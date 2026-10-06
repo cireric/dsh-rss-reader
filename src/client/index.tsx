@@ -25,6 +25,41 @@ const PANEL_ID = 'dsh-rss-reader'
 const ROOT_ATTR = 'data-dsh-rss-reader'
 /** 「全部标记已读」的撤销窗口。 */
 const UNDO_WINDOW_MS = 5000
+/**
+ * 加载指示的消抖阈值：刷新常常在毫秒级返回，立刻显示「刷新中」会闪一下。
+ * 超过这个时长才把加载态画出来（handoff §8 记过这条教训）。
+ */
+const SLOW_LOADING_MS = 180
+
+/** 面板内自带的样式：只用带前缀的类名，不碰宿主视觉 token。 */
+const STYLE = `
+.dsh-rss-btn { display:inline-flex; align-items:center; gap:6px; font:inherit; font-size:13px;
+  padding:4px 10px; border-radius:6px; color:inherit; background:transparent; cursor:pointer;
+  border:1px solid color-mix(in srgb, currentColor 22%, transparent);
+  transition: background 120ms ease, border-color 120ms ease, opacity 120ms ease; }
+.dsh-rss-btn:hover:not(:disabled) { background: color-mix(in srgb, currentColor 10%, transparent);
+  border-color: color-mix(in srgb, currentColor 35%, transparent); }
+.dsh-rss-btn:active:not(:disabled) { background: color-mix(in srgb, currentColor 16%, transparent); }
+.dsh-rss-btn:disabled { opacity:.55; cursor:default; }
+.dsh-rss-btn--ghost { border-color:transparent; padding:2px 8px; }
+.dsh-rss-spin { animation: dsh-rss-spin 800ms linear infinite; transform-origin:50% 50%; }
+@keyframes dsh-rss-spin { to { transform: rotate(360deg); } }
+.dsh-rss-bar { position:relative; height:2px; overflow:hidden; }
+.dsh-rss-bar::after { content:''; position:absolute; top:0; bottom:0; width:35%;
+  background:currentColor; opacity:.45; animation: dsh-rss-slide 1s ease-in-out infinite; }
+@keyframes dsh-rss-slide { 0% { left:-35%; } 100% { left:100%; } }
+`
+
+/** 刷新图标：加载时整圈旋转，省掉额外的 spinner 元素。 */
+function RefreshIcon({ spinning }: { spinning?: boolean }): ReactNode {
+  return (
+    <svg width={13} height={13} viewBox="0 0 16 16" fill="none" aria-hidden="true"
+      className={spinning === true ? 'dsh-rss-spin' : undefined}>
+      <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      <path d="M13.6 2.2v3.2h-3.2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
 
 type Filter = 'all' | 'unread' | 'starred'
 
@@ -272,6 +307,16 @@ function createReader(store: ReaderStore): () => ReactNode {
     const state = useReaderStore(store)
     const [root, setRoot] = useState<HTMLDivElement | null>(null)
     const [expanded, setExpanded] = useState<string | undefined>(undefined)
+    // 慢加载：只有超过 180ms 还在加载时才把「刷新中」画出来，避免毫秒级请求闪一下
+    const [slowLoading, setSlowLoading] = useState(false)
+    useEffect(() => {
+      if (!state.loading) {
+        setSlowLoading(false)
+        return
+      }
+      const timer = setTimeout(() => setSlowLoading(true), SLOW_LOADING_MS)
+      return () => clearTimeout(timer)
+    }, [state.loading])
 
     // 打开面板即刷新（主进程侧有最小间隔节流），并把焦点收到列表上，键盘立即可用
     useEffect(() => {
@@ -323,14 +368,15 @@ function createReader(store: ReaderStore): () => ReactNode {
     return (
       <div ref={setRoot} tabIndex={0} {...{ [ROOT_ATTR]: '' }}
         style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, fontSize: 14, lineHeight: 1.55, outline: 'none' }}>
+        <style>{STYLE}</style>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 20px', borderBottom: '1px solid color-mix(in srgb, currentColor 12%, transparent)' }}>
           <strong>RSS 阅读器</strong>
           <span style={{ opacity: 0.7 }}>{state.unread} 条未读 / {state.items.length} 条</span>
           <span style={{ display: 'flex', gap: 4, marginLeft: 8 }}>
             {filters.map((filter) => (
-              <button key={filter.key} type="button" onClick={() => store.setFilter(filter.key)}
+              <button key={filter.key} type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
+                onClick={() => store.setFilter(filter.key)}
                 style={{
-                  fontSize: 12, padding: '2px 8px', cursor: 'pointer',
                   fontWeight: state.filter === filter.key ? 600 : 400,
                   opacity: state.filter === filter.key ? 1 : 0.65,
                 }}>
@@ -340,17 +386,20 @@ function createReader(store: ReaderStore): () => ReactNode {
           </span>
           <span style={{ flex: 1 }} />
           <span style={{ fontSize: 11, opacity: 0.55 }}>j/k 移动（不标已读）· o 展开并已读 · v 开原站 · s 星标 · m 已读 · A 全部</span>
-          <button type="button" disabled={state.loading} onClick={() => { void store.load('refresh') }}
-            style={{ fontSize: 13, padding: '3px 10px', cursor: state.loading ? 'default' : 'pointer' }}>
-            {state.loading ? '刷新中' : '刷新'}
+          <button type="button" className="dsh-rss-btn" disabled={state.loading}
+            title="重新抓取所有订阅源（受最小间隔节流）"
+            onClick={() => { void store.load('refresh') }}>
+            <RefreshIcon spinning={slowLoading} />
+            {slowLoading ? '刷新中…' : '刷新'}
           </button>
         </div>
+        {slowLoading && <div className="dsh-rss-bar" aria-hidden="true" />}
 
         {state.error !== undefined && <div style={{ padding: '8px 20px', color: '#c0392b' }}>{state.error}</div>}
         {state.undo !== undefined && (
           <div style={{ padding: '6px 20px', fontSize: 12, background: 'color-mix(in srgb, currentColor 8%, transparent)' }}>
             已把 {state.undo.ids.length} 条标为已读 ·{' '}
-            <button type="button" style={{ fontSize: 12, cursor: 'pointer' }} onClick={() => { void store.undoMarkAll() }}>撤销</button>
+            <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" onClick={() => { void store.undoMarkAll() }}>撤销</button>
           </div>
         )}
         {failing.length > 0 && (
@@ -359,7 +408,10 @@ function createReader(store: ReaderStore): () => ReactNode {
           </div>
         )}
 
-        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+        <div style={{
+          flex: 1, minHeight: 0, overflowY: 'auto',
+          opacity: slowLoading ? 0.6 : 1, transition: 'opacity 150ms ease',
+        }}>
           {!state.loading && items.length === 0 && (
             <div style={{ padding: 20, opacity: 0.7 }}>
               {state.filter === 'starred' ? '还没有星标条目。' : state.filter === 'unread' ? '没有未读条目。' : '还没有条目。订阅源以存储域为准；可在 Config.feeds 里给种子，或用 OPML 导入（M4）。'}

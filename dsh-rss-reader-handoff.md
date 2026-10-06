@@ -250,7 +250,9 @@ sed -n '1,30p' /Users/eric/Project/tests/deepseek-harness/packages/client/ui-sid
 
 1. ~~**j/k 移动即标已读**（Google Reader 手感）~~ → **2026-10-06 用户实际使用后修正：
    `j`/`k` 只移动选中，不标已读**。已读只由「打开条目」（`o`/Enter/点击）与显式 `m` 触发。
-   这是对 GR 的有意偏离（GR 扫过即已读），README 已标明「别当 bug 改回去」。
+   核实后更正表述：这**不是**偏离 GR——GR 只有 **expanded view + 默认开启的 Scroll tracking**
+   才扫过即已读（可在 Preferences 关掉），**list view 下同样是打开才标已读**（出处见 §18）。
+   本插件取的是 list view 那一套。
 2. **A 的范围 = 当前过滤下的未读**，并给 5 秒撤销窗口（客户端计时，非宿主定时器）。
 3. **星标可见**：加过滤条 全部 / 未读 / 星标（此前 starred 只写不读，是死字段）。
 4. **快捷键作用域**：走 `ctx.shortcuts` 的 `regions: ['page']` + `resolve()` 判据
@@ -321,3 +323,29 @@ sed -n '1,30p' /Users/eric/Project/tests/deepseek-harness/packages/client/ui-sid
    `v: view original`）。交接件 §3.4 原写法有误，已在原处标注并修正。
 
 **测试**：28 条（新增：RSS/Atom 的正文优先、正文回填保已读、正文上限、升级轮绕开条件请求）。
+
+---
+
+## 18. 按键语义核实 + 刷新加载态（2026-10-06）
+
+**用户质疑我「GR 里 j/k 扫过即已读」这句未经查证的断言。核实结果：**
+
+- **`o` = expand/collapse item、`v` = view original** —— 一手证据：Google Reader 官方博客
+  [J-walking with Reader](http://googlereader.blogspot.com/2008/02/j-walking-with-reader.html)（2008）
+  按真实按键次数排的 Top-10：`j next item / k previous item / m mark as read-unread / o expand/collapse item /
+  v view original / s star item`。与 cheat sheet 的 `o/enter: expand/collapse (list only)` 一致。
+  ⇒ 本插件 M2 时按交接件 §3.4 写成「`o` 打开原站」是错的，已改。
+- **`j`/`k` 与已读**：不是无条件的「扫过即已读」。GoogleReaderHelp 官方视频（2009）：
+  *"the default setting is to mark items as read as you scroll past them … toggle by unchecking
+  **Scroll tracking**"*；StackExchange（2010）：*"In **expanded view**, mark items as read when you
+  scroll past them（Preferences 可取消）… **If you use list view instead, posts won't be marked as
+  read until you click to open them**"*。
+  ⇒ 用户要的「打开才算已读」= **GR 的 list view 语义**，属于 GR 的既有模式之一，**不是偏离**。
+  我上一轮把它写成「刻意偏离」是错的（当时那句依据本身就没核实），已在 README 与 §15 更正。
+- 顺带：GR 里 **`j`/`k` 本身不"展开"条目**——expanded view 下每条本来就是展开的，j/k 只移动；
+  list view 下才由 `o` 就地展开/折叠（cheat sheet 标注 "(list only)"）。
+
+**刷新按钮与加载态（用户要求优化）**：180ms 消抖后才显示加载态（毫秒级请求不闪）→ 按钮图标旋转
++ 文案「刷新中…」+ 禁用 → 头部下方 2px 不确定进度条 → 列表压暗 0.6 但**仍可读**（SVR）。
+**明确不做全屏遮罩**：刷新期间用户多半还在读旧内容，遮罩只会打断阅读并制造闪烁；「旧内容压暗可读
++ 完成后自动重渲染」是这套 UI 的正解（handoff §8 早记录过这条教训）。
