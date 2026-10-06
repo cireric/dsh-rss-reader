@@ -9,6 +9,7 @@
  */
 import { deriveItemId } from './feed/item-id.js'
 import { fetchFeed, type FetchLimits } from './feed/fetch.js'
+import { selectPrunable, selectArticleEvictions, type RetentionRow } from './retention.js'
 import { parseFeed } from './feed/parse.js'
 import type { ReaderStore } from './store.js'
 
@@ -30,6 +31,8 @@ export interface RefreshOptions {
    * 而存储域是「打开时全量载入内存」的 KV——不设上限会把 JSON 与内存一起撑爆。
    */
   maxContentChars: number
+  /** 每个源的按需正文缓存总量上限（字符）；超限从最旧的缓存开始清，见 capArticleCache */
+  maxArticleCacheChars: number
   now?: () => Date
   fetchFeedImpl?: typeof fetchFeed
 }
@@ -64,17 +67,55 @@ function truncateContent(text: string | undefined, limit: number): string | unde
   return text.slice(0, limit) + '…（正文过长，已截断）'
 }
 
+/**
+ * 按源裁剪到 maxItems。
+ *
+ * 策略在 `retention.ts` 的 `selectPrunable` 里（纯函数、有单测）：**先删未读、再删已读，
+ * 星标永不自动删**。改动前这里是「无差别删最旧」，实测会连星标条目一起删掉。
+ */
 async function prune(store: ReaderStore, feedId: string, maxItems: number): Promise<void> {
-  const all = store.listItems(feedId)
-  if (all.length <= maxItems) return
-  const oldestFirst = [...all].sort((a, b) => {
-    const byTime = recencyOf(a[1]).localeCompare(recencyOf(b[1]))
-    return byTime !== 0 ? byTime : a[0].localeCompare(b[0])
-  })
-  const dropCount = all.length - maxItems
-  for (const [itemId] of oldestFirst.slice(0, dropCount)) {
+  const rows: RetentionRow[] = store.listItems(feedId).map(([itemId, record]) => ({
+    id: itemId,
+    starred: record.starred,
+    read: record.readAt !== undefined,
+    recency: recencyOf(record),
+  }))
+  for (const itemId of selectPrunable(rows, maxItems)) {
     await store.deleteItem(itemId)
   }
+}
+
+/**
+ * 按需正文缓存的总量闸门：超限时**从最旧的开始清缓存**（只清 `article`，条目本身保留）。
+ *
+ * 清掉后用户再打开该条会重新抓一次——是「降级」而非「丢失」，所以不需要逐条确认。
+ * 上限按**源**统计：缓存是挂在条目上的，而条目按源裁剪，故同源的缓存自然同源清算。
+ */
+async function capArticleCache(store: ReaderStore, feedId: string, maxChars: number): Promise<number> {
+  const entries = store.listItems(feedId)
+    .filter(([, record]) => record.article !== undefined)
+    .map(([itemId, record]) => ({
+      id: itemId,
+      chars: (record.article?.paragraphs ?? []).reduce((sum, paragraph) => sum + paragraph.length, 0),
+      fetchedAt: record.article?.fetchedAt ?? '',
+    }))
+  const evicted = selectArticleEvictions(entries, maxChars)
+  for (const itemId of evicted) {
+    const record = store.item(itemId)
+    if (record === undefined) continue
+    // 显式重建记录：清掉 article，其余字段（含 readAt/starred）原样保留
+    await store.saveItem(itemId, {
+      feedId: record.feedId,
+      title: record.title,
+      link: record.link,
+      publishedAt: record.publishedAt,
+      summary: record.summary,
+      fetchedAt: record.fetchedAt,
+      readAt: record.readAt,
+      starred: record.starred,
+    })
+  }
+  return evicted.length
 }
 
 export async function refreshFeeds(
@@ -180,6 +221,7 @@ export async function refreshFeeds(
       contentRevision: CONTENT_REVISION,
     })
     await prune(store, feedId, options.maxItemsPerFeed)
+    await capArticleCache(store, feedId, options.maxArticleCacheChars)
 
     outcomes.push({ feedId, url: feedId, status: 'added', added: freshIds.length })
   }

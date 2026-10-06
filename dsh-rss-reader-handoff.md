@@ -446,3 +446,36 @@ sed -n '1,30p' /Users/eric/Project/tests/deepseek-harness/packages/client/ui-sid
   只编译 host，client 由 tsdown 产出，**只跑 build.sh + 测试会在不知不觉中测旧产物**。
 
 反向验证：去掉 `void markRead(item.id)` → 测试当场失败；还原 → 49/49 全绿。
+
+---
+
+## 22. 保留策略三件事（2026-10-06 用户确认后实施）
+
+用户问「磁盘缓存会留多久、有没有定期清理」。核实：**没有任何时间过期或定时清理**，只有容量规则。
+顺带查出两个缺口，用户全部确认修复：
+
+1. **裁剪不保护星标/已读**（改动前是无差别删最旧——星标条目照样被删）。
+2. **按需正文缓存无体积上限**。
+3. 需要一个**显式清理入口**（而不是定时器——验收项之一就是不残留定时器）。
+
+**实施**（策略全部抽到 `src/retention.ts` 的纯函数，因为这些都是「删数据」的规则）：
+
+| 函数 | 规则 |
+|---|---|
+| `selectPrunable` | 每源裁剪：**先删未读、再删已读、星标永不删**；星标占满时宁可超上限 |
+| `selectArticleEvictions` | 正文缓存超限时从最旧清起；上限非法（≤0/非有限）视为不清理 |
+| `selectCleanup` | 显式清理：**已读 + 未星标 + 严格早于阈值**，三者缺一不可 |
+
+**接线**：`refresh.ts` 的 `prune` 换用 `selectPrunable`；每次成功抓取后跑 `capArticleCache`
+（只清 `article` 字段，显式重建记录以保住 readAt/starred）；host 新增 `cleanup` 端点 + 两个
+Config（`maxArticleCacheChars` 8M、`cleanupAfterDays` 30）；客户端顶栏加「清理旧条目」按钮
+（二次确认 + 结果提示条，0 条也要如实说「没有可清理的」）。
+
+**测试**：策略层 9 条（边界、星标保护、单调/刚好达标、阈值严格性）+ 端到端 2 条（星标保护、
+缓存闸门），共 60 条全绿。
+
+**本轮踩的坑（两处，都是我的）**：
+- 测试里换了服务器端口 ⇒ `feedId` 变了 ⇒ 裁剪/清理作用在另一个源上，测试失败。改用
+  **同一服务器 + 可变响应体**。
+- `maxArticleCacheChars` 首次插进了 `index.ts` 的 Config 而非 `RefreshOptions`，tsc 报
+  TS2353/TS2339 才发现——**又一次是我没核对替换结果**。

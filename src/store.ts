@@ -17,6 +17,8 @@ export interface ReaderStore {
   saveItem(itemId: string, record: ItemRecord): Promise<void>
   deleteItem(itemId: string): Promise<void>
   listItems(feedId: string): Array<[string, ItemRecord]>
+  /** 全部条目（显式清理要跨源统计已读旧条目） */
+  allItems(): Array<[string, ItemRecord]>
   /** 全部订阅源（key 即归一化后的 URL）——订阅源以存储域为准，Config 只是种子 */
   listFeeds(): Array<[string, FeedRecord]>
 }
@@ -43,6 +45,7 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
       }
       return found
     },
+    allItems: () => [...items.entries()],
     listFeeds: () => [...feeds.entries()],
   }
 }

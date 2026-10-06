@@ -20,6 +20,7 @@ function memoryStore() {
     cursor: (id) => cursors.get(id),
     saveCursor: async (id, record) => { cursors.set(id, record) },
     item: (id) => items.get(id),
+    allItems: () => [...items.entries()],
     saveItem: async (id, record) => { items.set(id, record) },
     deleteItem: async (id) => { items.delete(id) },
     listItems: (feedId) => [...items.entries()].filter(([, record]) => record.feedId === feedId),
@@ -27,7 +28,7 @@ function memoryStore() {
 }
 
 const LIMITS = { timeoutMs: 2000, maxBytes: 1_000_000 }
-const BASE_OPTIONS = { limits: LIMITS, maxItemsPerFeed: 100, maxSeenPerFeed: 1000, maxContentChars: 100000 }
+const BASE_OPTIONS = { limits: LIMITS, maxItemsPerFeed: 100, maxSeenPerFeed: 1000, maxContentChars: 100000, maxArticleCacheChars: 1000000 }
 
 async function withServer(handler, run) {
   const server = createServer(handler)
@@ -167,7 +168,7 @@ test('已读态在重复抓取后必须保持（有 readAt 就不得回退成未
 test('去重窗口与保留量解耦：条目被裁掉后不得重新抓成新条目', async () => {
   const store = memoryStore()
   await withServer(serveFeed(THREE_ITEMS), async (base) => {
-    const options = { limits: LIMITS, maxItemsPerFeed: 1, maxSeenPerFeed: 100, maxContentChars: 100000 }
+    const options = { limits: LIMITS, maxItemsPerFeed: 1, maxSeenPerFeed: 100, maxContentChars: 100000, maxArticleCacheChars: 1000000 }
     await refreshFeeds([base + '/feed.xml'], store, options)
     assert.equal(store.items.size, 1)
 
@@ -251,4 +252,62 @@ test('非法 URL 记为该源失败，不抛异常', async () => {
   const outcomes = await refreshFeeds(['不是 URL'], store, BASE_OPTIONS)
   assert.equal(outcomes[0].status, 'failed')
   assert.match(outcomes[0].reason, /不是合法 URL/)
+})
+test('裁剪保护星标：满上限时删未读，星标一条都不动', async () => {
+  const store = memoryStore()
+  const mk = (n) => ({ title: 't' + n, link: 'https://ex.test/' + n, guid: 'g' + n, date: 'Mon, 0' + n + ' Jan 2024 00:00:00 GMT' })
+  // 同一台服务器、可变响应体：换服务器会换 feedId，裁剪也就换了对象（这个坑我踩过一次）
+  let payload = rss([mk(1), mk(2), mk(3), mk(4)])
+  await withServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/rss+xml' })
+    res.end(payload)
+  }, async (base) => {
+    const feedUrl = base + '/feed.xml'
+    await refreshFeeds([feedUrl], store, { ...BASE_OPTIONS, maxItemsPerFeed: 4 })
+    assert.equal(store.items.size, 4, '前置条件：先存满 4 条')
+
+    // 把最旧的一条标为星标——它就是下轮最可能被裁的对象
+    const oldest = [...store.items.entries()].sort((a, b) => (a[1].publishedAt ?? '').localeCompare(b[1].publishedAt ?? ''))[0][0]
+    await store.saveItem(oldest, { ...store.items.get(oldest), starred: true })
+
+    payload = rss([mk(1), mk(2), mk(3), mk(4), mk(5), mk(6)])
+    await refreshFeeds([feedUrl], store, { ...BASE_OPTIONS, maxItemsPerFeed: 4 })
+
+    assert.ok(store.items.has(oldest), '星标条目被裁剪删掉了 —— 这正是要防的回归')
+    assert.equal(store.items.size, 4, '其余仍应裁到上限')
+  })
+})
+
+test('正文缓存闸门：超限时清最旧的缓存，但条目本身与已读态保留', async () => {
+  const store = memoryStore()
+  const mk = (n) => ({ title: 't' + n, link: 'https://ex.test/' + n, guid: 'g' + n, date: 'Mon, 0' + n + ' Jan 2024 00:00:00 GMT' })
+  const payload = rss([mk(1), mk(2), mk(3)])
+  await withServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/rss+xml' })
+    res.end(payload)
+  }, async (base) => {
+    const feedUrl = base + '/feed.xml'
+    await refreshFeeds([feedUrl], store, BASE_OPTIONS)
+    const ids = [...store.items.keys()]
+    assert.equal(ids.length, 3, '前置条件：三条')
+
+    // 三条都挂正文缓存（各 1000 字符，共 3000），中间那条标已读、抓取时间居中
+    for (const [index, id] of ids.entries()) {
+      const record = store.items.get(id)
+      await store.saveItem(id, {
+        ...record,
+        readAt: index === 1 ? '2024-06-01T00:00:00.000Z' : record.readAt,
+        article: { fetchedAt: '2024-0' + (index + 1) + '-01T00:00:00.000Z', paragraphs: ['x'.repeat(1000)] },
+      })
+    }
+
+    // 上限 1500 ⇒ 从最旧开始清两条，剩一条（1000 ≤ 1500）
+    await refreshFeeds([feedUrl], store, { ...BASE_OPTIONS, maxArticleCacheChars: 1500 })
+
+    const cached = [...store.items.values()].filter((r) => r.article !== undefined)
+    assert.equal(cached.length, 1, '超限后应只剩一条缓存，实际 ' + cached.length + ' 条')
+    assert.equal(store.items.size, 3, '清缓存不得删条目')
+    const readOne = [...store.items.values()].find((r) => r.readAt === '2024-06-01T00:00:00.000Z')
+    assert.ok(readOne !== undefined, '清缓存不得动已读态')
+  })
 })

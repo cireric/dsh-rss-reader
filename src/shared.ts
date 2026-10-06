@@ -15,7 +15,7 @@
  */
 export const ROUTE_PATH = '/rss-reader-api'
 
-export type Endpoint = 'overview' | 'refresh' | 'markRead' | 'unmarkRead' | 'toggleStar' | 'article'
+export type Endpoint = 'overview' | 'refresh' | 'markRead' | 'unmarkRead' | 'toggleStar' | 'article' | 'cleanup'
 
 export type RpcResult<T> =
   | { ok: true; value: T }
@@ -67,4 +67,11 @@ export interface ArticlePayload {
   failure?: string
   /** 站点是否允许被 iframe 嵌入（决定能否切到「原站视图」） */
   frameable?: boolean
+}
+/** 显式清理（`cleanup` 端点）的结果：删除条数、释放字符数与阈值。 */
+export interface CleanupResult {
+  deleted: number
+  freedChars: number
+  cutoff: string
+  unread: number
 }

@@ -21,6 +21,7 @@ import { readerDomain } from './domain.js'
 import { createStore, type ReaderStore } from './store.js'
 import { refreshFeeds, type FeedOutcome } from './refresh.js'
 import { fetchArticle } from './article.js'
+import { selectCleanup, type CleanupRow } from './retention.js'
 import { ROUTE_PATH, type Endpoint, type ItemView, type Overview, type RpcResult } from './shared.js'
 
 export const name = '@dsh-external/dsh-rss-reader'
@@ -49,6 +50,10 @@ export interface Config {
   maxSeenPerFeed: number
   /** 单条正文的存储上限（字符）：正文优先取 content 后需要有这个闸门，见 refresh.ts 注释 */
   maxContentChars: number
+  /** 每个源的按需正文缓存总量上限（字符）：超限从最旧的开始清，见 refresh.ts 的 capArticleCache */
+  maxArticleCacheChars: number
+  /** 显式清理的天数阈值：早于「现在 − 该天数」的已读条目才可清理 */
+  cleanupAfterDays: number
   /** 按需抓原站正文的体积上限（字节）——单篇文章比 feed 大，与 maxBytes 分开 */
   articleMaxBytes: number
   /** 同一篇文章两次抓取之间的最小间隔（缓存未命中时），防连按造成的请求风暴 */
@@ -70,6 +75,8 @@ export const Config: z<Config> = z.object({
   maxItemsPerFeed: z.number().default(500),
   maxSeenPerFeed: z.number().default(5000),
   maxContentChars: z.number().default(50000),
+  maxArticleCacheChars: z.number().default(8_000_000),
+  cleanupAfterDays: z.number().default(30),
   articleMaxBytes: z.number().default(2 * 1024 * 1024),
   articleCooldownMs: z.number().default(30000),
   refreshOnStart: z.boolean().default(true),
@@ -218,6 +225,7 @@ export function apply(ctx: Context, config: Config): void {
         maxItemsPerFeed: config.maxItemsPerFeed,
         maxSeenPerFeed: config.maxSeenPerFeed,
         maxContentChars: config.maxContentChars,
+        maxArticleCacheChars: config.maxArticleCacheChars,
       }, options.signal)
       log(summarize(outcomes))
     })()
@@ -396,6 +404,27 @@ export function apply(ctx: Context, config: Config): void {
           log('取正文成功：' + existing.link + '（' + fetched.paragraphs.length + ' 段 ' +
             fetched.paragraphs.reduce((sum, p) => sum + p.length, 0) + ' 字符）')
           return ok({ itemId, cached: false, title: article.title, paragraphs: article.paragraphs, frameable: article.frameable })
+        }
+
+        case 'cleanup': {
+          // 显式清理（用户点按钮触发，**不设定时器**——交接件验收项之一就是不残留定时器）。
+          // 判据刻意保守：已读 + 未星标 + 早于阈值，三个条件缺一不可（见 retention.ts 注释）。
+          const cutoff = new Date(Date.now() - config.cleanupAfterDays * 24 * 3600 * 1000).toISOString()
+          const all = target.allItems()
+          const rows: CleanupRow[] = all.map(([itemId, record]) => ({
+            id: itemId,
+            starred: record.starred,
+            read: record.readAt !== undefined,
+            recency: record.publishedAt ?? record.fetchedAt,
+            articleChars: (record.article?.paragraphs ?? []).reduce((sum, paragraph) => sum + paragraph.length, 0),
+          }))
+          const doomed = selectCleanup(rows, cutoff)
+          const freedChars = rows.filter((row) => doomed.includes(row.id))
+            .reduce((sum, row) => sum + row.articleChars + (target.item(row.id)?.summary?.length ?? 0), 0)
+          for (const itemId of doomed) await target.deleteItem(itemId)
+          log('清理：删除 ' + doomed.length + ' 条已读旧条目（阈值 ' + config.cleanupAfterDays + ' 天，释放约 ' +
+            freedChars + ' 字符）')
+          return ok({ deleted: doomed.length, freedChars, cutoff, unread: countUnread(target) })
         }
 
         case 'toggleStar': {

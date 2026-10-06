@@ -15,7 +15,7 @@
  */
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import type { Context as ClientContext } from 'cordis'
-import { ROUTE_PATH, type ArticlePayload, type FeedView, type ItemView, type Overview, type RpcResult } from '../shared.js'
+import { ROUTE_PATH, type ArticlePayload, type CleanupResult, type FeedView, type ItemView, type Overview, type RpcResult } from '../shared.js'
 import { resolveReaderKey } from '../keys.js'
 import { nextScrollTop } from '../list-scroll.js'
 
@@ -90,6 +90,8 @@ interface ReaderState {
   undo: { ids: string[]; until: number } | undefined
   /** 当前视图：列表 or 正文（正文在主栏内换掉列表，不占右栏——见 handoff §19 的原因） */
   view: 'list' | 'article'
+  /** 一次性提示（如清理结果）：显示后由用户下一个动作清掉，不设定时器 */
+  notice: string | undefined
   article: ArticleState | undefined
 }
 
@@ -173,7 +175,7 @@ export function createReaderStore() {
   let state: ReaderState = {
     items: [], feeds: [], unread: 0, filter: 'all',
     selectedId: undefined, loading: true, error: undefined, undo: undefined,
-    view: 'list', article: undefined,
+    view: 'list', article: undefined, notice: undefined,
   }
   const listeners = new Set<() => void>()
   const emit = (): void => { for (const listener of listeners) listener() }
@@ -351,6 +353,26 @@ export function createReaderStore() {
 
   const closeArticle = (): void => { set({ view: 'list' }) }
 
+  /**
+   * 显式清理：删除「已读 + 未星标 + 早于阈值」的旧条目。
+   *
+   * 判据在宿主侧（`retention.ts` 的 selectCleanup，有单测）。客户端只负责发起与**如实回报**：
+   * 删了 0 条也要说清是 0 条，而不是让用户以为按钮坏了。
+   */
+  const cleanup = async (): Promise<void> => {
+    try {
+      const result = await callRpc<CleanupResult>('cleanup')
+      set({
+        notice: result.deleted === 0
+          ? '没有可清理的条目（只清「已读且未星标」且早于阈值的旧条目）'
+          : '已清理 ' + result.deleted + ' 条旧条目，释放约 ' + Math.round(result.freedChars / 1024) + ' KB',
+      })
+      await load('overview')
+    } catch (failure) {
+      set({ error: failure instanceof Error ? failure.message : String(failure) })
+    }
+  }
+
   /** 在「抽取正文」与「原页」之间切换（仅站点允许被嵌时可切）。 */
   const toggleArticleRender = (): void => {
     const article = state.article
@@ -361,7 +383,8 @@ export function createReaderStore() {
   return {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
     get, visible, load, markRead, selectRelative, openSelected, toggleStar, toggleRead, markAllRead, undoMarkAll,
-    openArticle, closeArticle, toggleArticleRender,
+    openArticle, closeArticle, toggleArticleRender, cleanup,
+    dismissNotice: (): void => { set({ notice: undefined }) },
     setFilter: (filter: Filter): void => { set({ filter }); const list = filter === 'all' ? state.items : state.items.filter((i) => (filter === 'unread' ? i.readAt === undefined : i.starred)); set({ selectedId: list[0]?.id }) },
     select: (itemId: string): void => { set({ selectedId: itemId }) },
   }
@@ -498,6 +521,13 @@ function createReader(store: ReaderStore): () => ReactNode {
           <span style={{ flex: 1 }} />
           <span style={{ fontSize: 11, opacity: 0.55 }}>j/k 移动 · o 展开并已读 · V 读正文 · v 开原站 · s 星标 · m 已读 · A 全部</span>
           <button type="button" className="dsh-rss-btn" disabled={state.loading}
+            title="删除「已读且未星标」的旧条目（阈值可在 Config.cleanupAfterDays 调，默认 30 天）"
+            onClick={() => {
+              if (window.confirm('清理已读的旧条目？\n\n只删除「已读 + 未星标 + 早于阈值」的条目，星标与未读的都会保留。此操作不可撤销。')) {
+                void store.cleanup()
+              }
+            }}>清理旧条目</button>
+          <button type="button" className="dsh-rss-btn" disabled={state.loading}
             title="重新抓取所有订阅源（受最小间隔节流）"
             onClick={() => { void store.load('refresh') }}>
             <RefreshIcon spinning={slowLoading} />
@@ -507,6 +537,13 @@ function createReader(store: ReaderStore): () => ReactNode {
         {slowLoading && <div className="dsh-rss-bar" aria-hidden="true" />}
 
         {state.error !== undefined && <div style={{ padding: '8px 20px', color: '#c0392b' }}>{state.error}</div>}
+        {state.notice !== undefined && (
+          <div style={{ padding: '6px 20px', fontSize: 12, opacity: 0.8 }}>
+            {state.notice}
+            <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
+              style={{ marginLeft: 8 }} onClick={() => store.dismissNotice()}>知道了</button>
+          </div>
+        )}
         {state.undo !== undefined && (
           <div style={{ padding: '6px 20px', fontSize: 12, background: 'color-mix(in srgb, currentColor 8%, transparent)' }}>
             已把 {state.undo.ids.length} 条标为已读 ·{' '}
