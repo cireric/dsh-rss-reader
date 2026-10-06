@@ -369,7 +369,7 @@ function ReaderIcon({ size = 16, active = false }: { size?: number; active?: boo
   )
 }
 
-function createReader(store: ReaderStore): () => ReactNode {
+function createReader(store: ReaderStore, ctx: ClientContext): () => ReactNode {
   return function Reader(): ReactNode {
     const state = useReaderStore(store)
     const [root, setRoot] = useState<HTMLDivElement | null>(null)
@@ -416,7 +416,7 @@ function createReader(store: ReaderStore): () => ReactNode {
           case 'v': run(() => store.openSelected()); break
           // V：在同一会话的右栏打开该条链接（C 步地基验证；成败证据回传宿主日志）
           case 'V': run(() => {
-            const selected = visible().find((entry) => entry.id === store.get().selectedId)
+            const selected = store.visible().find((entry) => entry.id === store.get().selectedId)
             if (selected === undefined || selected.link === '') return
             const detail: Record<string, unknown> = { url: selected.link }
             const sidebarRight = sidebarRightOf(ctx)
@@ -580,7 +580,7 @@ function Badge({ store }: { store: ReaderStore }): ReactNode {
 
 export function apply(ctx: ClientContext): void {
   const store = createReaderStore(ctx)
-  const Reader = createReader(store)
+  const Reader = createReader(store, ctx)
 
   // 阅读器本体进主栏；id 必须与 panellist 图标的 id 相同，否则点图标会抛错
   ctx.effect(() => ctx.slots.inject('main', () => ctx.slots.register(

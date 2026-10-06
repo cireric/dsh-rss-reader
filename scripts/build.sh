@@ -84,4 +84,20 @@ fi
 
 echo "=== Compiling src → lib ==="
 "$TSC" -p tsconfig.json
+
+# ── 客户端作用域闸门 ──
+# 主 tsconfig 排除了 src/client，而 tsdown 只打包不做类型检查 ⇒ 客户端半的错误（引用不存在的
+# 标识符、拼错属性名）能一路发布出去。2026-10-06 实测踩到：V 分支里 `visible`/`ctx` 两个
+# 未定义标识符，表现为「按键毫无反应」且在浏览器控制台里，agent 完全看不到。
+# 这里只把「找不到名称 / 属性不存在」当致命错误；模块与 JSX 报错是缺 react 类型的预期噪声。
+CLIENT_CHECK="$(mktemp)"
+"$TSC" --noEmit --ignoreConfig --noResolve --jsx react-jsx --target es2023 --lib es2023,dom \
+  --moduleResolution bundler --module esnext src/client/index.tsx > "$CLIENT_CHECK" 2>&1 || true
+if grep -qE "error TS(2304|2551|2552)" "$CLIENT_CHECK"; then
+  echo "build: 客户端作用域检查失败 —— 引用不存在的标识符或拼错属性名：" >&2
+  grep -E "error TS(2304|2551|2552)" "$CLIENT_CHECK" >&2
+  rm -f "$CLIENT_CHECK"
+  exit 1
+fi
+rm -f "$CLIENT_CHECK"
 echo "=== Build complete ==="
