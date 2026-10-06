@@ -15,7 +15,7 @@
  */
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import type { Context as ClientContext } from 'cordis'
-import { ROUTE_PATH, type ArticlePayload, type CleanupResult, type FeedView, type ItemView, type Overview, type RpcResult } from '../shared.js'
+import { ROUTE_PATH, type ArticlePayload, type CleanupResult, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult } from '../shared.js'
 import { resolveReaderKey } from '../keys.js'
 import { nextScrollTop } from '../list-scroll.js'
 
@@ -88,8 +88,12 @@ interface ReaderState {
   error: string | undefined
   /** 刚被「全部标记已读」的条目，供短时撤销 */
   undo: { ids: string[]; until: number } | undefined
-  /** 当前视图：列表 or 正文（正文在主栏内换掉列表，不占右栏——见 handoff §19 的原因） */
-  view: 'list' | 'article'
+  /** 当前视图：列表 / 正文 / 订阅管理（订阅管理同样在主栏内切换，见 handoff §19） */
+  view: 'list' | 'article' | 'feeds'
+  /** 最近一次导入的报告（坏源要逐条列出，不能只报总数） */
+  importReport: OpmlImportResult | undefined
+  /** 订阅管理里的忙碌标记（导入要逐源抓取，可能数秒） */
+  feedsBusy: boolean
   /** 一次性提示（如清理结果）：显示后由用户下一个动作清掉，不设定时器 */
   notice: string | undefined
   article: ArticleState | undefined
@@ -176,6 +180,7 @@ export function createReaderStore() {
     items: [], feeds: [], unread: 0, filter: 'all',
     selectedId: undefined, loading: true, error: undefined, undo: undefined,
     view: 'list', article: undefined, notice: undefined,
+    importReport: undefined, feedsBusy: false,
   }
   const listeners = new Set<() => void>()
   const emit = (): void => { for (const listener of listeners) listener() }
@@ -353,6 +358,61 @@ export function createReaderStore() {
 
   const closeArticle = (): void => { set({ view: 'list' }) }
 
+  /** 打开/关闭订阅管理视图。 */
+  const toggleFeeds = (): void => { set({ view: state.view === 'feeds' ? 'list' : 'feeds' }) }
+
+  /** 导出 OPML：拿到文本后交给浏览器下载（File System Access 不可用时退化为 blob 下载）。 */
+  const exportOpml = async (): Promise<void> => {
+    try {
+      const result = await callRpc<OpmlExportResult>('opmlExport')
+      const blob = new Blob([result.opml], { type: 'text/x-opml;charset=utf-8' })
+      const href = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = href
+      anchor.download = 'dsh-rss-subscriptions.opml'
+      anchor.click()
+      URL.revokeObjectURL(href)
+      set({ notice: '已导出 ' + result.feedCount + ' 个订阅（' + anchor.download + '）' })
+    } catch (failure) {
+      set({ error: failure instanceof Error ? failure.message : String(failure) })
+    }
+  }
+
+  /** 导入 OPML：逐源抓取校验，坏源单独列出、不阻断其余（§3.1）。 */
+  const importOpml = async (text: string): Promise<void> => {
+    set({ feedsBusy: true, importReport: undefined })
+    try {
+      const report = await callRpc<OpmlImportResult>('opmlImport', { opml: text })
+      set({ importReport: report, feedsBusy: false })
+      await load('overview')
+    } catch (failure) {
+      set({ feedsBusy: false, error: failure instanceof Error ? failure.message : String(failure) })
+    }
+  }
+
+  /** 加单个源：同样先校验再落库，避免把网页当订阅。 */
+  const addFeed = async (url: string): Promise<void> => {
+    set({ feedsBusy: true, importReport: undefined })
+    try {
+      const report = await callRpc<OpmlImportResult>('addFeed', { url })
+      set({ importReport: report, feedsBusy: false })
+      await load('overview')
+    } catch (failure) {
+      set({ feedsBusy: false, error: failure instanceof Error ? failure.message : String(failure) })
+    }
+  }
+
+  /** 退订：连带删除该源条目（宿主侧执行），不可撤销，界面要二次确认。 */
+  const removeFeed = async (url: string): Promise<void> => {
+    try {
+      const result = await callRpc<{ removed: number; items: number }>('removeFeed', { url })
+      set({ notice: '已退订（连带删除 ' + result.items + ' 条条目）' })
+      await load('overview')
+    } catch (failure) {
+      set({ error: failure instanceof Error ? failure.message : String(failure) })
+    }
+  }
+
   /**
    * 显式清理：删除「已读 + 未星标 + 早于阈值」的旧条目。
    *
@@ -384,6 +444,7 @@ export function createReaderStore() {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
     get, visible, load, markRead, selectRelative, openSelected, toggleStar, toggleRead, markAllRead, undoMarkAll,
     openArticle, closeArticle, toggleArticleRender, cleanup,
+    toggleFeeds, exportOpml, importOpml, addFeed, removeFeed,
     dismissNotice: (): void => { set({ notice: undefined }) },
     setFilter: (filter: Filter): void => { set({ filter }); const list = filter === 'all' ? state.items : state.items.filter((i) => (filter === 'unread' ? i.readAt === undefined : i.starred)); set({ selectedId: list[0]?.id }) },
     select: (itemId: string): void => { set({ selectedId: itemId }) },
@@ -467,8 +528,8 @@ function createReader(store: ReaderStore): () => ReactNode {
         const run = (act: () => void): void => { event.preventDefault(); act() }
         switch (action) {
           // 正文视图里 j/k 不移动：每次移动都意味着一次抓取，误按代价太高（Esc 回列表再移动）
-          case 'next': if (view === 'article') return; run(() => store.selectRelative(1)); break
-          case 'prev': if (view === 'article') return; run(() => store.selectRelative(-1)); break
+          case 'next': if (view !== 'list') return; run(() => store.selectRelative(1)); break
+          case 'prev': if (view !== 'list') return; run(() => store.selectRelative(-1)); break
           // Google Reader 语义：o 展开/折叠 + 标已读（已读的唯一自动触发点，另有显式的 m）
           case 'expand': run(() => {
             const selected = store.get().selectedId
@@ -477,10 +538,15 @@ function createReader(store: ReaderStore): () => ReactNode {
             void store.markRead(selected)
           }); break
           case 'openExternal': run(() => store.openSelected()); break
-          case 'openArticle': run(() => { void store.openArticle() }); break
+          case 'openArticle': if (view !== 'list') return; run(() => { void store.openArticle() }); break
           case 'toggleRender': if (view !== 'article') return; run(() => store.toggleArticleRender()); break
+          case 'manageFeeds': run(() => store.toggleFeeds()); break
           // Esc：从正文回到列表；列表态下不拦截（不抢弹层的 Esc）
-          case 'back': if (view !== 'article') return; event.preventDefault(); store.closeArticle(); break
+          // Esc：正文 → 列表；订阅管理 → 列表。列表态不拦截（不抢弹层的 Esc）
+          case 'back':
+            if (view === 'article') { event.preventDefault(); store.closeArticle(); break }
+            if (view === 'feeds') { event.preventDefault(); store.toggleFeeds(); break }
+            return
           case 'star': run(() => { void store.toggleStar() }); break
           case 'toggleRead': run(() => { void store.toggleRead() }); break
           case 'markAll': run(() => { void store.markAllRead() }); break
@@ -519,7 +585,10 @@ function createReader(store: ReaderStore): () => ReactNode {
             ))}
           </span>
           <span style={{ flex: 1 }} />
-          <span style={{ fontSize: 11, opacity: 0.55 }}>j/k 移动 · o 展开并已读 · V 读正文 · v 开原站 · s 星标 · m 已读 · A 全部</span>
+          <span style={{ fontSize: 11, opacity: 0.55 }}>j/k 移动 · o 展开并已读 · V 读正文 · v 开原站 · s 星标 · m 已读 · A 全部 · F 订阅</span>
+          <button type="button" className="dsh-rss-btn"
+            title="订阅管理：导入/导出 OPML、加源、退订（F 键）"
+            onClick={() => store.toggleFeeds()}>订阅</button>
           <button type="button" className="dsh-rss-btn" disabled={state.loading}
             title="删除「已读且未星标」的旧条目（阈值可在 Config.cleanupAfterDays 调，默认 30 天）"
             onClick={() => {
@@ -556,6 +625,20 @@ function createReader(store: ReaderStore): () => ReactNode {
           </div>
         )}
 
+        {state.view === 'feeds' && (
+          <FeedsView
+            feeds={state.feeds}
+            busy={state.feedsBusy}
+            report={state.importReport}
+            notice={state.notice}
+            onImport={(text) => { void store.importOpml(text) }}
+            onExport={() => { void store.exportOpml() }}
+            onAdd={(url) => { void store.addFeed(url) }}
+            onRemove={(url) => { void store.removeFeed(url) }}
+            onBack={() => store.toggleFeeds()}
+          />
+        )}
+
         {state.view === 'article' && (
           <ArticleView
             article={state.article}
@@ -570,7 +653,7 @@ function createReader(store: ReaderStore): () => ReactNode {
           // 少了它量到的是相对页面/body 的位置，滚动计算会整体偏掉。
           position: 'relative',
           flex: 1, minHeight: 0, overflowY: 'auto',
-          display: state.view === 'article' ? 'none' : 'block',
+          display: state.view === 'list' ? 'block' : 'none',
           opacity: slowLoading ? 0.6 : 1, transition: 'opacity 150ms ease',
         }}>
           {!state.loading && items.length === 0 && (
@@ -626,6 +709,125 @@ function createReader(store: ReaderStore): () => ReactNode {
       </div>
     )
   }
+}
+
+/**
+ * 订阅管理视图：导入 OPML（逐源校验、坏源逐条列出）、导出、加源、退订。
+ *
+ * 设计取舍：**坏源报告必须逐条可读**（§3.1 要求「坏源单独标注」），而不是只报「3 个失败」——
+ * 用户需要知道具体是哪个源、为什么失败，才能决定改 URL 还是放弃。
+ */
+function FeedsView({ feeds, busy, report, notice, onImport, onExport, onAdd, onRemove, onBack }: {
+  feeds: FeedView[]
+  busy: boolean
+  report: OpmlImportResult | undefined
+  notice: string | undefined
+  onImport: (text: string) => void
+  onExport: () => void
+  onAdd: (url: string) => void
+  onRemove: (url: string) => void
+  onBack: () => void
+}): ReactNode {
+  const [draft, setDraft] = useState('')
+  const [fileError, setFileError] = useState<string | undefined>(undefined)
+
+  const pickFile = (event: { target: { files?: ArrayLike<File> | null; value?: string } }): void => {
+    const file = event.target.files?.[0]
+    if (file === undefined || file === null) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      const text = typeof reader.result === 'string' ? reader.result : ''
+      if (text.trim() === '') { setFileError('文件是空的'); return }
+      setFileError(undefined)
+      onImport(text)
+    }
+    reader.onerror = () => { setFileError('读取文件失败：' + String(reader.error ?? '未知原因')) }
+    reader.readAsText(file)
+  }
+
+  return (
+    <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '12px 22px 24px', fontSize: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+        <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" onClick={onBack}>← 返回列表（Esc）</button>
+        <strong style={{ fontSize: 15 }}>订阅管理</strong>
+        <span style={{ opacity: 0.6, fontSize: 12 }}>{feeds.length} 个源</span>
+      </div>
+
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+        <label className="dsh-rss-btn" style={{ cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.55 : 1 }}>
+          导入 OPML…
+          <input type="file" accept=".opml,.xml,text/xml,text/x-opml" disabled={busy}
+            style={{ display: 'none' }} onChange={pickFile} />
+        </label>
+        <button type="button" className="dsh-rss-btn" disabled={busy || feeds.length === 0} onClick={onExport}>导出 OPML</button>
+        <span style={{ flex: 1 }} />
+        <input value={draft} placeholder="或直接粘贴 feed 地址后回车" disabled={busy}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            // 本插件的全局快捷键挂在 document 上，输入框里的键不该被它截走；
+            // 这里的 stopPropagation 是**双保险**（守卫已按 target 判断，但回车提交不该外泄）
+            if (event.key === 'Enter' && draft.trim() !== '') {
+              event.stopPropagation()
+              onAdd(draft.trim())
+              setDraft('')
+            }
+          }}
+          style={{ flex: '0 1 320px', fontSize: 13, padding: '4px 8px' }} />
+      </div>
+
+      {busy && <div style={{ opacity: 0.75, marginBottom: 8 }}>正在逐源抓取校验…（并发受限，源多时需要一会儿）</div>}
+      {fileError !== undefined && <div style={{ color: '#c0392b', marginBottom: 8 }}>{fileError}</div>}
+      {notice !== undefined && <div style={{ opacity: 0.85, marginBottom: 8 }}>{notice}</div>}
+
+      {report !== undefined && (
+        <div style={{ marginBottom: 14, padding: '10px 12px', background: 'color-mix(in srgb, currentColor 6%, transparent)', borderRadius: 6 }}>
+          <div style={{ marginBottom: 6 }}>
+            导入结果：新增 <strong>{report.added}</strong> 个，已存在 {report.existed} 个，
+            校验失败 <strong style={{ color: report.failed.length > 0 ? '#c0392b' : 'inherit' }}>{report.failed.length}</strong> 个，
+            文件内跳过 {report.skipped.length} 项
+          </div>
+          {report.failed.length > 0 && (
+            <div style={{ fontSize: 12, color: '#c0392b' }}>
+              <div style={{ marginBottom: 2 }}>以下源校验失败（未加入订阅，其余不受影响）：</div>
+              {report.failed.map((row) => (
+                <div key={row.url} style={{ wordBreak: 'break-all' }}>· {row.url} —— {row.reason}</div>
+              ))}
+            </div>
+          )}
+          {report.skipped.length > 0 && (
+            <div style={{ fontSize: 12, opacity: 0.75, marginTop: 6 }}>
+              <div style={{ marginBottom: 2 }}>文件里被跳过的条目：</div>
+              {report.skipped.map((row, index) => (
+                <div key={index}>· {row.title ?? '(无标题)'} —— {row.reason}</div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div style={{ borderTop: '1px solid color-mix(in srgb, currentColor 12%, transparent)' }}>
+        {feeds.length === 0 && <div style={{ padding: '12px 0', opacity: 0.7 }}>还没有订阅源。可以用上面的「导入 OPML…」。</div>}
+        {feeds.map((feed) => (
+          <div key={feed.id} style={{
+            display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0',
+            borderBottom: '1px solid color-mix(in srgb, currentColor 8%, transparent)',
+          }}>
+            <span style={{ flex: 1, minWidth: 0 }}>
+              <span style={{ display: 'block' }}>{feed.title ?? feed.id}</span>
+              <span style={{ display: 'block', fontSize: 11, opacity: 0.6, wordBreak: 'break-all' }}>
+                {feed.id}{feed.lastFailure !== undefined ? ' · 上次失败：' + feed.lastFailure : ''}
+              </span>
+            </span>
+            <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
+              title="退订并删除该源的全部条目（不可撤销）"
+              onClick={() => {
+                if (window.confirm('退订该源并删除它的全部条目？\n\n' + feed.id + '\n\n此操作不可撤销。')) onRemove(feed.id)
+              }}>退订</button>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
 }
 
 /** 阅读器内的正文视图（D 方案）：段落由宿主抽取后回传，这里只做排版。 */

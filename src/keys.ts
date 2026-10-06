@@ -9,7 +9,7 @@
 /** 键盘动作：与具体按键解耦，客户端只负责把动作落到 store 上。 */
 export type ReaderKeyAction =
   | 'next' | 'prev' | 'expand' | 'openExternal' | 'openArticle'
-  | 'toggleRender' | 'back' | 'star' | 'toggleRead' | 'markAll' | 'none'
+  | 'toggleRender' | 'back' | 'star' | 'toggleRead' | 'markAll' | 'manageFeeds' | 'none'
 
 /**
  * 键值 → 动作。`event.key` 大小写敏感：字母键按 shift 会变成大写，
@@ -27,6 +27,8 @@ export function resolveReaderKey(key: string): ReaderKeyAction {
     case 'r':
     case 'R': return 'toggleRender'
     case 'Escape': return 'back'
+    // f：订阅管理（GR 里 f 是全屏，但本插件没有全屏概念，用作 manage 更实用）
+    case 'f': return 'manageFeeds'
     case 's': return 'star'
     case 'm': return 'toggleRead'
     // Google Reader 里「全部已读」就是 shift+a，故只认大写

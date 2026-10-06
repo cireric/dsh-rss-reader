@@ -16,6 +16,7 @@
 export const ROUTE_PATH = '/rss-reader-api'
 
 export type Endpoint = 'overview' | 'refresh' | 'markRead' | 'unmarkRead' | 'toggleStar' | 'article' | 'cleanup'
+  | 'opmlExport' | 'opmlImport' | 'addFeed' | 'removeFeed'
 
 export type RpcResult<T> =
   | { ok: true; value: T }
@@ -74,4 +75,23 @@ export interface CleanupResult {
   freedChars: number
   cutoff: string
   unread: number
+}
+/** OPML 导出（`opmlExport`）的返回。 */
+export interface OpmlExportResult {
+  opml: string
+  feedCount: number
+}
+
+/** OPML 导入（`opmlImport`）的返回：逐源结果 + 汇总，坏源单独列出（§3.1）。 */
+export interface OpmlImportResult {
+  /** 新增（此前不在订阅里）的源数 */
+  added: number
+  /** 已存在、本次跳过校验后仍保留的源数 */
+  existed: number
+  /** 校验失败的源，逐条带原因 */
+  failed: Array<{ url: string; reason: string }>
+  /** OPML 里被跳过的条目（缺 xmlUrl / URL 非法 / 重复） */
+  skipped: Array<{ title?: string; reason: string }>
+  /** 通过校验并落库的源（供界面回显） */
+  accepted: Array<{ url: string; title?: string; folder?: string }>
 }

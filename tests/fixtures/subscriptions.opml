@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0">
+  <head>
+    <title>My Subscriptions</title>
+  </head>
+  <body>
+    <outline text="Tech" title="Tech">
+      <outline type="rss" text="Hacker News" title="Hacker News" xmlUrl="https://news.ycombinator.com/rss" htmlUrl="https://news.ycombinator.com/"/>
+      <outline type="rss" text="GitHub Blog" title="GitHub Blog" xmlUrl="https://github.blog/feed/"/>
+      <outline text="中文源" title="中文源">
+        <outline type="rss" text="少数派" title="少数派" xmlUrl="https://sspai.com/feed"/>
+        <outline type="rss" text="阮一峰" title="阮一峰" xmlUrl="https://www.ruanyifeng.com/blog/atom.xml"/>
+      </outline>
+    </outline>
+    <outline text="未分组源" title="未分组源" xmlUrl="https://example.com/feed.xml"/>
+    <outline text="小写属性" xmlurl="https://example.com/lowercase.xml"/>
+    <outline text="重复项" xmlUrl="https://github.blog/feed/"/>
+    <outline text="坏 URL" xmlUrl="not a url at all"/>
+    <outline text="纯分组没有源"/>
+    <outline text="带 &amp; 的名字" xmlUrl="https://example.com/amp.xml"/>
+  </body>
+</opml>

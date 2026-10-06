@@ -21,6 +21,7 @@ function memoryStore() {
     saveCursor: async (id, record) => { cursors.set(id, record) },
     item: (id) => items.get(id),
     allItems: () => [...items.entries()],
+    deleteFeed: async (feedId) => { feeds.delete(feedId); cursors.delete(feedId) },
     saveItem: async (id, record) => { items.set(id, record) },
     deleteItem: async (id) => { items.delete(id) },
     listItems: (feedId) => [...items.entries()].filter(([, record]) => record.feedId === feedId),

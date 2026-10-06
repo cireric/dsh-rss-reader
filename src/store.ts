@@ -12,6 +12,8 @@ export interface ReaderStore {
   saveFeed(feedId: string, record: FeedRecord): Promise<void>
   cursor(feedId: string): CursorRecord | undefined
   saveCursor(feedId: string, record: CursorRecord): Promise<void>
+  /** 退订：删源记录与它的游标（条目由调用方一并删，避免留下孤儿） */
+  deleteFeed(feedId: string): Promise<void>
   /** 单条读取（标记已读要读改写，不能覆盖其它字段） */
   item(itemId: string): ItemRecord | undefined
   saveItem(itemId: string, record: ItemRecord): Promise<void>
@@ -33,6 +35,10 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
     saveFeed: (feedId, record) => feeds.put(feedId, record),
     cursor: (feedId) => cursors.get(feedId),
     saveCursor: (feedId, record) => cursors.put(feedId, record),
+    deleteFeed: async (feedId) => {
+      await cursors.delete(feedId)
+      await feeds.delete(feedId)
+    },
     item: (itemId) => items.get(itemId),
     saveItem: (itemId, record) => items.put(itemId, record),
     deleteItem: async (itemId) => {

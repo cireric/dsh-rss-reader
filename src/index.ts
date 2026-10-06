@@ -22,6 +22,8 @@ import { createStore, type ReaderStore } from './store.js'
 import { refreshFeeds, type FeedOutcome } from './refresh.js'
 import { fetchArticle } from './article.js'
 import { selectCleanup, type CleanupRow } from './retention.js'
+import { buildOpml, parseOpml } from './opml.js'
+import { validateSubscriptions } from './subscribe.js'
 import { ROUTE_PATH, type Endpoint, type ItemView, type Overview, type RpcResult } from './shared.js'
 
 export const name = '@dsh-external/dsh-rss-reader'
@@ -54,6 +56,8 @@ export interface Config {
   maxArticleCacheChars: number
   /** 显式清理的天数阈值：早于「现在 − 该天数」的已读条目才可清理 */
   cleanupAfterDays: number
+  /** OPML 导入时的逐源校验并发上限（≥20 源逐个抓太慢，全放出去又不友好） */
+  importConcurrency: number
   /** 按需抓原站正文的体积上限（字节）——单篇文章比 feed 大，与 maxBytes 分开 */
   articleMaxBytes: number
   /** 同一篇文章两次抓取之间的最小间隔（缓存未命中时），防连按造成的请求风暴 */
@@ -77,6 +81,7 @@ export const Config: z<Config> = z.object({
   maxContentChars: z.number().default(50000),
   maxArticleCacheChars: z.number().default(8_000_000),
   cleanupAfterDays: z.number().default(30),
+  importConcurrency: z.number().default(5),
   articleMaxBytes: z.number().default(2 * 1024 * 1024),
   articleCooldownMs: z.number().default(30000),
   refreshOnStart: z.boolean().default(true),
@@ -404,6 +409,101 @@ export function apply(ctx: Context, config: Config): void {
           log('取正文成功：' + existing.link + '（' + fetched.paragraphs.length + ' 段 ' +
             fetched.paragraphs.reduce((sum, p) => sum + p.length, 0) + ' 字符）')
           return ok({ itemId, cached: false, title: article.title, paragraphs: article.paragraphs, frameable: article.frameable })
+        }
+
+        case 'opmlExport': {
+          const feeds = target.listFeeds().map(([feedUrl, record]) => ({
+            url: feedUrl, title: record.title, folder: record.folder,
+          }))
+          return ok({ opml: buildOpml(feeds), feedCount: feeds.length })
+        }
+
+        case 'opmlImport': {
+          // §3.1：导入时**逐源抓取校验**，坏源单独标注、不阻断其余。
+          const text = String((payload as { opml?: unknown } | null)?.opml ?? '')
+          if (text.trim() === '') return fail('bad-request', 'opmlImport 需要 opml 文本')
+          const parsed = parseOpml(text)
+          if (parsed.subscriptions.length === 0) {
+            return ok({
+              added: 0, existed: 0, failed: [], skipped: parsed.skipped, accepted: [],
+            })
+          }
+
+          const checked = await validateSubscriptions(
+            parsed.subscriptions.map((subscription) => subscription.xmlUrl),
+            { limits: { timeoutMs: config.timeoutMs, maxBytes: config.maxBytes }, concurrency: config.importConcurrency },
+          )
+
+          const byUrl = new Map(parsed.subscriptions.map((subscription) => [subscription.xmlUrl, subscription]))
+          const accepted: Array<{ url: string; title?: string; folder?: string }> = []
+          const failed: Array<{ url: string; reason: string }> = []
+          let added = 0
+          let existed = 0
+
+          for (const result of checked) {
+            if (!result.ok) {
+              failed.push({ url: result.url, reason: result.reason ?? '校验失败' })
+              continue
+            }
+            const subscription = byUrl.get(result.url)
+            const previous = target.feed(result.url)
+            existed += previous === undefined ? 0 : 1
+            added += previous === undefined ? 1 : 0
+            // 已存在的源保留其 folder（用户可能在界面上改过），新源才写入 OPML 的分组
+            await target.saveFeed(result.url, {
+              url: result.url,
+              title: result.title ?? subscription?.title ?? previous?.title,
+              folder: previous?.folder ?? subscription?.folder,
+              etag: previous?.etag,
+              lastModified: previous?.lastModified,
+              lastFetchedAt: previous?.lastFetchedAt,
+            })
+            accepted.push({ url: result.url, title: result.title ?? subscription?.title, folder: previous?.folder ?? subscription?.folder })
+          }
+
+          log('导入 OPML：新增 ' + added + ' 源，已存在 ' + existed + ' 源，校验失败 ' + failed.length +
+            ' 源，文件内跳过 ' + parsed.skipped.length + ' 项')
+          return ok({ added, existed, failed, skipped: parsed.skipped, accepted })
+        }
+
+        case 'addFeed': {
+          const raw = String((payload as { url?: unknown } | null)?.url ?? '')
+          const checked = await validateSubscriptions([raw], {
+            limits: { timeoutMs: config.timeoutMs, maxBytes: config.maxBytes },
+            concurrency: 1,
+          })
+          const result = checked[0]
+          if (result === undefined || !result.ok) {
+            return ok({ added: 0, existed: 0, failed: [{ url: raw, reason: result?.reason ?? '校验失败' }], skipped: [], accepted: [] })
+          }
+          const previous = target.feed(result.url)
+          await target.saveFeed(result.url, {
+            url: result.url,
+            title: result.title ?? previous?.title,
+            folder: previous?.folder,
+            etag: previous?.etag,
+            lastModified: previous?.lastModified,
+            lastFetchedAt: previous?.lastFetchedAt,
+          })
+          return ok({
+            added: previous === undefined ? 1 : 0,
+            existed: previous === undefined ? 0 : 1,
+            failed: [], skipped: [],
+            accepted: [{ url: result.url, title: result.title, folder: previous?.folder }],
+          })
+        }
+
+        case 'removeFeed': {
+          const feedId = String((payload as { url?: unknown } | null)?.url ?? '')
+          if (!feedId) return fail('bad-request', 'removeFeed 需要 url')
+          const known = target.feed(feedId)
+          if (known === undefined) return fail('not-found', '订阅不存在：' + feedId)
+          // 连带删掉该源的全部条目与游标——留着孤儿条目只会让人困惑
+          const items = target.listItems(feedId)
+          for (const [itemId] of items) await target.deleteItem(itemId)
+          await target.deleteFeed(feedId)
+          log('退订 ' + feedId + '（连带删除 ' + items.length + ' 条条目）')
+          return ok({ removed: 1, items: items.length })
         }
 
         case 'cleanup': {
