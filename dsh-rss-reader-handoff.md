@@ -349,3 +349,38 @@ sed -n '1,30p' /Users/eric/Project/tests/deepseek-harness/packages/client/ui-sid
 + 文案「刷新中…」+ 禁用 → 头部下方 2px 不确定进度条 → 列表压暗 0.6 但**仍可读**（SVR）。
 **明确不做全屏遮罩**：刷新期间用户多半还在读旧内容，遮罩只会打断阅读并制造闪烁；「旧内容压暗可读
 + 完成后自动重渲染」是这套 UI 的正解（handoff §8 早记录过这条教训）。
+
+---
+
+## 19. 右栏方案不可行的根因与 D 方案（2026-10-06）
+
+**C 步（V 开右栏标签页）实测失败，根因是宿主的硬约束，不是快捷键冲突：**
+
+探针日志 8 条都长这样：`{"step":"openTab","hasService":true,"beforeKind":null,
+"error":"sidebarRight: no session surface is mounted"}`。能被记录即证明按键到达了处理函数，
+**排除了「shift+V 与浏览器/系统快捷键冲突」**。
+
+- 守卫在 `packages/client/ui-sidebar-right/src/client/service.ts:720-730`：`openTab` / `close` /
+  `openResource` 等**所有写操作**都要求「屏幕上有会话」，否则抛 `no session surface is mounted`。
+- 会话是否「在屏幕上」由主栏决定（`service.ts:303` ← `sessions.onScreen`）。官方测试注释写得
+  很直白（`ui-sidebar-right/tests/apply.client.spec.ts:216-218`）：**「A global panel takes the
+  Conversation's place: no Session is on screen.」**
+- **我们的阅读器就是主栏面板**：它一打开就把会话挤掉 ⇒ 右栏没有可写入目标。
+- 官方唯一两处 `openTab` 调用（`ui-schedule/src/client/index.ts:198,225`）都在**会话侧座位**
+  （`conversation.chat.turnTail`、`conversation.session.header.utilities`），不在主栏面板里。
+
+⇒ **从阅读器（主栏面板）开右栏标签页在当前结构下做不到。** 我早先记的「转发器不生效」是同一个坑，
+当时只记了现象、没追到这条守卫——这是可行性分析没有落到源码级验证的代价。
+
+**D 方案（已实施）**：正文**在主栏内**打开，不碰右栏。
+
+- `V`：抓原站 + 抽正文 + 在主栏内换成阅读视图；`Esc`（或「← 返回列表」）回列表。
+- 抽取在**宿主侧**（`src/article.ts`）：段落纯文本回传 ⇒ 客户端不注入 HTML（无 XSS 面），
+  且抽取逻辑能用固定夹具做单测（7 条），并已用真实页面验证（13,490 字符 / 38 段；
+  版式不支持时如实报错，不编造）。
+- 缓存挂在条目记录上（`item.article`）：第二次打开不跑网络；失败原因存 `item.articleFailure`，
+  重开可见；同一篇 30 秒冷却防请求风暴（`articleCooldownMs`）。
+- 列表在正文视图下用 `display:none` 隐藏而不是卸载 ⇒ 返回时滚动位置还在。
+
+**探针已撤除**：C 步的客户端探针、`probe` 端点与嵌套 `inject` 注册整块删除（源码与产物均已核对为 0），
+同批的 bug 修复与客户端作用域闸门保留。

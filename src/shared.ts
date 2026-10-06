@@ -15,11 +15,7 @@
  */
 export const ROUTE_PATH = '/rss-reader-api'
 
-/**
- * `probe` 是**临时诊断端点**（C 步地基验证用）：客户端把右栏交互的成败证据回传，宿主写进
- * reader.log，让 agent 读到硬证据而不是靠用户口述。A 步落地后应删除。
- */
-export type Endpoint = 'overview' | 'refresh' | 'markRead' | 'unmarkRead' | 'toggleStar' | 'probe'
+export type Endpoint = 'overview' | 'refresh' | 'markRead' | 'unmarkRead' | 'toggleStar' | 'article'
 
 export type RpcResult<T> =
   | { ok: true; value: T }
@@ -59,4 +55,14 @@ export interface Overview {
   refreshed: boolean
   /** 上次刷新完成时间 */
   refreshedAt?: string
+}
+/** 按需正文（`article` 端点）的返回：成功给段落，失败给可直接显示的原因。 */
+export interface ArticlePayload {
+  itemId: string
+  /** 命中存储里的缓存时为 true（没有跑网络） */
+  cached: boolean
+  title?: string
+  paragraphs?: string[]
+  /** 抓取/抽取失败的原因；与 paragraphs 互斥 */
+  failure?: string
 }

@@ -20,6 +20,7 @@ import z from 'schemastery'
 import { readerDomain } from './domain.js'
 import { createStore, type ReaderStore } from './store.js'
 import { refreshFeeds, type FeedOutcome } from './refresh.js'
+import { fetchArticle } from './article.js'
 import { ROUTE_PATH, type Endpoint, type ItemView, type Overview, type RpcResult } from './shared.js'
 
 export const name = '@dsh-external/dsh-rss-reader'
@@ -48,6 +49,10 @@ export interface Config {
   maxSeenPerFeed: number
   /** 单条正文的存储上限（字符）：正文优先取 content 后需要有这个闸门，见 refresh.ts 注释 */
   maxContentChars: number
+  /** 按需抓原站正文的体积上限（字节）——单篇文章比 feed 大，与 maxBytes 分开 */
+  articleMaxBytes: number
+  /** 同一篇文章两次抓取之间的最小间隔（缓存未命中时），防连按造成的请求风暴 */
+  articleCooldownMs: number
   /** 装载时刷新一次 */
   refreshOnStart: boolean
   /** 打开面板时的最小刷新间隔（毫秒）：节流不打网络，但不引入常驻定时器 */
@@ -65,6 +70,8 @@ export const Config: z<Config> = z.object({
   maxItemsPerFeed: z.number().default(500),
   maxSeenPerFeed: z.number().default(5000),
   maxContentChars: z.number().default(50000),
+  articleMaxBytes: z.number().default(2 * 1024 * 1024),
+  articleCooldownMs: z.number().default(30000),
   refreshOnStart: z.boolean().default(true),
   minRefreshIntervalMs: z.number().default(10 * 60 * 1000),
   maxItemsShown: z.number().default(300),
@@ -140,6 +147,9 @@ async function openDomainWithRetry(
 export function apply(ctx: Context, config: Config): void {
   const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
   const logFile = config.logFile || join(dshHome, 'state', 'dsh-rss-reader', 'reader.log')
+
+  /** 同一篇文章的抓取时间（内存态即可：重启后允许再抓一次）。 */
+  const articleAttempts = new Map<string, number>()
 
   const log = (message: string): void => {
     const line = '[' + new Date().toISOString() + '] ' + message
@@ -332,10 +342,56 @@ export function apply(ctx: Context, config: Config): void {
           return ok({ changed, unread: countUnread(target) })
         }
 
-        case 'probe': {
-          // 临时诊断：把客户端侧右栏交互的成败写进日志（A 步落地后删）
-          log('probe: ' + JSON.stringify(payload))
-          return ok({ logged: true })
+        case 'article': {
+          // 按需正文（V 键）：先看缓存，再冷却，最后才抓原站。三步都留日志——这是唯一会
+          // 出网的用户手势，出问题时必须能从日志里还原过程。
+          const itemId = String((payload as { itemId?: unknown } | null)?.itemId ?? '')
+          if (!itemId) return fail('bad-request', 'article 需要 itemId')
+          const existing = target.item(itemId)
+          if (existing === undefined) return fail('not-found', '条目不存在：' + itemId)
+          if (existing.article !== undefined) {
+            return ok({ itemId, cached: true, title: existing.article.title, paragraphs: existing.article.paragraphs })
+          }
+          if (existing.link === '') return fail('bad-request', '该条目没有可抓取的链接')
+
+          const lastAt = articleAttempts.get(itemId)
+          if (lastAt !== undefined && Date.now() - lastAt < config.articleCooldownMs) {
+            const wait = Math.ceil((config.articleCooldownMs - (Date.now() - lastAt)) / 1000)
+            return fail('cooldown', '刚刚取过这篇正文，请 ' + wait + ' 秒后再试')
+          }
+          articleAttempts.set(itemId, Date.now())
+
+          log('取正文：' + existing.link)
+          const fetched = await fetchArticle(existing.link, {
+            timeoutMs: config.timeoutMs,
+            maxBytes: config.articleMaxBytes,
+          })
+          if (fetched.kind === 'failed') {
+            // 失败原因存进条目：用户重开时能看到，且不必再等一次网络往返
+            await target.saveItem(itemId, { ...existing, articleFailure: fetched.reason })
+            log('取正文失败：' + existing.link + ' → ' + fetched.reason)
+            return ok({ itemId, cached: false, failure: fetched.reason })
+          }
+          const article = {
+            fetchedAt: new Date().toISOString(),
+            title: fetched.title,
+            paragraphs: fetched.paragraphs,
+          }
+          // 成功要清掉旧的失败原因：显式重建记录，避免在 .strict() 下塞 undefined 键
+          await target.saveItem(itemId, {
+            feedId: existing.feedId,
+            title: existing.title,
+            link: existing.link,
+            publishedAt: existing.publishedAt,
+            summary: existing.summary,
+            fetchedAt: existing.fetchedAt,
+            readAt: existing.readAt,
+            starred: existing.starred,
+            article,
+          })
+          log('取正文成功：' + existing.link + '（' + fetched.paragraphs.length + ' 段 ' +
+            fetched.paragraphs.reduce((sum, p) => sum + p.length, 0) + ' 字符）')
+          return ok({ itemId, cached: false, title: article.title, paragraphs: article.paragraphs })
         }
 
         case 'toggleStar': {

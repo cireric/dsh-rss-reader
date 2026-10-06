@@ -15,7 +15,7 @@
  */
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import type { Context as ClientContext } from 'cordis'
-import { ROUTE_PATH, type FeedView, type ItemView, type Overview, type RpcResult } from '../shared.js'
+import { ROUTE_PATH, type ArticlePayload, type FeedView, type ItemView, type Overview, type RpcResult } from '../shared.js'
 
 export const inject = ['slots']
 
@@ -63,6 +63,15 @@ function RefreshIcon({ spinning }: { spinning?: boolean }): ReactNode {
 
 type Filter = 'all' | 'unread' | 'starred'
 
+/** 按需正文的运行态（D 方案：V 进正文、Esc 回列表）。 */
+interface ArticleState {
+  itemId: string
+  loading: boolean
+  title?: string
+  paragraphs?: string[]
+  failure?: string
+}
+
 interface ReaderState {
   items: ItemView[]
   feeds: FeedView[]
@@ -73,6 +82,9 @@ interface ReaderState {
   error: string | undefined
   /** 刚被「全部标记已读」的条目，供短时撤销 */
   undo: { ids: string[]; until: number } | undefined
+  /** 当前视图：列表 or 正文（正文在主栏内换掉列表，不占右栏——见 handoff §19 的原因） */
+  view: 'list' | 'article'
+  article: ArticleState | undefined
 }
 
 /** 调一个端点并解信封；失败抛出 `code: message`，由面板渲染。 */
@@ -123,72 +135,6 @@ function toParagraphs(html: string | undefined): string[] {
     .filter((line) => line !== '')
 }
 
-/** 右栏自建「正文」标签页：C 步只验证地基，A 步再接入正文抓取与渲染。 */
-const ARTICLE_KIND = 'rssReaderArticle'
-const ARTICLE_ID = 'dsh-rss-reader-article'
-
-/** 右栏标签页记录里我们关心的字段（宿主是 TS，客户端运行时按形状取）。 */
-interface ArticleTabLike {
-  readonly id?: string
-  readonly kind?: string
-  readonly title?: string
-  readonly navigation?: { readonly params?: { readonly url?: string; readonly title?: string } }
-}
-
-/** 右栏服务的最小面（可选依赖，用 ctx.get 判空，缺了也不影响阅读器本体）。 */
-interface SidebarRightLike {
-  active?: () => ArticleTabLike | undefined
-  openTab?: (kind: string, options?: { params?: unknown }) => void
-  close?: (tabId: string) => void
-}
-
-/**
- * 把右栏交互的成败回传宿主日志（**临时诊断**，A 步落地后删）。
- *
- * 为什么值得这一小段管道：右栏是我们完全看不见的浏览器侧行为，靠用户口述「点了没反应」
- * 无法定位——上一次就是这么卡住的。把 beforeKind/afterKind/error 落到我可以读的日志里，
- * 一次按键就能拿到硬证据。
- */
-async function reportProbe(step: string, detail: Record<string, unknown>): Promise<void> {
-  try {
-    await callRpc('probe', { step, ...detail })
-  } catch (error) {
-    // 探针自身失败要可见，但绝不该影响用户操作
-    console.warn('[dsh-rss-reader] 探针上报失败：' + String(error))
-  }
-}
-
-/** 右栏标签页的标题 chip。 */
-function ArticleTitle(props: { useTabInfo?: () => { tab: ArticleTabLike } }): ReactNode {
-  const title = props.useTabInfo?.()?.tab?.navigation?.params?.title
-  return <span>{typeof title === 'string' && title !== '' ? title : '正文'}</span>
-}
-
-/** 右栏标签页的正文体（C 步占位；A 步换成抽取后的正文）。 */
-function ArticleBody(props: { useTabInfo?: () => { tab: ArticleTabLike } }): ReactNode {
-  const url = props.useTabInfo?.()?.tab?.navigation?.params?.url
-  return (
-    <div style={{ padding: 16, fontSize: 13, lineHeight: 1.6 }}>
-      <div style={{ opacity: 0.75 }}>右栏「正文」标签页已能打开——C 步地基验证中。</div>
-      <div style={{ opacity: 0.6, marginTop: 6 }}>正文抓取与渲染在 A 步接入。</div>
-      {typeof url === 'string' && url !== '' && (
-        <div style={{ marginTop: 10, wordBreak: 'break-all' }}>
-          <a href={url} target="_blank" rel="noreferrer">{url}</a>
-        </div>
-      )}
-    </div>
-  )
-}
-
-/** 解析右栏服务（可选依赖：拿不到就返回 undefined，不抛）。 */
-function sidebarRightOf(ctx: ClientContext): SidebarRightLike | undefined {
-  try {
-    const get = (ctx as { get?: (name: string) => unknown }).get
-    return typeof get === 'function' ? (get.call(ctx, 'sidebarRight') as SidebarRightLike | undefined) : undefined
-  } catch {
-    return undefined
-  }
-}
 
 /** 阅读器根节点是否持有焦点——快捷键作用域的判据。 */
 function readerFocused(): boolean {
@@ -206,6 +152,7 @@ function createReaderStore(ctx: ClientContext) {
   let state: ReaderState = {
     items: [], feeds: [], unread: 0, filter: 'all',
     selectedId: undefined, loading: true, error: undefined, undo: undefined,
+    view: 'list', article: undefined,
   }
   const listeners = new Set<() => void>()
   const emit = (): void => { for (const listener of listeners) listener() }
@@ -342,9 +289,38 @@ function createReaderStore(ctx: ClientContext) {
     }
   }
 
+  /**
+   * V：抓并显示选中条目的正文。
+   *
+   * 先走宿主缓存（第二次打开不跑网络）；失败原因原样显示，不编造内容。打开正文 = 读过了，
+   * 与 o / 点击保持同一语义。
+   */
+  const openArticle = async (): Promise<void> => {
+    const item = state.items.find((entry) => entry.id === state.selectedId)
+    if (item === undefined || item.link === '') return
+    set({ view: 'article', article: { itemId: item.id, loading: true } })
+    void markRead(item.id)
+    try {
+      const result = await callRpc<ArticlePayload>('article', { itemId: item.id })
+      // 期间用户可能已经换到别的条目：丢弃过期结果，避免把 A 的正文显示成 B 的
+      if (state.article?.itemId !== item.id) return
+      if (result.failure !== undefined) {
+        set({ article: { itemId: item.id, loading: false, failure: result.failure } })
+      } else {
+        set({ article: { itemId: item.id, loading: false, title: result.title, paragraphs: result.paragraphs ?? [] } })
+      }
+    } catch (error) {
+      if (state.article?.itemId !== item.id) return
+      set({ article: { itemId: item.id, loading: false, failure: error instanceof Error ? error.message : String(error) } })
+    }
+  }
+
+  const closeArticle = (): void => { set({ view: 'list' }) }
+
   return {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
     get, visible, load, markRead, selectRelative, openSelected, toggleStar, toggleRead, markAllRead, undoMarkAll,
+    openArticle, closeArticle,
     setFilter: (filter: Filter): void => { set({ filter }); const list = filter === 'all' ? state.items : state.items.filter((i) => (filter === 'unread' ? i.readAt === undefined : i.starred)); set({ selectedId: list[0]?.id }) },
     select: (itemId: string): void => { set({ selectedId: itemId }) },
   }
@@ -403,8 +379,9 @@ function createReader(store: ReaderStore, ctx: ClientContext): () => ReactNode {
         if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return
         const run = (action: () => void): void => { event.preventDefault(); action() }
         switch (event.key) {
-          case 'j': run(() => store.selectRelative(1)); break
-          case 'k': run(() => store.selectRelative(-1)); break
+          // 正文视图里 j/k 不移动：每次移动都意味着一次抓取，误按代价太高（Esc 回列表再移动）
+          case 'j': if (store.get().view === 'article') return; run(() => store.selectRelative(1)); break
+          case 'k': if (store.get().view === 'article') return; run(() => store.selectRelative(-1)); break
           // Google Reader 的语义：o 展开/折叠（列表内），v 才开原站
           // o = 展开/折叠 + 标已读（已读的唯一自动触发点，另有显式的 m）
           case 'o': run(() => {
@@ -414,42 +391,13 @@ function createReader(store: ReaderStore, ctx: ClientContext): () => ReactNode {
             void store.markRead(selected)
           }); break
           case 'v': run(() => store.openSelected()); break
-          // V：在同一会话的右栏打开该条链接（C 步地基验证；成败证据回传宿主日志）
-          case 'V': run(() => {
-            const selected = store.visible().find((entry) => entry.id === store.get().selectedId)
-            if (selected === undefined || selected.link === '') return
-            const detail: Record<string, unknown> = { url: selected.link }
-            const sidebarRight = sidebarRightOf(ctx)
-            detail.hasService = sidebarRight !== undefined
-            if (sidebarRight === undefined) {
-              void reportProbe('openTab-no-service', detail)
-              return
-            }
-            try {
-              detail.beforeKind = sidebarRight.active?.()?.kind ?? null
-              sidebarRight.openTab?.(ARTICLE_KIND, { params: { url: selected.link, title: selected.title } })
-              const after = sidebarRight.active?.()
-              detail.afterKind = after?.kind ?? null
-              detail.afterTabId = after?.id ?? null
-            } catch (error) {
-              detail.error = error instanceof Error ? error.message : String(error)
-            }
-            void reportProbe('openTab', detail)
-          }); break
-          // Esc：只在右栏当前正是本插件的「正文」标签页时才动作，避免抢弹层的 Esc
+          // V：在阅读器内打开正文（按需抓原站 + 抽取）。做在此处而不是右栏，原因见 handoff §19
+          case 'V': run(() => { void store.openArticle() }); break
+          // Esc：从正文回到列表；列表态下不拦截（不抢弹层的 Esc）
           case 'Escape': {
-            const sidebarRight = sidebarRightOf(ctx)
-            const active = sidebarRight?.active?.()
-            if (sidebarRight?.close === undefined || active === undefined || active.kind !== ARTICLE_KIND) return
-            const tabId = active.id
-            if (tabId === undefined) return
+            if (store.get().view !== 'article') return
             event.preventDefault()
-            try {
-              sidebarRight.close(tabId)
-              void reportProbe('closeTab', { tabId, ok: true })
-            } catch (error) {
-              void reportProbe('closeTab', { tabId, ok: false, error: String(error) })
-            }
+            store.closeArticle()
             break
           }
           case 's': run(() => { void store.toggleStar() }); break
@@ -490,7 +438,7 @@ function createReader(store: ReaderStore, ctx: ClientContext): () => ReactNode {
             ))}
           </span>
           <span style={{ flex: 1 }} />
-          <span style={{ fontSize: 11, opacity: 0.55 }}>j/k 移动（不标已读）· o 展开并已读 · v 开原站 · s 星标 · m 已读 · A 全部</span>
+          <span style={{ fontSize: 11, opacity: 0.55 }}>j/k 移动 · o 展开并已读 · V 读正文 · v 开原站 · s 星标 · m 已读 · A 全部</span>
           <button type="button" className="dsh-rss-btn" disabled={state.loading}
             title="重新抓取所有订阅源（受最小间隔节流）"
             onClick={() => { void store.load('refresh') }}>
@@ -513,8 +461,17 @@ function createReader(store: ReaderStore, ctx: ClientContext): () => ReactNode {
           </div>
         )}
 
+        {state.view === 'article' && (
+          <ArticleView
+            article={state.article}
+            link={state.items.find((entry) => entry.id === state.selectedId)?.link}
+            onBack={() => store.closeArticle()}
+          />
+        )}
+
         <div style={{
           flex: 1, minHeight: 0, overflowY: 'auto',
+          display: state.view === 'article' ? 'none' : 'block',
           opacity: slowLoading ? 0.6 : 1, transition: 'opacity 150ms ease',
         }}>
           {!state.loading && items.length === 0 && (
@@ -569,6 +526,43 @@ function createReader(store: ReaderStore, ctx: ClientContext): () => ReactNode {
       </div>
     )
   }
+}
+
+/** 阅读器内的正文视图（D 方案）：段落由宿主抽取后回传，这里只做排版。 */
+function ArticleView({ article, link, onBack }: {
+  article: ArticleState | undefined
+  link: string | undefined
+  onBack: () => void
+}): ReactNode {
+  const paragraphs = article?.paragraphs ?? []
+  return (
+    <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '12px 22px 24px', fontSize: 15, lineHeight: 1.8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+        <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" onClick={onBack}>← 返回列表（Esc）</button>
+        <span style={{ flex: 1 }} />
+        {link !== undefined && link !== '' && (
+          <a href={link} target="_blank" rel="noreferrer" style={{ fontSize: 12 }}>打开原站 ↗</a>
+        )}
+      </div>
+      {article === undefined || article.loading ? (
+        <div style={{ opacity: 0.7 }}>正在抓取并抽取原站正文…</div>
+      ) : article.failure !== undefined ? (
+        <div style={{ color: '#c0392b' }}>
+          没能取到正文：{article.failure}
+          <div style={{ opacity: 0.7, marginTop: 6, fontSize: 12 }}>可以按 Esc 回列表，或点右上角去原站阅读。</div>
+        </div>
+      ) : (
+        <>
+          {article.title !== undefined && (
+            <div style={{ fontSize: 17, fontWeight: 600, marginBottom: 12 }}>{article.title}</div>
+          )}
+          {paragraphs.map((paragraph, index) => (
+            <p key={index} style={{ margin: index === 0 ? 0 : '0 0 0.9em' }}>{paragraph}</p>
+          ))}
+        </>
+      )}
+    </div>
+  )
 }
 
 /** 侧栏折叠按钮里的未读数（非交互）。 */

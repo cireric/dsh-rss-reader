@@ -29,6 +29,13 @@ export const feedRecordSchema = z.object({
 }).strict()
 export type FeedRecord = z.infer<typeof feedRecordSchema>
 
+/** 抽取后的正文缓存（挂在条目上，与已读态一样只增不减）。 */
+export const articleRecordSchema = z.object({
+  fetchedAt: z.string(),
+  title: z.string().optional(),
+  paragraphs: z.array(z.string()),
+}).strict()
+
 export const itemRecordSchema = z.object({
   feedId: z.string().min(1),
   title: z.string(),
@@ -42,6 +49,12 @@ export const itemRecordSchema = z.object({
    */
   readAt: z.string().optional(),
   starred: z.boolean(),
+  /**
+   * 按需抓取的正文缓存（D 方案：V 键触发宿主抓原站 + 抽正文）。
+   * 缓存在条目上——重开不再跑网络；失败原因另存 `articleFailure`，两者互斥。
+   */
+  article: articleRecordSchema.optional(),
+  articleFailure: z.string().optional(),
 }).strict()
 export type ItemRecord = z.infer<typeof itemRecordSchema>
 
