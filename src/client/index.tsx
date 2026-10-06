@@ -69,11 +69,23 @@ function relativeTime(iso: string | undefined): string {
   return new Date(then).toISOString().slice(0, 10)
 }
 
-/** 摘要可能是 HTML 片段；列表里只当纯文本看，不注入 DOM。 */
-function plainText(html: string | undefined, limit = 400): string {
-  if (!html) return ''
-  const text = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
-  return text.length > limit ? text.slice(0, limit) + '…' : text
+/**
+ * feed 正文（HTML 片段）→ 段落数组。
+ *
+ * 只做「块级标签换成换行 + 去掉其余标签 + 收敛空白」，全程当**文本**渲染，不注入 DOM：
+ * 因此没有 XSS 面，也不需要 sanitizer 依赖。体积上限由存储层负责（Config.maxContentChars）。
+ * 注意实体解码在解析层已经做过（htmlEntities），这里不重复处理。
+ */
+function toParagraphs(html: string | undefined): string[] {
+  if (!html) return []
+  const withBreaks = html
+    .replace(/<\s*br\s*\/?>/gi, '\n')
+    .replace(/<\s*\/(p|div|li|h[1-6]|blockquote|tr|section|article|figure)\s*>/gi, '\n')
+    .replace(/<[^>]*>/g, ' ')
+  return withBreaks
+    .split('\n')
+    .map((line) => line.replace(/[ \t\u00a0]+/g, ' ').trim())
+    .filter((line) => line !== '')
 }
 
 /** 阅读器根节点是否持有焦点——快捷键作用域的判据。 */
@@ -277,7 +289,14 @@ function createReader(store: ReaderStore): () => ReactNode {
         switch (event.key) {
           case 'j': run(() => { void store.selectRelative(1) }); break
           case 'k': run(() => { void store.selectRelative(-1) }); break
-          case 'o': run(() => store.openSelected()); break
+          // Google Reader 的语义：o 展开/折叠（列表内），v 才开原站
+          case 'o': run(() => {
+            const selected = store.get().selectedId
+            if (selected === undefined) return
+            setExpanded((current) => (current === selected ? undefined : selected))
+            void store.markRead(selected)
+          }); break
+          case 'v': run(() => store.openSelected()); break
           case 's': run(() => { void store.toggleStar() }); break
           case 'm': run(() => { void store.toggleRead() }); break
           case 'A': run(() => { void store.markAllRead() }); break
@@ -315,7 +334,7 @@ function createReader(store: ReaderStore): () => ReactNode {
             ))}
           </span>
           <span style={{ flex: 1 }} />
-          <span style={{ fontSize: 11, opacity: 0.55 }}>j/k 移动 · o 打开 · s 星标 · m 已读 · A 全部</span>
+          <span style={{ fontSize: 11, opacity: 0.55 }}>j/k 移动 · o 展开 · v 开原站 · s 星标 · m 已读 · A 全部</span>
           <button type="button" disabled={state.loading} onClick={() => { void store.load('refresh') }}
             style={{ fontSize: 13, padding: '3px 10px', cursor: state.loading ? 'default' : 'pointer' }}>
             {state.loading ? '刷新中' : '刷新'}
@@ -368,9 +387,14 @@ function createReader(store: ReaderStore): () => ReactNode {
                     </span>
                     {isOpen && (
                       <span style={{ display: 'block', marginTop: 8, opacity: 0.85, fontSize: 13 }}>
-                        {plainText(item.summary) !== '' && <span style={{ display: 'block' }}>{plainText(item.summary)}</span>}
+                        {toParagraphs(item.summary).length === 0 && (
+                          <span style={{ display: 'block', opacity: 0.7 }}>（此源只提供摘要，点下面到原站读全文）</span>
+                        )}
+                        {toParagraphs(item.summary).map((paragraph, index) => (
+                          <span key={index} style={{ display: 'block', margin: index === 0 ? '0' : '0.6em 0 0' }}>{paragraph}</span>
+                        ))}
                         {item.link !== '' && (
-                          <a href={item.link} target="_blank" rel="noreferrer" style={{ fontSize: 12, display: 'inline-block', marginTop: 6 }}>打开原站 ↗</a>
+                          <a href={item.link} target="_blank" rel="noreferrer" style={{ fontSize: 12, display: 'inline-block', marginTop: 8 }}>打开原站 ↗</a>
                         )}
                       </span>
                     )}

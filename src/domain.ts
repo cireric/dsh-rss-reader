@@ -18,6 +18,12 @@ export const feedRecordSchema = z.object({
   etag: z.string().optional(),
   lastModified: z.string().optional(),
   lastFetchedAt: z.string().optional(),
+  /**
+   * 已存正文的内容版本（见 refresh.ts 的 CONTENT_REVISION）。
+   * 缺省视为 1（旧的「摘要优先」解析）；版本落后时该源的第一轮抓取会绕开条件请求，
+   * 否则源一直回 304、老条目的短摘要永远回填不了。可选字段 ⇒ 老记录照常通过校验。
+   */
+  contentRevision: z.number().optional(),
   /** 最近一次失败原因；成功后清掉（单源降级，不阻断其余源） */
   lastFailure: z.string().optional(),
 }).strict()

@@ -60,6 +60,28 @@ export function textOf(value: unknown): string | undefined {
   return undefined
 }
 
+/**
+ * 取「更完整」的那份文本。
+ *
+ * 同一个源里，正文常常在 content:encoded / content，而 description / summary 只是摘要
+ * ——实测 GitHub Blog：content:encoded 3,826–548,104 字符，description 只有 231–286 字符。
+ * 原实现固定「摘要优先」，等于把到手的全文扔掉（用户因此以为这插件只能看摘要）。
+ * 比较用「去掉标签后的长度」：HTML 标记不该让某一份看起来更完整。
+ */
+export function fullest(...candidates: Array<string | undefined>): string | undefined {
+  let best: string | undefined
+  let bestLength = -1
+  for (const candidate of candidates) {
+    if (candidate === undefined) continue
+    const length = candidate.replace(/<[^>]*>/g, '').length
+    if (length > bestLength) {
+      best = candidate
+      bestLength = length
+    }
+  }
+  return best
+}
+
 /** 相对链接按源地址解析成绝对链接；解析不了就原样返回。 */
 export function absolutize(href: string | undefined, baseUrl: string): string {
   const value = (href ?? '').trim()
@@ -120,7 +142,8 @@ function parseRss2(root: XmlNode, baseUrl: string): ParsedFeed {
       title: textOf(item.title),
       link: textOf(item.link),
       published,
-      summary: textOf(item.description) ?? textOf(item['content:encoded']),
+      // 正文优先，而不是摘要优先（见 fullest 的注释）
+      summary: fullest(textOf(item['content:encoded']), textOf(item.description)),
       author: textOf(item['dc:creator']) ?? textOf(item.author),
     }, baseUrl)
   })
@@ -157,7 +180,7 @@ function parseAtom(root: XmlNode, baseUrl: string): ParsedFeed {
       link: atomLink(entry.link),
       // Atom 规范里 updated 必有、published 可选；缺 published 时用 updated 兜底
       published: textOf(entry.published) ?? textOf(entry.updated),
-      summary: textOf(entry.summary) ?? textOf(entry.content),
+      summary: fullest(textOf(entry.content), textOf(entry.summary)),
       author: author ? textOf(author.name) : undefined,
     }, baseUrl)
   })

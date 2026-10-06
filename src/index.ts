@@ -46,6 +46,8 @@ export interface Config {
   maxItemsPerFeed: number
   /** 每源去重窗口大小（只存 id，必须远大于 maxItemsPerFeed，否则老条目会重新变未读） */
   maxSeenPerFeed: number
+  /** 单条正文的存储上限（字符）：正文优先取 content 后需要有这个闸门，见 refresh.ts 注释 */
+  maxContentChars: number
   /** 装载时刷新一次 */
   refreshOnStart: boolean
   /** 打开面板时的最小刷新间隔（毫秒）：节流不打网络，但不引入常驻定时器 */
@@ -62,6 +64,7 @@ export const Config: z<Config> = z.object({
   maxBytes: z.number().default(5 * 1024 * 1024),
   maxItemsPerFeed: z.number().default(500),
   maxSeenPerFeed: z.number().default(5000),
+  maxContentChars: z.number().default(50000),
   refreshOnStart: z.boolean().default(true),
   minRefreshIntervalMs: z.number().default(10 * 60 * 1000),
   maxItemsShown: z.number().default(300),
@@ -204,6 +207,7 @@ export function apply(ctx: Context, config: Config): void {
         limits: { timeoutMs: config.timeoutMs, maxBytes: config.maxBytes },
         maxItemsPerFeed: config.maxItemsPerFeed,
         maxSeenPerFeed: config.maxSeenPerFeed,
+        maxContentChars: config.maxContentChars,
       }, options.signal)
       log(summarize(outcomes))
     })()

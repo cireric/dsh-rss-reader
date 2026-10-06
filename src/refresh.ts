@@ -12,12 +12,24 @@ import { fetchFeed, type FetchLimits } from './feed/fetch.js'
 import { parseFeed } from './feed/parse.js'
 import type { ReaderStore } from './store.js'
 
+/**
+ * 已存正文的解析版本。1 = 旧实现（摘要优先，等于丢掉 content 里的全文）；
+ * 2 = 正文优先 + 全文回填。版本落后时该源的第一轮抓取**绕开条件请求**去拿一次 200，
+ * 之后立刻恢复正常的 ETag/Last-Modified 增量（§3.5 不被破坏：只多一次全量）。
+ */
+export const CONTENT_REVISION = 2
+
 export interface RefreshOptions {
   limits: FetchLimits
   /** 每源保留的条目数（入 items 表） */
   maxItemsPerFeed: number
   /** 每源去重窗口大小（只存 id） */
   maxSeenPerFeed: number
+  /**
+   * 单条正文的存储上限（字符）。正文优先取 content 后，个别源会给出几十万字符的整页 dump，
+   * 而存储域是「打开时全量载入内存」的 KV——不设上限会把 JSON 与内存一起撑爆。
+   */
+  maxContentChars: number
   now?: () => Date
   fetchFeedImpl?: typeof fetchFeed
 }
@@ -41,6 +53,15 @@ export function normalizeFeedUrl(url: string): string {
 /** 条目排序用的时间：优先发布时间，缺则退到抓取时间。 */
 function recencyOf(record: { publishedAt?: string; fetchedAt: string }): string {
   return record.publishedAt ?? record.fetchedAt
+}
+
+/** 单条正文截断；给截断留一句可辨认的标记，避免被误当成正文结尾。 */
+function truncateContent(text: string | undefined, limit: number): string | undefined {
+  if (text === undefined) return undefined
+  // 上限非法（非有限数 / ≤0）一律视为「不截断」——否则 slice(0, undefined) 会返回整串
+  // 却仍拼上截断标记，等于在本该完整的正文后面撒谎（实测踩到）。
+  if (!Number.isFinite(limit) || limit <= 0 || text.length <= limit) return text
+  return text.slice(0, limit) + '…（正文过长，已截断）'
 }
 
 async function prune(store: ReaderStore, feedId: string, maxItems: number): Promise<void> {
@@ -76,9 +97,11 @@ export async function refreshFeeds(
     }
 
     const previous = store.feed(feedId)
+    // 内容版本落后 ⇒ 这一轮不带条件请求，强制拿 200 以便回填正文
+    const needsContentUpgrade = (previous?.contentRevision ?? 1) < CONTENT_REVISION
     const result = await doFetch(
       feedId,
-      { etag: previous?.etag, lastModified: previous?.lastModified },
+      needsContentUpgrade ? {} : { etag: previous?.etag, lastModified: previous?.lastModified },
       options.limits,
       signal,
     )
@@ -95,11 +118,17 @@ export async function refreshFeeds(
     }
 
     if (result.kind === 'not-modified') {
+      // 升级轮里还被判 304（源忽略了无条件请求）：写回版本号避免每轮都重试，并留下痕迹
+      if (needsContentUpgrade) {
+        outcomes.push({ feedId, url: feedId, status: 'not-modified', added: 0, reason: '源未响应无条件请求，正文升级跳过' })
+      }
       await store.saveFeed(feedId, {
         ...(previous ?? {}),
         url: feedId,
         lastFetchedAt: stamp,
+        contentRevision: CONTENT_REVISION,
       })
+      if (needsContentUpgrade) continue
       outcomes.push({ feedId, url: feedId, status: 'not-modified', added: 0 })
       continue
     }
@@ -112,7 +141,18 @@ export async function refreshFeeds(
 
     for (const item of parsed.items) {
       const itemId = deriveItemId(feedId, item)
-      if (seenSet.has(itemId)) continue
+      const summary = truncateContent(item.summary, options.maxContentChars)
+      const existing = store.item(itemId)
+
+      if (existing !== undefined || seenSet.has(itemId)) {
+        // 已见过：只补「更完整的正文」，绝不碰 readAt / starred（已读与星标是用户数据）。
+        // 这条同时承担回填：解析优先级修好后，老条目在下一次抓取里就能拿到全文。
+        if (existing !== undefined && (summary?.length ?? 0) > (existing.summary?.length ?? 0)) {
+          await store.saveItem(itemId, { ...existing, summary })
+        }
+        continue
+      }
+
       seenSet.add(itemId)
       freshIds.push(itemId)
       await store.saveItem(itemId, {
@@ -120,7 +160,7 @@ export async function refreshFeeds(
         title: item.title,
         link: item.link,
         publishedAt: item.publishedAt,
-        summary: item.summary,
+        summary,
         fetchedAt: stamp,
         starred: false,
       })
@@ -137,6 +177,7 @@ export async function refreshFeeds(
       etag: result.etag,
       lastModified: result.lastModified,
       lastFetchedAt: stamp,
+      contentRevision: CONTENT_REVISION,
     })
     await prune(store, feedId, options.maxItemsPerFeed)
 

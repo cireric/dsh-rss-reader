@@ -63,6 +63,31 @@ test('Atom：link 属性取值、published 缺失时用 updated 兜底', () => {
   assert.equal(second.summary, '<p>content 兜底</p>', '缺 summary 必须回退到 content')
 })
 
+test('正文优先：content 比 description 长时必须取 content（否则等于扔掉全文）', () => {
+  const longBody = '<p>' + '正文段落。'.repeat(120) + '</p>' // 480 字，远长于摘要
+  const xml = '<?xml version="1.0" encoding="UTF-8"?>'
+    + '<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">'
+    + '<channel><title>t</title>'
+    + '<item><title>带全文</title><link>https://ex.test/a</link><description>短摘要</description>'
+    + '<content:encoded><![CDATA[' + longBody + ']]></content:encoded></item>'
+    + '<item><title>只有摘要</title><link>https://ex.test/b</link><description>只有摘要</description></item>'
+    + '</channel></rss>'
+
+  const feed = parseFeed(xml, 'https://ex.test/feed.xml')
+  assert.match(feed.items[0].summary, /正文段落/, '必须取更完整的 content:encoded')
+  assert.equal(feed.items[1].summary, '只有摘要', '没有 content 时回落到 description')
+})
+
+test('正文优先：Atom 的 content 同样优先于 summary', () => {
+  const longBody = '完整内容。'.repeat(80)
+  const xml = '<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>t</title>'
+    + '<entry><title>a</title><id>tag:1</id><updated>2024-05-02T00:00:00Z</updated>'
+    + '<summary>短摘要</summary><content type="html">' + longBody + '</content></entry>'
+    + '</feed>'
+  const feed = parseFeed(xml, 'https://ex.test/feed.xml')
+  assert.equal(feed.items[0].summary, longBody, 'content 更长时必须取 content')
+})
+
 test('非 feed 输入判为 unknown，且不抛异常', () => {
   const feed = parseFeed(fixture('notafeed.html'), 'https://example.com/')
   assert.equal(feed.format, 'unknown')
