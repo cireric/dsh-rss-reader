@@ -261,3 +261,37 @@ sed -n '1,30p' /Users/eric/Project/tests/deepseek-harness/packages/client/ui-sid
 （键盘、过滤、撤销、折叠态徽标）。
 
 **已知取舍**：徽标座位是 single，桌面版会顶掉官方的更新提示点（Web 无此 UI，故无损）。
+
+---
+
+## 16. 事故与根因：M3 的 client 半启动即崩（2026-10-06）
+
+**症状**：用户重启 DSH 后进不去、报错；手动删掉注入器注册表里本插件的条目才恢复。插件 host 半
+在此之前一直健康（13:09:45 还在正常刷新）⇒ 炸的是**加载时**，不是运行时。
+
+**根因（两处，都是宿主「加载期校验、失败即响亮抛错」的设计被打穿）**
+
+1. **未读徽标撞车**：`sidebar.toggle.badge` 是 **single** 座位，已被官方 `DesktopUpdateIndicator`
+   以默认优先级 0 占用；我按默认优先级注册 ⇒ `ui-slots/src/index.ts:1134-1140`「同 cell 同优先级
+   的第二次注册抛错」。**上一轮我把这条规则读成了「后注册者遮蔽前者」，是误读。**
+2. **裸键绑定非法**：`ctx.shortcuts.register` 对每个 profile 校验默认键，`configuration.ts:100`
+   规定 `modifiers` 为空或全为 `shift` 即 `modifier-required` ⇒ `registry.ts:94` 直接
+   `throw 'Reserved shortcut default'`。j/k/o/s/m/A 恰全是裸键，**六个命令一个都注册不上**。
+
+第一条先抛，client 半 `apply` 当场中断；而注入器在启动时会自动装回本插件，于是崩在启动路径上。
+
+**修复**
+
+- 键盘改为**阅读器根节点上的 DOM keydown 监听**（根节点持焦 ⇒ 只在阅读器激活时响应，也不截获输入框），
+  彻底不碰 `shortcuts` 的绑定校验；client `inject` 收窄回 `['slots']`。
+- 徽标改注册为 `{ name: 'sidebar.toggle.badge', priority: -1 }`：显式与官方差开优先级（同优先级才是抛错），
+  且因「最低优先级渲染」而生效。
+- 契约测试补回归护栏：徽标 `priority` 必须存在且 ≠ 0；测试的桩 ctx **不再提供 `shortcuts`**
+  （谁再引入 `ctx.shortcuts.register` 会当场炸测试）。
+
+**验证**：23 条测试全绿；重新注入运行期 `host ✓ client ✓`、entry `[active]`、启动刷新正常、
+无新的被吞错误。
+
+**仍未验证（据实标注）**：**浏览器侧的真实加载**我无法自测（GUI 需鉴权 token）。修复依据是把两处
+校验规则逐行读准 + 契约测试反证不再调用 `shortcuts`；剩余风险是「还有我没读到的加载期校验」。
+若刷新页面后 GUI 仍报错，请把浏览器控制台的首条报错发我。

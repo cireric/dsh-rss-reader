@@ -17,7 +17,7 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import type { Context as ClientContext } from 'cordis'
 import { ROUTE_PATH, type FeedView, type ItemView, type Overview, type RpcResult } from '../shared.js'
 
-export const inject = ['slots', 'shortcuts']
+export const inject = ['slots']
 
 /** panellist 图标的 id 必须与 main 座位的 key 相同。 */
 const PANEL_ID = 'dsh-rss-reader'
@@ -265,6 +265,29 @@ function createReader(store: ReaderStore): () => ReactNode {
       root?.focus()
     }, [root])
 
+    // 键盘流：挂在阅读器根节点上——根节点持有焦点，所以只在阅读器激活时响应，
+    // 也不会截获别处的输入框。⚠️ 不走 ctx.shortcuts：平台规则禁止无修饰键的绑定
+    // （configuration.ts:100 —— modifiers 为空或全为 shift 即 modifier-required，
+    // registry.register 会直接 throw，实测会把整个 client 半炸掉）。
+    useEffect(() => {
+      if (root === null) return
+      const onKeyDown = (event: KeyboardEvent): void => {
+        if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return
+        const run = (action: () => void): void => { event.preventDefault(); action() }
+        switch (event.key) {
+          case 'j': run(() => { void store.selectRelative(1) }); break
+          case 'k': run(() => { void store.selectRelative(-1) }); break
+          case 'o': run(() => store.openSelected()); break
+          case 's': run(() => { void store.toggleStar() }); break
+          case 'm': run(() => { void store.toggleRead() }); break
+          case 'A': run(() => { void store.markAllRead() }); break
+          default: break
+        }
+      }
+      root.addEventListener('keydown', onKeyDown)
+      return () => { root.removeEventListener('keydown', onKeyDown) }
+    }, [root, store])
+
     const items = store.visible()
     const failing = state.feeds.filter((feed) => feed.lastFailure)
     const filters: Array<{ key: Filter; label: string }> = [
@@ -384,39 +407,14 @@ export function apply(ctx: ClientContext): void {
     ReaderIcon,
   )), 'dsh-rss-reader: panellist icon')
 
-  // 未读徽标：数据源就是上面那个共享 store；启动先拉一次，之后每次面板刷新都会更新
+  // 未读徽标：数据源就是上面那个共享 store；启动先拉一次，之后每次面板刷新都会更新。
+  // ⚠️ 这个座位是 single 且已被官方 DesktopUpdateIndicator 以**默认优先级 0** 占用；
+  // slots 的规则是「同一 cell 同优先级的第二次注册直接抛错」（ui-slots:1134-1140），
+  // 而「cell 内最低优先级的条目渲染」。故显式给 -1：既避开抛错，又让本插件渲染。
   ctx.effect(() => ctx.slots.inject('sidebar.toggle.badge', () => ctx.slots.register(
-    { name: 'sidebar.toggle.badge' },
+    { name: 'sidebar.toggle.badge', priority: -1 },
     () => <Badge store={store} />,
   )), 'dsh-rss-reader: unread badge')
   void store.load('overview')
 
-  // 键盘：regions ['page'] 保证焦点在输入框时不触发；resolve 再要求本面板持有焦点，
-  // 于是只有「阅读器是当前焦点面」时 j/k/o/s/m/A 才生效，不会与对话抢键。
-  const blocked = { status: 'blocked', reason: 'RSS 阅读器未持有焦点' } as const
-  const commands: Array<{ id: string; label: string; code: string; modifiers: string[]; run: () => void }> = [
-    { id: 'rssReader.next', label: '下一条', code: 'KeyJ', modifiers: [], run: () => { void store.selectRelative(1) } },
-    { id: 'rssReader.previous', label: '上一条', code: 'KeyK', modifiers: [], run: () => { void store.selectRelative(-1) } },
-    { id: 'rssReader.open', label: '打开原站', code: 'KeyO', modifiers: [], run: () => store.openSelected() },
-    { id: 'rssReader.star', label: '切换星标', code: 'KeyS', modifiers: [], run: () => { void store.toggleStar() } },
-    { id: 'rssReader.toggleRead', label: '切换已读', code: 'KeyM', modifiers: [], run: () => { void store.toggleRead() } },
-    { id: 'rssReader.markAllRead', label: '全部标记已读', code: 'KeyA', modifiers: ['shift'], run: () => { void store.markAllRead() } },
-  ]
-  for (const command of commands) {
-    ctx.effect(() => ctx.shortcuts.register({
-      id: command.id as never,
-      label: () => command.label,
-      aliases: ['rss', command.label],
-      defaults: {
-        'web:macos': { code: command.code, modifiers: command.modifiers },
-        'web:windows': { code: command.code, modifiers: command.modifiers },
-        'desktop:macos': { code: command.code, modifiers: command.modifiers },
-        'desktop:windows': { code: command.code, modifiers: command.modifiers },
-        'desktop:linux': { code: command.code, modifiers: command.modifiers },
-      } as never,
-      regions: ['page'],
-      modals: [],
-      resolve: () => (readerFocused() ? { status: 'handled', run: command.run } : blocked),
-    }), 'dsh-rss-reader: shortcut ' + command.id)
-  }
 }

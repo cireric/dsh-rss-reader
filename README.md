@@ -77,16 +77,25 @@ Host/Origin 与浏览器鉴权（实测：未带 token 的请求得 401，不存
 | `m` | 切换已读（可反选） |
 | `A` | 把**当前过滤下**的未读全部标为已读，并给 5 秒撤销窗口 |
 
-**作用域**：命令走 `ctx.shortcuts`，`regions: ['page']` 使其在输入框内不触发；`resolve()`
-再要求阅读器根节点（`[data-dsh-rss-reader]`）持有 `document.activeElement`——所以只有
-「阅读器是当前焦点面」时才响应，不会和对话抢键。点侧栏图标后面板会自动取焦；点进对话即失效。
+**实现**：监听器挂在阅读器根节点（`[data-dsh-rss-reader]`）上，根节点持有焦点——所以只在
+阅读器激活时响应，也不会截获别处的输入框。点侧栏图标后面板自动取焦；点进对话即失效。
+
+> ⚠️ **不要改回 `ctx.shortcuts`**：平台规则禁止无修饰键的绑定
+> （`packages/client/shortcuts/src/client/configuration.ts:100`——`modifiers` 为空或全为 `shift`
+> 即返回 `modifier-required`，而 `registry.register` 对每个 profile 都跑这个校验，不通过直接
+> `throw new Error('Reserved shortcut default: …')`）。j/k/o/s/m/A 全是裸键，注册即抛错——
+> 2026-10-06 实测：这一条把整个 client 半炸掉，导致 DSH 重新加载时 GUI 报错。
 
 **过滤**：全部 / 未读 / 星标。星标此前只写不读，M3 起有地方看了。
 
-**未读徽标**：注册在 `sidebar.toggle.badge`（侧栏折叠按钮内的非交互提示）。它是 **single 座位**，
-官方占用者是 Desktop 的更新提示——后注册者遮蔽前者，**Web 上官方那个本来就不渲染，无损失**；
-若将来跑桌面版，这里会顶掉更新提示（已知取舍）。徽标数据源与面板共用同一个 store：
-客户端装载时拉一次，之后每次面板刷新都会更新（**不加定时器**）。
+**未读徽标**：注册在 `sidebar.toggle.badge`（侧栏折叠按钮内的非交互提示），数据源与面板共用
+同一个 store：客户端装载时拉一次，之后每次面板刷新都会更新（**不加定时器**）。
+
+> ⚠️ **必须显式带 `priority: -1`**：该座位是 **single** 且已被官方 `DesktopUpdateIndicator` 以
+> 默认优先级 0 占用；slots 的规则是「同一 cell **同优先级**的第二次注册直接抛错」（`ui-slots/src/index.ts:1134-1140`），
+> 而「cell 内**最低**优先级的条目渲染」。默认优先级注册 = 抛错并炸掉 client 半（2026-10-06 实测）。
+> 显式 -1 既避开抛错，又让本插件渲染——代价是桌面版会顶掉官方更新提示点（Web 上官方那个本来
+> 就不渲染，无损失）。
 
 ## 命令
 

@@ -54,18 +54,11 @@ function loadClientBundle() {
 function collectRegistrations() {
   const { id, exports } = loadClientBundle()
   const registrations = []
-  const shortcutCommands = []
   const ctx = {
     slots: {
       inject: (_slot, callback) => callback(),
       register: (options, component) => {
         registrations.push({ options, component })
-        return () => {}
-      },
-    },
-    shortcuts: {
-      register: (command) => {
-        shortcutCommands.push(command)
         return () => {}
       },
     },
@@ -75,7 +68,7 @@ function collectRegistrations() {
     },
   }
   exports.apply(ctx)
-  return { id, exports, registrations, shortcutCommands }
+  return { id, exports, registrations }
 }
 
 test('bundle 以包名注册，且声明所需的浏览器服务', () => {
@@ -85,43 +78,18 @@ test('bundle 以包名注册，且声明所需的浏览器服务', () => {
   // 两侧都排序：断言的是集合，不依赖声明顺序。
   assert.deepEqual(
     [...exports.inject].sort(),
-    ['shortcuts', 'slots'],
-    '缺 shortcuts 时键盘面注册会失败；缺 slots 则座位全注册不上',
+    ['slots'],
+    '缺 inject 声明时宿主不会提供 slots 服务',
   )
 })
 
-test('M3：注册未读徽标与六个键盘命令', () => {
-  const { registrations, shortcutCommands } = collectRegistrations()
-
-  assert.ok(registrations.some((r) => r.options.name === 'sidebar.toggle.badge'), '没有注册未读徽标座位')
-
-  const byId = new Map(shortcutCommands.map((command) => [command.id, command]))
-  assert.deepEqual(
-    [...byId.keys()].sort(),
-    ['rssReader.markAllRead', 'rssReader.next', 'rssReader.open', 'rssReader.previous', 'rssReader.star', 'rssReader.toggleRead'],
-    '六个命令必须齐备',
-  )
-
-  const expected = {
-    'rssReader.next': { code: 'KeyJ', modifiers: [] },
-    'rssReader.previous': { code: 'KeyK', modifiers: [] },
-    'rssReader.open': { code: 'KeyO', modifiers: [] },
-    'rssReader.star': { code: 'KeyS', modifiers: [] },
-    'rssReader.toggleRead': { code: 'KeyM', modifiers: [] },
-    'rssReader.markAllRead': { code: 'KeyA', modifiers: ['shift'] },
-  }
-  for (const [id, binding] of Object.entries(expected)) {
-    const command = byId.get(id)
-    // 逐字段取进宿主 realm 再比：bundle 在 vm 沙箱里跑，直接 deepEqual 会因原型不同源而失败
-    const actual = command.defaults['web:macos']
-    assert.deepEqual(
-      { code: String(actual.code), modifiers: [...(actual.modifiers ?? [])].map(String) },
-      binding,
-      id + ' 的默认键不对',
-    )
-    assert.deepEqual([...command.regions], ['page'], id + ' 必须只在 page 区触发（否则会和输入框抢键）')
-    assert.equal(typeof command.resolve, 'function', id + ' 缺 resolve（作用域判据）')
-  }
+test('M3：徽标必须用非默认优先级注册（single 座位已被官方占用）', () => {
+  const { registrations } = collectRegistrations()
+  const badge = registrations.find((r) => r.options.name === 'sidebar.toggle.badge')
+  assert.ok(badge, '没有注册未读徽标座位')
+  // ui-slots:1134-1140 —— single 座位同优先级第二次注册会直接抛错，故必须给不同优先级
+  assert.notEqual(badge.options.priority, undefined, '徽标必须显式声明 priority')
+  assert.notEqual(badge.options.priority, 0, 'priority 0 会与官方占用者撞车并抛错')
 })
 
 test('注册侧栏图标与主面板，且二者 id 一致', () => {
