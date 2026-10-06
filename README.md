@@ -3,14 +3,13 @@
 Google Reader 式阅读流：RSS/Atom 订阅 + 条目流 + 未读态 + 键盘流。
 当前进度：**M0 入口 + M1 数据面 + M2 阅读面（宿主侧已验证）**。浏览器侧待看过实物再定优化。
 
-## 两个入口（宿主给它们的归属不同，2026-10-06 实测）
+## 入口：一个图标，开在右栏
 
-| 入口 | 座位 | 打开什么 |
-|---|---|---|
-| 侧栏图标「RSS 阅读器」 | `sidebar.panellist` | **主栏**宽视图——该座位的 id 必须同名于 `main` 座位的 key，`panellist` 天生只能开主栏 |
-| 侧栏底部「RSS」 | `sidebar.footer.action` | **右栏标签页**（`ctx.sidebarRight.openTab`），与对话并排的窄视图 |
-
-两处挂同一个组件、读同一份数据；留哪个待用过再定。
+侧栏图标「RSS 阅读器」是唯一入口。宿主这个座位**没有「开右栏」的口子**（`sidebar.panellist`
+的注册项只有 `id/order/label`，且其 id 必须同名于 `main` 座位的 key，缺 main 条目点选即抛错），
+所以 `main` 面板做成了**转发器**：一挂载就把阅读器开进右栏
+（`ctx.sidebarRight.openTab`），再把主栏让回默认对话（`ctx.layout.selectPanel(null)`）。
+用户看到的就是「点图标 → 阅读器出现在可开合的右栏里」。
 
 ## 浏览器半 ↔ 主进程半
 

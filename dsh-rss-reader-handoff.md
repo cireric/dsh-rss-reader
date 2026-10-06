@@ -224,7 +224,7 @@ sed -n '1,30p' /Users/eric/Project/tests/deepseek-harness/packages/client/ui-sid
 
 **两处偏离方案，都有实测依据**
 
-1. **入口不能是 panellist 图标**：`sidebar.panellist` 的 id 必须寻址同名 `main` 座位（README 原文），**天生开不了右栏标签页**。故新增 `sidebar.footer.action`（侧栏底部、Settings 旁）开右栏；panellist 图标保留为主栏宽视图。同一组件挂两处，待用户看过实物砍掉不要的那个。
+1. **入口不能直接开右栏**：`sidebar.panellist` 的注册项只有 `id/order/label`，且其 id 必须寻址同名 `main` 座位（README 原文），**天生开不了右栏标签页**。（中途曾用 `sidebar.footer.action` 做入口，用户看过后明确否决，已删。）最终形态：`main` 面板做成**转发器**——挂载即 `ctx.sidebarRight.openTab` 开进右栏 + `ctx.layout.selectPanel(null)` 把主栏让回对话。
 2. **通道不走 Connection RPC**：`ctx.connection.rpc.handle` 内部 `owner = connection 插件自己的 ctx`，该 ctx 解析不到 `webServer` → 抛 `cannot get property "webServer" without inject`；全仓库亦无产品插件用它（只有测试与 gateway）。改用 `ctx.webServer.register` + `ctx.connection.requestRejection`（宿主接口自述就是「把 Connection 的检查套用到别的 Web 路由」）。
 
 **踩坑（都已修）**
