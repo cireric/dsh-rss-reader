@@ -15,7 +15,7 @@
  */
 export const ROUTE_PATH = '/rss-reader-api'
 
-export type Endpoint = 'overview' | 'markRead' | 'refresh'
+export type Endpoint = 'overview' | 'refresh' | 'markRead' | 'unmarkRead' | 'toggleStar'
 
 export type RpcResult<T> =
   | { ok: true; value: T }
@@ -42,6 +42,7 @@ export interface ItemView {
   fetchedAt: string
   /** 已读 = 有值（用户 2026-10-05 定的粒度） */
   readAt?: string
+  starred: boolean
   summary?: string
 }
 

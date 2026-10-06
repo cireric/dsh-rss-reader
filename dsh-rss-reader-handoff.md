@@ -239,3 +239,25 @@ sed -n '1,30p' /Users/eric/Project/tests/deepseek-harness/packages/client/ui-sid
 **已验证（宿主侧）**：entry `[active]`；重载前后均 active、无被吞错误；启动刷新正常（4 源，304 生效）；`/rss-reader-api` 探测 **401**、对照路由 **404**（路由存在且受同一套鉴权保护）。
 
 **待验证（需用户看实物）**：浏览器里的两件事——侧栏底部「RSS」能否打开右栏标签页、条目流是否渲染并能在点击后标已读且重启仍在。若底部入口不出现，首要怀疑 client 半 apply 失败（`inject` 未满足）。
+
+---
+
+## 15. M3 施工记录（2026-10-06）
+
+键盘面 + 未读徽标，按用户「M3 按建议执行」落地的五条：
+
+1. **j/k 移动即标已读**（Google Reader 手感），保留 `m` 反选。
+2. **A 的范围 = 当前过滤下的未读**，并给 5 秒撤销窗口（客户端计时，非宿主定时器）。
+3. **星标可见**：加过滤条 全部 / 未读 / 星标（此前 starred 只写不读，是死字段）。
+4. **快捷键作用域**：走 `ctx.shortcuts` 的 `regions: ['page']` + `resolve()` 判据
+   （阅读器根节点是否持有 `document.activeElement`）——原生机制，未自造 DOM 拦截。
+5. **徽标刷新**：与面板共用 store，装载拉一次 + 每次面板刷新后更新；无定时器。
+
+**host 侧新增**：`ItemView.starred`；端点 `markRead`（改收 `itemIds[]`）、`unmarkRead`（服务撤销）、
+`toggleStar`。清理 readAt 时显式重建记录（zod `.strict()` 下不塞 undefined 键）。
+
+**验证**：构建通过；23 条测试全绿（新增契约测试：徽标座位 + 六个命令的 id/默认键/regions/resolve）；
+重载前后均 `[active]`、无被吞错误、启动刷新正常。**浏览器侧待用户刷新后实测**
+（键盘、过滤、撤销、折叠态徽标）。
+
+**已知取舍**：徽标座位是 single，桌面版会顶掉官方的更新提示点（Web 无此 UI，故无损）。

@@ -240,6 +240,7 @@ export function apply(ctx: Context, config: Config): void {
           publishedAt: item.publishedAt,
           fetchedAt: item.fetchedAt,
           readAt: item.readAt,
+          starred: item.starred,
           summary: item.summary,
         })
       }
@@ -257,6 +258,23 @@ export function apply(ctx: Context, config: Config): void {
       refreshed,
     }
   }
+
+  /** 显式重建记录并去掉 readAt：zod .strict() 下不该塞一个 undefined 键进去。 */
+  const withoutReadAt = (record: {
+    feedId: string; title: string; link: string; publishedAt?: string
+    summary?: string; fetchedAt: string; starred: boolean
+  }): {
+    feedId: string; title: string; link: string; publishedAt?: string
+    summary?: string; fetchedAt: string; starred: boolean
+  } => ({
+    feedId: record.feedId,
+    title: record.title,
+    link: record.link,
+    publishedAt: record.publishedAt,
+    summary: record.summary,
+    fetchedAt: record.fetchedAt,
+    starred: record.starred,
+  })
 
   const countUnread = (target: ReaderStore): number =>
     target.listFeeds().reduce((sum, [feedId]) => sum + target.listItems(feedId).filter(([, i]) => i.readAt === undefined).length, 0)
@@ -278,15 +296,46 @@ export function apply(ctx: Context, config: Config): void {
         }
 
         case 'markRead': {
+          const itemIds = Array.isArray((payload as { itemIds?: unknown } | null)?.itemIds)
+            ? ((payload as { itemIds: unknown[] }).itemIds.map(String))
+            : []
+          if (itemIds.length === 0) return fail('bad-request', 'markRead 需要 itemIds 数组')
+          const stamp = new Date().toISOString()
+          let changed = 0
+          for (const itemId of itemIds) {
+            const existing = target.item(itemId)
+            if (existing === undefined || existing.readAt !== undefined) continue
+            // 幂等：已读的原时间戳不动
+            await target.saveItem(itemId, { ...existing, readAt: stamp })
+            changed += 1
+          }
+          return ok({ changed, unread: countUnread(target) })
+        }
+
+        case 'unmarkRead': {
+          // 只服务于「全部标记已读」的短时撤销
+          const itemIds = Array.isArray((payload as { itemIds?: unknown } | null)?.itemIds)
+            ? ((payload as { itemIds: unknown[] }).itemIds.map(String))
+            : []
+          if (itemIds.length === 0) return fail('bad-request', 'unmarkRead 需要 itemIds 数组')
+          let changed = 0
+          for (const itemId of itemIds) {
+            const existing = target.item(itemId)
+            if (existing === undefined || existing.readAt === undefined) continue
+            await target.saveItem(itemId, withoutReadAt(existing))
+            changed += 1
+          }
+          return ok({ changed, unread: countUnread(target) })
+        }
+
+        case 'toggleStar': {
           const itemId = String((payload as { itemId?: unknown } | null)?.itemId ?? '')
-          if (!itemId) return fail('bad-request', 'markRead 需要 itemId')
+          if (!itemId) return fail('bad-request', 'toggleStar 需要 itemId')
           const existing = target.item(itemId)
           if (existing === undefined) return fail('not-found', '条目不存在：' + itemId)
-          // 幂等：已读就保留原时间戳，不改写
-          if (existing.readAt === undefined) {
-            await target.saveItem(itemId, { ...existing, readAt: new Date().toISOString() })
-          }
-          return ok({ itemId, unread: countUnread(target) })
+          const starred = !existing.starred
+          await target.saveItem(itemId, { ...existing, starred })
+          return ok({ itemId, starred, unread: countUnread(target) })
         }
 
         default:
