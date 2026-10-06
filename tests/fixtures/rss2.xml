@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>示例科技博客</title>
+    <link>https://example.com/blog</link>
+    <description>RSS 2.0 样例</description>
+    <item>
+      <title>TypeScript 5.9 与 erasableSyntaxOnly</title>
+      <link>https://example.com/blog/ts-59</link>
+      <guid isPermaLink="false">post-59</guid>
+      <pubDate>Mon, 2 Apr 2018 10:00:00 +0800</pubDate>
+      <dc:creator>张三</dc:creator>
+      <description><![CDATA[<p>CDATA 里的 <b>HTML</b></p>]]></description>
+      <content:encoded><![CDATA[<p>正文……</p>]]></content:encoded>
+    </item>
+    <item>
+      <title>Rust 与 Zig 的内存模型对比</title>
+      <link>/blog/rust-zig</link>
+      <pubDate>Tue, 03 Jun 2003 09:39:21 GMT</pubDate>
+      <description>相对链接 + 实体：Tom &amp; Jerry &#8217;s</description>
+    </item>
+  </channel>
+</rss>
