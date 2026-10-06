@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import type { Context as ClientContext } from 'cordis'
 import { ROUTE_PATH, type ArticlePayload, type FeedView, type ItemView, type Overview, type RpcResult } from '../shared.js'
+import { resolveReaderKey } from '../keys.js'
 
 export const inject = ['slots']
 
@@ -394,39 +395,31 @@ function createReader(store: ReaderStore, ctx: ClientContext): () => ReactNode {
       if (root === null) return
       const onKeyDown = (event: KeyboardEvent): void => {
         if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return
-        const run = (action: () => void): void => { event.preventDefault(); action() }
-        switch (event.key) {
+        // 键位语义在 src/keys.ts（纯函数，宿主侧有单测）；这里只把动作落到 store 上
+        const action = resolveReaderKey(event.key)
+        if (action === 'none') return
+        const view = store.get().view
+        const run = (act: () => void): void => { event.preventDefault(); act() }
+        switch (action) {
           // 正文视图里 j/k 不移动：每次移动都意味着一次抓取，误按代价太高（Esc 回列表再移动）
-          case 'j': if (store.get().view === 'article') return; run(() => store.selectRelative(1)); break
-          case 'k': if (store.get().view === 'article') return; run(() => store.selectRelative(-1)); break
-          // Google Reader 的语义：o 展开/折叠（列表内），v 才开原站
-          // o = 展开/折叠 + 标已读（已读的唯一自动触发点，另有显式的 m）
-          case 'o': run(() => {
+          case 'next': if (view === 'article') return; run(() => store.selectRelative(1)); break
+          case 'prev': if (view === 'article') return; run(() => store.selectRelative(-1)); break
+          // Google Reader 语义：o 展开/折叠 + 标已读（已读的唯一自动触发点，另有显式的 m）
+          case 'expand': run(() => {
             const selected = store.get().selectedId
             if (selected === undefined) return
             setExpanded((current) => (current === selected ? undefined : selected))
             void store.markRead(selected)
           }); break
-          case 'v': run(() => store.openSelected()); break
-          // V：在阅读器内打开正文（按需抓原站 + 抽取）。做在此处而不是右栏，原因见 handoff §19
-          case 'V': run(() => { void store.openArticle() }); break
+          case 'openExternal': run(() => store.openSelected()); break
+          case 'openArticle': run(() => { void store.openArticle() }); break
+          case 'toggleRender': if (view !== 'article') return; run(() => store.toggleArticleRender()); break
           // Esc：从正文回到列表；列表态下不拦截（不抢弹层的 Esc）
-          // R：在抽取正文与原站页面之间切换（仅站点允许被嵌时有效）
-          case 'R': {
-            if (store.get().view !== 'article') return
-            run(() => store.toggleArticleRender())
-            break
-          }
-          case 'Escape': {
-            if (store.get().view !== 'article') return
-            event.preventDefault()
-            store.closeArticle()
-            break
-          }
-          case 's': run(() => { void store.toggleStar() }); break
-          case 'm': run(() => { void store.toggleRead() }); break
-          case 'A': run(() => { void store.markAllRead() }); break
-          default: break
+          case 'back': if (view !== 'article') return; event.preventDefault(); store.closeArticle(); break
+          case 'star': run(() => { void store.toggleStar() }); break
+          case 'toggleRead': run(() => { void store.toggleRead() }); break
+          case 'markAll': run(() => { void store.markAllRead() }); break
+          default: return
         }
       }
       root.addEventListener('keydown', onKeyDown)
@@ -602,11 +595,16 @@ function ArticleView({ article, link, onBack, onToggleRender }: {
         </div>
       ) : original && link !== undefined ? (
         // 原站视图：浏览器内嵌整页，样式/代码/交互全是原样（已被 X-Frame-Options 放行的站点才可用）
-        <iframe
-          src={link}
-          title={article.title ?? '原站视图'}
-          style={{ flex: 1, minHeight: 0, width: '100%', border: 'none', background: '#fff' }}
-        />
+        <>
+          <div style={{ padding: '4px 20px', fontSize: 11, opacity: 0.6 }}>
+            原站视图：页面内的按键由原站接管，本插件的快捷键需先点回面板——或直接用上方按钮切回阅读视图
+          </div>
+          <iframe
+            src={link}
+            title={article.title ?? '原站视图'}
+            style={{ flex: 1, minHeight: 0, width: '100%', border: 'none', background: '#fff' }}
+          />
+        </>
       ) : (
         // 阅读视图：限宽 + 加大行高（长文可读性），代码块单独走等宽样式
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 24px 32px' }}>
