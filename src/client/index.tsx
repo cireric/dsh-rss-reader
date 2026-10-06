@@ -17,6 +17,7 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import type { Context as ClientContext } from 'cordis'
 import { ROUTE_PATH, type ArticlePayload, type FeedView, type ItemView, type Overview, type RpcResult } from '../shared.js'
 import { resolveReaderKey } from '../keys.js'
+import { nextScrollTop } from '../list-scroll.js'
 
 export const inject = ['slots']
 
@@ -141,16 +142,24 @@ function toParagraphs(html: string | undefined): string[] {
 }
 
 
-/** 阅读器根节点是否持有焦点——快捷键作用域的判据。 */
-function readerFocused(): boolean {
+/**
+ * 快捷键的守卫：焦点在输入框、可编辑区或弹层里时不响应。
+ *
+ * 为什么不再要求「阅读器持有焦点」：用户实测切到阅读器后必须先用鼠标点一下才能用快捷键——
+ * 因为宿主在面板切换后并不把按键交给我们的节点。现在监听挂在 document 上（面板卸载即移除），
+ * 于是「只有阅读器存在时才可能响应」由生命周期保证，而「别抢输入框的键」由本函数保证。
+ */
+function isTypingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
   try {
-    const root = document.querySelector('[' + ROOT_ATTR + ']')
-    if (root === null) return false
-    const active = document.activeElement
-    return active !== null && root.contains(active)
+    if (target.isContentEditable) return true
+    if (target.closest('[role="dialog"], [aria-modal="true"], dialog') !== null) return true
+    const tag = target.tagName
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true
   } catch {
     return false
   }
+  return false
 }
 
 function createReaderStore(ctx: ClientContext) {
@@ -367,6 +376,7 @@ function createReader(store: ReaderStore, ctx: ClientContext): () => ReactNode {
   return function Reader(): ReactNode {
     const state = useReaderStore(store)
     const [root, setRoot] = useState<HTMLDivElement | null>(null)
+    const [listBox, setListBox] = useState<HTMLDivElement | null>(null)
     const [expanded, setExpanded] = useState<string | undefined>(undefined)
     // 慢加载：只有超过 180ms 还在加载时才把「刷新中」画出来，避免毫秒级请求闪一下
     const [slowLoading, setSlowLoading] = useState(false)
@@ -387,13 +397,31 @@ function createReader(store: ReaderStore, ctx: ClientContext): () => ReactNode {
       root?.focus()
     }, [root])
 
-    // 键盘流：挂在阅读器根节点上——根节点持有焦点，所以只在阅读器激活时响应，
-    // 也不会截获别处的输入框。⚠️ 不走 ctx.shortcuts：平台规则禁止无修饰键的绑定
-    // （configuration.ts:100 —— modifiers 为空或全为 shift 即 modifier-required，
-    // registry.register 会直接 throw，实测会把整个 client 半炸掉）。
+    // 跟随滚动：选中项超出可视区时才滚（j/k 走到边界后屏幕要跟着动——用户实测缺失）。
+    // 位置计算在 src/list-scroll.ts 里，是纯函数且有单测；这里只负责量 DOM 并写入。
     useEffect(() => {
-      if (root === null) return
+      if (listBox === null || state.view !== 'list') return
+      const selected = state.selectedId
+      if (selected === undefined) return
+      const row = listBox.querySelector('[data-rss-row="' + selected + '"]')
+      if (!(row instanceof HTMLElement)) return
+      const target = nextScrollTop(listBox.scrollTop, listBox.clientHeight, row.offsetTop, row.offsetHeight)
+      if (target !== listBox.scrollTop) listBox.scrollTop = target
+    }, [listBox, state.selectedId, state.view])
+
+    // 键盘流：挂在 document 上 + 输入框守卫。
+    // 原实现挂在面板根节点并要求其持有焦点，导致「必须先点一下页面」才响应（用户实测）。
+    // 挂 document 的代价是作用域变宽，因此用 isTypingTarget 挡住输入框/弹层；
+    // 面板卸载时监听随 effect 清理一并移除，所以只有阅读器存在时才可能响应。
+    // ⚠️ 不走 ctx.shortcuts：平台规则禁止无修饰键的绑定（configuration.ts:100 ——
+    // modifiers 为空或全为 shift 即 modifier-required，register 会直接 throw，实测会炸掉整个 client 半）。
+    useEffect(() => {
       const onKeyDown = (event: KeyboardEvent): void => {
+        if (isTypingTarget(event.target)) return
+        // 宿主可能把非当前主栏面板保活在后台（ui-layout 的 retainMainPanels 就是这个意图）：
+        // 面板没真正显示时不响应，否则你在对话里按 j/k 会去动一个看不见的列表。
+        // 用 getClientRects().length 判可见：display:none 或未挂载时为 0，且不受定位方式影响。
+        if (root === null || root.getClientRects().length === 0) return
         if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return
         // 键位语义在 src/keys.ts（纯函数，宿主侧有单测）；这里只把动作落到 store 上
         const action = resolveReaderKey(event.key)
@@ -422,8 +450,8 @@ function createReader(store: ReaderStore, ctx: ClientContext): () => ReactNode {
           default: return
         }
       }
-      root.addEventListener('keydown', onKeyDown)
-      return () => { root.removeEventListener('keydown', onKeyDown) }
+      document.addEventListener('keydown', onKeyDown)
+      return () => { document.removeEventListener('keydown', onKeyDown) }
     }, [root, store])
 
     const items = store.visible()
@@ -486,7 +514,10 @@ function createReader(store: ReaderStore, ctx: ClientContext): () => ReactNode {
           />
         )}
 
-        <div style={{
+        <div ref={setListBox} style={{
+          // position:relative 是必需的：row.offsetTop 以最近的定位祖先为参照，
+          // 少了它量到的是相对页面/body 的位置，滚动计算会整体偏掉。
+          position: 'relative',
           flex: 1, minHeight: 0, overflowY: 'auto',
           display: state.view === 'article' ? 'none' : 'block',
           opacity: slowLoading ? 0.6 : 1, transition: 'opacity 150ms ease',
@@ -501,7 +532,8 @@ function createReader(store: ReaderStore, ctx: ClientContext): () => ReactNode {
             const unread = item.readAt === undefined
             const selected = state.selectedId === item.id
             return (
-              <div key={item.id} style={{ borderBottom: '1px solid color-mix(in srgb, currentColor 8%, transparent)' }}>
+              <div key={item.id} data-rss-row={item.id}
+                style={{ borderBottom: '1px solid color-mix(in srgb, currentColor 8%, transparent)' }}>
                 <div role="button" tabIndex={0}
                   onClick={() => {
                     store.select(item.id)
