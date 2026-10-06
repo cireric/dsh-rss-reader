@@ -15,7 +15,11 @@
  */
 export const ROUTE_PATH = '/rss-reader-api'
 
-export type Endpoint = 'overview' | 'refresh' | 'markRead' | 'unmarkRead' | 'toggleStar'
+/**
+ * `probe` 是**临时诊断端点**（C 步地基验证用）：客户端把右栏交互的成败证据回传，宿主写进
+ * reader.log，让 agent 读到硬证据而不是靠用户口述。A 步落地后应删除。
+ */
+export type Endpoint = 'overview' | 'refresh' | 'markRead' | 'unmarkRead' | 'toggleStar' | 'probe'
 
 export type RpcResult<T> =
   | { ok: true; value: T }

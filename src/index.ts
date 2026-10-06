@@ -332,6 +332,12 @@ export function apply(ctx: Context, config: Config): void {
           return ok({ changed, unread: countUnread(target) })
         }
 
+        case 'probe': {
+          // 临时诊断：把客户端侧右栏交互的成败写进日志（A 步落地后删）
+          log('probe: ' + JSON.stringify(payload))
+          return ok({ logged: true })
+        }
+
         case 'toggleStar': {
           const itemId = String((payload as { itemId?: unknown } | null)?.itemId ?? '')
           if (!itemId) return fail('bad-request', 'toggleStar 需要 itemId')

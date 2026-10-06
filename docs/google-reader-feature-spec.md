@@ -1,7 +1,7 @@
 # Google Reader 功能说明书（史料还原版）
 
 > **本文用途**：给出复刻 Google Reader（2005-10-07 上线 ~ 2013-07-01 关停）所需的**功能需求基准**——它有哪些功能、每个功能的行为语义、边界与陷阱。
-> **本文不是**：本项目的实现说明或设计文档。凡属推断的内容一律标注 `[D]` 并集中在 §6。
+> **本文不是**：本项目的实现说明或设计文档。全文只有 **§6** 一处越出「史料」边界，它是标注为 `[D]` 的复刻落点推断，其余各节不含任何项目相关判断。
 
 ---
 
@@ -18,8 +18,10 @@
 
 1. Wayback Machine 对部分帮助文章只返回归档站外壳页，以下 **6 篇正文未能取到**，本文只保留其标题级证据：*Sorting my reading list*（69980）、*About feeds and subscribing*（69967）、*Import subscription lists*（69982）、*Full story not showing in expanded view*（69969）、*Viewing a feed's original site*（69971）、*About RSS and Atom*（69986）。
 2. 存在一处**官方材料自相矛盾**，见 §3.10 末尾注。
-3. 2005 年首发博文正文未取到；首发时间以 Wikipedia 与官方博客索引日期为据（【C】）。
-4. 官方帮助中心页脚标注的最后更新日期为 2012-10-16；其内容可能滞后于产品实际状态（见第 2 条）。
+3. 2005 年首发博文正文与 2013 年关停公告正文均未取到；相关时间点以 Wikipedia 与官方博客索引日期为据（标注为【C】，或按标题级【A】）。**一处可交叉验证**：官方博客首帖标题为 *Google Reader: Two weeks*、日期 2005-10-21（【A】索引），与 Wikipedia 的上线日 2005-10-07 恰好相差两周，两个独立来源互证。
+4. 官方帮助中心页脚标注的最后更新日期为 **2012-10-16**，即产品关停前约 5 个月——其内容**可能滞后于产品实际状态**。第 2 条那处矛盾正由此而来（见 §3.10）。
+5. 部分正文经 **mcp-exa 取文通道**获得（而非 web_fetch 直取），例如 Takeout 数据清单（answer/3028851）；两通道同源同页，仅取证路径不同。
+6. 附录 A 的目录树是按 2013-03 快照**人工重排**的层级还原，不是原站 DOM 的逐字复制；它用于定位文章编号，不作为结构证据。
 
 ---
 
@@ -139,7 +141,7 @@ ID 内部是 64 位数字，对外有两种表示：
   - **List view（列表视图）**——只有标题行；快捷键 `2`。
 - **顶部筛选**：可切换"查看全部条目"还是"只看新条目"。
 - **Fullscreen 模式**：快捷键 `f`。
-- **导航面板显隐**：2010-08 官方博客写的是 `shift + u`；2012-10 的帮助页写的是 `u`。**两份官方材料不一致**，以较晚的帮助页为准（`u`），此处如实并列。
+- **导航面板显隐**：2010-08 官方博客写的是 `shift + u`；2012-10 的帮助页写的是 `u`。**两份官方材料不一致**，且无法判定是快捷键发生过变更、还是其中一份写错。§3.8 的全表沿用较晚的帮助页（`u`），但此处应视为**未决**。
 - **字体缩放**：`-` 缩小、`=` 放大（针对当前条目）。
 - **刷新**：`r` 刷新导航里的未读计数。
 - **favicon**：订阅列表可显示各源 favicon（默认关闭，设置项，2009-11 加入）【A】。
@@ -177,7 +179,7 @@ ID 内部是 64 位数字，对外有两种表示：
 
 ### 3.6 排序与检索
 
-- **搜索**：`/` 把光标移到搜索框；**搜索范围是"所有 feed、所有订阅的更新"**，不只是当前源。
+- **搜索**：`/` 把光标移到搜索框；**搜索范围是"所有 feed、所有订阅的更新"**，不只是当前源【C】。（该页正文未取到，见 §0 缺口 1）
 - **排序方式**（`r` 参数）：
   - 最新优先（倒序）/ 最旧优先（正序）；
   - **"Sort by magic"**——在任意 feed 或文件夹的 Settings 菜单里选择，Reader 会"尽力按最相关、最有趣"排序。其信号来源：**你的历史阅读行为（含 like 与 star）+ 全局信号**；官方强调该个性化排序**全自动且匿名**。
@@ -276,7 +278,9 @@ Trends 页（2007-01 上线，入口在 Home 页链接）包含：
 | 2011-10 | **下线 friending、following、Reader 内的分享链接博客**；分享迁往 Google+（+1 按钮） |
 | 2013-03 | 随关停公告移除 +1 按钮与点赞计数 |
 
-**注（官方材料矛盾处）**：2012-10-16 版帮助页仍列出 `l`（like）、`shift-s`（share）、`g` `f`（好友分享）等社交快捷键，而官方博客 2011-10-20 已宣布下线相关社交功能。无法判定该帮助页是滞后未更新、还是快捷键在 2012 年仍在。复刻时**不要以该表为准实现社交快捷键**。
+**注（官方材料矛盾处）**：2012-10-16 版帮助页仍列出 `l`（like）、`shift-s`（share）、`g` `f`（好友分享）等社交快捷键，而官方博客 2011-10-20 已宣布下线相关社交功能。无法判定该帮助页是滞后未更新、还是快捷键在 2012 年仍在。
+
+**复刻取舍**：社交功能已在 §4 判定为「不做」，因此 §3.4 与 §3.8 中 like / share / 好友相关的快捷键条目**不应进入验收清单**——它们在 2013 年关停时刻是否仍然可用，史料无法确认。
 
 ### 3.11 邮件与外部出口
 
@@ -319,12 +323,12 @@ Trends 页（2007-01 上线，入口在 Home 页链接）包含：
 
 - **ARIA**（2008-03）：Google 无障碍专家 T.V. Raman 参与，Reader 是早期采用 ARIA 的应用之一；2008-05 另有阅读辅助特性（"lens"）。
 - **自动翻译**（2008-11）：可把外文 feed 自动翻译成你的语言——API 侧对应 `trans` 参数，两侧互证。
-- **界面语言**：帮助中心与产品均提供 13 种语言（de/en/es/fr/it/ja/ko/nl/pt-BR/zh-CN/zh-Hant/…）。
+- **界面语言**：归档帮助中心页脚提供 **11 种语言**（de / en / es / fr / it / ja / ko / nl / pt-BR / zh-Hans / zh-Hant）。【A，页脚实测】
 
 ### 3.16 数据导出与谢幕
 
 - **Takeout 导出内容清单**（2013-03，【A】answer/3028851）——这份清单本身就是**官方对"用户数据模型"的完整枚举**：
-  - 订阅数据（**XML/OPML**）
+  - 订阅数据（官方原文为 **XML**；OPML 形态由【B】的 `reader/subscription/export` 接口佐证）
   - 以下为 **JSON**：
     - 你关注的人 / 关注你的人
     - 你 star 的条目
@@ -367,7 +371,7 @@ Trends 页（2007-01 上线，入口在 Home 页链接）包含：
 | 9 | 改状态请求需要**限时的 ActionToken（30 分钟）**，失效表现为 401 + 专用响应头 | 【B】ActionToken |
 | 10 | 分页用**续传令牌**，不是页码；编号参数 `n` 在"取 ID"与"取内容"两条路径上**上限不同**（10000 vs 1000） | 【B】ApiStreamItemsIds / ApiStreamContents |
 | 11 | 条目的**长/短 ID 格式不得互转**，原样存取 | 【B】ItemId |
-| 12 | 分享/评论/邮件等**外发行为**都带明确的隐私默认值（如 Reader 邮件默认不存 Sent） | 【A】70652 |
+| 12 | **外发行为有明确的隐私默认值**：Reader 邮件默认**不**存档到 Gmail 的 Sent Mail，需显式勾选才留副本 | 【A】70652 |
 
 ---
 
@@ -413,7 +417,8 @@ Additional       Getting Started Guide / Google Reader Product Forum / Video tut
 （同章另有标题级条目：Exporting subscriptions from other services · Unsubscribing from a feed · About subscribing to private feeds · Recommending Feeds · Google Reader extensions for Google Chrome）
 
 **Reading Your Feeds**（topic 12012）：
-69969 Full story not showing in expanded view · 69971 Viewing a feed's original site · 69973 **Keyboard shortcuts** · 69980 Sorting my reading list · 69976 Searching within feeds · About the dates displayed with feeds · 164681 Explore section and "magic" ranking
+69969 Full story not showing in expanded view · 69971 Viewing a feed's original site · 69973 **Keyboard shortcuts** · 69980 Sorting my reading list · 164681 Explore section and "magic" ranking
+（同章另有标题级条目，**编号未在本次取证中确认**：Searching within feeds · About the dates displayed with feeds）
 
 **Organizing**：69977 Using tags · Using Folders
 
@@ -426,31 +431,34 @@ Additional       Getting Started Guide / Google Reader Product Forum / Video tut
 
 ## 附录 B：官方博客里程碑（含 URL）
 
-官方博客共 **108 篇**（2005-10-21 ~ 2013-07-02），本文实际读取正文的关键篇目：
+官方博客共 **108 篇**（2005-10-21 ~ 2013-07-02）。下表列出本文引用的关键篇目，**并标出每篇的实际取证深度**：
 
-| 日期 | 标题 | URL |
-|---|---|---|
-| 2005-10-21 | Google Reader: Two weeks（首帖） | googlereader.blogspot.com/2005/10/google-reader-two-weeks.html |
-| 2006-03-21 | Reader learns to share | …/2006/03/reader-learns-to-share.html |
-| 2006-04-07 | Labels: Better, stronger, faster | …/2006/04/labels-better-stronger-faster.html |
-| 2006-07-19 | Your wish is our command（视图/排序） | …/2006/07/your-wish-is-our-command.html |
-| 2006-09-28 | **Something looks... different.**（大改版） | …/2006/09/something-looks-different.html |
-| 2007-01-03 | **I like big charts and I cannot lie**（Trends） | …/2007/01/i-like-big-charts-and-i-cannot-lie.html |
-| 2007-09-05 | "We found it!"（搜索） | …/2007/09/we-found-it.html |
-| 2007-11-29 | Attack of the interns（推荐 + 拖拽） | …/2007/11/attack-of-interns-recommendations-and.html |
-| 2008-10-28 | We like it graphed（Trends 可视化） | …/2008/10/we-like-it-graphed.html |
-| 2009-05-19 | Latest round of Reader improvements | …/2009/05/latest-round-of-reader-improvements.html |
-| 2009-08-12 | **A flurry of features for feed readers**（Send to / mark-all 阈值） | …/2009/08/flurry-of-features-for-feed-readers.html |
-| 2009-11-24 | Let your subscriptions' personality come through（favicon） | …/2009/11/let-your-subscriptions-personality-come.html |
-| 2010-02-18 | May we recommend...（推荐个性化 / 相关 feed） | …/2010/02/may-we-recommend.html |
-| 2010-04-09 | A veritable boatload of read items（阅读量统计） | …/2010/04/veritable-boatload-of-read-items.html |
-| 2010-05-24 | Spring Cleaning（评论权限 / 停止 Gears） | …/2010/05/spring-cleaning-comments-offline-and.html |
-| 2010-06-01 | Folder and tag renaming | …/2010/06/folder-and-tag-renaming.html |
-| 2010-08-26 | Fullscreen and more!（全屏 / clicked trends / 终身计数） | …/2010/08/fullscreen-and-more.html |
-| 2011-10-20 | Upcoming changes to Reader（社交下线预告） | …/2011/10/upcoming-changes-to-reader-new-look-new.html |
-| 2011-10-31 | New in Reader: a fresh design, and Google+ sharing | …/2011/10/new-in-reader-fresh-design-and-google.html |
-| 2013-03-13 | **Powering Down Google Reader**（关停公告） | …/2013/03/powering-down-google-reader.html |
-| 2013-07-02 | A final farewell | …/2013/07/a-final-farewell.html |
+- **正文** = 已取到并逐段核对过博文正文（12 篇）
+- **标题级** = 仅从官方 feed 索引确认了标题/日期/摘要，**正文未取到**（9 篇，其论断不得超出标题所示范围）
+
+| 日期 | 标题 | 取证深度 | URL |
+|---|---|---|---|
+| 2005-10-21 | Google Reader: Two weeks（首帖） | googlereader.blogspot.com/2005/10/google-reader-two-weeks.html | 标题级 |
+| 2006-03-21 | Reader learns to share | …/2006/03/reader-learns-to-share.html | 标题级 |
+| 2006-04-07 | Labels: Better, stronger, faster | …/2006/04/labels-better-stronger-faster.html | 标题级 |
+| 2006-07-19 | Your wish is our command（视图/排序） | …/2006/07/your-wish-is-our-command.html | 标题级 |
+| 2006-09-28 | **Something looks... different.**（大改版） | …/2006/09/something-looks-different.html | 正文 |
+| 2007-01-03 | **I like big charts and I cannot lie**（Trends） | …/2007/01/i-like-big-charts-and-i-cannot-lie.html | 正文 |
+| 2007-09-05 | "We found it!"（搜索） | …/2007/09/we-found-it.html | 标题级 |
+| 2007-11-29 | Attack of the interns（推荐 + 拖拽） | …/2007/11/attack-of-interns-recommendations-and.html | 标题级 |
+| 2008-10-28 | We like it graphed（Trends 可视化） | …/2008/10/we-like-it-graphed.html | 标题级 |
+| 2009-05-19 | Latest round of Reader improvements | …/2009/05/latest-round-of-reader-improvements.html | 正文 |
+| 2009-08-12 | **A flurry of features for feed readers**（Send to / mark-all 阈值） | …/2009/08/flurry-of-features-for-feed-readers.html | 正文 |
+| 2009-11-24 | Let your subscriptions' personality come through（favicon） | …/2009/11/let-your-subscriptions-personality-come.html | 正文 |
+| 2010-02-18 | May we recommend...（推荐个性化 / 相关 feed） | …/2010/02/may-we-recommend.html | 正文 |
+| 2010-04-09 | A veritable boatload of read items（阅读量统计） | …/2010/04/veritable-boatload-of-read-items.html | 正文 |
+| 2010-05-24 | Spring Cleaning（评论权限 / 停止 Gears） | …/2010/05/spring-cleaning-comments-offline-and.html | 正文 |
+| 2010-06-01 | Folder and tag renaming | …/2010/06/folder-and-tag-renaming.html | 正文 |
+| 2010-08-26 | Fullscreen and more!（全屏 / clicked trends / 终身计数） | …/2010/08/fullscreen-and-more.html | 正文 |
+| 2011-10-20 | Upcoming changes to Reader（社交下线预告） | …/2011/10/upcoming-changes-to-reader-new-look-new.html | 正文 |
+| 2011-10-31 | New in Reader: a fresh design, and Google+ sharing | …/2011/10/new-in-reader-fresh-design-and-google.html | 标题级 |
+| 2013-03-13 | **Powering Down Google Reader**（关停公告） | …/2013/03/powering-down-google-reader.html | 正文 |
+| 2013-07-02 | A final farewell | …/2013/07/a-final-farewell.html | 标题级 |
 
 ---
 

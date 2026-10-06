@@ -123,6 +123,73 @@ function toParagraphs(html: string | undefined): string[] {
     .filter((line) => line !== '')
 }
 
+/** 右栏自建「正文」标签页：C 步只验证地基，A 步再接入正文抓取与渲染。 */
+const ARTICLE_KIND = 'rssReaderArticle'
+const ARTICLE_ID = 'dsh-rss-reader-article'
+
+/** 右栏标签页记录里我们关心的字段（宿主是 TS，客户端运行时按形状取）。 */
+interface ArticleTabLike {
+  readonly id?: string
+  readonly kind?: string
+  readonly title?: string
+  readonly navigation?: { readonly params?: { readonly url?: string; readonly title?: string } }
+}
+
+/** 右栏服务的最小面（可选依赖，用 ctx.get 判空，缺了也不影响阅读器本体）。 */
+interface SidebarRightLike {
+  active?: () => ArticleTabLike | undefined
+  openTab?: (kind: string, options?: { params?: unknown }) => void
+  close?: (tabId: string) => void
+}
+
+/**
+ * 把右栏交互的成败回传宿主日志（**临时诊断**，A 步落地后删）。
+ *
+ * 为什么值得这一小段管道：右栏是我们完全看不见的浏览器侧行为，靠用户口述「点了没反应」
+ * 无法定位——上一次就是这么卡住的。把 beforeKind/afterKind/error 落到我可以读的日志里，
+ * 一次按键就能拿到硬证据。
+ */
+async function reportProbe(step: string, detail: Record<string, unknown>): Promise<void> {
+  try {
+    await callRpc('probe', { step, ...detail })
+  } catch (error) {
+    // 探针自身失败要可见，但绝不该影响用户操作
+    console.warn('[dsh-rss-reader] 探针上报失败：' + String(error))
+  }
+}
+
+/** 右栏标签页的标题 chip。 */
+function ArticleTitle(props: { useTabInfo?: () => { tab: ArticleTabLike } }): ReactNode {
+  const title = props.useTabInfo?.()?.tab?.navigation?.params?.title
+  return <span>{typeof title === 'string' && title !== '' ? title : '正文'}</span>
+}
+
+/** 右栏标签页的正文体（C 步占位；A 步换成抽取后的正文）。 */
+function ArticleBody(props: { useTabInfo?: () => { tab: ArticleTabLike } }): ReactNode {
+  const url = props.useTabInfo?.()?.tab?.navigation?.params?.url
+  return (
+    <div style={{ padding: 16, fontSize: 13, lineHeight: 1.6 }}>
+      <div style={{ opacity: 0.75 }}>右栏「正文」标签页已能打开——C 步地基验证中。</div>
+      <div style={{ opacity: 0.6, marginTop: 6 }}>正文抓取与渲染在 A 步接入。</div>
+      {typeof url === 'string' && url !== '' && (
+        <div style={{ marginTop: 10, wordBreak: 'break-all' }}>
+          <a href={url} target="_blank" rel="noreferrer">{url}</a>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** 解析右栏服务（可选依赖：拿不到就返回 undefined，不抛）。 */
+function sidebarRightOf(ctx: ClientContext): SidebarRightLike | undefined {
+  try {
+    const get = (ctx as { get?: (name: string) => unknown }).get
+    return typeof get === 'function' ? (get.call(ctx, 'sidebarRight') as SidebarRightLike | undefined) : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** 阅读器根节点是否持有焦点——快捷键作用域的判据。 */
 function readerFocused(): boolean {
   try {
@@ -347,6 +414,44 @@ function createReader(store: ReaderStore): () => ReactNode {
             void store.markRead(selected)
           }); break
           case 'v': run(() => store.openSelected()); break
+          // V：在同一会话的右栏打开该条链接（C 步地基验证；成败证据回传宿主日志）
+          case 'V': run(() => {
+            const selected = visible().find((entry) => entry.id === store.get().selectedId)
+            if (selected === undefined || selected.link === '') return
+            const detail: Record<string, unknown> = { url: selected.link }
+            const sidebarRight = sidebarRightOf(ctx)
+            detail.hasService = sidebarRight !== undefined
+            if (sidebarRight === undefined) {
+              void reportProbe('openTab-no-service', detail)
+              return
+            }
+            try {
+              detail.beforeKind = sidebarRight.active?.()?.kind ?? null
+              sidebarRight.openTab?.(ARTICLE_KIND, { params: { url: selected.link, title: selected.title } })
+              const after = sidebarRight.active?.()
+              detail.afterKind = after?.kind ?? null
+              detail.afterTabId = after?.id ?? null
+            } catch (error) {
+              detail.error = error instanceof Error ? error.message : String(error)
+            }
+            void reportProbe('openTab', detail)
+          }); break
+          // Esc：只在右栏当前正是本插件的「正文」标签页时才动作，避免抢弹层的 Esc
+          case 'Escape': {
+            const sidebarRight = sidebarRightOf(ctx)
+            const active = sidebarRight?.active?.()
+            if (sidebarRight?.close === undefined || active === undefined || active.kind !== ARTICLE_KIND) return
+            const tabId = active.id
+            if (tabId === undefined) return
+            event.preventDefault()
+            try {
+              sidebarRight.close(tabId)
+              void reportProbe('closeTab', { tabId, ok: true })
+            } catch (error) {
+              void reportProbe('closeTab', { tabId, ok: false, error: String(error) })
+            }
+            break
+          }
           case 's': run(() => { void store.toggleStar() }); break
           case 'm': run(() => { void store.toggleRead() }); break
           case 'A': run(() => { void store.markAllRead() }); break
