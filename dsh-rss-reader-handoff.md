@@ -248,7 +248,9 @@ sed -n '1,30p' /Users/eric/Project/tests/deepseek-harness/packages/client/ui-sid
 
 键盘面 + 未读徽标，按用户「M3 按建议执行」落地的五条：
 
-1. **j/k 移动即标已读**（Google Reader 手感），保留 `m` 反选。
+1. ~~**j/k 移动即标已读**（Google Reader 手感）~~ → **2026-10-06 用户实际使用后修正：
+   `j`/`k` 只移动选中，不标已读**。已读只由「打开条目」（`o`/Enter/点击）与显式 `m` 触发。
+   这是对 GR 的有意偏离（GR 扫过即已读），README 已标明「别当 bug 改回去」。
 2. **A 的范围 = 当前过滤下的未读**，并给 5 秒撤销窗口（客户端计时，非宿主定时器）。
 3. **星标可见**：加过滤条 全部 / 未读 / 星标（此前 starred 只写不读，是死字段）。
 4. **快捷键作用域**：走 `ctx.shortcuts` 的 `regions: ['page']` + `resolve()` 判据

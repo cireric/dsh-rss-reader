@@ -155,8 +155,13 @@ function createReaderStore(ctx: ClientContext) {
     }
   }
 
-  /** j/k：移动选中，并按已定手感把**新选中**的条目标已读。 */
-  const selectRelative = async (delta: number): Promise<void> => {
+  /**
+   * j/k：**只移动选中，不标已读**（用户 2026-10-06 明确要求）。
+   *
+   * ⚠️ 这是对 Google Reader 的**有意偏离**——GR 里 j/k 扫过即标已读。别当 bug 改回去：
+   * 已读只由「打开条目」触发（o / Enter / 鼠标点击）以及显式的 m。
+   */
+  const selectRelative = (delta: number): void => {
     const list = visible()
     if (list.length === 0) return
     const current = list.findIndex((item) => item.id === state.selectedId)
@@ -166,7 +171,6 @@ function createReaderStore(ctx: ClientContext) {
     const target = list[nextIndex]
     if (target === undefined) return
     set({ selectedId: target.id })
-    await markRead(target.id)
   }
 
   const openSelected = (): void => {
@@ -287,9 +291,10 @@ function createReader(store: ReaderStore): () => ReactNode {
         if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return
         const run = (action: () => void): void => { event.preventDefault(); action() }
         switch (event.key) {
-          case 'j': run(() => { void store.selectRelative(1) }); break
-          case 'k': run(() => { void store.selectRelative(-1) }); break
+          case 'j': run(() => store.selectRelative(1)); break
+          case 'k': run(() => store.selectRelative(-1)); break
           // Google Reader 的语义：o 展开/折叠（列表内），v 才开原站
+          // o = 展开/折叠 + 标已读（已读的唯一自动触发点，另有显式的 m）
           case 'o': run(() => {
             const selected = store.get().selectedId
             if (selected === undefined) return
@@ -334,7 +339,7 @@ function createReader(store: ReaderStore): () => ReactNode {
             ))}
           </span>
           <span style={{ flex: 1 }} />
-          <span style={{ fontSize: 11, opacity: 0.55 }}>j/k 移动 · o 展开 · v 开原站 · s 星标 · m 已读 · A 全部</span>
+          <span style={{ fontSize: 11, opacity: 0.55 }}>j/k 移动（不标已读）· o 展开并已读 · v 开原站 · s 星标 · m 已读 · A 全部</span>
           <button type="button" disabled={state.loading} onClick={() => { void store.load('refresh') }}
             style={{ fontSize: 13, padding: '3px 10px', cursor: state.loading ? 'default' : 'pointer' }}>
             {state.loading ? '刷新中' : '刷新'}
