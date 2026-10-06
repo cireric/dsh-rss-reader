@@ -71,6 +71,11 @@ export async function fetchFeed(
   validators: FeedValidators,
   limits: FetchLimits,
   externalSignal?: AbortSignal,
+  /**
+   * 可选：响应一到就回调，让调用方能读响应头（如判断站点是否允许被 iframe 嵌入）。
+   * 放在这里而不是扩展返回值，是为了不把「嵌入策略」这类上层关心的事塞进 feed 层。
+   */
+  onResponse?: (response: Response) => void,
 ): Promise<FetchResult> {
   const headers: Record<string, string> = { 'user-agent': USER_AGENT, accept: ACCEPT }
   if (validators.etag) headers['if-none-match'] = validators.etag
@@ -86,6 +91,7 @@ export async function fetchFeed(
     return { kind: 'failed', reason: describeFailure(error, limits.timeoutMs) }
   }
 
+  onResponse?.(response)
   if (response.status === 304) return { kind: 'not-modified' }
   if (!response.ok) {
     return { kind: 'failed', reason: `HTTP ${response.status}` }

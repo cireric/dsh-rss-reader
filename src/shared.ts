@@ -65,4 +65,6 @@ export interface ArticlePayload {
   paragraphs?: string[]
   /** 抓取/抽取失败的原因；与 paragraphs 互斥 */
   failure?: string
+  /** 站点是否允许被 iframe 嵌入（决定能否切到「原站视图」） */
+  frameable?: boolean
 }

@@ -350,7 +350,10 @@ export function apply(ctx: Context, config: Config): void {
           const existing = target.item(itemId)
           if (existing === undefined) return fail('not-found', '条目不存在：' + itemId)
           if (existing.article !== undefined) {
-            return ok({ itemId, cached: true, title: existing.article.title, paragraphs: existing.article.paragraphs })
+            return ok({
+              itemId, cached: true, title: existing.article.title,
+              paragraphs: existing.article.paragraphs, frameable: existing.article.frameable,
+            })
           }
           if (existing.link === '') return fail('bad-request', '该条目没有可抓取的链接')
 
@@ -376,6 +379,7 @@ export function apply(ctx: Context, config: Config): void {
             fetchedAt: new Date().toISOString(),
             title: fetched.title,
             paragraphs: fetched.paragraphs,
+            frameable: fetched.frameable,
           }
           // 成功要清掉旧的失败原因：显式重建记录，避免在 .strict() 下塞 undefined 键
           await target.saveItem(itemId, {
@@ -391,7 +395,7 @@ export function apply(ctx: Context, config: Config): void {
           })
           log('取正文成功：' + existing.link + '（' + fetched.paragraphs.length + ' 段 ' +
             fetched.paragraphs.reduce((sum, p) => sum + p.length, 0) + ' 字符）')
-          return ok({ itemId, cached: false, title: article.title, paragraphs: article.paragraphs })
+          return ok({ itemId, cached: false, title: article.title, paragraphs: article.paragraphs, frameable: article.frameable })
         }
 
         case 'toggleStar': {

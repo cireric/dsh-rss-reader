@@ -70,6 +70,10 @@ interface ArticleState {
   title?: string
   paragraphs?: string[]
   failure?: string
+  /** 站点是否允许被嵌入（决定「原站视图」可不可用） */
+  frameable?: boolean
+  /** 抽取正文（阅读视图）还是原页（原站视图，iframe） */
+  render?: 'reading' | 'original'
 }
 
 interface ReaderState {
@@ -307,7 +311,13 @@ function createReaderStore(ctx: ClientContext) {
       if (result.failure !== undefined) {
         set({ article: { itemId: item.id, loading: false, failure: result.failure } })
       } else {
-        set({ article: { itemId: item.id, loading: false, title: result.title, paragraphs: result.paragraphs ?? [] } })
+        set({
+          article: {
+            itemId: item.id, loading: false, title: result.title,
+            paragraphs: result.paragraphs ?? [], frameable: result.frameable === true,
+            render: 'reading',
+          },
+        })
       }
     } catch (error) {
       if (state.article?.itemId !== item.id) return
@@ -317,10 +327,17 @@ function createReaderStore(ctx: ClientContext) {
 
   const closeArticle = (): void => { set({ view: 'list' }) }
 
+  /** 在「抽取正文」与「原页」之间切换（仅站点允许被嵌时可切）。 */
+  const toggleArticleRender = (): void => {
+    const article = state.article
+    if (article === undefined || article.frameable !== true) return
+    set({ article: { ...article, render: article.render === 'original' ? 'reading' : 'original' } })
+  }
+
   return {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
     get, visible, load, markRead, selectRelative, openSelected, toggleStar, toggleRead, markAllRead, undoMarkAll,
-    openArticle, closeArticle,
+    openArticle, closeArticle, toggleArticleRender,
     setFilter: (filter: Filter): void => { set({ filter }); const list = filter === 'all' ? state.items : state.items.filter((i) => (filter === 'unread' ? i.readAt === undefined : i.starred)); set({ selectedId: list[0]?.id }) },
     select: (itemId: string): void => { set({ selectedId: itemId }) },
   }
@@ -394,6 +411,12 @@ function createReader(store: ReaderStore, ctx: ClientContext): () => ReactNode {
           // V：在阅读器内打开正文（按需抓原站 + 抽取）。做在此处而不是右栏，原因见 handoff §19
           case 'V': run(() => { void store.openArticle() }); break
           // Esc：从正文回到列表；列表态下不拦截（不抢弹层的 Esc）
+          // R：在抽取正文与原站页面之间切换（仅站点允许被嵌时有效）
+          case 'R': {
+            if (store.get().view !== 'article') return
+            run(() => store.toggleArticleRender())
+            break
+          }
           case 'Escape': {
             if (store.get().view !== 'article') return
             event.preventDefault()
@@ -466,6 +489,7 @@ function createReader(store: ReaderStore, ctx: ClientContext): () => ReactNode {
             article={state.article}
             link={state.items.find((entry) => entry.id === state.selectedId)?.link}
             onBack={() => store.closeArticle()}
+            onToggleRender={() => store.toggleArticleRender()}
           />
         )}
 
@@ -529,37 +553,81 @@ function createReader(store: ReaderStore, ctx: ClientContext): () => ReactNode {
 }
 
 /** 阅读器内的正文视图（D 方案）：段落由宿主抽取后回传，这里只做排版。 */
-function ArticleView({ article, link, onBack }: {
+/**
+ * 段落判定：含换行的段落来自 <pre>（宿主抽取时保留内部换行）⇒ 按代码块渲染。
+ * 这是为了解决「代码全变样」——等宽字体 + 保留缩进 + 横向可滚动，而不是当普通文字折行。
+ */
+function isCodeBlock(paragraph: string): boolean {
+  return paragraph.includes('\n')
+}
+
+/** 阅读器内的正文视图（D 方案）：默认抽取正文，站点允许时可切「原站视图」看原样页面。 */
+function ArticleView({ article, link, onBack, onToggleRender }: {
   article: ArticleState | undefined
   link: string | undefined
   onBack: () => void
+  onToggleRender: () => void
 }): ReactNode {
   const paragraphs = article?.paragraphs ?? []
+  const original = article?.render === 'original'
+  const frameable = article?.frameable === true
+
   return (
-    <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '12px 22px 24px', fontSize: 15, lineHeight: 1.8 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+    <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 10, padding: '10px 20px',
+        borderBottom: '1px solid color-mix(in srgb, currentColor 12%, transparent)',
+      }}>
         <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" onClick={onBack}>← 返回列表（Esc）</button>
         <span style={{ flex: 1 }} />
+        <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
+          disabled={!frameable || article?.loading === true}
+          title={frameable
+            ? '按原站样式渲染整页（R 切换）'
+            : '该站点通过 X-Frame-Options / CSP 禁止被嵌入，只能看抽取版或去原站'}
+          onClick={onToggleRender}>
+          {original ? '阅读视图（R）' : '原站视图（R）'}
+        </button>
         {link !== undefined && link !== '' && (
           <a href={link} target="_blank" rel="noreferrer" style={{ fontSize: 12 }}>打开原站 ↗</a>
         )}
       </div>
+
       {article === undefined || article.loading ? (
-        <div style={{ opacity: 0.7 }}>正在抓取并抽取原站正文…</div>
+        <div style={{ padding: '12px 22px', opacity: 0.7 }}>正在抓取并抽取原站正文…</div>
       ) : article.failure !== undefined ? (
-        <div style={{ color: '#c0392b' }}>
+        <div style={{ padding: '12px 22px', color: '#c0392b' }}>
           没能取到正文：{article.failure}
           <div style={{ opacity: 0.7, marginTop: 6, fontSize: 12 }}>可以按 Esc 回列表，或点右上角去原站阅读。</div>
         </div>
+      ) : original && link !== undefined ? (
+        // 原站视图：浏览器内嵌整页，样式/代码/交互全是原样（已被 X-Frame-Options 放行的站点才可用）
+        <iframe
+          src={link}
+          title={article.title ?? '原站视图'}
+          style={{ flex: 1, minHeight: 0, width: '100%', border: 'none', background: '#fff' }}
+        />
       ) : (
-        <>
-          {article.title !== undefined && (
-            <div style={{ fontSize: 17, fontWeight: 600, marginBottom: 12 }}>{article.title}</div>
-          )}
-          {paragraphs.map((paragraph, index) => (
-            <p key={index} style={{ margin: index === 0 ? 0 : '0 0 0.9em' }}>{paragraph}</p>
-          ))}
-        </>
+        // 阅读视图：限宽 + 加大行高（长文可读性），代码块单独走等宽样式
+        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 24px 32px' }}>
+          <div style={{ maxWidth: 760, margin: '0 auto', fontSize: 15.5, lineHeight: 1.85 }}>
+            {article.title !== undefined && (
+              <div style={{ fontSize: 19, fontWeight: 600, lineHeight: 1.4, marginBottom: 16 }}>{article.title}</div>
+            )}
+            {paragraphs.map((paragraph, index) => (
+              isCodeBlock(paragraph) ? (
+                <pre key={index} style={{
+                  margin: '0 0 1.1em', padding: '10px 12px', overflowX: 'auto',
+                  borderRadius: 6, fontSize: 13, lineHeight: 1.6,
+                  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+                  background: 'color-mix(in srgb, currentColor 6%, transparent)',
+                }}>{paragraph}</pre>
+              ) : (
+                <p key={index} style={{ margin: '0 0 1.05em' }}>{paragraph}</p>
+              )
+            ))}
+          </div>
+        </div>
       )}
     </div>
   )

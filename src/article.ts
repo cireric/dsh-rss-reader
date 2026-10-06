@@ -50,13 +50,49 @@ export function htmlToText(fragment: string): string {
     .join('\n')
 }
 
+/**
+ * `<pre>` 内容专用转换：**保留每行原样缩进**。
+ *
+ * 不能复用 htmlToText —— 它会逐行 trim，把代码的缩进吃掉（实测：单测当场抓到
+ * 4 空格缩进被抹平，而那正是用户说的「代码全都变样」）。这里只解实体、去标签，
+ * 并且标签替换成空串而不是空格（否则 <code> 之类会在词中间插空格）。
+ */
+export function preToText(fragment: string): string {
+  return decodeEntities(fragment.replace(/<[^>]*>/g, ''))
+    .replace(/\r\n?/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/[ \t]+$/gm, '')
+    .trim()
+}
+
 /** 段落最小长度：低于此值的 <p> 多为「分类：xxx」「订阅」「相关阅读」这类栏目。 */
 const MIN_PARAGRAPH_CHARS = 40
 
-/** 抽取结果：标题与段落（纯文本）。 */
+/** 抽取结果：标题与段落（纯文本；代码块保留内部换行）。 */
 export interface ExtractedArticle {
   title?: string
   paragraphs: string[]
+}
+
+/**
+ * 站点是否允许被 iframe 嵌入（浏览器强制执行的服务器策略）。
+ *
+ * 判断依据：`X-Frame-Options` 只认历史写法 ALLOWALL 才算放行；`Content-Security-Policy`
+ * 的 `frame-ancestors` 只有通配 `*` 才放行。实测 6 个真实站点里 github.blog(SAMEORIGIN)
+ * 与 MDN(DENY) 会拒绝，其余放行——所以这一项必须按站判断，不能假定。
+ */
+export function isFrameable(headers: Headers): boolean {
+  const xfo = headers.get('x-frame-options')
+  if (xfo !== null && xfo.trim().toLowerCase() !== 'allowall') return false
+  const csp = headers.get('content-security-policy')
+  if (csp !== null) {
+    const match = /frame-ancestors([^;]*)/i.exec(csp)
+    if (match !== null) {
+      const value = match[1].trim()
+      if (value !== '*' && !value.split(/\s+/).includes('*')) return false
+    }
+  }
+  return true
 }
 
 /** 从 HTML 里抽正文。纯函数——单测直接喂夹具。 */
@@ -72,16 +108,40 @@ export function extractArticle(html: string): ExtractedArticle {
     body = body.replace(new RegExp('<' + tag + '\\b[^>]*>[\\s\\S]*?<\\/' + tag + '>', 'gi'), ' ')
   }
 
+  // ① 先保护代码块：它们确实配对，且必须保留换行与缩进
+  const codes: string[] = []
+  body = body.replace(/<pre\b[^>]*>([\s\S]*?)<\/pre>/gi, (_whole, inner: string) => {
+    const text = preToText(inner)
+    if (text === '') return ' '
+    codes.push(text)
+    return '\u0000C' + (codes.length - 1) + '\u0000'
+  })
+
+  // ② 按块级**边界**切分，而不是要求 <p>…</p> 配对。
+  //    实测教训：mihai.dinculescu.dev 的页面里 <p 出现 34 次而 </p> 出现 0 次（省略闭合标签），
+  //    配对正则命中 0，散文全军覆没——当时只是被「退化路径按行取全文」兜住了才看不出问题。
+  //    闭合与**开始**标签都算边界：实测该站省略 </p>，只按闭合切分会把多个段落粘成一段
+  //    （最长段曾达 2,383 字符）。开标签本身不含文字，切开无害；过短的碎片由长度门槛滤掉。
+  const boundary = /<\/(?:p|div|li|h[1-6]|blockquote|section|article|figure|tr|td)>|<(?:p|div|li|h[1-6]|blockquote|section|article|figure|tr|td)\b[^>]*>|<br\s*\/?>/gi
+  const chunks = body.split(boundary)
   const paragraphs: string[] = []
-  for (const match of body.matchAll(/<p\b[^>]*>([\s\S]*?)<\/p>/gi)) {
-    const text = htmlToText(match[1]).replace(/\n/g, ' ')
-    if (text.length >= MIN_PARAGRAPH_CHARS) paragraphs.push(text)
+  for (const chunk of chunks) {
+    // 一个 chunk 里可能夹着代码占位符（前后还有散文）：按占位符切开分别处理
+    for (const piece of chunk.split(/(\u0000C\d+\u0000)/)) {
+      const marker = /^\u0000C(\d+)\u0000$/.exec(piece)
+      if (marker !== null) {
+        paragraphs.push(codes[Number(marker[1])])
+        continue
+      }
+      const text = htmlToText(piece).replace(/\n/g, ' ')
+      if (text.length >= MIN_PARAGRAPH_CHARS) paragraphs.push(text)
+    }
   }
 
-  // 退化路径：有些站点正文用 <div> 排版，取不到足够 <p> 时就按行取全文
-  if (paragraphs.length < 2) {
+  // ③ 兜底：完全没抽到时才按行取全文（这条路径会带上导航等噪声，所以只做最后手段）
+  if (paragraphs.length === 0) {
     const lines = htmlToText(body).split('\n').filter((line) => line.length >= MIN_PARAGRAPH_CHARS)
-    if (lines.length > paragraphs.length) return { title: normalizeTitle(title), paragraphs: lines }
+    if (lines.length > 0) return { title: normalizeTitle(title), paragraphs: lines }
   }
   return { title: normalizeTitle(title), paragraphs }
 }
@@ -102,11 +162,12 @@ export async function fetchArticle(
   url: string,
   limits: FetchLimits,
   signal?: AbortSignal,
-): Promise<{ kind: 'ok'; title?: string; paragraphs: string[] } | { kind: 'failed'; reason: string }> {
-  const result = await fetchFeed(url, {}, limits, signal)
+): Promise<{ kind: 'ok'; title?: string; paragraphs: string[]; frameable: boolean } | { kind: 'failed'; reason: string }> {
+  let frameable = true
+  const result = await fetchFeed(url, {}, limits, signal, (response) => { frameable = isFrameable(response.headers) })
   if (result.kind === 'failed') return { kind: 'failed', reason: result.reason }
   if (result.kind === 'not-modified') return { kind: 'failed', reason: '原站返回 304（未传条件请求，异常）' }
   const extracted = extractArticle(result.body)
   if (extracted.paragraphs.length === 0) return { kind: 'failed', reason: '没能从该页面里抽出正文（版式不支持）' }
-  return { kind: 'ok', title: extracted.title, paragraphs: extracted.paragraphs }
+  return { kind: 'ok', title: extracted.title, paragraphs: extracted.paragraphs, frameable }
 }

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { decodeEntities, extractArticle, htmlToText } from '../lib/article.js'
+import { decodeEntities, extractArticle, htmlToText, isFrameable } from '../lib/article.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const fixture = readFileSync(join(here, 'fixtures', 'article.html'), 'utf8')
@@ -31,7 +31,7 @@ test('抽取：正文段落保留，导航/页脚/脚本/短栏目被丢弃', ()
   const article = extractArticle(fixture)
   const text = article.paragraphs.join('\n')
 
-  assert.equal(article.paragraphs.length, 2, '应当只留两段正文，实际：' + article.paragraphs.length)
+  assert.equal(article.paragraphs.length, 4, '两段正文 + 两个代码块，实际：' + article.paragraphs.length)
   assert.match(text, /第一段真正的正文/)
   assert.match(text, /第二段正文/)
   // 实体在抽取里被解码
@@ -44,6 +44,36 @@ test('抽取：正文段落保留，导航/页脚/脚本/短栏目被丢弃', ()
   assert.ok(!text.includes('版权所有'), 'footer 段落泄漏进正文')
   // 短栏目（分类：…）按长度门槛被丢弃
   assert.ok(!text.includes('分类：智能家居'), '短栏目未被长度门槛过滤')
+})
+
+test('代码块必须保留且有换行（代码被当普通段落折行 = 用户点名的「全变样」）', () => {
+  const article = extractArticle(fixture)
+  const code = article.paragraphs.find((p) => p.includes('def main()'))
+  assert.ok(code !== undefined, '代码块被整块丢掉了')
+  // 换行与缩进要留下来，客户端才能按 pre-wrap + 等宽渲染
+  assert.ok(code.includes('\n'), '代码块内部换行丢了')
+  assert.match(code, /\n {4}print\("hello"\)/, '代码块缩进丢了')
+  // 夹具里还有一个只有 5 个字符的代码块：长度门槛对代码块必须不适用，否则它会被静默丢掉
+  assert.ok(
+    article.paragraphs.includes('x = 1'),
+    '短代码块被长度门槛杀掉了 —— 门槛只该作用于散文段落',
+  )
+})
+
+test('可嵌性判定：按 X-Frame-Options / CSP frame-ancestors 决定能否 iframe', () => {
+  const H = (pairs) => new Headers(pairs)
+  // 无任何策略 = 允许
+  assert.equal(isFrameable(H([])), true)
+  // 实测真实站点：github.blog 发 SAMEORIGIN，MDN 发 DENY
+  assert.equal(isFrameable(H([['x-frame-options', 'SAMEORIGIN']])), false)
+  assert.equal(isFrameable(H([['x-frame-options', 'DENY']])), false)
+  assert.equal(isFrameable(H([['x-frame-options', 'allowall']])), true)
+  // CSP frame-ancestors：只有通配 * 放行
+  assert.equal(isFrameable(H([['content-security-policy', "default-src 'self'; frame-ancestors 'none'"]])), false)
+  assert.equal(isFrameable(H([['content-security-policy', 'frame-ancestors https://dsh.local']])), false)
+  assert.equal(isFrameable(H([['content-security-policy', 'frame-ancestors *']])), true)
+  // 没有 frame-ancestors 的 CSP 不影响判定
+  assert.equal(isFrameable(H([['content-security-policy', "default-src 'self'"]])), true)
 })
 
 test('标题：og:title 优先（它比 <title> 干净，去掉站点名后缀）', () => {

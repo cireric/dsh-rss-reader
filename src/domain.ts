@@ -34,6 +34,8 @@ export const articleRecordSchema = z.object({
   fetchedAt: z.string(),
   title: z.string().optional(),
   paragraphs: z.array(z.string()),
+  /** 站点是否允许被嵌入（决定能不能切「原站视图」）；老缓存缺此字段时按不可嵌处理 */
+  frameable: z.boolean().optional(),
 }).strict()
 
 export const itemRecordSchema = z.object({
