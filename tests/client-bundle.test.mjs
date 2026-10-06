@@ -184,3 +184,27 @@ test('没有链接的条目：v 不打开也不标已读（不误伤）', async 
   assert.deepEqual(opened, [], '空链接不该打开浏览器')
   assert.ok(!endpoints.includes('markRead'), '空链接不该标已读')
 })
+test('未读筛选下打开条目：条目不该当场消失（sticky 选中），移开后才让位', async () => {
+  const { store } = await driveStore({ items: [item({ id: 'a' }), item({ id: 'b' })] })
+  store.setFilter('unread')
+  assert.equal(store.visible().length, 2, '前置条件：未读筛选下两条都可见')
+
+  const target = store.get().selectedId
+  assert.equal(target, 'a', '前置条件：选中第一条')
+  await store.markRead(target) // 这一步等价于按 o / 点击条目
+
+  assert.ok(store.visible().some((i) => i.id === target), '刚打开的条目从列表消失了 —— 用户正要读的就是它')
+  assert.equal(store.get().unread, 1, '未读数仍应减少（打开即已读的语义不变）')
+
+  store.selectRelative(1) // 移开
+  assert.ok(!store.visible().some((i) => i.id === target), '移开之后应当让位')
+})
+
+test('已读条目在未读筛选下正常不可见（sticky 只作用于当前选中项）', async () => {
+  const { store } = await driveStore({
+    items: [item({ id: 'a', readAt: '2026-10-01T00:00:00.000Z' }), item({ id: 'b' })],
+  })
+  store.setFilter('unread')
+  // setFilter 会把选中项设为过滤后的第一条（b）；已读的 a 不是选中项，不该出现
+  assert.ok(!store.visible().some((i) => i.id === 'a'), '非选中的已读条目不该被 sticky 规则带出来')
+})

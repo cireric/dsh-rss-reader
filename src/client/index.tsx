@@ -25,6 +25,14 @@ export const inject = ['slots']
 const PANEL_ID = 'dsh-rss-reader'
 /** 阅读器根节点的标记：快捷键用它判断焦点是否在本面板内。 */
 const ROOT_ATTR = 'data-dsh-rss-reader'
+/**
+ * 正文「够不够当正文」的门槛（字符）。
+ *
+ * 与抽取层的 MIN_PARAGRAPH_CHARS 同源：低于它的内容在列表里读不出信息量，只会在视觉上
+ * 冒充正文。实测 HN 的 feed 里 description 恒为 68 字符的 HTML，剥标签后只剩 "Comments"。
+ */
+const MIN_BODY_CHARS = 40
+
 /** 「全部标记已读」的撤销窗口。 */
 const UNDO_WINDOW_MS = 5000
 /**
@@ -187,11 +195,25 @@ export function createReaderStore() {
   const set = (patch: Partial<ReaderState>): void => { state = { ...state, ...patch }; emit() }
   const get = (): ReaderState => state
 
-  /** 当前过滤下的可见条目——A/j/k 都只作用于它。 */
+  /**
+   * 当前过滤下的可见条目——A/j/k 都只作用于它。
+   *
+   * **钉住当前选中项**：打开条目会立即标已读，若此时正处在「未读」筛选下，该条目会当场
+   * 从列表消失——而你正要读的正是它（用户实测发现的体验 bug）。所以只要它还处于选中状态，
+   * 就一并保留；一旦移开（j/k 或点击别处）就自然让位。
+   *
+   * 实现上是「按过滤条件保留，或 id 等于当前选中」——用整表过滤而不是「过滤后再插入」，
+   * 这样保留下来的位置仍是原来的全局顺序，不会跳到列表首尾。
+   */
   const visible = (): ItemView[] => {
-    if (state.filter === 'unread') return state.items.filter((item) => item.readAt === undefined)
-    if (state.filter === 'starred') return state.items.filter((item) => item.starred)
-    return state.items
+    const selectedId = state.selectedId
+    const matches = (item: ItemView): boolean => {
+      if (item.id === selectedId) return true
+      if (state.filter === 'unread') return item.readAt === undefined
+      if (state.filter === 'starred') return item.starred
+      return true
+    }
+    return state.items.filter(matches)
   }
 
   const applyOverview = (overview: Overview): void => {
@@ -689,12 +711,24 @@ function createReader(store: ReaderStore): () => ReactNode {
                     </span>
                     {isOpen && (
                       <span style={{ display: 'block', marginTop: 8, opacity: 0.85, fontSize: 13 }}>
-                        {toParagraphs(item.summary).length === 0 && (
-                          <span style={{ display: 'block', opacity: 0.7 }}>（此源只提供摘要，点下面到原站读全文）</span>
-                        )}
-                        {toParagraphs(item.summary).map((paragraph, index) => (
-                          <span key={index} style={{ display: 'block', margin: index === 0 ? '0' : '0.6em 0 0' }}>{paragraph}</span>
-                        ))}
+                        {(() => {
+                          const paragraphs = toParagraphs(item.summary)
+                          const bodyText = paragraphs.join(' ').trim()
+                          // 「勉强算有正文」不该冒充正文：像 HN 那样 feed 里只有一串 Comments 链接时，
+                          // 剥完标签只剩几个字符——与其显示一行孤零零的 "Comments"，不如如实说明。
+                          if (bodyText.length < MIN_BODY_CHARS) {
+                            return (
+                              <span style={{ display: 'block', opacity: 0.7 }}>
+                                {paragraphs.length === 0
+                                  ? '（此源未提供正文，点下面到原站阅读）'
+                                  : '（此源只提供标题与外链，正文在原站）'}
+                              </span>
+                            )
+                          }
+                          return paragraphs.map((paragraph, index) => (
+                            <span key={index} style={{ display: 'block', margin: index === 0 ? '0' : '0.6em 0 0' }}>{paragraph}</span>
+                          ))
+                        })()}
                         {item.link !== '' && (
                           <a href={item.link} target="_blank" rel="noreferrer" style={{ fontSize: 12, display: 'inline-block', marginTop: 8 }}>打开原站 ↗</a>
                         )}
