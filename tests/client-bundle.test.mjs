@@ -8,7 +8,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
@@ -22,8 +22,12 @@ const TAB_KIND = 'rssReader'
 function loadClientBundle() {
   const source = readFileSync(BUNDLE, 'utf8')
   let captured = null
+  const opened = []
   const sandbox = {
-    window: { __ModuleLoader__: { load: (entry) => { captured = entry } } },
+    window: {
+      __ModuleLoader__: { load: (entry) => { captured = entry } },
+      open: (url) => { opened.push(url) },
+    },
     console,
   }
   vm.createContext(sandbox)
@@ -47,7 +51,41 @@ function loadClientBundle() {
     }
     throw new Error('未预期的外部依赖：' + specifier)
   }
-  return { id: captured.id, exports: captured.factory(require) }
+  return { id: captured.id, exports: captured.factory(require), sandbox, opened }
+}
+
+/**
+ * 驱动**真实的** store：用桩 fetch 喂数据，并把每个请求过的端点记下来。
+ *
+ * 为什么值得专门做一层：客户端行为在浏览器里跑，我无法自测；而历史故障几乎都出在
+ * 「接线」上（按键没接上、动作漏了副作用），不是算法上。这一层让「按 v 打开时是否
+ * 真的调了 markRead」这类问题变成可断言的，而不是靠读代码确认。
+ */
+async function driveStore({ items = [], article } = {}) {
+  const { exports, sandbox, opened } = loadClientBundle()
+  const endpoints = []
+  sandbox.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body)
+    endpoints.push(body.endpoint)
+    const ok = (value) => ({ ok: true, status: 200, json: async () => ({ ok: true, value }) })
+    if (body.endpoint === 'overview') {
+      return ok({ feeds: [], unread: items.filter((i) => i.readAt === undefined).length, items })
+    }
+    if (body.endpoint === 'article') return ok(article ?? { itemId: body.payload.itemId, cached: false, paragraphs: ['正文'] })
+    return ok({ changed: 1, unread: 0 })
+  }
+  const store = exports.createReaderStore()
+  await store.load('overview')
+  return { store, endpoints, opened }
+}
+
+/** 一条最小可用的条目。 */
+function item(overrides = {}) {
+  return {
+    id: 'item-1', feedId: 'f', feedTitle: '源', title: '标题',
+    link: 'https://example.com/a', readAt: undefined, starred: false,
+    fetchedAt: '2026-10-06T00:00:00.000Z', ...overrides,
+  }
 }
 
 /** 以桩 ctx 跑一遍 apply，返回它注册的座位、标签页类型与开页动作。 */
@@ -107,4 +145,42 @@ test('注册侧栏图标与主面板，且二者 id 一致', () => {
   assert.equal(typeof panellist.component, 'function', 'panellist 需要一个图标组件')
   assert.equal(typeof main.component, 'function', 'main 需要一个面板组件')
   assert.equal(typeof panellist.options.label(), 'string', 'label 必须是字符串或返回字符串的函数')
+})
+test('产物不能过期：客户端源码比 lib/client.js 新时测试必须失败', () => {
+  const sourceMtime = statSync(join(ROOT, 'src', 'client', 'index.tsx')).mtimeMs
+  const bundleMtime = statSync(BUNDLE).mtimeMs
+  assert.ok(
+    bundleMtime >= sourceMtime,
+    '客户端产物过期（源码比 lib/client.js 新）——本测试会静默测旧代码。请先跑 dev_build_plugin 或 npm run build:client',
+  )
+})
+
+test('打开即视为已读：v（外部浏览器）必须调 markRead', async () => {
+  const { store, endpoints, opened } = await driveStore({ items: [item()] })
+  assert.equal(store.get().unread, 1, '前置条件：初始应为未读')
+
+  store.openSelected()
+  // markRead 是异步的，等它落地
+  await new Promise((resolve) => setTimeout(resolve, 20))
+
+  assert.deepEqual(opened, ['https://example.com/a'], 'v 应当用新标签页打开原站')
+  assert.ok(endpoints.includes('markRead'), 'v 打开后必须调 markRead —— 与 V/点击保持一致')
+  assert.equal(store.get().unread, 0, '未读数应当减掉')
+  assert.notEqual(store.get().items[0].readAt, undefined, '条目的已读态应当被标记')
+})
+
+test('打开即视为已读：V（内置详情页）同样必须调 markRead', async () => {
+  const { store, endpoints } = await driveStore({ items: [item()] })
+  await store.openArticle()
+  assert.ok(endpoints.includes('article'), 'V 应当去取正文')
+  assert.ok(endpoints.includes('markRead'), 'V 打开后必须调 markRead')
+  assert.equal(store.get().unread, 0)
+})
+
+test('没有链接的条目：v 不打开也不标已读（不误伤）', async () => {
+  const { store, endpoints, opened } = await driveStore({ items: [item({ link: '' })] })
+  store.openSelected()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.deepEqual(opened, [], '空链接不该打开浏览器')
+  assert.ok(!endpoints.includes('markRead'), '空链接不该标已读')
 })

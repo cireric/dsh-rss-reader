@@ -4,9 +4,9 @@
  * 入口只有侧栏图标 `sidebar.panellist`，点击切到主栏阅读器（该座位的 id 必须同名于
  * `main` 座位的 key，缺 main 条目点选即抛错）。
  *
- * 键盘：走 `ctx.shortcuts`——它的 `regions: ['page']` 保证焦点在输入框时不触发，
- * `resolve()` 返回 blocked 则拒绝执行；本插件用它实现「只有阅读器是当前焦点面时才响应」
- * （判定方式是阅读器根节点是否包含 document.activeElement，不依赖 layout 服务）。
+ * 键盘：**不走 `ctx.shortcuts`**（平台禁止无修饰键的绑定，见 keys.ts 注释），而是 `document` 级
+ * 监听 + 输入框/弹层/不可见三重守卫：面板卸载即移除监听，所以只在阅读器挂载期生效。
+ * 键位语义集中在 `src/keys.ts`（纯函数、有单测），滚动跟随在 `src/list-scroll.ts`（同）。
  *
  * 状态放在 apply 里创建的共享 store 上（不是组件内部 state）：快捷键要能驱动同一份状态，
  * 未读徽标也要在没有面板时读它。
@@ -162,7 +162,14 @@ function isTypingTarget(target: EventTarget | null): boolean {
   return false
 }
 
-function createReaderStore(ctx: ClientContext) {
+/**
+ * 阅读器状态与动作。
+ *
+ * 刻意 `export`：客户端行为在浏览器里跑，我无法自测；导出来之后，测试可以直接驱动
+ * 真实 store（喂桩 fetch / window.open），把「按 v 打开并标已读」这类**接线**钉住——
+ * 历史上多次故障都出在接线上，而不是算法上。
+ */
+export function createReaderStore() {
   let state: ReaderState = {
     items: [], feeds: [], unread: 0, filter: 'all',
     selectedId: undefined, loading: true, error: undefined, undo: undefined,
@@ -236,11 +243,18 @@ function createReaderStore(ctx: ClientContext) {
     set({ selectedId: target.id })
   }
 
+  /**
+   * v：用系统浏览器打开原站（新标签页）。
+   *
+   * **打开即视为已读**（用户 2026-10-06 定）：与内置详情页 `V`、列表点击三条路径保持一致——
+   * 同一类动作（打开条目）语义相同，否则会出现「内置打开算已读、外部打开不算」这种只能靠
+   * 读源码才发现的差异。GR 里的 `v`（view original）同样是阅读动作，不与已读语义冲突。
+   */
   const openSelected = (): void => {
     const item = visible().find((entry) => entry.id === state.selectedId)
     if (item === undefined || item.link === '') return
-    // 打开原站按已定方案走新标签页
     window.open(item.link, '_blank', 'noopener')
+    void markRead(item.id)
   }
 
   const toggleStar = async (): Promise<void> => {
@@ -372,7 +386,7 @@ function ReaderIcon({ size = 16, active = false }: { size?: number; active?: boo
   )
 }
 
-function createReader(store: ReaderStore, ctx: ClientContext): () => ReactNode {
+function createReader(store: ReaderStore): () => ReactNode {
   return function Reader(): ReactNode {
     const state = useReaderStore(store)
     const [root, setRoot] = useState<HTMLDivElement | null>(null)
@@ -671,8 +685,8 @@ function Badge({ store }: { store: ReaderStore }): ReactNode {
 }
 
 export function apply(ctx: ClientContext): void {
-  const store = createReaderStore(ctx)
-  const Reader = createReader(store, ctx)
+  const store = createReaderStore()
+  const Reader = createReader(store)
 
   // 阅读器本体进主栏；id 必须与 panellist 图标的 id 相同，否则点图标会抛错
   ctx.effect(() => ctx.slots.inject('main', () => ctx.slots.register(
