@@ -1,27 +1,24 @@
 /**
  * @dsh-external/dsh-rss-reader — client 半（M2 阅读面）。
  *
- * 入口一个：`sidebar.panellist` 图标。宿主这个座位**没有「开右栏」的口子**（注册项只有
- * id/order/label），图标在架构上绑死主栏——因此图标指向的 `main` 面板做成**转发器**：
- * 一挂载就把阅读器开进右栏（`ctx.sidebarRight.openTab`），再把主栏让回默认对话
- * （`ctx.layout.selectPanel(null)`）。用户看到的即是「点图标 → 阅读器出现在可开合的右栏」。
+ * 入口只有侧栏图标 `sidebar.panellist`，点击即切到主栏阅读器：该座位的 id 必须同名于
+ * `main` 座位的 key（缺 main 条目点选即抛错），所以这里成对注册，阅读器就渲染在 main 面板。
  *
- * 数据只经 Connection RPC 走主进程（references/connection-rpc.md），浏览器半不直连存储。
+ * 曾试过「图标 → 开进右栏标签页」（把 main 面板做成转发器），实测在你环境里转发不生效、
+ * 只留下一个点了没反应的兜底按钮，已按用户要求整体移除（2026-10-06）。
+ *
+ * 数据只经同源 HTTP 通道走主进程（见 shared.ts），浏览器半不直连存储。
  */
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import type { Context as ClientContext } from 'cordis'
 import { ROUTE_PATH, type ItemView, type Overview, type RpcResult } from '../shared.js'
 
-export const inject = ['slots', 'sidebarRightTabs', 'sidebarRight', 'layout']
+export const inject = ['slots']
 
-/** 本实现在标签页系统里的身份：body 与 chip 标题都注册在它下面。 */
-const TAB_ID = '@dsh-external/dsh-rss-reader/tab'
-/** 本实现独占的标签页类型。 */
-const TAB_KIND = 'rssReader'
 /** panellist 图标的 id 必须与 main 座位的 key 相同。 */
 const PANEL_ID = 'dsh-rss-reader'
 
-/** 调一个端点并解信封；失败抛出 \`code: message\`，由面板渲染。 */
+/** 调一个端点并解信封；失败抛出 `code: message`，由面板渲染。 */
 async function callRpc<T>(endpoint: string, payload?: unknown): Promise<T> {
   // 同源 fetch：宿主用自己的 web server 承载这条路由，并套了 connection 的准入检查
   const response = await fetch(ROUTE_PATH, {
@@ -52,42 +49,10 @@ function relativeTime(iso: string | undefined): string {
 }
 
 /** 摘要可能是 HTML 片段；列表里只当纯文本看，不注入 DOM。 */
-function plainText(html: string | undefined, limit = 240): string {
+function plainText(html: string | undefined, limit = 400): string {
   if (!html) return ''
   const text = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
   return text.length > limit ? text.slice(0, limit) + '…' : text
-}
-
-/**
- * 主栏座位用的转发器。
- *
- * 宿主的 `sidebar.panellist` 座位没有「开右栏」的口子（注册项只有 id/order/label），
- * 图标在架构上绑死主栏。所以：图标照常切到本面板，本面板一挂载就把阅读器开进**右栏**，
- * 再把主栏让回对话——用户看到的就是「点图标 → 阅读器出现在可开合的右栏里」。
- * 转发失败也不至于白屏：给出手动按钮兜底。
- */
-function ReaderLauncher(ctx: ClientContext): () => ReactNode {
-  return function Launcher(): ReactNode {
-    useEffect(() => {
-      try {
-        ctx.sidebarRight.openTab(TAB_KIND)
-        // null = 主栏回到默认的 conversation 面板
-        ;(ctx as unknown as { layout: { selectPanel: (id: unknown) => void } }).layout.selectPanel(null)
-      } catch (failure) {
-        // 让出去失败就留在本面板，用户仍能用下面的按钮
-        ctx.logger?.warn?.('[dsh-rss-reader] 转发到右栏失败：' + String(failure))
-      }
-    }, [])
-    return (
-      <div style={{ padding: 16, opacity: 0.8 }}>
-        <div>RSS 阅读器已开在右侧栏。</div>
-        <button type="button" style={{ marginTop: 8, fontSize: 12, padding: '2px 8px', cursor: 'pointer' }}
-          onClick={() => ctx.sidebarRight.openTab(TAB_KIND)}>
-          在右栏打开
-        </button>
-      </div>
-    )
-  }
 }
 
 function ReaderIcon({ size = 16, active = false }: { size?: number; active?: boolean }) {
@@ -101,9 +66,8 @@ function ReaderIcon({ size = 16, active = false }: { size?: number; active?: boo
 }
 
 /**
- * 阅读面组件工厂：闭包持有 client ctx 以便调 RPC。
- * @param ctx - 浏览器半上下文。
- * @returns 可重复注册到多个座位的组件。
+ * 阅读面组件：跨源合并的时间倒序条目流，点击展开摘要与原站链接并标记已读。
+ * @returns 注册进 main 座位的组件。
  */
 function createReader(ctx: ClientContext): () => ReactNode {
   return function Reader(): ReactNode {
@@ -152,29 +116,29 @@ function createReader(ctx: ClientContext): () => ReactNode {
     const items = overview?.items ?? []
 
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, fontSize: 13, lineHeight: 1.5 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px', borderBottom: '1px solid color-mix(in srgb, currentColor 12%, transparent)' }}>
-          <strong style={{ fontSize: 13 }}>RSS</strong>
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, fontSize: 14, lineHeight: 1.55 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 20px', borderBottom: '1px solid color-mix(in srgb, currentColor 12%, transparent)' }}>
+          <strong>RSS 阅读器</strong>
           <span style={{ opacity: 0.7 }}>{overview ? overview.unread + ' 条未读 / ' + items.length + ' 条' : '加载中…'}</span>
           <span style={{ flex: 1 }} />
           <button type="button" disabled={busy} onClick={() => { void load('refresh') }}
-            style={{ fontSize: 12, padding: '2px 8px', cursor: busy ? 'default' : 'pointer' }}>
+            style={{ fontSize: 13, padding: '3px 10px', cursor: busy ? 'default' : 'pointer' }}>
             {busy ? '刷新中' : '刷新'}
           </button>
         </div>
 
         {error !== undefined && (
-          <div style={{ padding: '8px 12px', color: '#c0392b', borderBottom: '1px solid color-mix(in srgb, currentColor 12%, transparent)' }}>{error}</div>
+          <div style={{ padding: '8px 20px', color: '#c0392b' }}>{error}</div>
         )}
         {failing.length > 0 && (
-          <div style={{ padding: '6px 12px', opacity: 0.75 }}>
+          <div style={{ padding: '6px 20px', opacity: 0.75, fontSize: 12 }}>
             {failing.length} 个源抓取失败：{failing.map((feed) => feed.title + '（' + feed.lastFailure + '）').join('；')}
           </div>
         )}
 
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
           {!busy && items.length === 0 && (
-            <div style={{ padding: 12, opacity: 0.7 }}>还没有条目。订阅源以存储域为准；可在 Config.feeds 里给种子，或用 OPML 导入（M4）。</div>
+            <div style={{ padding: 20, opacity: 0.7 }}>还没有条目。订阅源以存储域为准；可在 Config.feeds 里给种子，或用 OPML 导入（M4）。</div>
           )}
           {items.map((item) => {
             const isOpen = expanded === item.id
@@ -184,23 +148,23 @@ function createReader(ctx: ClientContext): () => ReactNode {
                 <div role="button" tabIndex={0}
                   onClick={() => { void toggle(item) }}
                   onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void toggle(item) } }}
-                  style={{ padding: '8px 12px', cursor: 'pointer', display: 'flex', gap: 8, alignItems: 'baseline' }}>
-                  <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', flex: '0 0 auto', marginTop: 5, background: unread ? 'currentColor' : 'transparent', opacity: unread ? 0.85 : 0 }} />
+                  style={{ padding: '10px 20px', cursor: 'pointer', display: 'flex', gap: 10, alignItems: 'baseline' }}>
+                  <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', flex: '0 0 auto', marginTop: 6, background: unread ? 'currentColor' : 'transparent' }} />
                   <span style={{ flex: 1, minWidth: 0 }}>
-                    <span style={{ display: 'block', fontWeight: unread ? 600 : 400, opacity: unread ? 1 : 0.72, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: isOpen ? 'normal' : 'nowrap' }}>{item.title || item.link || '(无标题)'}</span>
-                    <span style={{ display: 'block', fontSize: 11, opacity: 0.6, marginTop: 2 }}>
+                    <span style={{ display: 'block', fontWeight: unread ? 600 : 400, opacity: unread ? 1 : 0.7 }}>{item.title || item.link || '(无标题)'}</span>
+                    <span style={{ display: 'block', fontSize: 12, opacity: 0.6, marginTop: 2 }}>
                       {item.feedTitle} · {relativeTime(item.publishedAt ?? item.fetchedAt)}
                     </span>
+                    {isOpen && (
+                      <span style={{ display: 'block', marginTop: 8, opacity: 0.85, fontSize: 13 }}>
+                        {plainText(item.summary) !== '' && <span style={{ display: 'block' }}>{plainText(item.summary)}</span>}
+                        {item.link !== '' && (
+                          <a href={item.link} target="_blank" rel="noreferrer" style={{ fontSize: 12, display: 'inline-block', marginTop: 6 }}>打开原站 ↗</a>
+                        )}
+                      </span>
+                    )}
                   </span>
                 </div>
-                {isOpen && (
-                  <div style={{ padding: '0 12px 10px 26px', opacity: 0.85 }}>
-                    {plainText(item.summary) !== '' && <div>{plainText(item.summary)}</div>}
-                    {item.link !== '' && (
-                      <a href={item.link} target="_blank" rel="noreferrer" style={{ fontSize: 12 }}>打开原站 ↗</a>
-                    )}
-                  </div>
-                )}
               </div>
             )
           })}
@@ -212,32 +176,12 @@ function createReader(ctx: ClientContext): () => ReactNode {
 
 export function apply(ctx: ClientContext): void {
   const Reader = createReader(ctx)
-  const Launcher = ReaderLauncher(ctx)
 
-  // ① 右栏标签页：类型（stage 1）→ body（stage 2）→ chip 标题
-  ctx.effect(() => ctx.sidebarRightTabs.register({
-    id: TAB_ID,
-    kind: TAB_KIND,
-    priority: 'builtin',
-    title: () => 'RSS 阅读器',
-  }), 'dsh-rss-reader: tab type')
-
-  ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register(
-    { name: 'sidebar.right.pane.tab', key: TAB_ID },
-    Reader,
-  )), 'dsh-rss-reader: tab body')
-
-  ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register(
-    { name: 'sidebar.right.pane.tab.title', key: TAB_ID },
-    () => <span>RSS 阅读器</span>,
-  )), 'dsh-rss-reader: tab chip title')
-
-  // ② 侧栏图标（panellist）：该座位必须同名注册一个 main 面板，否则点选即抛错。
-  // 这里把 main 面板做成转发器——挂载即把阅读器开进右栏，并把主栏让回对话。
+  // 阅读器本体进主栏；id 必须与 panellist 图标的 id 相同，否则点图标会抛错
   ctx.effect(() => ctx.slots.inject('main', () => ctx.slots.register(
     { name: 'main', key: PANEL_ID },
-    Launcher,
-  )), 'dsh-rss-reader: main panel (launcher)')
+    Reader,
+  )), 'dsh-rss-reader: main panel')
 
   ctx.effect(() => ctx.slots.inject('sidebar.panellist', () => ctx.slots.register(
     { name: 'sidebar.panellist', id: PANEL_ID, order: 20, label: () => 'RSS 阅读器' },

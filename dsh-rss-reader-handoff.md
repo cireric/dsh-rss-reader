@@ -224,7 +224,10 @@ sed -n '1,30p' /Users/eric/Project/tests/deepseek-harness/packages/client/ui-sid
 
 **两处偏离方案，都有实测依据**
 
-1. **入口不能直接开右栏**：`sidebar.panellist` 的注册项只有 `id/order/label`，且其 id 必须寻址同名 `main` 座位（README 原文），**天生开不了右栏标签页**。（中途曾用 `sidebar.footer.action` 做入口，用户看过后明确否决，已删。）最终形态：`main` 面板做成**转发器**——挂载即 `ctx.sidebarRight.openTab` 开进右栏 + `ctx.layout.selectPanel(null)` 把主栏让回对话。
+1. **入口最终定为主栏**：`sidebar.panellist` 的注册项只有 `id/order/label`，且其 id 必须寻址同名 `main` 座位（README 原文），**天生开不了右栏标签页**。其间试过两版并都被用户实际使用否决、已全部移除：
+   - ① `sidebar.footer.action` 底部入口（用户：「不需要」）；
+   - ② `main` 面板做转发器、把阅读器开进右栏（`ctx.sidebarRight.openTab` + `ctx.layout.selectPanel(null)`）——实测**转发不生效**，只留下一个点了没反应的兜底按钮（用户：「像原来那样即可（不需要又在右栏打开）」）。
+   结论：图标 → `main` 面板直接渲染阅读器；右栏标签页那套（类型/body/chip 标题）与 `sidebarRight`/`layout`/`sidebarRightTabs` 注入一并删除，client 的 `inject` 回到 `['slots']`。
 2. **通道不走 Connection RPC**：`ctx.connection.rpc.handle` 内部 `owner = connection 插件自己的 ctx`，该 ctx 解析不到 `webServer` → 抛 `cannot get property "webServer" without inject`；全仓库亦无产品插件用它（只有测试与 gateway）。改用 `ctx.webServer.register` + `ctx.connection.requestRejection`（宿主接口自述就是「把 Connection 的检查套用到别的 Web 路由」）。
 
 **踩坑（都已修）**
