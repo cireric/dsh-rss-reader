@@ -221,6 +221,10 @@ export function apply(ctx: Context, config: Config): void {
     }
     if (!options.force && lastRefreshCompletedAt !== undefined
       && Date.now() - lastRefreshCompletedAt < config.minRefreshIntervalMs) {
+      // 被节流时把「还剩多久」记进日志：否则界面上只表现为「点了没反应」，
+      // 用户与 agent 都无法区分「没抓」和「抓了没新内容」（用户实测踩到）。
+      const waitSec = Math.ceil((config.minRefreshIntervalMs - (Date.now() - lastRefreshCompletedAt)) / 1000)
+      log('刷新被节流：距上次完成不足 ' + Math.round(config.minRefreshIntervalMs / 1000) + 's（还需等 ' + waitSec + 's）')
       return false
     }
     const subscriptions = target.listFeeds().map(([feedId]) => feedId)
@@ -283,6 +287,8 @@ export function apply(ctx: Context, config: Config): void {
       items: items.slice(0, config.maxItemsShown),
       unread: items.filter((item) => item.readAt === undefined).length,
       refreshed,
+      // 让界面能说明「上次到底什么时候抓过」——否则「按住刷新没反应」无从判断
+      refreshedAt: lastRefreshCompletedAt === undefined ? undefined : new Date(lastRefreshCompletedAt).toISOString(),
     }
   }
 

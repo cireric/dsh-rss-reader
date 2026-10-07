@@ -52,9 +52,9 @@ export interface Overview {
   /** 跨源合并、按时间倒序（river of news） */
   items: ItemView[]
   unread: number
-  /** 本次是否真的发起了抓取（被最小间隔节流时为 false） */
+  /** 本次调用是否真的发起了抓取（被节流或并入在途刷新时为 false） */
   refreshed: boolean
-  /** 上次刷新完成时间 */
+  /** 上次抓取完成时间（ISO）；undefined = 本次进程内还没成功抓过 */
   refreshedAt?: string
 }
 /** 按需正文（`article` 端点）的返回：成功给段落，失败给可直接显示的原因。 */

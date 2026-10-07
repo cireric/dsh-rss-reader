@@ -232,7 +232,18 @@ export function createReaderStore() {
   const load = async (endpoint: 'overview' | 'refresh'): Promise<void> => {
     set({ loading: true })
     try {
-      applyOverview(await callRpc<Overview>(endpoint))
+      const overview = await callRpc<Overview>(endpoint)
+      applyOverview(overview)
+      // 「按了刷新没反应」是本插件最早的体验投诉：界面从不说明发生了什么。
+      // 这里如实区分——真抓了 / 被最小间隔节流（附上次完成时间）。
+      if (endpoint === 'refresh') {
+        const stamp = overview.refreshedAt === undefined ? '' : '（上次完成于 ' + relativeTime(overview.refreshedAt) + '）'
+        set({
+          notice: overview.refreshed === true
+            ? '已重新抓取全部订阅源' + stamp
+            : '距上次抓取不足最小间隔，本次未抓取' + stamp + ' —— 间隔可在 Config.minRefreshIntervalMs 调整（默认 10 分钟）',
+        })
+      }
     } catch (failure) {
       set({ loading: false, error: failure instanceof Error ? failure.message : String(failure) })
     }
