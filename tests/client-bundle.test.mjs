@@ -396,3 +396,53 @@ test('接线：空格在列表页滚动视野、且不改变选中项（n/p 的�
   // （纯滚动写在组件的 DOM 操作里，依赖真实容器；用 store 断言可覆盖的部分）
   assert.equal(harness.store.get().selectedId, before, '扫视不应改变选中项')
 })
+test('详情页按钮：canStepArticle 与 stepArticle 判定必须一致（防「按钮灰着但键盘能切」）', async () => {
+  const { store } = await driveStore({
+    items: [item({ id: 'a' }), item({ id: 'b' }), item({ id: 'c' })],
+    article: { itemId: 'a', cached: false, paragraphs: ['正文'], frameable: false },
+  })
+  await store.openArticle()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+
+  // 首条：不能往上，能往下
+  assert.equal(store.canStepArticle(-1), false, '首条不该有上一条')
+  assert.equal(store.stepArticle(-1), false, '键盘也应拒绝（与按钮一致）')
+  assert.equal(store.canStepArticle(1), true)
+  assert.equal(store.stepArticle(1), true)
+
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(store.get().article.itemId, 'b', '应当切到第二条')
+
+  // 末条：不能往下
+  store.stepArticle(1)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(store.get().article.itemId, 'c', '应当切到第三条')
+  assert.equal(store.canStepArticle(1), false, '末条不该有下一条（按钮置灰）')
+  assert.equal(store.stepArticle(1), false, '键盘同样拒绝')
+})
+
+test('详情页按钮：抓取在途时两侧都不可切（防连点堆请求）', async () => {
+  const { store } = await driveStore({
+    items: [item({ id: 'a' }), item({ id: 'b' })],
+    article: { itemId: 'a', cached: false, paragraphs: ['正文'], frameable: false },
+  })
+  const pending = store.openArticle()
+  // 未 await：此刻 article.loading 为真
+  assert.equal(store.canStepArticle(1), false, '在途时按钮应当置灰')
+  assert.equal(store.canStepArticle(-1), false)
+  await pending
+})
+
+test('详情页按钮：尊重当前过滤（未读筛选下按钮也跳过已读条目）', async () => {
+  const items = [item({ id: 'a' }), { ...item({ id: 'b' }), readAt: '2026-10-01T00:00:00.000Z' }, item({ id: 'c' })]
+  const { store } = await driveStore({
+    items,
+    article: { itemId: 'a', cached: false, paragraphs: ['正文'], frameable: false },
+  })
+  store.setFilter('unread')
+  await store.openArticle()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  store.stepArticle(1)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(store.get().article.itemId, 'c', '未读筛选下应当跳过已读的 b')
+})

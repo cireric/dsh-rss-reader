@@ -414,11 +414,24 @@ export function createReaderStore() {
    * - 作用范围是**当前过滤下的可见列表**，与列表页 j/k 一致（「未读」筛选下就不会跳到已读条目）。
    * @returns 是否真的切换了
    */
-  const stepArticle = (delta: number): boolean => {
+  /**
+   * 正文页能否向该方向切换（**纯查询，不产生副作用**）。
+   *
+   * 单独抽出来的原因：界面上「上一条/下一条」按钮的禁用态必须与键盘的判断**完全一致**——
+   * 各自算一遍迟早会出现「按钮灰着但键盘能切」或反之（本插件的标签/实现错位问题已有前例）。
+   */
+  const canStepArticle = (delta: number): boolean => {
     if (state.article?.loading === true) return false
     const list = visible()
     const index = list.findIndex((entry) => entry.id === state.article?.itemId)
     if (index < 0) return false
+    return list[index + delta] !== undefined
+  }
+
+  const stepArticle = (delta: number): boolean => {
+    if (!canStepArticle(delta)) return false
+    const list = visible()
+    const index = list.findIndex((entry) => entry.id === state.article?.itemId)
     const target = list[index + delta]
     if (target === undefined) return false
     void loadArticle(target.id)
@@ -512,7 +525,7 @@ export function createReaderStore() {
   return {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
     get, visible, load, markRead, selectRelative, openSelected, toggleStar, toggleRead, markAllRead, undoMarkAll,
-    openArticle, closeArticle, toggleArticleRender, cleanup, stepArticle,
+    openArticle, closeArticle, toggleArticleRender, cleanup, stepArticle, canStepArticle,
     toggleFeeds, exportOpml, importOpml, addFeed, removeFeed,
     dismissNotice: (): void => { set({ notice: undefined }) },
     setFilter: (filter: Filter): void => { set({ filter }); const list = filter === 'all' ? state.items : state.items.filter((i) => (filter === 'unread' ? i.readAt === undefined : i.starred)); set({ selectedId: list[0]?.id }) },
@@ -759,6 +772,10 @@ function createReader(store: ReaderStore): () => ReactNode {
             onBack={() => store.closeArticle()}
             onToggleRender={() => store.toggleArticleRender()}
             setBox={setArticleBox}
+            canPrev={store.canStepArticle(-1)}
+            canNext={store.canStepArticle(1)}
+            onPrev={() => { store.stepArticle(-1) }}
+            onNext={() => { store.stepArticle(1) }}
           />
         )}
 
@@ -1037,13 +1054,18 @@ function ArticleBlockView({ block }: { block: Record<string, unknown> }): ReactN
   return <p style={{ margin: '0 0 1.05em' }}>{text}</p>
 }
 
-function ArticleView({ article, link, onBack, onToggleRender, setBox }: {
+function ArticleView({ article, link, onBack, onToggleRender, setBox, canPrev, canNext, onPrev, onNext }: {
   article: ArticleState | undefined
   link: string | undefined
   onBack: () => void
   onToggleRender: () => void
   /** 阅读视图滚动容器的 ref 回调：空格翻页要作用在它上面（跨组件只能传进来） */
   setBox: (node: HTMLDivElement | null) => void
+  /** 上/下一条是否可切（与键盘共用同一判定，见 canStepArticle） */
+  canPrev: boolean
+  canNext: boolean
+  onPrev: () => void
+  onNext: () => void
 }): ReactNode {
   // 新缓存是结构化块；老缓存只有纯文本段落——把后者包成 p 块，走同一条渲染路径
   const blocks: Array<Record<string, unknown>> = article?.blocks !== undefined
@@ -1060,6 +1082,12 @@ function ArticleView({ article, link, onBack, onToggleRender, setBox }: {
       }}>
         <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" onClick={onBack}>← 返回列表（Esc）</button>
         <span style={{ flex: 1 }} />
+        {/* 上/下一条：焦点进入 iframe 后键盘就收不到了（浏览器限制），这两个按钮是**唯一可用的切换手段**。
+            标签里的键名与实际键位一致：详情页 j = 下一条、k = 上一条（n/p 是扫视，不换文章）。 */}
+        <button type="button" className="dsh-rss-btn" disabled={!canPrev}
+          title="上一条（k）" onClick={onPrev}>↑ 上一条</button>
+        <button type="button" className="dsh-rss-btn" disabled={!canNext}
+          title="下一条（j）" onClick={onNext}>↓ 下一条</button>
         <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
           disabled={!frameable || article?.loading === true}
           title={frameable
