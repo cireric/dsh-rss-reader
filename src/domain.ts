@@ -32,6 +32,8 @@ export type FeedRecord = z.infer<typeof feedRecordSchema>
 /** 抽取后的正文缓存（挂在条目上，与已读态一样只增不减）。 */
 export const articleRecordSchema = z.object({
   fetchedAt: z.string(),
+  /** 内容版本：缺省视为 1（纯文本老缓存）；低于当前版本时缓存判为过期并重抓 */
+  revision: z.number().optional(),
   title: z.string().optional(),
   /**
    * 结构化正文块（段落/标题/代码/图片/列表/引用）。

@@ -156,6 +156,15 @@ async function openDomainWithRetry(
   throw lastError
 }
 
+/**
+ * 按需正文缓存的**内容版本**。
+ *
+ * 1 = 纯文本段落（已废弃）；2 = 结构化块（段落/标题/代码/图片/列表/引用）。
+ * 缓存命中要求版本相等——老缓存会被判为过期并**自动重抓一次**，否则模型升级对已有缓存
+ * 永远不生效（实测：库里 9 条老缓存导致「图片怎么都不显示」）。
+ */
+const ARTICLE_REVISION = 2
+
 export function apply(ctx: Context, config: Config): void {
   const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
   const logFile = config.logFile || join(dshHome, 'state', 'dsh-rss-reader', 'reader.log')
@@ -382,7 +391,10 @@ export function apply(ctx: Context, config: Config): void {
           if (!itemId) return fail('bad-request', 'article 需要 itemId')
           const existing = target.item(itemId)
           if (existing === undefined) return fail('not-found', '条目不存在：' + itemId)
-          if (existing.article !== undefined) {
+          // 命中缓存的前提：**缓存的内容版本等于当前版本**。
+          // 老缓存（升级前抓的，只有纯文本 paragraphs）没有版本号 ⇒ 判为过期、自动重抓一次。
+          // 否则模型升级后老缓存会永远挡住新逻辑——实测：9 条老缓存导致「图片怎么都不显示」。
+          if (existing.article !== undefined && existing.article.revision === ARTICLE_REVISION) {
             return ok({
               itemId, cached: true, title: existing.article.title,
               blocks: existing.article.blocks, paragraphs: existing.article.paragraphs,
@@ -411,6 +423,7 @@ export function apply(ctx: Context, config: Config): void {
           }
           const article = {
             fetchedAt: new Date().toISOString(),
+            revision: ARTICLE_REVISION,
             title: fetched.title,
             blocks: fetched.blocks,
             frameable: fetched.frameable,
