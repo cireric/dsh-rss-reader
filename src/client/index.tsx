@@ -18,6 +18,7 @@ import type { Context as ClientContext } from 'cordis'
 import { ROUTE_PATH, type ArticlePayload, type CleanupResult, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult } from '../shared.js'
 import { resolveReaderKey } from '../keys.js'
 import { nextScrollTop } from '../list-scroll.js'
+import { pickInitialRender, nextRender } from '../article-view.js'
 
 export const inject = ['slots']
 
@@ -375,11 +376,14 @@ export function createReaderStore() {
       if (result.failure !== undefined) {
         set({ article: { itemId: item.id, loading: false, failure: result.failure } })
       } else {
+        const frameable = result.frameable === true
         set({
           article: {
             itemId: item.id, loading: false, title: result.title,
-            paragraphs: result.paragraphs ?? [], frameable: result.frameable === true,
-            render: 'reading',
+            paragraphs: result.paragraphs ?? [],
+            frameable,
+            // 站点允许被嵌入就直接给原站原样页面，否则回落到抽取正文（决策在 article-view.ts）
+            render: pickInitialRender(frameable),
           },
         })
       }
@@ -469,8 +473,8 @@ export function createReaderStore() {
   /** 在「抽取正文」与「原页」之间切换（仅站点允许被嵌时可切）。 */
   const toggleArticleRender = (): void => {
     const article = state.article
-    if (article === undefined || article.frameable !== true) return
-    set({ article: { ...article, render: article.render === 'original' ? 'reading' : 'original' } })
+    if (article === undefined) return
+    set({ article: { ...article, render: nextRender(article.render ?? 'reading', article.frameable === true) } })
   }
 
   return {
@@ -906,7 +910,7 @@ function ArticleView({ article, link, onBack, onToggleRender }: {
         <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
           disabled={!frameable || article?.loading === true}
           title={frameable
-            ? '按原站样式渲染整页（R 切换）'
+            ? '在原站原样页面与抽取正文之间切换（R 切换；本页可直接按 R）'
             : '该站点通过 X-Frame-Options / CSP 禁止被嵌入，只能看抽取版或去原站'}
           onClick={onToggleRender}>
           {original ? '阅读视图（R）' : '原站视图（R）'}

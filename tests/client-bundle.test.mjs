@@ -208,3 +208,54 @@ test('已读条目在未读筛选下正常不可见（sticky 只作用于当前�
   // setFilter 会把选中项设为过滤后的第一条（b）；已读的 a 不是选中项，不该出现
   assert.ok(!store.visible().some((i) => i.id === 'a'), '非选中的已读条目不该被 sticky 规则带出来')
 })
+test('V 打开：可嵌站点默认进原站视图，不可嵌回落阅读视图（用户要的体验）', async () => {
+  const frameable = await driveStore({
+    items: [item()],
+    article: { itemId: 'item-1', cached: false, paragraphs: ['正文'], frameable: true },
+  })
+  await frameable.store.openArticle()
+  assert.equal(frameable.store.get().article.render, 'original', '可嵌站点应当默认开原站视图')
+
+  const blocked = await driveStore({
+    items: [item()],
+    article: { itemId: 'item-1', cached: false, paragraphs: ['正文'], frameable: false },
+  })
+  await blocked.store.openArticle()
+  assert.equal(blocked.store.get().article.render, 'reading', '不可嵌站点应当回落到阅读视图')
+
+  const unknown = await driveStore({
+    items: [item()],
+    article: { itemId: 'item-1', cached: false, paragraphs: ['正文'] },
+  })
+  await unknown.store.openArticle()
+  assert.equal(unknown.store.get().article.render, 'reading', '可嵌性未知时保守回落，别给白屏 iframe')
+})
+
+test('V 打开：抓取失败时不进入任何视图，而是显示失败原因', async () => {
+  const { store } = await driveStore({
+    items: [item()],
+    article: { itemId: 'item-1', cached: false, failure: '版式不支持' },
+  })
+  await store.openArticle()
+  assert.equal(store.get().article.failure, '版式不支持', '失败原因必须如实显示')
+  assert.equal(store.get().article.render, undefined, '失败时不该有 render（没有内容可显示）')
+})
+
+test('切换视图：不可嵌时切不动（避免白屏），可嵌时能往返', async () => {
+  const blocked = await driveStore({
+    items: [item()],
+    article: { itemId: 'item-1', cached: false, paragraphs: ['正文'], frameable: false },
+  })
+  await blocked.store.openArticle()
+  blocked.store.toggleArticleRender()
+  assert.equal(blocked.store.get().article.render, 'reading', '不可嵌站点不该被切进原站视图')
+
+  const ok = await driveStore({
+    items: [item()],
+    article: { itemId: 'item-1', cached: false, paragraphs: ['正文'], frameable: true },
+  })
+  await ok.store.openArticle()
+  assert.equal(ok.store.get().article.render, 'original')
+  ok.store.toggleArticleRender()
+  assert.equal(ok.store.get().article.render, 'reading', '可嵌站点应当能切回阅读视图')
+})
