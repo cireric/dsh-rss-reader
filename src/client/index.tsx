@@ -359,15 +359,18 @@ export function createReaderStore() {
   }
 
   /**
-   * V：抓并显示选中条目的正文。
+   * 正文页的唯一真相来源：`article.itemId`。
    *
-   * 先走宿主缓存（第二次打开不跑网络）；失败原因原样显示，不编造内容。打开正文 = 读过了，
-   * 与 o / 点击保持同一语义。
+   * 这条路径同时负责：把该条目标已读（B1：显示即打开）、拉正文、按可嵌性决定默认视图。
+   * ⚠️ 界面上任何地方都不要再从 `selectedId` 反推正文页内容——曾经链接取自 selectedId、
+   * 内容取自 article.itemId，两者在"切换文章"时必然错位（iframe 载入新链接、可嵌性却来自旧站）。
+   *
+   * 先走宿主缓存（第二次打开不跑网络）；失败原因原样显示，不编造内容。
    */
-  const openArticle = async (): Promise<void> => {
-    const item = state.items.find((entry) => entry.id === state.selectedId)
+  const loadArticle = async (itemId: string): Promise<void> => {
+    const item = state.items.find((entry) => entry.id === itemId)
     if (item === undefined || item.link === '') return
-    set({ view: 'article', article: { itemId: item.id, loading: true } })
+    set({ view: 'article', selectedId: item.id, article: { itemId: item.id, loading: true } })
     void markRead(item.id)
     try {
       const result = await callRpc<ArticlePayload>('article', { itemId: item.id })
@@ -391,6 +394,32 @@ export function createReaderStore() {
       if (state.article?.itemId !== item.id) return
       set({ article: { itemId: item.id, loading: false, failure: error instanceof Error ? error.message : String(error) } })
     }
+  }
+
+  /** 打开当前选中的条目为正文（列表页的 V 走这里）。 */
+  const openArticle = async (): Promise<void> => {
+    const selectedId = state.selectedId
+    if (selectedId === undefined) return
+    await loadArticle(selectedId)
+  }
+
+  /**
+   * 正文页里切上/下一条文章（B1：显示即打开，故也标已读）。
+   *
+   * - **在途防抖**：上一次抓取未结束时忽略后续按键，否则连按 j 会堆出一串请求（每条一次网络）；
+   * - **边界停住**（不回列表）：避免"多按一下突然跳回列表"的意外；
+   * - 作用范围是**当前过滤下的可见列表**，与列表页 j/k 一致（「未读」筛选下就不会跳到已读条目）。
+   * @returns 是否真的切换了
+   */
+  const stepArticle = (delta: number): boolean => {
+    if (state.article?.loading === true) return false
+    const list = visible()
+    const index = list.findIndex((entry) => entry.id === state.article?.itemId)
+    if (index < 0) return false
+    const target = list[index + delta]
+    if (target === undefined) return false
+    void loadArticle(target.id)
+    return true
   }
 
   const closeArticle = (): void => { set({ view: 'list' }) }
@@ -480,7 +509,7 @@ export function createReaderStore() {
   return {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
     get, visible, load, markRead, selectRelative, openSelected, toggleStar, toggleRead, markAllRead, undoMarkAll,
-    openArticle, closeArticle, toggleArticleRender, cleanup,
+    openArticle, closeArticle, toggleArticleRender, cleanup, stepArticle,
     toggleFeeds, exportOpml, importOpml, addFeed, removeFeed,
     dismissNotice: (): void => { set({ notice: undefined }) },
     setFilter: (filter: Filter): void => { set({ filter }); const list = filter === 'all' ? state.items : state.items.filter((i) => (filter === 'unread' ? i.readAt === undefined : i.starred)); set({ selectedId: list[0]?.id }) },
@@ -565,15 +594,31 @@ function createReader(store: ReaderStore): () => ReactNode {
         const run = (act: () => void): void => { event.preventDefault(); act() }
         switch (action) {
           // 正文视图里 j/k 不移动：每次移动都意味着一次抓取，误按代价太高（Esc 回列表再移动）
-          case 'next': if (view !== 'list') return; run(() => store.selectRelative(1)); break
-          case 'prev': if (view !== 'list') return; run(() => store.selectRelative(-1)); break
+          // j/k 按视图分流——同一个键始终是「换条目」，语义不因视图而变：
+          //   列表页 → 移动选中（不标已读，用户 2026-10-06 定）
+          //   正文页 → 切上/下一条文章（B1：显示即打开，故标已读；在途防抖、边界停住）
+          case 'next':
+            if (view === 'article') { run(() => { store.stepArticle(1) }); break }
+            if (view !== 'list') return
+            run(() => store.selectRelative(1))
+            break
+          case 'prev':
+            if (view === 'article') { run(() => { store.stepArticle(-1) }); break }
+            if (view !== 'list') return
+            run(() => store.selectRelative(-1))
+            break
           // Google Reader 语义：o 展开/折叠 + 标已读（已读的唯一自动触发点，另有显式的 m）
-          case 'expand': run(() => {
-            const selected = store.get().selectedId
-            if (selected === undefined) return
-            setExpanded((current) => (current === selected ? undefined : selected))
-            void store.markRead(selected)
-          }); break
+          case 'expand':
+            // 只在列表页有意义：正文页按 o 曾会展开"背后那个看不见的列表"里的条目，
+            // 表现为按 Esc 回列表后发现某行莫名展开（既存缺陷，2026-10-06 修）
+            if (view !== 'list') return
+            run(() => {
+              const selected = store.get().selectedId
+              if (selected === undefined) return
+              setExpanded((current) => (current === selected ? undefined : selected))
+              void store.markRead(selected)
+            })
+            break
           case 'openExternal': run(() => store.openSelected()); break
           case 'openArticle': if (view !== 'list') return; run(() => { void store.openArticle() }); break
           case 'toggleRender': if (view !== 'article') return; run(() => store.toggleArticleRender()); break
@@ -679,7 +724,7 @@ function createReader(store: ReaderStore): () => ReactNode {
         {state.view === 'article' && (
           <ArticleView
             article={state.article}
-            link={state.items.find((entry) => entry.id === state.selectedId)?.link}
+            link={state.items.find((entry) => entry.id === state.article?.itemId)?.link}
             onBack={() => store.closeArticle()}
             onToggleRender={() => store.toggleArticleRender()}
           />

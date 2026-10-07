@@ -259,3 +259,79 @@ test('切换视图：不可嵌时切不动（避免白屏），可嵌时能往�
   ok.store.toggleArticleRender()
   assert.equal(ok.store.get().article.render, 'reading', '可嵌站点应当能切回阅读视图')
 })
+/** 造一份多条目的列表，供正文页 j/k 测试用。 */
+function manyItems(count) {
+  return Array.from({ length: count }, (_, index) => item({
+    id: 'i' + index,
+    title: '第 ' + index + ' 条',
+    link: 'https://example.com/' + index,
+  }))
+}
+
+test('正文页 j/k：切下一条并标已读（B1 显示即打开）', async () => {
+  const { store, endpoints } = await driveStore({
+    items: manyItems(3),
+    article: { itemId: 'i0', cached: false, paragraphs: ['正文'], frameable: false },
+  })
+  await store.openArticle()
+  assert.equal(store.get().article.itemId, 'i0', '前置条件：先打开第一条')
+  const before = store.get().unread
+
+  const stepped = store.stepArticle(1)
+  assert.equal(stepped, true, '应当真的切换了')
+  await new Promise((resolve) => setTimeout(resolve, 20))
+
+  assert.equal(store.get().article.itemId, 'i1', '正文页应当切到第二条')
+  assert.equal(store.get().selectedId, 'i1', '选中项必须同步（正文页以 article.itemId 为唯一真相）')
+  assert.ok(store.get().unread < before, 'B1：切过去即标已读，未读数应减少')
+  assert.ok(endpoints.filter((e) => e === 'article').length >= 2, '切换应当为第二条再取一次正文')
+})
+
+test('正文页 j/k：边界停住，不回列表（用户选定语义）', async () => {
+  const { store } = await driveStore({
+    items: manyItems(2),
+    article: { itemId: 'i0', cached: false, paragraphs: ['正文'], frameable: false },
+  })
+  await store.openArticle()
+  assert.equal(store.stepArticle(-1), false, '第一条再往前应当停住')
+  assert.equal(store.get().view, 'article', '停住时不该退回列表')
+  assert.equal(store.get().article.itemId, 'i0', '停住时不该换条目')
+
+  store.stepArticle(1)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(store.stepArticle(1), false, '最后一条再往后应当停住')
+  assert.equal(store.get().view, 'article')
+})
+
+test('正文页 j/k：在途时忽略后续按键（防连按打出一串请求）', async () => {
+  const { store, endpoints } = await driveStore({
+    items: manyItems(5),
+    article: { itemId: 'i0', cached: false, paragraphs: ['正文'], frameable: false },
+  })
+  await store.openArticle()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  const before = endpoints.filter((e) => e === 'article').length
+
+  // 连按四次：只有第一次应当真正发起（其余被 loading 挡住）
+  const results = [store.stepArticle(1), store.stepArticle(1), store.stepArticle(1), store.stepArticle(1)]
+  assert.deepEqual(results, [true, false, false, false], '在途期间后续按键必须被忽略')
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  const after = endpoints.filter((e) => e === 'article').length
+  assert.ok(after - before <= 1, '连按不该堆出多个请求，实际多出 ' + (after - before))
+})
+
+test('正文页 j/k：尊重当前过滤（未读筛选下不跳到已读条目）', async () => {
+  const items = manyItems(3)
+  items[1] = { ...items[1], readAt: '2026-10-01T00:00:00.000Z' }
+  const { store } = await driveStore({
+    items,
+    article: { itemId: 'i0', cached: false, paragraphs: ['正文'], frameable: false },
+  })
+  store.setFilter('unread')
+  await store.openArticle()
+  assert.equal(store.get().article.itemId, 'i0')
+
+  store.stepArticle(1)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(store.get().article.itemId, 'i2', '未读筛选下应当跳过已读的 i1')
+})
