@@ -18,3 +18,27 @@ export function nextScrollTop(
   // 越出下边界：把该行贴到容器底部
   return rowTop + rowHeight - containerHeight
 }
+/** 把滚动位置夹进合法范围（非有限值一律当 0，避免写进 NaN 让滚动条乱跳）。 */
+export function clampScrollTop(value: number, maxTop: number): number {
+  if (!Number.isFinite(value)) return 0
+  const ceiling = Number.isFinite(maxTop) && maxTop > 0 ? maxTop : 0
+  return Math.max(0, Math.min(ceiling, value))
+}
+
+/**
+ * 「扫视」：按**一行**为单位滚动视野，**不改变选中**（Google Reader 的 n/p 语义：
+ * scroll to the next item **without viewing it**）。
+ *
+ * 与 nextScrollTop 的分工：那个是「让选中项可见」（跟随光标），这个是「只看不动」
+ * ——用户在决定要不要打开某一项之前，需要先把视野推下去看看有什么。
+ */
+export function scanTop(currentTop: number, rowHeight: number, maxTop: number, direction: 1 | -1): number {
+  const step = Number.isFinite(rowHeight) && rowHeight > 0 ? rowHeight : 48
+  return clampScrollTop(currentTop + direction * step, maxTop)
+}
+
+/** 「翻页」：按**一屏**为单位滚动视野（空格 / shift+空格）。 */
+export function pageTop(currentTop: number, viewportHeight: number, maxTop: number, direction: 1 | -1): number {
+  const step = Number.isFinite(viewportHeight) && viewportHeight > 0 ? viewportHeight : 1
+  return clampScrollTop(currentTop + direction * step, maxTop)
+}

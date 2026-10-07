@@ -9,16 +9,24 @@
 /** 键盘动作：与具体按键解耦，客户端只负责把动作落到 store 上。 */
 export type ReaderKeyAction =
   | 'next' | 'prev' | 'expand' | 'openExternal' | 'openArticle'
-  | 'toggleRender' | 'back' | 'star' | 'toggleRead' | 'markAll' | 'manageFeeds' | 'none'
+  | 'toggleRender' | 'back' | 'star' | 'toggleRead' | 'markAll' | 'manageFeeds'
+  | 'scanNext' | 'scanPrev' | 'pageDown' | 'pageUp'
+  | 'none'
 
 /**
  * 键值 → 动作。`event.key` 大小写敏感：字母键按 shift 会变成大写，
  * 所以「同一动作接受两种写法」必须在这里显式写出，不能靠调用方猜测。
  */
-export function resolveReaderKey(key: string): ReaderKeyAction {
+export function resolveReaderKey(key: string, shift = false): ReaderKeyAction {
   switch (key) {
+    // j/k = 移动选中（列表）/ 换文章（详情）——「换条目」这条轴
     case 'j': return 'next'
     case 'k': return 'prev'
+    // n/p = 扫视：滚动视野但**不改变选中**（GR 原义；与 j/k 正交的「看」这条轴）
+    case 'n': return 'scanNext'
+    case 'p': return 'scanPrev'
+    // 空格 = 翻页（按一屏）。空格不分大小写，所以必须看 shift 标志才能分辨方向
+    case ' ': return shift === true ? 'pageUp' : 'pageDown'
     case 'o': return 'expand'
     // v 开外部浏览器、V（shift+v）在阅读器内读正文：这是刻意区分的一对
     case 'v': return 'openExternal'

@@ -28,8 +28,24 @@ test('核心导航与 GR 约定', () => {
   assert.equal(resolveReaderKey('a'), 'none')
 })
 
+test('n/p 是扫视（滚动视野但不改选中），与 j/k 正交', () => {
+  assert.equal(resolveReaderKey('n'), 'scanNext')
+  assert.equal(resolveReaderKey('p'), 'scanPrev')
+  // 关键：n/p 与 j/k 必须是不同的动作，否则「只看不动」这个能力就没了
+  assert.notEqual(resolveReaderKey('n'), resolveReaderKey('j'))
+  assert.notEqual(resolveReaderKey('p'), resolveReaderKey('k'))
+  // 大写 N/P 不该被绑定（避免与 GR 的 shift+n/p 翻页混淆）
+  assert.equal(resolveReaderKey('N'), 'none')
+  assert.equal(resolveReaderKey('P'), 'none')
+})
+
+test('空格翻页：必须用 shift 标志分辨方向（空格本身大小写不敏感）', () => {
+  assert.equal(resolveReaderKey(' '), 'pageDown', '空格应当向下翻页')
+  assert.equal(resolveReaderKey(' ', true), 'pageUp', 'shift+空格应当向上翻页')
+})
+
 test('未绑定的键一律返回 none（不误触发）', () => {
-  for (const key of ['q', 'z', 'Enter', ' ', 'F1', '阿', 'Shift', 'ArrowDown']) {
+  for (const key of ['q', 'z', 'Enter', 'F1', '阿', 'Shift', 'ArrowDown', 'N', 'P']) {
     assert.equal(resolveReaderKey(key), 'none', key + ' 不该被绑定')
   }
 })

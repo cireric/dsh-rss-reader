@@ -584,3 +584,38 @@ Config（`maxArticleCacheChars` 8M、`cleanupAfterDays` 30）；客户端顶栏�
 文件尾部结构**（打包器报 `}` expected，报错指向 apply 内部）。所幸**上一轮加的产品过期守卫**
 （源码比 lib/client.js 新即失败）当场报出，否则会在旧产物上跑测试而"全绿"。修复方式是
 **从 HEAD 恢复 + 改用 tools.edit 逐步改 + 每步构建验证**（五步全部 Build complete）。
+
+---
+
+## 27. 键盘两条轴：n/p 扫视 + 空格翻页（2026-10-06 用户选 A）
+
+用户先提出一个方案（列表页 n/p = 移动并打开、正文页 j/k = 滚动），问是否自洽。
+我查证 GR 原始语义后发现**那个方案与 GR 恰好相反**：
+
+- GR 官方定义（[完整表](http://4allhotkeys.blogspot.com/2012/03/google-reader-hotkeys.html)、
+  官方博客 [J-walking](http://googlereader.blogspot.com/2008/02/j-walking-with-reader.html)、
+  [cheat sheet](https://gegeek.com/_eBooks/CheatSheets/Google%20Reader%20Cheat%20Sheet.pdf) 三份一致）：
+  `j/k` = **view** next/prev（换条目并查看）；`n/p` = **scan** down/up
+  （scroll to the next item **without viewing it**）。
+- 用户方案的实质是「把 GR 的 n/p 语义给 j/k，把 GR 的 j/k 语义给 n/p」——内部自洽，但会引入
+  「按 n 即打开并标已读」这种**误按代价高**的行为（已读不易撤销）。
+
+**用户选 A**（我推荐）：保持 GR 的方向，两条正交轴：
+
+| 轴 | 键 | 列表页 | 正文页 |
+|---|---|---|---|
+| 换条目 | `j/k` | 移动选中（不标已读） | 切上/下一条文章（显示即打开） |
+| 只看不动 | `n/p` | 滚视野、选中不动 | 滚文章、条目不动 |
+| 按屏移动 | `空格/shift+空格` | 翻页列表 | 翻页文章 |
+
+**实现**：`list-scroll.ts` 新增 `scanTop`（按行）/`pageTop`（按屏）/`clampScrollTop`（夹边界，
+且对 NaN/0/负数免疫——否则会把滚动条写坏）；`keys.ts` 的 `resolveReaderKey` 增加 `shift` 参数
+（**空格大小写不敏感，方向只能靠 shift 标志分辨**）；阅读视图的滚动容器 ref 通过 prop 传入
+`ArticleView`（跨组件不能直接用外层的 setState）。
+
+**测试 96 条全绿**（新增 4 条滚动 + 3 条键位 + 1 条接线）。**反向验证**：把 n/p 改成 next/prev
+→ 正交性用例当场失败。
+
+**本轮我的失误**：改完只跑了 `npm run build:client` 就以为没事，**完整构建（含 host tsc 与客户端
+作用域闸门）**才报出 `Cannot find name 'setArticleBox'`——那是跨组件作用域的真错误。
+**教训**：验证必须跑完整链路，不是跑到我改的那一半为止。

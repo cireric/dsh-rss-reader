@@ -17,7 +17,7 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import type { Context as ClientContext } from 'cordis'
 import { ROUTE_PATH, type ArticlePayload, type CleanupResult, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult } from '../shared.js'
 import { resolveReaderKey } from '../keys.js'
-import { nextScrollTop } from '../list-scroll.js'
+import { nextScrollTop, scanTop, pageTop } from '../list-scroll.js'
 import { pickInitialRender, nextRender } from '../article-view.js'
 
 export const inject = ['slots']
@@ -541,6 +541,8 @@ function createReader(store: ReaderStore): () => ReactNode {
     const state = useReaderStore(store)
     const [root, setRoot] = useState<HTMLDivElement | null>(null)
     const [listBox, setListBox] = useState<HTMLDivElement | null>(null)
+    // 详情页阅读视图的滚动容器：空格翻页要作用在它上面
+    const [articleBox, setArticleBox] = useState<HTMLDivElement | null>(null)
     const [expanded, setExpanded] = useState<string | undefined>(undefined)
     // 慢加载：只有超过 180ms 还在加载时才把「刷新中」画出来，避免毫秒级请求闪一下
     const [slowLoading, setSlowLoading] = useState(false)
@@ -588,7 +590,8 @@ function createReader(store: ReaderStore): () => ReactNode {
         if (root === null || root.getClientRects().length === 0) return
         if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return
         // 键位语义在 src/keys.ts（纯函数，宿主侧有单测）；这里只把动作落到 store 上
-        const action = resolveReaderKey(event.key)
+        // 空格的大小写不敏感，方向必须靠 shift 标志分辨（见 keys.ts 的单测）
+        const action = resolveReaderKey(event.key, event.shiftKey)
         if (action === 'none') return
         const view = store.get().view
         const run = (act: () => void): void => { event.preventDefault(); act() }
@@ -619,6 +622,31 @@ function createReader(store: ReaderStore): () => ReactNode {
               void store.markRead(selected)
             })
             break
+          // n/p = 扫视：滚动视野但**不改变选中**（GR 原义：scroll without viewing）
+          // 列表页滚列表，详情页滚文章——两处都是「只看不动」
+          case 'scanNext':
+          case 'scanPrev': {
+            const direction: 1 | -1 = action === 'scanNext' ? 1 : -1
+            const box = view === 'list' ? listBox : view === 'article' ? articleBox : null
+            if (box === null) return
+            run(() => {
+              const row = box.querySelector('[data-rss-row]')
+              const rowHeight = row instanceof HTMLElement ? row.offsetHeight : 48
+              box.scrollTop = scanTop(box.scrollTop, rowHeight, box.scrollHeight - box.clientHeight, direction)
+            })
+            break
+          }
+          // 空格 / shift+空格 = 按一屏翻页（列表与详情页都适用）
+          case 'pageDown':
+          case 'pageUp': {
+            const direction: 1 | -1 = action === 'pageDown' ? 1 : -1
+            const box = view === 'list' ? listBox : view === 'article' ? articleBox : null
+            if (box === null) return
+            run(() => {
+              box.scrollTop = pageTop(box.scrollTop, box.clientHeight, box.scrollHeight - box.clientHeight, direction)
+            })
+            break
+          }
           case 'openExternal': run(() => store.openSelected()); break
           case 'openArticle': if (view !== 'list') return; run(() => { void store.openArticle() }); break
           case 'toggleRender': if (view !== 'article') return; run(() => store.toggleArticleRender()); break
@@ -667,7 +695,7 @@ function createReader(store: ReaderStore): () => ReactNode {
             ))}
           </span>
           <span style={{ flex: 1 }} />
-          <span style={{ fontSize: 11, opacity: 0.55 }}>j/k 移动 · o 展开并已读 · V 读正文 · v 开原站 · s 星标 · m 已读 · A 全部 · F 订阅</span>
+          <span style={{ fontSize: 11, opacity: 0.55 }}>j/k 移动 · n/p 扫视 · 空格翻页 · o 展开并已读 · V 读正文 · v 开原站 · s 星标 · m 已读 · A 全部 · F 订阅</span>
           <button type="button" className="dsh-rss-btn"
             title="订阅管理：导入/导出 OPML、加源、退订（F 键）"
             onClick={() => store.toggleFeeds()}>订阅</button>
@@ -727,6 +755,7 @@ function createReader(store: ReaderStore): () => ReactNode {
             link={state.items.find((entry) => entry.id === state.article?.itemId)?.link}
             onBack={() => store.closeArticle()}
             onToggleRender={() => store.toggleArticleRender()}
+            setBox={setArticleBox}
           />
         )}
 
@@ -934,11 +963,13 @@ function isCodeBlock(paragraph: string): boolean {
 }
 
 /** 阅读器内的正文视图（D 方案）：默认抽取正文，站点允许时可切「原站视图」看原样页面。 */
-function ArticleView({ article, link, onBack, onToggleRender }: {
+function ArticleView({ article, link, onBack, onToggleRender, setBox }: {
   article: ArticleState | undefined
   link: string | undefined
   onBack: () => void
   onToggleRender: () => void
+  /** 阅读视图滚动容器的 ref 回调：空格翻页要作用在它上面（跨组件只能传进来） */
+  setBox: (node: HTMLDivElement | null) => void
 }): ReactNode {
   const paragraphs = article?.paragraphs ?? []
   const original = article?.render === 'original'
@@ -986,7 +1017,7 @@ function ArticleView({ article, link, onBack, onToggleRender }: {
         </>
       ) : (
         // 阅读视图：限宽 + 加大行高（长文可读性），代码块单独走等宽样式
-        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 24px 32px' }}>
+        <div ref={setBox} style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 24px 32px' }}>
           <div style={{ maxWidth: 760, margin: '0 auto', fontSize: 15.5, lineHeight: 1.85 }}>
             {article.title !== undefined && (
               <div style={{ fontSize: 19, fontWeight: 600, lineHeight: 1.4, marginBottom: 16 }}>{article.title}</div>
