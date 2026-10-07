@@ -63,8 +63,14 @@ export interface ArticlePayload {
   /** 命中存储里的缓存时为 true（没有跑网络） */
   cached: boolean
   title?: string
+  /**
+   * 结构化正文块（段落/标题/代码/图片/列表/引用）。客户端按 kind 排版——
+   * 纯文本无法表达「这是标题/这是图片」，图片更是会被丢弃（用户实测反馈）。
+   */
+  blocks?: Array<Record<string, unknown>>
+  /** 旧版本回传的纯文本段落；仅为兼容尚未刷新的老缓存，不再写入 */
   paragraphs?: string[]
-  /** 抓取/抽取失败的原因；与 paragraphs 互斥 */
+  /** 抓取/抽取失败的原因；与 blocks 互斥 */
   failure?: string
   /** 站点是否允许被 iframe 嵌入（决定能否切到「原站视图」） */
   frameable?: boolean

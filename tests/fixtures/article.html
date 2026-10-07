@@ -8,8 +8,19 @@
 <header><p>站点标语占位，长度也超过四十个字符所以必须靠标签丢弃而不是靠长度。</p></header>
 <article>
 <h1>正文大标题</h1>
+<h2>二级小标题</h2>
 <p>这是第一段真正的正文。它足够长，超过四十个字符的门槛，因此应当被保留下来。里面还有实体 &amp; 和中文引号 &#8220;测试&#8221;。</p>
+<figure>
+  <img src="/images/placeholder.gif" data-src="/images/real-photo.jpg" alt="一张真实照片">
+  <figcaption>图注：这是图片说明</figcaption>
+</figure>
 <p>这是第二段正文，同样超过四十个字符的门槛，用来验证多段落按顺序保留且不会互相粘连。</p>
+<ul>
+  <li>列表项一，内容足够长以便通过短项过滤门槛的判断</li>
+  <li>列表项二，同样足够长</li>
+</ul>
+<blockquote>这是一段引用文字，长度超过四十个字符的门槛，应当作为引用块保留下来。</blockquote>
+<img srcset="/images/small.jpg 480w, /images/large.jpg 1280w" src="/images/fallback.jpg" alt="响应式图片">
 <pre><code>def main():
     print("hello")
     return 0</code></pre>

@@ -20,7 +20,7 @@ import z from 'schemastery'
 import { readerDomain } from './domain.js'
 import { createStore, type ReaderStore } from './store.js'
 import { refreshFeeds, type FeedOutcome } from './refresh.js'
-import { fetchArticle } from './article.js'
+import { blocksToText, fetchArticle } from './article.js'
 import { selectCleanup, type CleanupRow } from './retention.js'
 import { buildOpml, parseOpml } from './opml.js'
 import { validateSubscriptions } from './subscribe.js'
@@ -309,6 +309,20 @@ export function apply(ctx: Context, config: Config): void {
     starred: record.starred,
   })
 
+  /** 正文缓存的字符数（新旧两种存储形态都要算，否则清理闸门会漏算老缓存）。 */
+  const articleCharsOf = (article: { blocks?: Array<Record<string, unknown>>; paragraphs?: string[] } | undefined): number => {
+    if (article === undefined) return 0
+    if (article.paragraphs !== undefined) return article.paragraphs.reduce((sum, paragraph) => sum + paragraph.length, 0)
+    if (article.blocks === undefined) return 0
+    return article.blocks.reduce((sum, block) => {
+      const text = block['text']
+      if (typeof text === 'string') return sum + text.length
+      const items = block['items']
+      if (Array.isArray(items)) return sum + items.reduce((inner, item) => inner + String(item).length, 0)
+      return sum
+    }, 0)
+  }
+
   const countUnread = (target: ReaderStore): number =>
     target.listFeeds().reduce((sum, [feedId]) => sum + target.listItems(feedId).filter(([, i]) => i.readAt === undefined).length, 0)
 
@@ -371,7 +385,8 @@ export function apply(ctx: Context, config: Config): void {
           if (existing.article !== undefined) {
             return ok({
               itemId, cached: true, title: existing.article.title,
-              paragraphs: existing.article.paragraphs, frameable: existing.article.frameable,
+              blocks: existing.article.blocks, paragraphs: existing.article.paragraphs,
+              frameable: existing.article.frameable,
             })
           }
           if (existing.link === '') return fail('bad-request', '该条目没有可抓取的链接')
@@ -397,7 +412,7 @@ export function apply(ctx: Context, config: Config): void {
           const article = {
             fetchedAt: new Date().toISOString(),
             title: fetched.title,
-            paragraphs: fetched.paragraphs,
+            blocks: fetched.blocks,
             frameable: fetched.frameable,
           }
           // 成功要清掉旧的失败原因：显式重建记录，避免在 .strict() 下塞 undefined 键
@@ -412,9 +427,9 @@ export function apply(ctx: Context, config: Config): void {
             starred: existing.starred,
             article,
           })
-          log('取正文成功：' + existing.link + '（' + fetched.paragraphs.length + ' 段 ' +
-            fetched.paragraphs.reduce((sum, p) => sum + p.length, 0) + ' 字符）')
-          return ok({ itemId, cached: false, title: article.title, paragraphs: article.paragraphs, frameable: article.frameable })
+          log('取正文成功：' + existing.link + '（' + fetched.blocks.length + ' 块 ' +
+            blocksToText(fetched.blocks).length + ' 字符）')
+          return ok({ itemId, cached: false, title: article.title, blocks: article.blocks, frameable: article.frameable })
         }
 
         case 'opmlExport': {
@@ -522,7 +537,7 @@ export function apply(ctx: Context, config: Config): void {
             starred: record.starred,
             read: record.readAt !== undefined,
             recency: record.publishedAt ?? record.fetchedAt,
-            articleChars: (record.article?.paragraphs ?? []).reduce((sum, paragraph) => sum + paragraph.length, 0),
+            articleChars: articleCharsOf(record.article),
           }))
           const doomed = selectCleanup(rows, cutoff)
           const freedChars = rows.filter((row) => doomed.includes(row.id))

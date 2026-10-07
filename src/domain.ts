@@ -33,9 +33,16 @@ export type FeedRecord = z.infer<typeof feedRecordSchema>
 export const articleRecordSchema = z.object({
   fetchedAt: z.string(),
   title: z.string().optional(),
-  paragraphs: z.array(z.string()),
+  /**
+   * 结构化正文块（段落/标题/代码/图片/列表/引用）。
+   * 用 z.unknown() 存是因为 schema 只负责「形状合法的数组」，具体块类型由 article.ts 定义；
+   * 老数据里的 paragraphs 字段保留为可选，读取时由客户端兼容（见 ArticleView）。
+   */
+  blocks: z.array(z.record(z.string(), z.unknown())).optional(),
   /** 站点是否允许被嵌入（决定能不能切「原站视图」）；老缓存缺此字段时按不可嵌处理 */
   frameable: z.boolean().optional(),
+  /** 旧版本存过纯文本段落；保留以便读回老缓存，不再写入 */
+  paragraphs: z.array(z.string()).optional(),
 }).strict()
 
 export const itemRecordSchema = z.object({

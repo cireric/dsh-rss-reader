@@ -79,6 +79,8 @@ interface ArticleState {
   itemId: string
   loading: boolean
   title?: string
+  /** 结构化正文块（新）；与 paragraphs 互斥——后者是老缓存里的纯文本形态 */
+  blocks?: Array<Record<string, unknown>>
   paragraphs?: string[]
   failure?: string
   /** 站点是否允许被嵌入（决定「原站视图」可不可用） */
@@ -383,6 +385,7 @@ export function createReaderStore() {
         set({
           article: {
             itemId: item.id, loading: false, title: result.title,
+            blocks: result.blocks,
             paragraphs: result.paragraphs ?? [],
             frameable,
             // 站点允许被嵌入就直接给原站原样页面，否则回落到抽取正文（决策在 article-view.ts）
@@ -963,6 +966,77 @@ function isCodeBlock(paragraph: string): boolean {
 }
 
 /** 阅读器内的正文视图（D 方案）：默认抽取正文，站点允许时可切「原站视图」看原样页面。 */
+/**
+ * 单个正文块的渲染。
+ *
+ * 之所以要分类型：用户反馈「图片不显示、样式变形」——根因是抽取层过去只回传纯文本段落，
+ * 图片被整块丢弃、标题/列表/引用的语义也没了，客户端只能一律当段落排版。
+ * 这里按块类型给语义化样式（图片限宽、列表留符号、引用加左边线、标题分级字号）。
+ */
+function ArticleBlockView({ block }: { block: Record<string, unknown> }): ReactNode {
+  const kind = typeof block['kind'] === 'string' ? block['kind'] : 'p'
+  const text = typeof block['text'] === 'string' ? block['text'] : ''
+
+  if (kind === 'img') {
+    const src = typeof block['src'] === 'string' ? block['src'] : ''
+    if (src === '') return null
+    const alt = typeof block['alt'] === 'string' ? block['alt'] : ''
+    const caption = typeof block['caption'] === 'string' ? block['caption'] : ''
+    return (
+      <figure style={{ margin: '0 0 1.3em' }}>
+        {/* loading=lazy：长文里的图片很多，一次性加载会拖慢首屏 */}
+        <img src={src} alt={alt} loading="lazy"
+          style={{ display: 'block', maxWidth: '100%', height: 'auto', borderRadius: 6 }} />
+        {caption !== '' && (
+          <figcaption style={{ fontSize: 13, opacity: 0.65, marginTop: 6, textAlign: 'center' }}>{caption}</figcaption>
+        )}
+      </figure>
+    )
+  }
+
+  if (kind === 'pre') {
+    return (
+      <pre style={{
+        margin: '0 0 1.1em', padding: '10px 12px', overflowX: 'auto',
+        borderRadius: 6, fontSize: 13, lineHeight: 1.6,
+        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+        background: 'color-mix(in srgb, currentColor 6%, transparent)',
+      }}>{text}</pre>
+    )
+  }
+
+  if (kind === 'h') {
+    const level = typeof block['level'] === 'number' ? block['level'] : 2
+    const size = level <= 1 ? 22 : level === 2 ? 19 : level === 3 ? 17 : 16
+    return (
+      <div style={{ fontSize: size, fontWeight: 600, lineHeight: 1.4, margin: '1.4em 0 0.5em' }}>{text}</div>
+    )
+  }
+
+  if (kind === 'list') {
+    const ordered = block['ordered'] === true
+    const items = Array.isArray(block['items']) ? block['items'] : []
+    const ListTag = ordered ? 'ol' : 'ul'
+    return (
+      <ListTag style={{ margin: '0 0 1.1em', paddingLeft: '1.5em' }}>
+        {items.map((entry, index) => <li key={index} style={{ marginBottom: '0.3em' }}>{String(entry)}</li>)}
+      </ListTag>
+    )
+  }
+
+  if (kind === 'quote') {
+    return (
+      <blockquote style={{
+        margin: '0 0 1.1em', padding: '0.2em 0 0.2em 1em',
+        borderLeft: '3px solid color-mix(in srgb, currentColor 25%, transparent)',
+        opacity: 0.9,
+      }}>{text}</blockquote>
+    )
+  }
+
+  return <p style={{ margin: '0 0 1.05em' }}>{text}</p>
+}
+
 function ArticleView({ article, link, onBack, onToggleRender, setBox }: {
   article: ArticleState | undefined
   link: string | undefined
@@ -971,7 +1045,10 @@ function ArticleView({ article, link, onBack, onToggleRender, setBox }: {
   /** 阅读视图滚动容器的 ref 回调：空格翻页要作用在它上面（跨组件只能传进来） */
   setBox: (node: HTMLDivElement | null) => void
 }): ReactNode {
-  const paragraphs = article?.paragraphs ?? []
+  // 新缓存是结构化块；老缓存只有纯文本段落——把后者包成 p 块，走同一条渲染路径
+  const blocks: Array<Record<string, unknown>> = article?.blocks !== undefined
+    ? article.blocks
+    : (article?.paragraphs ?? []).map((text) => ({ kind: 'p', text }))
   const original = article?.render === 'original'
   const frameable = article?.frameable === true
 
@@ -1016,24 +1093,13 @@ function ArticleView({ article, link, onBack, onToggleRender, setBox }: {
           />
         </>
       ) : (
-        // 阅读视图：限宽 + 加大行高（长文可读性），代码块单独走等宽样式
+        // 阅读视图：限宽 + 加大行高（长文可读性）；每种块由 ArticleBlockView 给语义化样式
         <div ref={setBox} style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 24px 32px' }}>
-          <div style={{ maxWidth: 760, margin: '0 auto', fontSize: 15.5, lineHeight: 1.85 }}>
+          <div style={{ maxWidth: 760, margin: '0 auto', fontSize: 16, lineHeight: 1.85 }}>
             {article.title !== undefined && (
-              <div style={{ fontSize: 19, fontWeight: 600, lineHeight: 1.4, marginBottom: 16 }}>{article.title}</div>
+              <div style={{ fontSize: 20, fontWeight: 600, lineHeight: 1.4, marginBottom: 18 }}>{article.title}</div>
             )}
-            {paragraphs.map((paragraph, index) => (
-              isCodeBlock(paragraph) ? (
-                <pre key={index} style={{
-                  margin: '0 0 1.1em', padding: '10px 12px', overflowX: 'auto',
-                  borderRadius: 6, fontSize: 13, lineHeight: 1.6,
-                  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
-                  background: 'color-mix(in srgb, currentColor 6%, transparent)',
-                }}>{paragraph}</pre>
-              ) : (
-                <p key={index} style={{ margin: '0 0 1.05em' }}>{paragraph}</p>
-              )
-            ))}
+            {blocks.map((block, index) => <ArticleBlockView key={index} block={block} />)}
           </div>
         </div>
       )}

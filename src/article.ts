@@ -1,12 +1,15 @@
 /**
  * 原站正文抓取与抽取（D 方案的宿主侧）。
  *
- * 为什么抽在宿主而在渲染在客户端：抽完只剩纯文本段落，回传体积小、客户端不需要注入 HTML
- * （无 XSS 面），而且抽取逻辑可以用固定夹具做单测——这是本轮最需要的那道验证。
+ * 为什么抽在宿主而在渲染在客户端：客户端不需要注入 HTML（无 XSS 面），抽取逻辑可用固定夹具
+ * 单测——这是最需要验证的部分。
  *
- * 不引第三方 Readability：只用「去非正文块 + 取 <p> 段落 + 退化到全文行」这套启发式，
- * 够用且完全可测。已知它会漏掉少数与导航混排的版式，这种失败是**可见**的（段落明显不对），
- * 而不是静默出错。
+ * **输出是「结构化块」而不是纯文本**（2026-10-06 用户反馈「图片不显示、样式变形」后升级）：
+ * 原先只回传字符串数组，图片被整块剥掉、标题/列表/引用的语义全部丢失，客户端只能一律当段落渲染。
+ * 现在保留 段落 / 标题 / 代码 / 图片 / 列表 / 引用 六种块，客户端按语义排版。
+ *
+ * 不引第三方 Readability：只用「按块级标签保护 + 按边界切分」这套启发式，够用且完全可测。
+ * 已知它会漏掉少数与导航混排的版式，这种失败是**可见**的（内容明显不对），而不是静默出错。
  */
 import { fetchFeed, type FetchLimits } from './feed/fetch.js'
 
@@ -68,10 +71,24 @@ export function preToText(fragment: string): string {
 /** 段落最小长度：低于此值的 <p> 多为「分类：xxx」「订阅」「相关阅读」这类栏目。 */
 const MIN_PARAGRAPH_CHARS = 40
 
-/** 抽取结果：标题与段落（纯文本；代码块保留内部换行）。 */
+/**
+ * 结构化正文块。
+ *
+ * 为什么要分种类：用户要求「阅读视图尽量与原站一致」。纯文本段落无法表达「这是标题/这是图/
+ * 这是列表」，样式必然变形——图片更是被直接丢弃。
+ */
+export type ArticleBlock =
+  | { readonly kind: 'p'; readonly text: string }
+  | { readonly kind: 'h'; readonly level: number; readonly text: string }
+  | { readonly kind: 'pre'; readonly text: string }
+  | { readonly kind: 'img'; readonly src: string; readonly alt?: string; readonly caption?: string }
+  | { readonly kind: 'list'; readonly ordered: boolean; readonly items: readonly string[] }
+  | { readonly kind: 'quote'; readonly text: string }
+
+/** 抽取结果：标题 + 结构化块。 */
 export interface ExtractedArticle {
   title?: string
-  paragraphs: string[]
+  blocks: ArticleBlock[]
 }
 
 /**
@@ -95,8 +112,61 @@ export function isFrameable(headers: Headers): boolean {
   return true
 }
 
+/** 只放行 http/https（挡掉 javascript: / data: —— 后者还可能是 1x1 跟踪像素）。 */
+function safeUrl(raw: string | undefined, base: string | undefined): string | undefined {
+  if (raw === undefined) return undefined
+  const trimmed = raw.trim()
+  if (trimmed === '' || trimmed.startsWith('data:')) return undefined
+  try {
+    const resolved = base === undefined ? new URL(trimmed) : new URL(trimmed, base)
+    return resolved.protocol === 'http:' || resolved.protocol === 'https:' ? resolved.toString() : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** 从标签串里取属性（大小写不敏感，支持单双引号与无引号）。 */
+export function attrOf(tag: string, name: string): string | undefined {
+  const pattern = new RegExp('\\s' + name + '\\s*=\\s*(?:"([^"]*)"|\'([^\']*)\'|([^\\s>]+))', 'i')
+  const match = pattern.exec(tag)
+  if (match === null) return undefined
+  const value = match[1] ?? match[2] ?? match[3]
+  return value === undefined ? undefined : decodeEntities(value).trim()
+}
+
+/**
+ * 挑出图片地址。
+ *
+ * 真实站点大量使用懒加载：`src` 是占位图（甚至是 1x1 gif），真地址在 `data-src` / `srcset` 里。
+ * 只读 `src` 会得到「图片不显示」或一屏灰块——用户反馈的正是这个现象。
+ * 优先级：srcset 里最大的候选 > src > data-src/data-original/data-lazy-src。
+ */
+export function pickImageUrl(tag: string, base: string | undefined): string | undefined {
+  const srcset = attrOf(tag, 'srcset') ?? attrOf(tag, 'data-srcset')
+  if (srcset !== undefined) {
+    // 取「描述符最大」的那个候选（1x/2x/640w/1280w 都按数字比较）
+    let best: { url: string; weight: number } | undefined
+    for (const part of srcset.split(',')) {
+      const pieces = part.trim().split(/\s+/)
+      const url = pieces[0]
+      if (url === undefined || url === '') continue
+      const weight = Number.parseFloat((pieces[1] ?? '1').replace(/[^0-9.]/g, '')) || 1
+      if (best === undefined || weight > best.weight) best = { url, weight }
+    }
+    const fromSrcset = safeUrl(best?.url, base)
+    if (fromSrcset !== undefined) return fromSrcset
+  }
+  // 顺序要紧：懒加载属性**必须排在 src 前面**——真实站点常把 src 写成占位图（甚至 1x1 gif），
+  // 真地址在 data-src 里。先看 src 就会拿到占位图，表现为「图片不显示」（用户实测反馈）。
+  for (const name of ['data-src', 'data-original', 'data-lazy-src', 'data-actualsrc', 'src']) {
+    const url = safeUrl(attrOf(tag, name), base)
+    if (url !== undefined) return url
+  }
+  return undefined
+}
+
 /** 从 HTML 里抽正文。纯函数——单测直接喂夹具。 */
-export function extractArticle(html: string): ExtractedArticle {
+export function extractArticle(html: string, baseUrl?: string): ExtractedArticle {
   const title =
     firstGroup(html, /<meta[^>]+property=["']og:title["'][^>]*content=["']([^"']+)["']/i)
     ?? firstGroup(html, /<meta[^>]+content=["']([^"']+)["'][^>]*property=["']og:title["']/i)
@@ -108,42 +178,96 @@ export function extractArticle(html: string): ExtractedArticle {
     body = body.replace(new RegExp('<' + tag + '\\b[^>]*>[\\s\\S]*?<\\/' + tag + '>', 'gi'), ' ')
   }
 
-  // ① 先保护代码块：它们确实配对，且必须保留换行与缩进
-  const codes: string[] = []
+  /**
+   * 块先存进 Map 并留下占位符，**最后按占位符在文档里的位置重建顺序**。
+   *
+   * ⚠️ 不能边处理边 push：各类型是按「阶段」批量处理的（先 figure、再 pre、再 list…），
+   * 那样数组顺序会变成**处理顺序**而不是文档顺序（实测：段落全被挤到末尾、图片跑到最前）。
+   */
+  const stashed = new Map<number, ArticleBlock>()
+  let nextBlockId = 0
+  const stash = (block: ArticleBlock): string => {
+    const id = nextBlockId
+    nextBlockId += 1
+    stashed.set(id, block)
+    return '\u0000B' + id + '\u0000'
+  }
+
+  // ①②③ 按「越具体越先」的顺序保护：figure 含 img、list 含 li、pre 可能含大量符号
+  body = body.replace(/<figure\b[^>]*>([\s\S]*?)<\/figure>/gi, (_whole, inner: string) => {
+    const imgTag = /<img\b[^>]*>/i.exec(inner)?.[0]
+    const src = imgTag === undefined ? undefined : pickImageUrl(imgTag, baseUrl)
+    if (src === undefined) return ' '
+    const caption = firstGroup(inner, /<figcaption\b[^>]*>([\s\S]*?)<\/figcaption>/i)
+    const text = caption === undefined ? '' : htmlToText(caption).replace(/\n/g, ' ').trim()
+    return stash({ kind: 'img', src, alt: imgTag === undefined ? undefined : attrOf(imgTag, 'alt'), caption: text === '' ? undefined : text })
+  })
   body = body.replace(/<pre\b[^>]*>([\s\S]*?)<\/pre>/gi, (_whole, inner: string) => {
     const text = preToText(inner)
-    if (text === '') return ' '
-    codes.push(text)
-    return '\u0000C' + (codes.length - 1) + '\u0000'
+    return text === '' ? ' ' : stash({ kind: 'pre', text })
+  })
+  body = body.replace(/<(ul|ol)\b[^>]*>([\s\S]*?)<\/\1>/gi, (_whole, tag: string, inner: string) => {
+    const items: string[] = []
+    for (const match of inner.matchAll(/<li\b[^>]*>([\s\S]*?)<\/li>/gi)) {
+      const text = htmlToText(match[1]).replace(/\n/g, ' ').trim()
+      if (text !== '') items.push(text)
+    }
+    // 只有一个短项的「列表」多半是导航残留，丢掉
+    if (items.length === 0 || (items.length === 1 && items[0].length < MIN_PARAGRAPH_CHARS)) return ' '
+    return stash({ kind: 'list', ordered: tag.toLowerCase() === 'ol', items })
+  })
+  body = body.replace(/<blockquote\b[^>]*>([\s\S]*?)<\/blockquote>/gi, (_whole, inner: string) => {
+    const text = htmlToText(inner).replace(/\n+/g, ' ').trim()
+    // 引用**不套散文长度门槛**：blockquote 标签本身就是语义信号，短引用（一句被引的话）也是引用
+    return text === '' ? ' ' : stash({ kind: 'quote', text })
+  })
+  body = body.replace(/<img\b[^>]*>/gi, (tag: string) => {
+    const src = pickImageUrl(tag, baseUrl)
+    return src === undefined ? ' ' : stash({ kind: 'img', src, alt: attrOf(tag, 'alt') })
+  })
+  body = body.replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi, (_whole, level: string, inner: string) => {
+    const text = htmlToText(inner).replace(/\n/g, ' ').trim()
+    return text === '' ? ' ' : stash({ kind: 'h', level: Number(level), text })
   })
 
-  // ② 按块级**边界**切分，而不是要求 <p>…</p> 配对。
-  //    实测教训：mihai.dinculescu.dev 的页面里 <p 出现 34 次而 </p> 出现 0 次（省略闭合标签），
-  //    配对正则命中 0，散文全军覆没——当时只是被「退化路径按行取全文」兜住了才看不出问题。
-  //    闭合与**开始**标签都算边界：实测该站省略 </p>，只按闭合切分会把多个段落粘成一段
-  //    （最长段曾达 2,383 字符）。开标签本身不含文字，切开无害；过短的碎片由长度门槛滤掉。
+  // ④ 按边界切分剩余散文，并**在同一遍里按文档顺序重建块**
+  //    （闭合与开始标签都算边界；实测有站点省略 </p>，只按闭合切会把多段粘成一段）
   const boundary = /<\/(?:p|div|li|h[1-6]|blockquote|section|article|figure|tr|td)>|<(?:p|div|li|h[1-6]|blockquote|section|article|figure|tr|td)\b[^>]*>|<br\s*\/?>/gi
-  const chunks = body.split(boundary)
-  const paragraphs: string[] = []
-  for (const chunk of chunks) {
-    // 一个 chunk 里可能夹着代码占位符（前后还有散文）：按占位符切开分别处理
-    for (const piece of chunk.split(/(\u0000C\d+\u0000)/)) {
-      const marker = /^\u0000C(\d+)\u0000$/.exec(piece)
-      if (marker !== null) {
-        paragraphs.push(codes[Number(marker[1])])
-        continue
-      }
-      const text = htmlToText(piece).replace(/\n/g, ' ')
-      if (text.length >= MIN_PARAGRAPH_CHARS) paragraphs.push(text)
+  const blocks: ArticleBlock[] = []
+  // ⚠️ 必须把边界**替换成换行**再切分：直接 split 会丢掉分隔信息，相邻的两段文字会首尾相接
+  // （实测：div 版式的两段被粘成一块 121 字符）。join('\n') 之后按占位符与换行分别处理。
+  for (const piece of body.replace(boundary, '\n').split(/(\u0000B\d+\u0000)/)) {
+    const marker = /^\u0000B(\d+)\u0000$/.exec(piece)
+    if (marker !== null) {
+      const block = stashed.get(Number(marker[1]))
+      if (block !== undefined) blocks.push(block)
+      continue
+    }
+    // 一个 piece 里可能含多行（被换行切开的相邻块）：逐行判断，避免把两段并成一段
+    for (const line of htmlToText(piece).split('\n')) {
+      const text = line.replace(/\s+/g, ' ').trim()
+      if (text.length >= MIN_PARAGRAPH_CHARS) blocks.push({ kind: 'p', text })
     }
   }
 
-  // ③ 兜底：完全没抽到时才按行取全文（这条路径会带上导航等噪声，所以只做最后手段）
-  if (paragraphs.length === 0) {
-    const lines = htmlToText(body).split('\n').filter((line) => line.length >= MIN_PARAGRAPH_CHARS)
-    if (lines.length > 0) return { title: normalizeTitle(title), paragraphs: lines }
+  // ⑤ 兜底：一个块都没有时按行取全文（会带导航噪声，故只作最后手段）
+  if (blocks.length === 0) {
+    for (const line of htmlToText(body).split('\n')) {
+      if (line.length >= MIN_PARAGRAPH_CHARS) blocks.push({ kind: 'p', text: line })
+    }
   }
-  return { title: normalizeTitle(title), paragraphs }
+  return { title: normalizeTitle(title), blocks }
+}
+
+/** 正文纯文本（用于长度统计与日志）。 */
+export function blocksToText(blocks: readonly ArticleBlock[]): string {
+  return blocks
+    .map((block) => {
+      if (block.kind === 'img') return block.alt ?? ''
+      if (block.kind === 'list') return block.items.join(' ')
+      return block.text
+    })
+    .join('\n')
 }
 
 function firstGroup(text: string, pattern: RegExp): string | undefined {
@@ -162,12 +286,12 @@ export async function fetchArticle(
   url: string,
   limits: FetchLimits,
   signal?: AbortSignal,
-): Promise<{ kind: 'ok'; title?: string; paragraphs: string[]; frameable: boolean } | { kind: 'failed'; reason: string }> {
+): Promise<{ kind: 'ok'; title?: string; blocks: ArticleBlock[]; frameable: boolean } | { kind: 'failed'; reason: string }> {
   let frameable = true
   const result = await fetchFeed(url, {}, limits, signal, (response) => { frameable = isFrameable(response.headers) })
   if (result.kind === 'failed') return { kind: 'failed', reason: result.reason }
   if (result.kind === 'not-modified') return { kind: 'failed', reason: '原站返回 304（未传条件请求，异常）' }
-  const extracted = extractArticle(result.body)
-  if (extracted.paragraphs.length === 0) return { kind: 'failed', reason: '没能从该页面里抽出正文（版式不支持）' }
-  return { kind: 'ok', title: extracted.title, paragraphs: extracted.paragraphs, frameable }
+  const extracted = extractArticle(result.body, url)
+  if (extracted.blocks.length === 0) return { kind: 'failed', reason: '没能从该页面里抽出正文（版式不支持）' }
+  return { kind: 'ok', title: extracted.title, blocks: extracted.blocks, frameable }
 }
