@@ -243,29 +243,20 @@ test('已读条目在未读筛选下正常不可见（sticky 只作用于当前�
   // setFilter 会把选中项设为过滤后的第一条（b）；已读的 a 不是选中项，不该出现
   assert.ok(!store.visible().some((i) => i.id === 'a'), '非选中的已读条目不该被 sticky 规则带出来')
 })
-test('V 打开：默认一律抽取视图（可嵌性只决定切换按钮是否可用）', async () => {
-  // 2026-10-08 更正：此前可嵌站点默认开原站视图，但那个沙箱会让现代站点整页错乱（见 article-view.ts）。
-  const frameable = await driveStore({
-    items: [item()],
-    article: { itemId: 'item-1', cached: false, paragraphs: ['正文'], frameable: true },
-  })
-  await frameable.store.openArticle()
-  assert.equal(frameable.store.get().article.render, 'reading', '可嵌站点也默认抽取视图')
-  assert.equal(frameable.store.get().article.frameable, true, '但可嵌性要留下来 —— 切换按钮靠它') 
-
-  const blocked = await driveStore({
-    items: [item()],
-    article: { itemId: 'item-1', cached: false, paragraphs: ['正文'], frameable: false },
-  })
-  await blocked.store.openArticle()
-  assert.equal(blocked.store.get().article.render, 'reading', '不可嵌站点当然是阅读视图')
-
-  const unknown = await driveStore({
-    items: [item()],
-    article: { itemId: 'item-1', cached: false, paragraphs: ['正文'] },
-  })
-  await unknown.store.openArticle()
-  assert.equal(unknown.store.get().article.render, 'reading', '可嵌性未知同样是阅读视图')
+test('V 打开：正文只有抽取一条路（原站视图整条路径已删除）', async () => {
+  // 2026-10-08：内嵌原站的 iframe 被删掉了 —— 严格沙箱会让现代站点只剩裸 HTML（用户实测），
+  // 放宽沙箱又要让发布者的脚本跑在 DSH 页面上下文里。想看原样就点「打开原站 ↗」去新标签页。
+  // 可嵌性（frameable）仍从 host 带回、仍留在状态里，但它不再决定任何视图。
+  for (const frameable of [true, false, undefined]) {
+    const harness = await driveStore({
+      items: [item()],
+      article: { itemId: 'item-1', cached: false, paragraphs: ['正文'], ...(frameable === undefined ? {} : { frameable }) },
+    })
+    await harness.store.openArticle()
+    assert.equal(harness.store.get().article.render, undefined,
+      'render 字段随原站视图一起删掉了，不该再出现在状态里（frameable=' + String(frameable) + '）')
+    assert.notEqual(harness.store.get().article.paragraphs, undefined, '正文必须照常拿到')
+  }
 })
 
 test('V 打开：抓取失败时不进入任何视图，而是显示失败原因', async () => {
@@ -275,29 +266,9 @@ test('V 打开：抓取失败时不进入任何视图，而是显示失败原因
   })
   await store.openArticle()
   assert.equal(store.get().article.failure, '版式不支持', '失败原因必须如实显示')
-  assert.equal(store.get().article.render, undefined, '失败时不该有 render（没有内容可显示）')
+  assert.equal(store.get().article.blocks, undefined, '失败时不该有内容块')
 })
 
-test('切换视图：不可嵌时切不动（避免白屏），可嵌时能往返', async () => {
-  const blocked = await driveStore({
-    items: [item()],
-    article: { itemId: 'item-1', cached: false, paragraphs: ['正文'], frameable: false },
-  })
-  await blocked.store.openArticle()
-  blocked.store.toggleArticleRender()
-  assert.equal(blocked.store.get().article.render, 'reading', '不可嵌站点不该被切进原站视图')
-
-  const ok = await driveStore({
-    items: [item()],
-    article: { itemId: 'item-1', cached: false, paragraphs: ['正文'], frameable: true },
-  })
-  await ok.store.openArticle()
-  assert.equal(ok.store.get().article.render, 'reading', '默认抽取版（2026-10-08 更正）')
-  ok.store.toggleArticleRender()
-  assert.equal(ok.store.get().article.render, 'original', '可嵌站点能切到原站视图')
-  ok.store.toggleArticleRender()
-  assert.equal(ok.store.get().article.render, 'reading', '再切一次应当切回来（可往返）')
-})
 /** 造一份多条目的列表，供正文页 j/k 测试用。 */
 function manyItems(count) {
   return Array.from({ length: count }, (_, index) => item({
@@ -429,16 +400,17 @@ test('接线：空格在列表页滚动视野、且不改变选中项（n/p 的�
   assert.equal(harness.store.get().selectedId, before, '扫视不应改变选中项')
 })
 
-test('原站视图 iframe 必须有沙箱，且不给同源升级路径（2026-10-07 安全修）', () => {
+test('客户端不得再内嵌原站页面（2026-10-08 删除 iframe 后的守护）', () => {
+  // 为什么是「禁止内嵌」而不是「必须沙箱」：这个 iframe 的两条路都不能接受 ——
+  // 严格沙箱 ⇒ 现代站点只剩裸 HTML（用户实测）；放宽沙箱 ⇒ 发布者脚本跑在 DSH 页面上下文里。
+  // 所以原站内容一律走新标签页（浏览器自己的上下文），客户端不该再出现 iframe / 沙箱常量。
   const { exports } = loadClientBundle()
-  const props = exports.ORIGINAL_VIEW_FRAME_PROPS
-  assert.ok(props !== undefined, '客户端必须导出 ORIGINAL_VIEW_FRAME_PROPS（JSX 与测试共用同一份）')
-  assert.ok(props.sandbox.includes('allow-scripts'), '原站需要脚本才能正常显示')
-  assert.ok(!props.sandbox.includes('allow-same-origin'),
-    '给了 allow-same-origin 就保留真实 origin：一旦 SSRF 让 frame 落在本机 127.0.0.1:3080，同源 frame 可自行解除沙箱')
-  assert.ok(!props.sandbox.includes('allow-top-navigation'),
-    '否则一次用户点击就能把整个标签页换成钓鱼页（地址栏仍是本机地址）')
-  assert.equal(props.referrerPolicy, 'no-referrer', '别把本机地址当 Referer 发给原站')
+  assert.equal(exports.ORIGINAL_VIEW_FRAME_PROPS, undefined,
+    'ORIGINAL_VIEW_FRAME_PROPS 必须随原站视图一起删掉（留着就是死代码）')
+  // 导出面是客户端对外的契约：入口必须还在（测试与宿主都靠它）
+  assert.notEqual(exports.apply, undefined, '插件入口必须在')
+  assert.notEqual(exports.createReader, undefined, '阅读器工厂必须在')
+  assert.equal(exports.ORIGINAL_VIEW_FRAME_PROPS, undefined, '原站视图的沙箱常量必须已删')
 })
 test('详情页按钮：canStepArticle 与 stepArticle 判定必须一致（防「按钮灰着但键盘能切」）', async () => {
   const { store } = await driveStore({

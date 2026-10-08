@@ -18,6 +18,12 @@ import { decodeEntities, htmlToText, preToText } from './html-text.js'
 /** 整块丢弃的标签（连同内容）：这些几乎从不属于正文。 */
 const DROP_BLOCKS = ['script', 'style', 'noscript', 'svg', 'iframe', 'form', 'nav', 'header', 'footer', 'aside', 'template'] as const
 
+/** CDN 尺寸描述符小于等于这个值就当作装饰性小图（头像/图标/徽标）。见 isDecorativeImage。 */
+const DECORATIVE_IMAGE_MAX = 200
+
+/** 同一个 src 在正文里出现到这个次数以上就只留第一张（卡片区会把同一张图重复塞进来）。 */
+const MAX_SAME_IMAGE = 2
+
 
 /**
  * 结构化正文块。
@@ -89,6 +95,24 @@ export function attrOf(tag: string, name: string): string | undefined {
  * 只读 `src` 会得到「图片不显示」或一屏灰块——用户反馈的正是这个现象。
  * 优先级：srcset 里最大的候选 > src > data-src/data-original/data-lazy-src。
  */
+/**
+ * 这张图是不是「装饰性小图」—— CDN 的尺寸描述符说明它被当成头像/图标在用。
+ *
+ * 实测依据（sspai.com/post/115416）：21 个 img 块里 6 个是**同一张作者头像**的两种规格
+ * （thumbnail/!72x72r 与 !100x100r，各出现 3 次），而正文图都是无尺寸描述符的原图。
+ * 判据只看 URL 里显式的宽x高描述符，**不猜路径关键词**（那是脆弱且容易误伤的做法）。
+ *
+ * 阈值取 200：头像/图标/徽标的缩略规格都在 100 以内，而正文里最小的插图也远大于它。
+ */
+export function isDecorativeImage(url: string): boolean {
+  for (const match of url.matchAll(/[!/=_-]0*(\d{1,4})x0*(\d{1,4})(?![0-9])/g)) {
+    const width = Number(match[1])
+    const height = Number(match[2])
+    if (width > 0 && height > 0 && width <= DECORATIVE_IMAGE_MAX && height <= DECORATIVE_IMAGE_MAX) return true
+  }
+  return false
+}
+
 export function pickImageUrl(tag: string, base: string | undefined): string | undefined {
   const srcset = attrOf(tag, 'srcset') ?? attrOf(tag, 'data-srcset')
   if (srcset !== undefined) {
@@ -316,7 +340,8 @@ export function extractArticle(html: string, baseUrl?: string): ExtractedArticle
   body = rewriteTagRegions(body, (name) => name === 'figure', (_name, inner) => {
     const imgTag = firstVoidTag(inner, 'img')
     const src = imgTag === undefined ? undefined : pickImageUrl(imgTag, baseUrl)
-    if (src === undefined) return ' '
+    // 装饰性小图（头像/图标）即使包在 figure 里也不是正文，丢掉
+    if (src === undefined || isDecorativeImage(src)) return ' '
     const caption = firstRegion(inner, inner.toLowerCase(), 'figcaption')
     const text = caption === undefined ? '' : htmlToText(caption).replace(/\n/g, ' ').trim()
     return stash({ kind: 'img', src, alt: imgTag === undefined ? undefined : attrOf(imgTag, 'alt'), caption: text === '' ? undefined : text })
@@ -342,7 +367,8 @@ export function extractArticle(html: string, baseUrl?: string): ExtractedArticle
   })
   body = rewriteVoidTags(body, 'img', (tag) => {
     const src = pickImageUrl(tag, baseUrl)
-    return src === undefined ? ' ' : stash({ kind: 'img', src, alt: attrOf(tag, 'alt') })
+    if (src === undefined || isDecorativeImage(src)) return ' '
+    return stash({ kind: 'img', src, alt: attrOf(tag, 'alt') })
   })
   body = rewriteTagRegions(body, (name) => /^h[1-6]$/.test(name), (name, inner) => {
     const text = htmlToText(inner).replace(/\n/g, ' ').trim()
@@ -375,7 +401,27 @@ export function extractArticle(html: string, baseUrl?: string): ExtractedArticle
       if (line.length >= MIN_CONTENT_CHARS) blocks.push({ kind: 'p', text: line })
     }
   }
-  return { title: normalizeTitle(title), blocks }
+  return { title: normalizeTitle(title), blocks: dedupeImages(blocks) }
+}
+
+/**
+ * 同一张图在正文里重复出现时只留第一次。
+ *
+ * 实测依据（sspai）：作者头像与「相关阅读」卡片会引用与正文相同的图；22 个 img 块里去重能砍掉
+ * 4 个纯重复。只对 img 去重，**段落重复不碰**（那可能是站点故意的排版，也可能是抽取噪声，
+ * 但两种情况下「合并」都比「保留」更危险）。
+ */
+function dedupeImages(blocks: readonly ArticleBlock[]): ArticleBlock[] {
+  const seen = new Map<string, number>()
+  const out: ArticleBlock[] = []
+  for (const block of blocks) {
+    if (block.kind !== 'img') { out.push(block); continue }
+    const count = (seen.get(block.src) ?? 0) + 1
+    seen.set(block.src, count)
+    if (count > MAX_SAME_IMAGE) continue
+    out.push(block)
+  }
+  return out
 }
 
 /** 正文纯文本（用于长度统计与日志）。 */

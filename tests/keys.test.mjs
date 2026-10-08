@@ -6,13 +6,15 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { resolveReaderKey } from '../lib/keys.js'
 
-test('键位：r 刷新计数、w 切视图（2026-10-08 改键，标签同步改了）', () => {
+test('键位：r 刷新计数；w/W 已空出且不得被偷偷接管（2026-10-08）', () => {
   // 2026-10-08 改键：r 归还给「刷新未读计数」（规格 §5 不变量 8），视图切换移到 w/W。
   // 标签（article-pane 的「（W）」）已同步改，免得又出现「标签与实现各说各话」。
   assert.equal(resolveReaderKey('r'), 'refreshCount')
   assert.equal(resolveReaderKey('R'), 'refreshCount')
-  assert.equal(resolveReaderKey('w'), 'toggleRender')
-  assert.equal(resolveReaderKey('W'), 'toggleRender')
+  // w/W 于 2026-10-08 空出：原站视图（iframe）整条路径已删除。留空的键必须如实解析成 none ——
+  // 谁想重新占用它，就得先在这条断言上留下痕迹（这是「键位不被偷偷改派」的守护）。
+  assert.equal(resolveReaderKey('w'), 'none')
+  assert.equal(resolveReaderKey('W'), 'none')
 })
 
 test('v 与 V 是刻意区分的一对：外部浏览器 vs 阅读器内读正文', () => {

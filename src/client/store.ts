@@ -7,7 +7,6 @@
  */
 import { useEffect, useState } from 'react'
 import { ROUTE_PATH, recencyOf, type ArticlePayload, type CleanupResult, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult } from '../shared.js'
-import { nextRender, pickInitialRender } from '../article-view.js'
 
 export type Filter = 'all' | 'unread' | 'starred'
 
@@ -27,10 +26,11 @@ export interface ArticleState {
   blocks?: Array<Record<string, unknown>>
   paragraphs?: string[]
   failure?: string
-  /** 站点是否允许被嵌入（决定「原站视图」可不可用） */
+  /**
+   * 站点是否允许被嵌入。**2026-10-08 起不再决定任何视图**：正文只走抽取视图，这个字段留作诊断
+   * （能在界面/日志里说明「这个站禁嵌」）。真正内嵌原站页面的路径已整条删除，理由见 article-pane.tsx。
+   */
   frameable?: boolean
-  /** 抽取正文（阅读视图）还是原页（原站视图，iframe） */
-  render?: 'reading' | 'original'
 }
 
 export interface ReaderState {
@@ -358,8 +358,6 @@ export function createReaderStore() {
             blocks: result.blocks,
             paragraphs: result.paragraphs ?? [],
             frameable,
-            // 默认一律抽取版（决策与理由在 article-view.ts）；frameable 只决定切换按钮是否可用
-            render: pickInitialRender(),
           },
         })
       }
@@ -502,18 +500,11 @@ export function createReaderStore() {
     }
   }
 
-  /** 在「抽取正文」与「原页」之间切换（仅站点允许被嵌时可切）。 */
-  const toggleArticleRender = (): void => {
-    const article = state.article
-    if (article === undefined) return
-    set({ article: { ...article, render: nextRender(article.render ?? 'reading', article.frameable === true) } })
-  }
-
   return {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
     get, visible, load, markRead, selectRelative, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllRead, undoMarkAll,
     setLayout, setMarkAllRange, setShowUnread, refreshCount,
-    openArticle, closeArticle, toggleArticleRender, cleanup, stepArticle, canStepArticle,
+    openArticle, closeArticle, cleanup, stepArticle, canStepArticle,
     toggleFeeds, exportOpml, importOpml, addFeed, removeFeed,
     dismissNotice: (): void => { set({ notice: undefined }) },
     setFilter: (filter: Filter): void => { set({ filter }); const list = filter === 'all' ? state.items : state.items.filter((i) => (filter === 'unread' ? i.readAt === undefined : i.starred)); set({ selectedId: list[0]?.id }) },

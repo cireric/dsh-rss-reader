@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { extractArticle, isFrameable, pickImageUrl, attrOf, blocksToText } from '../lib/article.js'
+import { extractArticle, isDecorativeImage, isFrameable, pickImageUrl, attrOf, blocksToText } from '../lib/article.js'
 // decodeEntities / htmlToText 已搬到 html-text.ts（2026-10-07），断言一条没动
 import { decodeEntities, htmlToText } from '../lib/html-text.js'
 
@@ -150,4 +150,38 @@ test('实体解码：越界码点不得抛错（否则一次输入就能毁掉�
   assert.equal(decodeEntities('&#1114112;'), '&#1114112;', '越界的十进制引用同理')
   assert.equal(decodeEntities('&#x10ffff;'), '\u{10ffff}', '边界内的最大码点照常解码')
   assert.equal(decodeEntities('&#x41;'), 'A', '常规引用不受影响')
+})
+
+test('装饰性小图判据：CDN 尺寸描述符 ≤200 就当头像/图标丢掉（2026-10-08 用户实测）', () => {
+  // 实测样本：同一张作者头像以 thumbnail/!72x72r 与 !100x100r 两种规格各出现多次，
+  // 而正文图都是无尺寸描述符的原图。判据只看显式宽x高，不猜路径关键词。
+  assert.equal(isDecorativeImage('https://cdn.test/a.JPG?imageMogr2/thumbnail/!72x72r/gravity/center'), true)
+  assert.equal(isDecorativeImage('https://cdn.test/a.JPG?imageMogr2/thumbnail/!100x100r'), true)
+  // 边界（如实写明，不假装覆盖）：只认「显式 WxH 描述符」这一种写法。像 ?w=64&h=64 这种
+  // 拆成两个参数的形式**不认** —— 没有实测样本支持它，加规则只会引入误伤风险。
+  assert.equal(isDecorativeImage('https://cdn.test/a.png?w=64&h=64'), false, '只认 WxH 描述符，不认拆开的 w/h 参数')
+  assert.equal(isDecorativeImage('https://cdn.test/2026/10/06/article/abc.png'), false, '无尺寸描述符 = 正文图')
+  assert.equal(isDecorativeImage('https://cdn.test/pic-1600x900.jpg'), false, '大尺寸描述符是正文图')
+  assert.equal(isDecorativeImage('https://cdn.test/pic-201x201.jpg'), false, '刚好超过阈值要保留（阈值内才是装饰）')
+})
+
+test('抽取：装饰性小图与重复图都不进正文（sspai 那篇的回归）', () => {
+  const avatar = 'https://cdnfile.test/avatar.JPG?imageMogr2/thumbnail/!100x100r'
+  const body1 = 'https://cdnfile.test/2026/10/article/real1.png'
+  const body2 = 'https://cdnfile.test/2026/10/article/real2.png'
+  const html = '<html><body>'
+    + '<p>' + '正'.repeat(60) + '</p>'
+    + '<img src="' + avatar + '" alt="作者头像">'
+    + '<p>' + '文'.repeat(60) + '</p>'
+    + '<img src="' + body1 + '" alt="正文图一">'
+    + '<p>' + '章'.repeat(60) + '</p>'
+    + '<img src="' + body1 + '" alt="正文图一（卡片区重复）">'
+    + '<img src="' + body1 + '" alt="正文图一（又重复）">'
+    + '<img src="' + body2 + '" alt="正文图二">'
+    + '</body></html>'
+  const article = extractArticle(html, 'https://ex.test/post/1')
+  const imgs = article.blocks.filter((b) => b.kind === 'img').map((b) => String(b.src))
+  assert.ok(!imgs.some((s) => s.includes('avatar')), '头像（小尺寸描述符）不该进正文')
+  assert.equal(imgs.filter((s) => s === body1).length, 2, '同一张正文图最多留 ' + 2 + ' 次（超过的重复丢掉）')
+  assert.ok(imgs.includes(body2), '另一张正文图要留着')
 })

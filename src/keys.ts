@@ -9,7 +9,7 @@
 /** 键盘动作：与具体按键解耦，客户端只负责把动作落到 store 上。 */
 export type ReaderKeyAction =
   | 'next' | 'prev' | 'expand' | 'openExternal' | 'openArticle'
-  | 'toggleRender' | 'refreshCount' | 'back' | 'star' | 'toggleRead' | 'markAll' | 'manageFeeds'
+  | 'refreshCount' | 'back' | 'star' | 'toggleRead' | 'markAll' | 'manageFeeds'
   | 'scanNext' | 'scanPrev' | 'pageDown' | 'pageUp'
   | 'expandedView' | 'listView'
   | 'none'
@@ -39,10 +39,8 @@ export function resolveReaderKey(key: string, shift = false): ReaderKeyAction {
     // 注意它**不抓取外部站点** —— 不变量 1 明写「Refresh ≠ 重新抓取」，所以这个动作只重取本地视图。
     case 'r':
     case 'R': return 'refreshCount'
-    // 视图切换（抽取正文 ⇄ 原站 iframe）改到 w/W：GR 的 r 是刷新计数，而我们原先用它切视图。
-    // 标签跟着改（article-pane.tsx 的「（W）」）—— 「标签与实现各说各话」这个仓库栽过，不许再犯。
-    case 'w':
-    case 'W': return 'toggleRender'
+    // w/W 于 2026-10-08 空出：原站视图（iframe）整条路径已删除。键位留空而不是随手改派 ——
+    // 空着的键是明确的「没绑」，改派需要一个真实需求。
     case 'Escape': return 'back'
     // f 与 F 都接受：界面标签与 README 写的都是「F」，不写 shift 就不该要求 shift
     // （与上面 r/R 同一处理；2026-10-07 修——这条是同类缺陷的复发）

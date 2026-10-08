@@ -1,30 +1,15 @@
 /**
- * 正文面（2026-10-07 从 index.tsx 拆出）：结构化块渲染、阅读视图 / 原站视图切换。
+ * 正文面（2026-10-07 从 index.tsx 拆出，2026-10-08 去掉原站视图）：结构化块渲染。
  *
- * 原站视图的沙箱属性也定义在这里 —— iframe 与它的策略属于同一个概念，不该分居两个文件。
+ * **为什么不再内嵌原站页面**：那个 iframe 的沙箱（无 allow-same-origin）会让现代站点的样式流程
+ * 断掉、整页只剩裸 HTML；而放宽沙箱（加 allow-same-origin + 允许脚本）等于让发布者的脚本在 DSH
+ * 页面上下文里跑，是当初加沙箱要挡的事。取舍结论：**正文只走抽取视图**，想看原样就用
+ * 「打开原站 ↗」在新标签页看——那是浏览器自己的上下文，没有沙箱折衷。
  */
 import type { ReactNode } from 'react'
 import type { ArticlePayload } from '../shared.js'
 import type { ArticleState } from './store.js'
 
-/**
- * 原站视图 iframe 的属性：**单点定义**——既给 JSX 用，也给契约测试断言，防止两处各说各话。
- *
- * 为什么必须沙箱（2026-10-07 安全评审）：feed 里的条目链接完全由发布者控制，而宿主的抓取
- * 接受 data: URL —— 攻击者不需要任何真站点，就能造出一个「可嵌入」的恶意页，让它在 DSH
- * 页面内以无沙箱 iframe 加载（脚本、弹窗、下载，以及一次点击后的整页跳转）。
- *
- * 刻意**不给** allow-same-origin：给了它 frame 就保留真实 origin，而一旦 SSRF 那条路径让
- * frame 落在 http://127.0.0.1:3080/...，同源且可执行脚本的 frame 能自行解除沙箱并触到 DSH
- * 页面。代价是原站拿不到自己的 cookie/storage，少数站点会显示未登录态——这是明知取舍：
- * 宁可牺牲原站登录态，也不留同源升级路径。
- * 也刻意**不给** allow-top-navigation：否则一次用户点击就能把整个标签页换成钓鱼页。
- */
-export const ORIGINAL_VIEW_FRAME_PROPS = {
-  sandbox: 'allow-scripts allow-forms allow-popups',
-  referrerPolicy: 'no-referrer',
-} as const
-/** 阅读器内的正文视图（D 方案）：默认抽取正文，站点允许时可切「原站视图」看原样页面。 */
 /**
  * 单个正文块的渲染。
  *
@@ -96,11 +81,10 @@ function ArticleBlockView({ block }: { block: Record<string, unknown> }): ReactN
   return <p style={{ margin: '0 0 1.05em' }}>{text}</p>
 }
 
-export function ArticleView({ article, link, onBack, onToggleRender, setBox, canPrev, canNext, onPrev, onNext }: {
+export function ArticleView({ article, link, onBack, setBox, canPrev, canNext, onPrev, onNext }: {
   article: ArticleState | undefined
   link: string | undefined
   onBack: () => void
-  onToggleRender: () => void
   /** 阅读视图滚动容器的 ref 回调：空格翻页要作用在它上面（跨组件只能传进来） */
   setBox: (node: HTMLDivElement | null) => void
   /** 上/下一条是否可切（与键盘共用同一判定，见 canStepArticle） */
@@ -113,8 +97,7 @@ export function ArticleView({ article, link, onBack, onToggleRender, setBox, can
   const blocks: Array<Record<string, unknown>> = article?.blocks !== undefined
     ? article.blocks
     : (article?.paragraphs ?? []).map((text) => ({ kind: 'p', text }))
-  const original = article?.render === 'original'
-  const frameable = article?.frameable === true
+
 
   return (
     <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
@@ -124,20 +107,11 @@ export function ArticleView({ article, link, onBack, onToggleRender, setBox, can
       }}>
         <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" onClick={onBack}>← 返回列表（Esc）</button>
         <span style={{ flex: 1 }} />
-        {/* 上/下一条：焦点进入 iframe 后键盘就收不到了（浏览器限制），这两个按钮是**唯一可用的切换手段**。
-            标签里的键名与实际键位一致：详情页 j = 下一条、k = 上一条（n/p 是扫视，不换文章）。 */}
+        {/* 上/下一条：与键盘同一套判定；详情页 j = 下一条、k = 上一条（n/p 是扫视，不换文章）。 */}
         <button type="button" className="dsh-rss-btn" disabled={!canPrev}
           title="上一条（k）" onClick={onPrev}>↑ 上一条</button>
         <button type="button" className="dsh-rss-btn" disabled={!canNext}
           title="下一条（j）" onClick={onNext}>↓ 下一条</button>
-        <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
-          disabled={!frameable || article?.loading === true}
-          title={frameable
-            ? '在原站原样页面与抽取正文之间切换（W 切换；本页可直接按 W）。注意沙箱渲染：部分站点会缺样式'
-            : '该站点通过 X-Frame-Options / CSP 禁止被嵌入，只能看抽取版或去原站'}
-          onClick={onToggleRender}>
-          {original ? '阅读视图（W）' : '原站视图（W）'}
-        </button>
         {link !== undefined && link !== '' && (
           <a href={link} target="_blank" rel="noreferrer" style={{ fontSize: 12 }}>打开原站 ↗</a>
         )}
@@ -150,21 +124,6 @@ export function ArticleView({ article, link, onBack, onToggleRender, setBox, can
           没能取到正文：{article.failure}
           <div style={{ opacity: 0.7, marginTop: 6, fontSize: 12 }}>可以按 Esc 回列表，或点右上角去原站阅读。</div>
         </div>
-      ) : original && link !== undefined ? (
-        // 原站视图：浏览器内嵌整页，样式/代码/交互全是原样（已被 X-Frame-Options 放行的站点才可用）
-        <>
-          <div style={{ padding: '4px 20px', fontSize: 11, opacity: 0.6 }}>
-            原站视图：页面内的按键由原站接管，本插件的快捷键需先点回面板——或直接用上方按钮切回阅读视图。
-            {' '}
-            <strong>沙箱渲染：部分站点会缺样式（只剩裸 HTML），那种情况请切回阅读视图。</strong>
-          </div>
-          <iframe
-            src={link}
-            title={article.title ?? '原站视图'}
-            {...ORIGINAL_VIEW_FRAME_PROPS}
-            style={{ flex: 1, minHeight: 0, width: '100%', border: 'none', background: '#fff' }}
-          />
-        </>
       ) : (
         // 阅读视图：限宽 + 加大行高（长文可读性）；每种块由 ArticleBlockView 给语义化样式
         <div ref={setBox} style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 24px 32px' }}>

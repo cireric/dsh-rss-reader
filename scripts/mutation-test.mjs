@@ -20,8 +20,13 @@ const ROOT = process.cwd()
  * 缺口。等价变异混进来会让这道门槛变成狼来了。
  */
 const MUTATIONS = [
-  { id: 'article-view-默认抽取版', file: 'lib/article-view.js',
-    from: "return explicit ?? 'reading';", to: "return explicit ?? 'original';" },
+  // article-view.ts 随原站视图整条删除（2026-10-08），那条变异的目标已不存在。
+  // 换成守护本次修复的两条判定：装饰性小图过滤、同一图重复去重。
+  { id: 'article-装饰性小图过滤', file: 'lib/article.js',
+    from: 'if (width > 0 && height > 0 && width <= DECORATIVE_IMAGE_MAX && height <= DECORATIVE_IMAGE_MAX)',
+    to: 'if (false)' },
+  { id: 'article-重复图去重', file: 'lib/article.js',
+    from: 'if (count > MAX_SAME_IMAGE)', to: 'if (false)' },
   { id: 'keys-r 归还刷新计数', file: 'lib/keys.js',
     from: "return 'refreshCount';", to: "return 'toggleRender';" },
   { id: 'client-A 的范围阈值过滤', file: 'lib/client.js',
@@ -83,9 +88,6 @@ const MUTATIONS = [
   { id: 'fetch-解析层内网拦截', file: 'lib/feed/fetch.js',
     from: 'const privateAddress = addresses.find((address) => isPrivateHost(address));',
     to: 'const privateAddress = undefined;' },
-  { id: 'client-iframe 沙箱', file: 'lib/client.js',
-    from: 'allow-scripts allow-forms allow-popups',
-    to: 'allow-scripts allow-same-origin allow-forms allow-popups' },
   { id: 'client-键解析短路', file: 'lib/client.js',
     from: 'const action = resolveReaderKey(event.key, event.shiftKey);',
     to: "const action = 'none';" },

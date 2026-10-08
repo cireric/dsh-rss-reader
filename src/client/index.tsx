@@ -29,8 +29,6 @@ import { createReaderStore, relativeTime, useReaderStore, type Filter, type Mark
 export { createReaderStore }
 import { FeedsView } from './feeds-view.js'
 import { ArticleView } from './article-pane.js'
-// 契约测试断言的就是这一份（iframe 沙箱属性）；它现在住在 article-view 里
-export { ORIGINAL_VIEW_FRAME_PROPS } from './article-pane.js'
 import { MIN_CONTENT_CHARS, recencyOf, ROUTE_PATH, type ArticlePayload, type CleanupResult, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult } from '../shared.js'
 import { htmlToText } from '../html-text.js'
 import { resolveReaderKey } from '../keys.js'
@@ -242,7 +240,6 @@ export function createReader(store: ReaderStore): () => ReactNode {
           }
           case 'openExternal': run(() => store.openSelected()); break
           case 'openArticle': if (view !== 'list') return; run(() => { void store.openArticle() }); break
-          case 'toggleRender': if (view !== 'article') return; run(() => store.toggleArticleRender()); break
           // r：刷新未读计数（只重取本地视图，不抓取 —— 规格不变量 1）
           case 'refreshCount': run(() => { void store.refreshCount() }); break
           case 'manageFeeds': run(() => store.toggleFeeds()); break
@@ -367,7 +364,6 @@ export function createReader(store: ReaderStore): () => ReactNode {
             article={state.article}
             link={state.items.find((entry) => entry.id === state.article?.itemId)?.link}
             onBack={() => store.closeArticle()}
-            onToggleRender={() => store.toggleArticleRender()}
             setBox={setArticleBox}
             canPrev={store.canStepArticle(-1)}
             canNext={store.canStepArticle(1)}
