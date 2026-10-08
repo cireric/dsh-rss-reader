@@ -21,7 +21,7 @@ import { readerDomain } from './domain.js'
 import { createStore, type ReaderStore } from './store.js'
 import { refreshFeeds, type FeedOutcome } from './refresh.js'
 import { blocksToText, fetchArticle } from './article.js'
-import { selectCleanup, type CleanupRow } from './retention.js'
+import { articleCharsOf, selectCleanup, type CleanupRow } from './retention.js'
 import { buildOpml, parseOpml } from './opml.js'
 import { validateSubscriptions } from './subscribe.js'
 import { ROUTE_PATH, type Endpoint, type ItemView, type Overview, type RpcResult } from './shared.js'
@@ -317,20 +317,6 @@ export function apply(ctx: Context, config: Config): void {
     fetchedAt: record.fetchedAt,
     starred: record.starred,
   })
-
-  /** 正文缓存的字符数（新旧两种存储形态都要算，否则清理闸门会漏算老缓存）。 */
-  const articleCharsOf = (article: { blocks?: Array<Record<string, unknown>>; paragraphs?: string[] } | undefined): number => {
-    if (article === undefined) return 0
-    if (article.paragraphs !== undefined) return article.paragraphs.reduce((sum, paragraph) => sum + paragraph.length, 0)
-    if (article.blocks === undefined) return 0
-    return article.blocks.reduce((sum, block) => {
-      const text = block['text']
-      if (typeof text === 'string') return sum + text.length
-      const items = block['items']
-      if (Array.isArray(items)) return sum + items.reduce((inner, item) => inner + String(item).length, 0)
-      return sum
-    }, 0)
-  }
 
   const countUnread = (target: ReaderStore): number =>
     target.listFeeds().reduce((sum, [feedId]) => sum + target.listItems(feedId).filter(([, i]) => i.readAt === undefined).length, 0)

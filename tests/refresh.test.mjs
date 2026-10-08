@@ -312,3 +312,36 @@ test('正文缓存闸门：超限时清最旧的缓存，但条目本身与已�
     assert.ok(readOne !== undefined, '清缓存不得动已读态')
   })
 })
+
+test('正文缓存闸门：现行的 blocks 形态同样要被统计到（2026-10-07 修回归）', async () => {
+  const store = memoryStore()
+  const payload = rss(THREE_ITEMS)
+  await withServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/rss+xml' })
+    res.end(payload)
+  }, async (base) => {
+    const feedUrl = base + '/feed.xml'
+    await refreshFeeds([feedUrl], store, BASE_OPTIONS)
+    const ids = [...store.items.keys()]
+    assert.equal(ids.length, 3, '前置条件：三条')
+
+    // **现行形态**：只写 blocks（index.ts 的 article 端点就是这样写的，paragraphs 已不再写入）。
+    // 修复前闸门按 paragraphs 计字符 ⇒ 这里每条都算成 0 字符 ⇒ 永不触发，测试必须能抓到。
+    for (const [index, id] of ids.entries()) {
+      await store.saveItem(id, {
+        ...store.items.get(id),
+        article: {
+          fetchedAt: '2024-0' + (index + 1) + '-01T00:00:00.000Z',
+          revision: 2,
+          blocks: [{ kind: 'p', text: 'x'.repeat(1000) }],
+        },
+      })
+    }
+
+    await refreshFeeds([feedUrl], store, { ...BASE_OPTIONS, maxArticleCacheChars: 1500 })
+
+    const cached = [...store.items.values()].filter((r) => r.article !== undefined)
+    assert.equal(cached.length, 1, 'blocks 形态也必须被闸门统计到；实际还剩 ' + cached.length + ' 条缓存')
+    assert.equal(store.items.size, 3, '清缓存不得删条目')
+  })
+})

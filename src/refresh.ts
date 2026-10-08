@@ -9,7 +9,7 @@
  */
 import { deriveItemId } from './feed/item-id.js'
 import { fetchFeed, type FetchLimits } from './feed/fetch.js'
-import { selectPrunable, selectArticleEvictions, type RetentionRow } from './retention.js'
+import { articleCharsOf, selectPrunable, selectArticleEvictions, type RetentionRow } from './retention.js'
 import { parseFeed } from './feed/parse.js'
 import type { ReaderStore } from './store.js'
 
@@ -90,13 +90,16 @@ async function prune(store: ReaderStore, feedId: string, maxItems: number): Prom
  *
  * 清掉后用户再打开该条会重新抓一次——是「降级」而非「丢失」，所以不需要逐条确认。
  * 上限按**源**统计：缓存是挂在条目上的，而条目按源裁剪，故同源的缓存自然同源清算。
+ *
+ * 字符数一律走 retention.articleCharsOf。2026-10-07 修：这里原先只统计 paragraphs，
+ * 而现行缓存只写 blocks ⇒ 每源字符数恒为 0，闸门永不触发、上限形同虚设。
  */
 async function capArticleCache(store: ReaderStore, feedId: string, maxChars: number): Promise<number> {
   const entries = store.listItems(feedId)
     .filter(([, record]) => record.article !== undefined)
     .map(([itemId, record]) => ({
       id: itemId,
-      chars: (record.article?.paragraphs ?? []).reduce((sum, paragraph) => sum + paragraph.length, 0),
+      chars: articleCharsOf(record.article),
       fetchedAt: record.article?.fetchedAt ?? '',
     }))
   const evicted = selectArticleEvictions(entries, maxChars)

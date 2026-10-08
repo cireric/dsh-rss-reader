@@ -62,6 +62,28 @@ export function selectArticleEvictions(entries: readonly ArticleEntry[], maxChar
   return evicted
 }
 
+/**
+ * 正文缓存的字符数。**新旧两种存储形态都要算**。
+ *
+ * 为什么必须是共享实现（2026-10-07 修）：refresh.ts 的闸门原先自己写了一份、只统计
+ * paragraphs，而现行缓存只写 blocks —— 于是每源字符数恒为 0，8M 上限形同虚设，
+ * 正文缓存无界增长。index.ts 的清理侧本来就算对了两种形态，所以这两处收敛到这里。
+ */
+export function articleCharsOf(
+  article: { blocks?: Array<Record<string, unknown>>; paragraphs?: string[] } | undefined,
+): number {
+  if (article === undefined) return 0
+  if (article.paragraphs !== undefined) return article.paragraphs.reduce((sum, paragraph) => sum + paragraph.length, 0)
+  if (article.blocks === undefined) return 0
+  return article.blocks.reduce((sum, block) => {
+    const text = block['text']
+    if (typeof text === 'string') return sum + text.length
+    const items = block['items']
+    if (Array.isArray(items)) return sum + items.reduce((inner, item) => inner + String(item).length, 0)
+    return sum
+  }, 0)
+}
+
 /** 清理候选的形态：在保留字段之外还要知道有没有正文缓存，便于如实汇报释放量。 */
 export interface CleanupRow extends RetentionRow {
   readonly articleChars: number
