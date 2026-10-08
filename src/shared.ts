@@ -121,3 +121,12 @@ export const MIN_CONTENT_CHARS = 40
 export function recencyOf(record: { publishedAt?: string; fetchedAt: string }): string {
   return record.publishedAt ?? record.fetchedAt
 }
+
+/** 成功信封（两侧共用的信封构造器：宿主端点与客户端解包都按这个形状）。 */
+export function ok<T>(value: T): RpcResult<T> {
+  return { ok: true, value }
+}
+export function fail<T = never>(code: string, message: string, details: object = {}): RpcResult<T> {
+  // details 必填：宿主信封 ConnectionRpcFailure 要求它（源码为准，技能文档样板落后）
+  return { ok: false, error: { code, message, details } }
+}

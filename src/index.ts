@@ -25,6 +25,9 @@ import { blocksToText, fetchArticle } from './article.js'
 import { articleCharsOf, selectCleanup, type CleanupRow } from './retention.js'
 import { buildOpml, parseOpml } from './opml.js'
 import { validateSubscriptions } from './subscribe.js'
+import { Config as ReaderConfig, type Config } from './config.js'
+import { createDispatch } from './endpoints.js'
+import { fail } from './shared.js'
 import { ROUTE_PATH, type Endpoint, type ItemView, type Overview, type RpcResult } from './shared.js'
 
 export const name = '@dsh-external/dsh-rss-reader'
@@ -37,63 +40,6 @@ export const name = '@dsh-external/dsh-rss-reader'
  */
 export const inject = ['storageDomain', 'connection', 'webServer']
 
-export interface Config {
-  /**
-   * 订阅源种子 URL：仅用于首次把订阅落进存储域（幂等）。
-   * 订阅源的真相在存储域里，M2 界面与 M4 的 OPML 导入都写同一张表。
-   */
-  feeds: string[]
-  /** 单源超时（毫秒） */
-  timeoutMs: number
-  /** 单次响应体积上限（字节） */
-  maxBytes: number
-  /** 每源保留条目数 */
-  maxItemsPerFeed: number
-  /** 每源去重窗口大小（只存 id，必须远大于 maxItemsPerFeed，否则老条目会重新变未读） */
-  maxSeenPerFeed: number
-  /** 单条正文的存储上限（字符）：正文优先取 content 后需要有这个闸门，见 refresh.ts 注释 */
-  maxContentChars: number
-  /** 每个源的按需正文缓存总量上限（字符）：超限从最旧的开始清，见 refresh.ts 的 capArticleCache */
-  maxArticleCacheChars: number
-  /** 显式清理的天数阈值：早于「现在 − 该天数」的已读条目才可清理 */
-  cleanupAfterDays: number
-  /** OPML 导入时的逐源校验并发上限（≥20 源逐个抓太慢，全放出去又不友好） */
-  importConcurrency: number
-  /** 刷新时同时在飞的抓取数（逐源串行是 N x RTT 的线性等待，见 refresh.ts） */
-  refreshConcurrency: number
-  /** 按需抓原站正文的体积上限（字节）——单篇文章比 feed 大，与 maxBytes 分开 */
-  articleMaxBytes: number
-  /** 同一篇文章两次抓取之间的最小间隔（缓存未命中时），防连按造成的请求风暴 */
-  articleCooldownMs: number
-  /** 装载时刷新一次 */
-  refreshOnStart: boolean
-  /** 打开面板时的最小刷新间隔（毫秒）：节流不打网络，但不引入常驻定时器 */
-  minRefreshIntervalMs: number
-  /** 面板一次最多取多少条（跨源合并后的尾部截断） */
-  maxItemsShown: number
-  /** 刷新日志路径；空串 = 仅走 ctx.logger */
-  logFile: string
-}
-
-export const Config: z<Config> = z.object({
-  feeds: z.array(z.string()).default([]),
-  timeoutMs: z.number().default(15000),
-  maxBytes: z.number().default(5 * 1024 * 1024),
-  maxItemsPerFeed: z.number().default(500),
-  maxSeenPerFeed: z.number().default(5000),
-  maxContentChars: z.number().default(50000),
-  maxArticleCacheChars: z.number().default(8_000_000),
-  cleanupAfterDays: z.number().default(30),
-  importConcurrency: z.number().default(5),
-  refreshConcurrency: z.number().default(5),
-  articleMaxBytes: z.number().default(2 * 1024 * 1024),
-  articleCooldownMs: z.number().default(30000),
-  refreshOnStart: z.boolean().default(true),
-  minRefreshIntervalMs: z.number().default(10 * 60 * 1000),
-  maxItemsShown: z.number().default(300),
-  logFile: z.string().default(''),
-})
-
 function summarize(outcomes: readonly FeedOutcome[]): string {
   if (outcomes.length === 0) return '未配置订阅源（Config.feeds 为空），跳过刷新'
   const lines = outcomes.map((outcome) => {
@@ -104,14 +50,6 @@ function summarize(outcomes: readonly FeedOutcome[]): string {
 }
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
-
-function ok<T>(value: T): RpcResult<T> {
-  return { ok: true, value }
-}
-function fail<T = never>(code: string, message: string, details: object = {}): RpcResult<T> {
-  // details 必填：宿主信封 ConnectionRpcFailure 要求它（源码为准，技能文档样板落后）
-  return { ok: false, error: { code, message, details } }
-}
 
 /**
  * 打开存储域，对 already-open 退避重试。
@@ -160,14 +98,6 @@ async function openDomainWithRetry(
   throw lastError
 }
 
-/**
- * 按需正文缓存的**内容版本**。
- *
- * 1 = 纯文本段落（已废弃）；2 = 结构化块（段落/标题/代码/图片/列表/引用）。
- * 缓存命中要求版本相等——老缓存会被判为过期并**自动重抓一次**，否则模型升级对已有缓存
- * 永远不生效（实测：库里 9 条老缓存导致「图片怎么都不显示」）。
- */
-const ARTICLE_REVISION = 2
 
 export function apply(ctx: Context, config: Config): void {
   const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
@@ -262,288 +192,8 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   /** 跨源合并、按时间倒序——river of news（验收标准 §3.2）。 */
-  const buildOverview = (refreshed: boolean): Overview => {
-    const target = ready()
-    if (!target) return { feeds: [], items: [], unread: 0, refreshed }
-
-    const feeds = target.listFeeds().map(([feedId, record]) => ({
-      id: feedId,
-      title: record.title ?? feedId,
-      lastFetchedAt: record.lastFetchedAt,
-      lastFailure: record.lastFailure,
-    }))
-
-    const items: ItemView[] = []
-    for (const [feedId, record] of target.listFeeds()) {
-      for (const [itemId, item] of target.listItems(feedId)) {
-        items.push({
-          id: itemId,
-          feedId,
-          feedTitle: record.title ?? feedId,
-          title: item.title,
-          link: item.link,
-          publishedAt: item.publishedAt,
-          fetchedAt: item.fetchedAt,
-          readAt: item.readAt,
-          starred: item.starred,
-          summary: item.summary,
-        })
-      }
-    }
-    items.sort((a, b) => {
-      const byTime = recencyOf(b).localeCompare(recencyOf(a))
-      return byTime !== 0 ? byTime : a.id.localeCompare(b.id)
-    })
-
-    return {
-      feeds,
-      items: items.slice(0, config.maxItemsShown),
-      unread: items.filter((item) => item.readAt === undefined).length,
-      refreshed,
-      // 让界面能说明「上次到底什么时候抓过」——否则「按住刷新没反应」无从判断
-      refreshedAt: lastRefreshCompletedAt === undefined ? undefined : new Date(lastRefreshCompletedAt).toISOString(),
-    }
-  }
-
-  const countUnread = (target: ReaderStore): number =>
-    target.listFeeds().reduce((sum, [feedId]) => sum + target.listItems(feedId).filter(([, i]) => i.readAt === undefined).length, 0)
-
-  // 浏览器半的读写通道：宿主自有 HTTP 路由 + connection 的准入检查（见 shared.ts 注释）。
-  const dispatch = async (endpoint: string, payload: unknown): Promise<RpcResult<unknown>> => {
-    // 不把异常 throw 进通道：调用方需要的是带 code 的失败信封
-    try {
-      const target = ready()
-      if (!target) return fail('not-ready', '存储域尚未就绪，稍后重试')
-
-      switch (endpoint as Endpoint) {
-        case 'overview':
-          return ok(buildOverview(false))
-
-        case 'refresh': {
-          const refreshed = await refreshNow()
-          return ok(buildOverview(refreshed))
-        }
-
-        case 'markRead': {
-          const itemIds = Array.isArray((payload as { itemIds?: unknown } | null)?.itemIds)
-            ? ((payload as { itemIds: unknown[] }).itemIds.map(String))
-            : []
-          if (itemIds.length === 0) return fail('bad-request', 'markRead 需要 itemIds 数组')
-          const stamp = new Date().toISOString()
-          let changed = 0
-          for (const itemId of itemIds) {
-            const existing = target.item(itemId)
-            if (existing === undefined || existing.readAt !== undefined) continue
-            // 幂等：已读的原时间戳不动
-            await target.saveItem(itemId, { ...existing, readAt: stamp })
-            changed += 1
-          }
-          return ok({ changed, unread: countUnread(target) })
-        }
-
-        case 'unmarkRead': {
-          // 只服务于「全部标记已读」的短时撤销
-          const itemIds = Array.isArray((payload as { itemIds?: unknown } | null)?.itemIds)
-            ? ((payload as { itemIds: unknown[] }).itemIds.map(String))
-            : []
-          if (itemIds.length === 0) return fail('bad-request', 'unmarkRead 需要 itemIds 数组')
-          let changed = 0
-          for (const itemId of itemIds) {
-            const existing = target.item(itemId)
-            if (existing === undefined || existing.readAt === undefined) continue
-            // 只去掉 readAt：原先这里调的那个 helper 按 7 个字段重建，会把 article 缓存
-            // 一起丢掉——撤销「全部已读」不该动内容缓存（2026-10-07 随三处重建收敛时修掉）
-            await target.saveItem(itemId, rebuildItem(existing, { omit: ['readAt'] }))
-            changed += 1
-          }
-          return ok({ changed, unread: countUnread(target) })
-        }
-
-        case 'article': {
-          // 按需正文（V 键）：先看缓存，再冷却，最后才抓原站。三步都留日志——这是唯一会
-          // 出网的用户手势，出问题时必须能从日志里还原过程。
-          const itemId = String((payload as { itemId?: unknown } | null)?.itemId ?? '')
-          if (!itemId) return fail('bad-request', 'article 需要 itemId')
-          const existing = target.item(itemId)
-          if (existing === undefined) return fail('not-found', '条目不存在：' + itemId)
-          // 命中缓存的前提：**缓存的内容版本等于当前版本**。
-          // 老缓存（升级前抓的，只有纯文本 paragraphs）没有版本号 ⇒ 判为过期、自动重抓一次。
-          // 否则模型升级后老缓存会永远挡住新逻辑——实测：9 条老缓存导致「图片怎么都不显示」。
-          if (existing.article !== undefined && existing.article.revision === ARTICLE_REVISION) {
-            return ok({
-              itemId, cached: true, title: existing.article.title,
-              blocks: existing.article.blocks, paragraphs: existing.article.paragraphs,
-              frameable: existing.article.frameable,
-            })
-          }
-          if (existing.link === '') return fail('bad-request', '该条目没有可抓取的链接')
-
-          const lastAt = articleAttempts.get(itemId)
-          if (lastAt !== undefined && Date.now() - lastAt < config.articleCooldownMs) {
-            const wait = Math.ceil((config.articleCooldownMs - (Date.now() - lastAt)) / 1000)
-            return fail('cooldown', '刚刚取过这篇正文，请 ' + wait + ' 秒后再试')
-          }
-          articleAttempts.set(itemId, Date.now())
-
-          log('取正文：' + existing.link)
-          const fetched = await fetchArticle(existing.link, {
-            timeoutMs: config.timeoutMs,
-            maxBytes: config.articleMaxBytes,
-          })
-          if (fetched.kind === 'failed') {
-            // 失败原因存进条目：用户重开时能看到，且不必再等一次网络往返
-            await target.saveItem(itemId, { ...existing, articleFailure: fetched.reason })
-            log('取正文失败：' + existing.link + ' → ' + fetched.reason)
-            return ok({ itemId, cached: false, failure: fetched.reason })
-          }
-          const article = {
-            fetchedAt: new Date().toISOString(),
-            revision: ARTICLE_REVISION,
-            title: fetched.title,
-            blocks: fetched.blocks,
-            frameable: fetched.frameable,
-          }
-          // 成功要清掉旧的失败原因：交给 rebuildItem（它按 schema 字段表搬运，不会漏字段）
-          await target.saveItem(itemId, rebuildItem(existing, { omit: ['articleFailure'], set: { article } }))
-          log('取正文成功：' + existing.link + '（' + fetched.blocks.length + ' 块 ' +
-            blocksToText(fetched.blocks).length + ' 字符）')
-          return ok({ itemId, cached: false, title: article.title, blocks: article.blocks, frameable: article.frameable })
-        }
-
-        case 'opmlExport': {
-          const feeds = target.listFeeds().map(([feedUrl, record]) => ({
-            url: feedUrl, title: record.title, folder: record.folder,
-          }))
-          return ok({ opml: buildOpml(feeds), feedCount: feeds.length })
-        }
-
-        case 'opmlImport': {
-          // §3.1：导入时**逐源抓取校验**，坏源单独标注、不阻断其余。
-          const text = String((payload as { opml?: unknown } | null)?.opml ?? '')
-          if (text.trim() === '') return fail('bad-request', 'opmlImport 需要 opml 文本')
-          const parsed = parseOpml(text)
-          if (parsed.subscriptions.length === 0) {
-            return ok({
-              added: 0, existed: 0, failed: [], skipped: parsed.skipped, accepted: [],
-            })
-          }
-
-          const checked = await validateSubscriptions(
-            parsed.subscriptions.map((subscription) => subscription.xmlUrl),
-            { limits: { timeoutMs: config.timeoutMs, maxBytes: config.maxBytes }, concurrency: config.importConcurrency },
-          )
-
-          const byUrl = new Map(parsed.subscriptions.map((subscription) => [subscription.xmlUrl, subscription]))
-          const accepted: Array<{ url: string; title?: string; folder?: string }> = []
-          const failed: Array<{ url: string; reason: string }> = []
-          let added = 0
-          let existed = 0
-
-          for (const result of checked) {
-            if (!result.ok) {
-              failed.push({ url: result.url, reason: result.reason ?? '校验失败' })
-              continue
-            }
-            const subscription = byUrl.get(result.url)
-            const previous = target.feed(result.url)
-            existed += previous === undefined ? 0 : 1
-            added += previous === undefined ? 1 : 0
-            // 已存在的源保留其 folder（用户可能在界面上改过），新源才写入 OPML 的分组
-            await target.saveFeed(result.url, {
-              url: result.url,
-              title: result.title ?? subscription?.title ?? previous?.title,
-              folder: previous?.folder ?? subscription?.folder,
-              etag: previous?.etag,
-              lastModified: previous?.lastModified,
-              lastFetchedAt: previous?.lastFetchedAt,
-            })
-            accepted.push({ url: result.url, title: result.title ?? subscription?.title, folder: previous?.folder ?? subscription?.folder })
-          }
-
-          log('导入 OPML：新增 ' + added + ' 源，已存在 ' + existed + ' 源，校验失败 ' + failed.length +
-            ' 源，文件内跳过 ' + parsed.skipped.length + ' 项')
-          return ok({ added, existed, failed, skipped: parsed.skipped, accepted })
-        }
-
-        case 'addFeed': {
-          const raw = String((payload as { url?: unknown } | null)?.url ?? '')
-          const checked = await validateSubscriptions([raw], {
-            limits: { timeoutMs: config.timeoutMs, maxBytes: config.maxBytes },
-            concurrency: 1,
-          })
-          const result = checked[0]
-          if (result === undefined || !result.ok) {
-            return ok({ added: 0, existed: 0, failed: [{ url: raw, reason: result?.reason ?? '校验失败' }], skipped: [], accepted: [] })
-          }
-          const previous = target.feed(result.url)
-          await target.saveFeed(result.url, {
-            url: result.url,
-            title: result.title ?? previous?.title,
-            folder: previous?.folder,
-            etag: previous?.etag,
-            lastModified: previous?.lastModified,
-            lastFetchedAt: previous?.lastFetchedAt,
-          })
-          return ok({
-            added: previous === undefined ? 1 : 0,
-            existed: previous === undefined ? 0 : 1,
-            failed: [], skipped: [],
-            accepted: [{ url: result.url, title: result.title, folder: previous?.folder }],
-          })
-        }
-
-        case 'removeFeed': {
-          const feedId = String((payload as { url?: unknown } | null)?.url ?? '')
-          if (!feedId) return fail('bad-request', 'removeFeed 需要 url')
-          const known = target.feed(feedId)
-          if (known === undefined) return fail('not-found', '订阅不存在：' + feedId)
-          // 连带删掉该源的全部条目与游标——留着孤儿条目只会让人困惑
-          const items = target.listItems(feedId)
-          for (const [itemId] of items) await target.deleteItem(itemId)
-          await target.deleteFeed(feedId)
-          log('退订 ' + feedId + '（连带删除 ' + items.length + ' 条条目）')
-          return ok({ removed: 1, items: items.length })
-        }
-
-        case 'cleanup': {
-          // 显式清理（用户点按钮触发，**不设定时器**——交接件验收项之一就是不残留定时器）。
-          // 判据刻意保守：已读 + 未星标 + 早于阈值，三个条件缺一不可（见 retention.ts 注释）。
-          const cutoff = new Date(Date.now() - config.cleanupAfterDays * 24 * 3600 * 1000).toISOString()
-          const all = target.allItems()
-          const rows: CleanupRow[] = all.map(([itemId, record]) => ({
-            id: itemId,
-            starred: record.starred,
-            read: record.readAt !== undefined,
-            recency: recencyOf(record),
-            articleChars: articleCharsOf(record.article),
-          }))
-          const doomed = selectCleanup(rows, cutoff)
-          const freedChars = rows.filter((row) => doomed.includes(row.id))
-            .reduce((sum, row) => sum + row.articleChars + (target.item(row.id)?.summary?.length ?? 0), 0)
-          for (const itemId of doomed) await target.deleteItem(itemId)
-          log('清理：删除 ' + doomed.length + ' 条已读旧条目（阈值 ' + config.cleanupAfterDays + ' 天，释放约 ' +
-            freedChars + ' 字符）')
-          return ok({ deleted: doomed.length, freedChars, cutoff, unread: countUnread(target) })
-        }
-
-        case 'toggleStar': {
-          const itemId = String((payload as { itemId?: unknown } | null)?.itemId ?? '')
-          if (!itemId) return fail('bad-request', 'toggleStar 需要 itemId')
-          const existing = target.item(itemId)
-          if (existing === undefined) return fail('not-found', '条目不存在：' + itemId)
-          const starred = !existing.starred
-          await target.saveItem(itemId, { ...existing, starred })
-          return ok({ itemId, starred, unread: countUnread(target) })
-        }
-
-        default:
-          return fail('unknown-endpoint', '未知端点：' + endpoint)
-      }
-    } catch (error) {
-      log('请求失败（' + endpoint + '）：' + String(error))
-      return fail('internal', error instanceof Error ? error.message : String(error))
-    }
-  }
+  // 端点实现搬到 endpoints.ts：这里把闭包依赖显式交出去
+  const dispatch = createDispatch({ config, log, ready, refreshNow, lastRefreshCompletedAt: () => lastRefreshCompletedAt, articleAttempts })
 
   const readJsonBody = async (req: import('node:http').IncomingMessage): Promise<unknown> => {
     const chunks: Buffer[] = []
