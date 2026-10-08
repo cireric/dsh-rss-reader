@@ -39,6 +39,11 @@ export interface ReaderState {
   undo: { ids: string[] } | undefined
   /** 当前视图：列表 / 正文 / 订阅管理（订阅管理同样在主栏内切换，见 handoff §19） */
   view: 'list' | 'article' | 'feeds'
+  /**
+   * 条目流的**视图密度**（GR 的两视图）：expanded 含条目描述/正文摘录，list 只有标题行。
+   * 注意与上面的 view 是两条正交的轴：view 决定「看哪个面板」，layout 决定「条目流怎么排」。
+   */
+  layout: 'list' | 'expanded'
   /** 最近一次导入的报告（坏源要逐条列出，不能只报总数） */
   importReport: OpmlImportResult | undefined
   /** 订阅管理里的忙碌标记（导入要逐源抓取，可能数秒） */
@@ -95,7 +100,7 @@ export function createReaderStore() {
   let state: ReaderState = {
     items: [], feeds: [], unread: 0, filter: 'all',
     selectedId: undefined, loading: true, error: undefined, undo: undefined,
-    view: 'list', article: undefined, notice: undefined,
+    view: 'list', layout: 'list', article: undefined, notice: undefined,
     importReport: undefined, feedsBusy: false,
   }
   const listeners = new Set<() => void>()
@@ -389,6 +394,9 @@ export function createReaderStore() {
   const closeArticle = (): void => { set({ view: 'list' }) }
 
   /** 打开/关闭订阅管理视图。 */
+  /** 切视图密度。默认 list = 本插件既有的紧凑行为，所以切成 expanded 是「多显示」而不是改默认。 */
+  const setLayout = (layout: ReaderState['layout']): void => { set({ layout }) }
+
   const toggleFeeds = (): void => { set({ view: state.view === 'feeds' ? 'list' : 'feeds' }) }
 
   /** 导出 OPML：拿到文本后交给浏览器下载（File System Access 不可用时退化为 blob 下载）。 */
@@ -473,6 +481,7 @@ export function createReaderStore() {
   return {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
     get, visible, load, markRead, selectRelative, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllRead, undoMarkAll,
+    setLayout,
     openArticle, closeArticle, toggleArticleRender, cleanup, stepArticle, canStepArticle,
     toggleFeeds, exportOpml, importOpml, addFeed, removeFeed,
     dismissNotice: (): void => { set({ notice: undefined }) },

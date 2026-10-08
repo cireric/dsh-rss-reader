@@ -630,3 +630,14 @@ test('保持未读可切换，并把状态回填到条目上', async () => {
   await store.toggleKeepUnread('a')
   assert.equal(store.get().items[0].keptUnread, false, '再切一次应取消')
 })
+
+test('按键接线：1 切展开视图、2 切回列表（且默认是列表 = 既有行为）', async () => {
+  const harness = renderReader({ items: [item({ id: 'a' }), item({ id: 'b' })] })
+  await harness.store.load('overview')
+  const handler = harness.listeners[harness.listeners.length - 1]
+  assert.equal(harness.store.get().layout, 'list', '默认必须是紧凑列表 —— 这是本插件既有行为')
+  handler(keyEvent('1'))
+  assert.equal(harness.store.get().layout, 'expanded', '1 必须切到展开视图')
+  handler(keyEvent('2'))
+  assert.equal(harness.store.get().layout, 'list', '2 必须切回列表视图')
+})

@@ -11,6 +11,7 @@ export type ReaderKeyAction =
   | 'next' | 'prev' | 'expand' | 'openExternal' | 'openArticle'
   | 'toggleRender' | 'back' | 'star' | 'toggleRead' | 'markAll' | 'manageFeeds'
   | 'scanNext' | 'scanPrev' | 'pageDown' | 'pageUp'
+  | 'expandedView' | 'listView'
   | 'none'
 
 /**
@@ -28,6 +29,9 @@ export function resolveReaderKey(key: string, shift = false): ReaderKeyAction {
     // 空格 = 翻页（按一屏）。空格不分大小写，所以必须看 shift 标志才能分辨方向
     case ' ': return shift === true ? 'pageUp' : 'pageDown'
     case 'o': return 'expand'
+    // 1/2 = 视图密度（GR 原键位）：1 = expanded view「含条目描述/正文摘录」、2 = list view「只有标题行」
+    case '1': return 'expandedView'
+    case '2': return 'listView'
     // v 开外部浏览器、V（shift+v）在阅读器内读正文：这是刻意区分的一对
     case 'v': return 'openExternal'
     case 'V': return 'openArticle'

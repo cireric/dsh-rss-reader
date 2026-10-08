@@ -20,6 +20,8 @@ const ROOT = process.cwd()
  * 缺口。等价变异混进来会让这道门槛变成狼来了。
  */
 const MUTATIONS = [
+  { id: 'client-1 键切展开视图', file: 'lib/client.js',
+    from: 'setLayout("expanded")', to: 'setLayout("list")' },
   { id: 'retention-星标保护', file: 'lib/retention.js',
     from: 'const protectedFromPrune = (row) => row.starred || row.kept;',
     to: 'const protectedFromPrune = (row) => row.kept;' },

@@ -250,6 +250,9 @@ export function createReader(store: ReaderStore): () => ReactNode {
             if (view === 'article') { event.preventDefault(); store.closeArticle(); break }
             if (view === 'feeds') { event.preventDefault(); store.toggleFeeds(); break }
             return
+          // 视图密度只在条目流上有意义（在正文页/订阅管理页按 1/2 不该改背后的列表）
+          case 'expandedView': if (view === 'list') store.setLayout('expanded'); break
+          case 'listView': if (view === 'list') store.setLayout('list'); break
           case 'star': run(() => { void store.toggleStar() }); break
           case 'toggleRead': run(() => { void store.toggleRead() }); break
           case 'markAll': run(() => { void store.markAllRead() }); break
@@ -370,7 +373,8 @@ export function createReader(store: ReaderStore): () => ReactNode {
             </div>
           )}
           {items.map((item) => {
-            const isOpen = expanded === item.id
+            // expanded 视图下每条都带正文摘录；list 视图下只有 o 展开的那一条（GR 的 o 就是 list 专用）
+            const isOpen = state.layout === 'expanded' || expanded === item.id
             const unread = item.readAt === undefined
             const selected = state.selectedId === item.id
             return (
