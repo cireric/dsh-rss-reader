@@ -35,7 +35,8 @@ export interface ReaderState {
   loading: boolean
   error: string | undefined
   /** 刚被「全部标记已读」的条目，供短时撤销 */
-  undo: { ids: string[]; until: number } | undefined
+  /** 一键已读的撤销条。窗口到期由 armUndoExpiry 的定时器负责，所以这里不需要存时间戳。 */
+  undo: { ids: string[] } | undefined
   /** 当前视图：列表 / 正文 / 订阅管理（订阅管理同样在主栏内切换，见 handoff §19） */
   view: 'list' | 'article' | 'feeds'
   /** 最近一次导入的报告（坏源要逐条列出，不能只报总数） */
@@ -100,6 +101,27 @@ export function createReaderStore() {
   const listeners = new Set<() => void>()
   const emit = (): void => { for (const listener of listeners) listener() }
   const set = (patch: Partial<ReaderState>): void => { state = { ...state, ...patch }; emit() }
+
+  /**
+   * 撤销窗口的定时器。
+   *
+   * 2026-10-07 修：原先只往 state.undo.until 写了个时间戳，全仓没有任何地方读它，于是
+   * 「5 秒撤销窗口」名存实亡——撤销条一直挂着，想撤多久撤多久（README 承诺的是 5 秒）。
+   */
+  let undoExpiry: ReturnType<typeof setTimeout> | undefined
+  const clearUndoExpiry = (): void => {
+    if (undoExpiry !== undefined) {
+      clearTimeout(undoExpiry)
+      undoExpiry = undefined
+    }
+  }
+  const armUndoExpiry = (): void => {
+    clearUndoExpiry()
+    undoExpiry = setTimeout(() => {
+      undoExpiry = undefined
+      set({ undo: undefined })
+    }, UNDO_WINDOW_MS)
+  }
   const get = (): ReaderState => state
 
   /**
@@ -241,8 +263,9 @@ export function createReaderStore() {
     set({
       items: state.items.map((item) => (ids.includes(item.id) ? { ...item, readAt: stamp } : item)),
       unread: Math.max(0, state.unread - ids.length),
-      undo: { ids, until: Date.now() + UNDO_WINDOW_MS },
+      undo: { ids },
     })
+    armUndoExpiry()
     try {
       const result = await callRpc<{ unread: number }>('markRead', { itemIds: ids })
       set({ unread: result.unread })
@@ -254,6 +277,7 @@ export function createReaderStore() {
   const undoMarkAll = async (): Promise<void> => {
     const undo = state.undo
     if (undo === undefined) return
+    clearUndoExpiry()
     set({ undo: undefined })
     set({ items: state.items.map((item) => (undo.ids.includes(item.id) ? { ...item, readAt: undefined } : item)) })
     try {

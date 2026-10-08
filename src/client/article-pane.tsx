@@ -24,15 +24,6 @@ export const ORIGINAL_VIEW_FRAME_PROPS = {
   sandbox: 'allow-scripts allow-forms allow-popups',
   referrerPolicy: 'no-referrer',
 } as const
-/** 阅读器内的正文视图（D 方案）：段落由宿主抽取后回传，这里只做排版。 */
-/**
- * 段落判定：含换行的段落来自 <pre>（宿主抽取时保留内部换行）⇒ 按代码块渲染。
- * 这是为了解决「代码全变样」——等宽字体 + 保留缩进 + 横向可滚动，而不是当普通文字折行。
- */
-function isCodeBlock(paragraph: string): boolean {
-  return paragraph.includes('\n')
-}
-
 /** 阅读器内的正文视图（D 方案）：默认抽取正文，站点允许时可切「原站视图」看原样页面。 */
 /**
  * 单个正文块的渲染。

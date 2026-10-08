@@ -16,9 +16,6 @@ import vm from 'node:vm'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const BUNDLE = join(ROOT, 'lib', 'client.js')
 
-const TAB_ID = '@dsh-external/dsh-rss-reader/tab'
-const TAB_KIND = 'rssReader'
-
 function loadClientBundle() {
   const source = readFileSync(BUNDLE, 'utf8')
   let captured = null
@@ -523,7 +520,7 @@ function renderReader({ items = [] } = {}) {
   // 桩件没有真的 React，ref 不会被自动调用：把树里的 ref 回调都拿假节点调一遍
   for (const props of collectRefs(renderOnce())) props.ref(box)
   renderOnce()
-  return { store, listeners, box, endpoints }
+  return { store, listeners, box, endpoints, sandbox }
 }
 
 /** 深度遍历元素桩（{type, props}）收集所有函数型 ref，供 renderReader 手工挂载。 */
@@ -591,3 +588,21 @@ test('按键接线：o 展开并触发 markRead（副作用不能漏）', async 
   )
 })
 
+
+test('A 的撤销窗口：5 秒后自动撤掉（此前 until 只写不读，撤销条常驻）', async () => {
+  const harness = renderReader({ items: [item({ id: 'a' }), item({ id: 'b' })] })
+  // 记录定时器并手动触发到期回调 —— 不必真等 5 秒
+  const timers = []
+  harness.sandbox.setTimeout = (fn, ms) => { timers.push({ fn, ms }); return timers.length }
+  harness.sandbox.clearTimeout = () => {}
+
+  await harness.store.load('overview')
+  await harness.store.markAllRead()
+
+  const armed = timers.find((entry) => entry.ms === 5000)
+  assert.ok(armed !== undefined, 'markAll 必须给撤销窗口上定时器；实际 setTimeout 延时：' + JSON.stringify(timers.map((entry) => entry.ms)))
+  assert.ok(harness.store.get().undo !== undefined, '刚标完应当有撤销条')
+
+  armed.fn()
+  assert.equal(harness.store.get().undo, undefined, '窗口到期后撤销条必须消失')
+})
