@@ -17,7 +17,7 @@ import { appendFileSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import z from 'schemastery'
-import { readerDomain } from './domain.js'
+import { readerDomain, rebuildItem } from './domain.js'
 import { createStore, type ReaderStore } from './store.js'
 import { refreshFeeds, type FeedOutcome } from './refresh.js'
 import { blocksToText, fetchArticle } from './article.js'
@@ -305,23 +305,6 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
-  /** 显式重建记录并去掉 readAt：zod .strict() 下不该塞一个 undefined 键进去。 */
-  const withoutReadAt = (record: {
-    feedId: string; title: string; link: string; publishedAt?: string
-    summary?: string; fetchedAt: string; starred: boolean
-  }): {
-    feedId: string; title: string; link: string; publishedAt?: string
-    summary?: string; fetchedAt: string; starred: boolean
-  } => ({
-    feedId: record.feedId,
-    title: record.title,
-    link: record.link,
-    publishedAt: record.publishedAt,
-    summary: record.summary,
-    fetchedAt: record.fetchedAt,
-    starred: record.starred,
-  })
-
   const countUnread = (target: ReaderStore): number =>
     target.listFeeds().reduce((sum, [feedId]) => sum + target.listItems(feedId).filter(([, i]) => i.readAt === undefined).length, 0)
 
@@ -368,7 +351,9 @@ export function apply(ctx: Context, config: Config): void {
           for (const itemId of itemIds) {
             const existing = target.item(itemId)
             if (existing === undefined || existing.readAt === undefined) continue
-            await target.saveItem(itemId, withoutReadAt(existing))
+            // 只去掉 readAt：原先这里调的那个 helper 按 7 个字段重建，会把 article 缓存
+            // 一起丢掉——撤销「全部已读」不该动内容缓存（2026-10-07 随三处重建收敛时修掉）
+            await target.saveItem(itemId, rebuildItem(existing, { omit: ['readAt'] }))
             changed += 1
           }
           return ok({ changed, unread: countUnread(target) })
@@ -418,18 +403,8 @@ export function apply(ctx: Context, config: Config): void {
             blocks: fetched.blocks,
             frameable: fetched.frameable,
           }
-          // 成功要清掉旧的失败原因：显式重建记录，避免在 .strict() 下塞 undefined 键
-          await target.saveItem(itemId, {
-            feedId: existing.feedId,
-            title: existing.title,
-            link: existing.link,
-            publishedAt: existing.publishedAt,
-            summary: existing.summary,
-            fetchedAt: existing.fetchedAt,
-            readAt: existing.readAt,
-            starred: existing.starred,
-            article,
-          })
+          // 成功要清掉旧的失败原因：交给 rebuildItem（它按 schema 字段表搬运，不会漏字段）
+          await target.saveItem(itemId, rebuildItem(existing, { omit: ['articleFailure'], set: { article } }))
           log('取正文成功：' + existing.link + '（' + fetched.blocks.length + ' 块 ' +
             blocksToText(fetched.blocks).length + ' 字符）')
           return ok({ itemId, cached: false, title: article.title, blocks: article.blocks, frameable: article.frameable })

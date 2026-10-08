@@ -8,6 +8,7 @@
  *      前者必须远大于后者，否则老条目会借「滚出去重窗口」重新变成未读。
  */
 import { mapConcurrent } from './concurrency.js'
+import { rebuildItem } from './domain.js'
 import { deriveItemId } from './feed/item-id.js'
 import { fetchFeed, type FetchLimits } from './feed/fetch.js'
 import { articleCharsOf, selectPrunable, selectArticleEvictions, type RetentionRow } from './retention.js'
@@ -113,17 +114,8 @@ async function capArticleCache(store: ReaderStore, feedId: string, maxChars: num
   for (const itemId of evicted) {
     const record = store.item(itemId)
     if (record === undefined) continue
-    // 显式重建记录：清掉 article，其余字段（含 readAt/starred）原样保留
-    await store.saveItem(itemId, {
-      feedId: record.feedId,
-      title: record.title,
-      link: record.link,
-      publishedAt: record.publishedAt,
-      summary: record.summary,
-      fetchedAt: record.fetchedAt,
-      readAt: record.readAt,
-      starred: record.starred,
-    })
+    // 清掉 article，其余字段（含 readAt/starred）原样保留——交给 rebuildItem 按 schema 搬运
+    await store.saveItem(itemId, rebuildItem(record, { omit: ['article', 'articleFailure'] }))
   }
   return evicted.length
 }

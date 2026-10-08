@@ -69,6 +69,42 @@ export const itemRecordSchema = z.object({
 }).strict()
 export type ItemRecord = z.infer<typeof itemRecordSchema>
 
+/**
+ * 条目记录的全部字段名，**从 schema 派生而不是手抄一份**。
+ *
+ * 为什么必须派生：rebuildItem 靠这张表逐字段搬运。手抄一份的话，schema 加了字段而这里忘了加，
+ * 重建就会静默丢字段——那正是「手写重建散落三处」这个坏味道本身的成因。
+ */
+const ITEM_FIELDS = Object.keys(itemRecordSchema.shape) as Array<keyof ItemRecord>
+
+/**
+ * 显式重建条目记录：按 schema 的字段表搬运，再叠加改动。
+ *
+ * 为什么需要它：zod 的 .strict() 不接受 schema 之外的键，「删掉一个字段」不能靠展开加 undefined
+ * 糊过去，只能重建。原先这个动作在 index.ts 与 refresh.ts 里手写了三处（去掉 readAt、清正文缓存、
+ * 写入新正文），加一个字段要改三处。**而且三份拷贝里已经有一份出了事**：unmarkRead 用的那份把
+ * 参数类型声明成 7 个字段，于是「反转已读」时把 article 缓存一起丢掉了（重建只搬运声明过的字段）。
+ *
+ * - omit：要丢掉的字段
+ * - set：要覆盖/新增的字段
+ */
+export function rebuildItem(
+  record: ItemRecord,
+  change: { omit?: ReadonlyArray<keyof ItemRecord>; set?: Partial<ItemRecord> } = {},
+): ItemRecord {
+  const next: Record<string, unknown> = {}
+  for (const field of ITEM_FIELDS) {
+    if (change.omit?.includes(field) === true) continue
+    const value = record[field]
+    if (value !== undefined) next[field] = value
+  }
+  for (const [field, value] of Object.entries(change.set ?? {})) {
+    if (value === undefined) delete next[field]
+    else next[field] = value
+  }
+  return next as ItemRecord
+}
+
 export const cursorRecordSchema = z.object({
   /**
    * 去重窗口：本次新增的 id 在前（批次内保持 feed 文档顺序，不保证时间序），
