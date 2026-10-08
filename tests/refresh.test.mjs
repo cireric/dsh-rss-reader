@@ -365,3 +365,27 @@ test('并发受控：同时在飞的抓取数不超过上限，且结果顺序�
   assert.ok(peak <= 4, '并发峰值 ' + peak + ' 超过上限 4')
   assert.deepEqual(outcomes.map((o) => o.url), urls, '结果顺序必须与输入一致（并发不能打乱对应关系）')
 })
+test('正文回填的反面：源变短时不得用更短的正文覆盖更完整的正文', async () => {
+  // 2026-10-07 变异测试发现的唯一真缺口：把 refresh.ts 里那句「只在更完整时才覆盖」的判定
+  // 整个去掉，套件当时全绿 —— 说明这个方向从来没被断言过。
+  const store = memoryStore()
+  const item = { title: '一篇', link: 'https://ex.test/shrink', guid: 'g-shrink', date: 'Mon, 01 Jan 2024 00:00:00 GMT' }
+  let description = '完整正文。'.repeat(300)
+  await withServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/rss+xml' })
+    res.end(rss([{ ...item, description }]))
+  }, async (base) => {
+    const first = await refreshFeeds([base + '/feed.xml'], store, BASE_OPTIONS)
+    assert.equal(first[0].added, 1)
+    const itemId = [...store.items.keys()][0]
+    const full = store.items.get(itemId).summary
+    assert.equal(full, description, '前置条件：先存下完整正文')
+
+    // 源改版/摘要化：同样的 guid，但正文变短了
+    description = '短了。'
+    const second = await refreshFeeds([base + '/feed.xml'], store, BASE_OPTIONS)
+    assert.equal(second[0].added, 0, '已见过不该算新增')
+    assert.equal(store.items.get(itemId).summary, full,
+      '已存的完整正文不得被更短的版本覆盖：降级会静默丢掉用户本来能读到的内容')
+  })
+})
