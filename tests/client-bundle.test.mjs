@@ -24,6 +24,9 @@ function loadClientBundle() {
   let captured = null
   const opened = []
   const listeners = []
+  // isTypingTarget 会对 event.target 做 instanceof HTMLElement —— 沙箱里没有这个全局，
+  // 不给就会让按键处理器直接抛 ReferenceError（实测踩到）。空类即可：null 不是它的实例。
+  class HTMLElementStub {}
   const sandbox = {
     document: {
       addEventListener: (type, handler) => { if (type === 'keydown') listeners.push(handler) },
@@ -36,6 +39,13 @@ function loadClientBundle() {
       open: (url) => { opened.push(url) },
     },
     console,
+    HTMLElement: HTMLElementStub,
+    // 组件的某些 effect 用 setTimeout 做消抖（SLOW_LOADING_MS），沙箱里不给会直接抛
+    // ReferenceError —— 实测踩到，表现为三条接线测试全部报错而不是断言失败。
+    setTimeout,
+    clearTimeout,
+    Date,
+    JSON,
   }
   vm.createContext(sandbox)
   vm.runInContext(source, sandbox)
@@ -43,6 +53,11 @@ function loadClientBundle() {
   for (const field of ['id', 'factory']) assert.ok(captured[field], 'bundle entry 缺 ' + field)
   // 元素桩保留 type/props，测试才能检查 onClick 真正接了什么
   const createElement = (type, props) => ({ type, props })
+  // 最小的 hooks 状态：按渲染序号存 useState 的值；每次渲染前调 beginRender 归零。
+  // 为什么需要它——若 useState 永远返回初始值 + 空 setter，组件里的 root 会恒为 null，
+  // 而按键处理器第一行的可见性守卫会因此直接 return，接线就永远测不到（实测如此）。
+  const hooks = []
+  let hookIndex = 0
   const require = (specifier) => {
     if (specifier === 'react' || specifier === 'react/jsx-runtime') {
       return {
@@ -52,13 +67,26 @@ function loadClientBundle() {
         useCallback: (fn) => fn,
         // 立即执行 effect：组件挂载时的转发动作要能被测试观察到
         useEffect: (fn) => { fn() },
-        useState: (initial) => [initial, () => undefined],
+        useState: (initial) => {
+          const at = hookIndex
+          hookIndex += 1
+          if (!(at in hooks)) hooks[at] = typeof initial === 'function' ? initial() : initial
+          return [hooks[at], (next) => { hooks[at] = typeof next === 'function' ? next(hooks[at]) : next }]
+        },
         default: {},
       }
     }
     throw new Error('未预期的外部依赖：' + specifier)
   }
-  return { id: captured.id, exports: captured.factory(require), sandbox, opened, listeners }
+  return {
+    id: captured.id,
+    exports: captured.factory(require),
+    sandbox,
+    opened,
+    listeners,
+    hooks,
+    beginRender: () => { hookIndex = 0 },
+  }
 }
 
 /**
@@ -458,3 +486,108 @@ test('详情页按钮：尊重当前过滤（未读筛选下按钮也跳过已�
   await new Promise((resolve) => setTimeout(resolve, 20))
   assert.equal(store.get().article.itemId, 'c', '未读筛选下应当跳过已读的 b')
 })
+
+/**
+ * 渲染**真实组件**并取出它注册的 keydown 处理器 —— 让按键「接线」可断言。
+ *
+ * 为什么需要这一层：既有的测试只驱动 store（断言最终状态），而历史故障几乎都出在接线
+ * （键没接上、副作用漏了）。2026-10-07 实测：把「所有键解析短路」「可见性守卫恒真」
+ * 「干脆不注册监听器」三条变异分别注入构建产物，套件全绿 —— 那一层此前零覆盖。
+ *
+ * 桩件是最小 React：useState 真的存值，渲染一遍后把树里所有 ref 回调用假 DOM 节点调一遍，
+ * 再渲染一遍（第一遍里 root 还是 null，按键处理器的可见性守卫会拦住所有按键）。
+ */
+function renderReader({ items = [] } = {}) {
+  const harness = loadClientBundle()
+  const { exports, sandbox, listeners } = harness
+  const endpoints = []
+  sandbox.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body)
+    endpoints.push(body.endpoint)
+    const ok = (value) => ({ ok: true, status: 200, json: async () => ({ ok: true, value }) })
+    if (body.endpoint === 'overview') return ok({ feeds: [], unread: items.length, items })
+    return ok({ changed: 1, unread: 0 })
+  }
+  const store = exports.createReaderStore()
+  const Reader = exports.createReader(store)
+  const box = {
+    scrollTop: 0,
+    scrollHeight: 3000,
+    clientHeight: 300,
+    querySelector: () => ({ offsetHeight: 40 }),
+    getClientRects: () => [{}],
+    focus: () => {},
+    contains: () => true,
+  }
+  const renderOnce = () => { harness.beginRender(); return Reader() }
+  // 桩件没有真的 React，ref 不会被自动调用：把树里的 ref 回调都拿假节点调一遍
+  for (const props of collectRefs(renderOnce())) props.ref(box)
+  renderOnce()
+  return { store, listeners, box, endpoints }
+}
+
+/** 深度遍历元素桩（{type, props}）收集所有函数型 ref，供 renderReader 手工挂载。 */
+function collectRefs(node, found = []) {
+  if (node === null || node === undefined || typeof node !== 'object') return found
+  if (Array.isArray(node)) {
+    for (const child of node) collectRefs(child, found)
+    return found
+  }
+  const props = node.props
+  if (props !== null && typeof props === 'object') {
+    if (typeof props.ref === 'function') found.push(props)
+    for (const value of Object.values(props)) {
+      if (value !== null && typeof value === 'object') collectRefs(value, found)
+    }
+  }
+  return found
+}
+
+/** 构造一次按键事件：不需要真 DOM —— isTypingTarget 对 null 返回 false，正好放行。 */
+function keyEvent(key, shiftKey = false) {
+  return {
+    key,
+    shiftKey,
+    target: null,
+    metaKey: false,
+    ctrlKey: false,
+    altKey: false,
+    defaultPrevented: false,
+    preventDefault: () => {},
+  }
+}
+
+test('按键接线：j / k 真的驱动选中项（此前三条变异全部幸存）', async () => {
+  const harness = renderReader({ items: [item({ id: 'a' }), item({ id: 'b' }), item({ id: 'c' })] })
+  await harness.store.load('overview')
+  assert.ok(harness.listeners.length > 0, '组件必须注册 keydown 监听器')
+  const handler = harness.listeners[harness.listeners.length - 1]
+
+  const before = harness.store.get().selectedId
+  handler(keyEvent('j'))
+  assert.notEqual(harness.store.get().selectedId, before, 'j 必须移动选中项 —— 不动说明接线的某一环断了')
+  handler(keyEvent('k'))
+  assert.equal(harness.store.get().selectedId, before, 'k 必须移回来')
+})
+
+test('按键接线：未绑定的键不动任何状态（不误触发）', async () => {
+  const harness = renderReader({ items: [item({ id: 'a' }), item({ id: 'b' })] })
+  await harness.store.load('overview')
+  const handler = harness.listeners[harness.listeners.length - 1]
+  const snapshot = JSON.stringify(harness.store.get())
+  handler(keyEvent('z'))
+  assert.equal(JSON.stringify(harness.store.get()), snapshot, '未绑定的键不该改任何状态')
+})
+
+test('按键接线：o 展开并触发 markRead（副作用不能漏）', async () => {
+  const harness = renderReader({ items: [item({ id: 'a' }), item({ id: 'b' })] })
+  await harness.store.load('overview')
+  const handler = harness.listeners[harness.listeners.length - 1]
+  handler(keyEvent('o'))
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.ok(
+    harness.endpoints.includes('markRead'),
+    'o 必须触发 markRead 端点；实际端点：[' + harness.endpoints.join(', ') + ']',
+  )
+})
+

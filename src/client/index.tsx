@@ -570,7 +570,15 @@ function ReaderIcon({ size = 16, active = false }: { size?: number; active?: boo
   )
 }
 
-function createReader(store: ReaderStore): () => ReactNode {
+/**
+ * 组装 Reader 组件。
+ *
+ * **刻意 export**：客户端行为在浏览器里跑、我无法自测，导出来之后测试可以直接渲染它并派发
+ * 真实按键事件，而不是只断言 store 的最终状态。2026-10-07 实测：把「所有键解析短路」
+ * 「可见性守卫恒真」「干脆不注册监听器」三条变异分别注入构建产物，只断言 store 的测试
+ * 103 条全绿——说明按键接线那一层此前零覆盖。
+ */
+export function createReader(store: ReaderStore): () => ReactNode {
   return function Reader(): ReactNode {
     const state = useReaderStore(store)
     const [root, setRoot] = useState<HTMLDivElement | null>(null)
