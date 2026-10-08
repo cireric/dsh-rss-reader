@@ -9,6 +9,8 @@
  * 304 命中即返回 not-modified：重复抓取不得发全量重抓（§3.5 增量抓取）。
  */
 
+import { lookup } from 'node:dns/promises'
+
 export interface FetchLimits {
   /** 单源超时（毫秒） */
   timeoutMs: number
@@ -180,6 +182,46 @@ function describeFailure(error: unknown, timeoutMs: number): string {
   return String(error)
 }
 
+type AddressLookup = (hostname: string) => Promise<readonly string[]>
+
+/** 真实解析器：取全部 A/AAAA 记录（CNAME 已展开成最终地址）。 */
+const resolveAll: AddressLookup = async (hostname) => {
+  const found = await lookup(hostname, { all: true })
+  return found.map((entry) => entry.address)
+}
+
+/**
+ * 在真正 fetch 之前多一道**解析层**检查：域名解析出来的地址里只要有一个是内网，就直接拒。
+ *
+ * 为什么需要它（2026-10-07 安全评审 R3 的残留项）：blockedReason 只看**名字**，而攻击者可以让一个
+ * 看起来正常的域名解析到 127.0.0.1 / 169.254.169.254。这一步挡掉 rebinding 的前置形态。
+ *
+ * 仍然挡不住什么（写清楚，不假装封死）：解析与连接之间有时间差，我们查到的地址与实际连上的地址
+ * 理论上可以不同（真正的 TOCTOU）。要彻底封死得把连接也钉死在已校验的地址上——那需要给 fetch 传
+ * 自定义 dispatcher，也就是引入 undici 依赖，不在本插件当前的依赖面里（要做得先问过）。
+ */
+export async function resolvedBlockedReason(
+  rawUrl: string,
+  allowPrivateHosts = false,
+  lookupImpl: AddressLookup = resolveAll,
+): Promise<string | undefined> {
+  const direct = blockedReason(rawUrl, allowPrivateHosts)
+  if (direct !== undefined) return direct
+  if (allowPrivateHosts) return undefined
+  const host = new URL(rawUrl).hostname.replace(/^\[|\]$/g, '')
+  // 字面量地址在 blockedReason 里已经判过，不必再查一遍 DNS
+  if (host.includes(':') || /^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return undefined
+  let addresses: readonly string[]
+  try {
+    addresses = await lookupImpl(host)
+  } catch {
+    return '域名解析失败：' + host
+  }
+  const privateAddress = addresses.find((address) => isPrivateHost(address))
+  if (privateAddress !== undefined) return '域名 ' + host + ' 解析到内网地址 ' + privateAddress
+  return undefined
+}
+
 export async function fetchFeed(
   url: string,
   validators: FeedValidators,
@@ -196,7 +238,7 @@ export async function fetchFeed(
   if (validators.lastModified) headers['if-modified-since'] = validators.lastModified
 
   const allowPrivate = limits.allowPrivateHosts === true
-  const blocked = blockedReason(url, allowPrivate)
+  const blocked = await resolvedBlockedReason(url, allowPrivate)
   if (blocked !== undefined) return { kind: 'failed', reason: blocked }
 
   const timeout = AbortSignal.timeout(limits.timeoutMs)
@@ -225,7 +267,7 @@ export async function fetchFeed(
     } catch {
       return { kind: 'failed', reason: '重定向到一个非法地址' }
     }
-    const hopBlocked = blockedReason(next, allowPrivate)
+    const hopBlocked = await resolvedBlockedReason(next, allowPrivate)
     if (hopBlocked !== undefined) return { kind: 'failed', reason: '重定向被拒：' + hopBlocked }
     current = next
   }

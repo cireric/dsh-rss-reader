@@ -5,7 +5,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
-import { blockedReason, fetchFeed, decodeXmlBody } from '../lib/feed/fetch.js'
+import { blockedReason, resolvedBlockedReason, fetchFeed, decodeXmlBody } from '../lib/feed/fetch.js'
 
 // allowPrivateHosts 只给测试用：桩服务器都在 127.0.0.1，而生产默认是拒绝内网地址
 const LIMITS = { timeoutMs: 2000, maxBytes: 1_000_000, allowPrivateHosts: true }
@@ -142,4 +142,21 @@ test('出网策略：重定向环被跳数上限截断', async () => {
     assert.equal(result.kind, 'failed')
     assert.match(result.reason, /重定向超过/)
   })
+})
+
+test('出网策略：域名解析到内网地址也要拒（rebinding 的前置拦截）', async () => {
+  const fakeLookup = async (host) => (host === 'evil.test' ? ['93.184.216.34', '169.254.169.254'] : ['93.184.216.34'])
+  assert.match(String(await resolvedBlockedReason('http://evil.test/feed', false, fakeLookup)), /内网地址/)
+  assert.equal(await resolvedBlockedReason('http://good.test/feed', false, fakeLookup), undefined,
+    '解析到公网地址的不该被拦')
+
+  // 解析失败按失败上报 —— 否则会走到 fetch 再报一个更含糊的错
+  const boom = async () => { throw new Error('ENOTFOUND') }
+  assert.match(String(await resolvedBlockedReason('http://nx.test/feed', false, boom)), /解析失败/)
+
+  // 测试开关打开时整段跳过（桩服务器都在 127.0.0.1）
+  assert.equal(await resolvedBlockedReason('http://evil.test/feed', true, fakeLookup), undefined)
+
+  // 字面量地址不查 DNS：blockedReason 已经判过
+  assert.match(String(await resolvedBlockedReason('http://169.254.169.254/latest/', false, fakeLookup)), /内网地址/)
 })

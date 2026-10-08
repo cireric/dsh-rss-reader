@@ -68,6 +68,12 @@ Host/Origin 与浏览器鉴权（实测：未带 token 的请求得 401，不存
 | `maxArticleCacheChars` | 8000000 | **每个源的按需正文缓存总量上限**（字符）。超限从最旧的缓存开始清——只清 `article`，条目与已读/星标都保留；用户再打开该条会重新抓一次 |
 | `cleanupAfterDays` | 30 | 显式清理的天数阈值：早于「现在 − 该天数」的条目才可被「清理旧条目」按钮删除 |
 | `refreshOnStart` | true | 装载时刷新一次 |
+| `importConcurrency` | 5 | OPML 导入时逐源校验的并发上限 |
+| `refreshConcurrency` | 5 | 刷新时同时在飞的抓取数（逐源串行是 N x RTT 的线性等待） |
+| `articleMaxBytes` | 2 MiB | 单篇正文的抓取体积上限（按需取正文时用） |
+| `articleCooldownMs` | 30000 | 同一篇文章两次取正文的最小间隔（防连按打出一串请求） |
+| `minRefreshIntervalMs` | 600000 | 打开面板时的最小刷新间隔：节流不打网络，但不引入常驻定时器 |
+| `maxItemsShown` | 300 | 一次下发到浏览器半的条目上限（排序后再截） |
 | `logFile` | `$DSH_HOME/state/dsh-rss-reader/reader.log` | 刷新日志（宿主内证据通道） |
 
 > 注入器（dsh-super-injector）的 `loader.create` 写死 `config: {}`，注入的插件永远拿 schema
