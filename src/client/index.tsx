@@ -34,6 +34,24 @@ const ROOT_ATTR = 'data-dsh-rss-reader'
  */
 const MIN_BODY_CHARS = 40
 
+/**
+ * 原站视图 iframe 的属性：**单点定义**——既给 JSX 用，也给契约测试断言，防止两处各说各话。
+ *
+ * 为什么必须沙箱（2026-10-07 安全评审）：feed 里的条目链接完全由发布者控制，而宿主的抓取
+ * 接受 data: URL —— 攻击者不需要任何真站点，就能造出一个「可嵌入」的恶意页，让它在 DSH
+ * 页面内以无沙箱 iframe 加载（脚本、弹窗、下载，以及一次点击后的整页跳转）。
+ *
+ * 刻意**不给** allow-same-origin：给了它 frame 就保留真实 origin，而一旦 SSRF 那条路径让
+ * frame 落在 http://127.0.0.1:3080/...，同源且可执行脚本的 frame 能自行解除沙箱并触到 DSH
+ * 页面。代价是原站拿不到自己的 cookie/storage，少数站点会显示未登录态——这是明知取舍：
+ * 宁可牺牲原站登录态，也不留同源升级路径。
+ * 也刻意**不给** allow-top-navigation：否则一次用户点击就能把整个标签页换成钓鱼页。
+ */
+export const ORIGINAL_VIEW_FRAME_PROPS = {
+  sandbox: 'allow-scripts allow-forms allow-popups',
+  referrerPolicy: 'no-referrer',
+} as const
+
 /** 「全部标记已读」的撤销窗口。 */
 const UNDO_WINDOW_MS = 5000
 /**
@@ -1117,6 +1135,7 @@ function ArticleView({ article, link, onBack, onToggleRender, setBox, canPrev, c
           <iframe
             src={link}
             title={article.title ?? '原站视图'}
+            {...ORIGINAL_VIEW_FRAME_PROPS}
             style={{ flex: 1, minHeight: 0, width: '100%', border: 'none', background: '#fff' }}
           />
         </>

@@ -396,6 +396,18 @@ test('接线：空格在列表页滚动视野、且不改变选中项（n/p 的�
   // （纯滚动写在组件的 DOM 操作里，依赖真实容器；用 store 断言可覆盖的部分）
   assert.equal(harness.store.get().selectedId, before, '扫视不应改变选中项')
 })
+
+test('原站视图 iframe 必须有沙箱，且不给同源升级路径（2026-10-07 安全修）', () => {
+  const { exports } = loadClientBundle()
+  const props = exports.ORIGINAL_VIEW_FRAME_PROPS
+  assert.ok(props !== undefined, '客户端必须导出 ORIGINAL_VIEW_FRAME_PROPS（JSX 与测试共用同一份）')
+  assert.ok(props.sandbox.includes('allow-scripts'), '原站需要脚本才能正常显示')
+  assert.ok(!props.sandbox.includes('allow-same-origin'),
+    '给了 allow-same-origin 就保留真实 origin：一旦 SSRF 让 frame 落在本机 127.0.0.1:3080，同源 frame 可自行解除沙箱')
+  assert.ok(!props.sandbox.includes('allow-top-navigation'),
+    '否则一次用户点击就能把整个标签页换成钓鱼页（地址栏仍是本机地址）')
+  assert.equal(props.referrerPolicy, 'no-referrer', '别把本机地址当 Referer 发给原站')
+})
 test('详情页按钮：canStepArticle 与 stepArticle 判定必须一致（防「按钮灰着但键盘能切」）', async () => {
   const { store } = await driveStore({
     items: [item({ id: 'a' }), item({ id: 'b' }), item({ id: 'c' })],
