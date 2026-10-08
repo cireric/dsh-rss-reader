@@ -133,13 +133,22 @@ export function apply(ctx: Context, config: Config): void {
 
   /** 把 Config.feeds 里还没落库的源幂等写进存储域（订阅源的真相在域里）。 */
   const seedConfiguredFeeds = async (target: ReaderStore): Promise<number> => {
+    // 种子的真相在存储域里（README），这里只是首次落库的便利。所以当 config 没经过 schema 解析
+    // （2026-10-08 实测：注入器路径下连报 3 次 `config.feeds is not iterable`，fiber 直接失败）
+    // 时按「没有种子」降级并响亮记一笔，而不是让整个插件起不来。
+    const rawSeeds: unknown = config.feeds
+    if (!Array.isArray(rawSeeds)) {
+      log('config.feeds 不是数组（配置未经 schema 解析？），按「无种子」继续：' + String(rawSeeds))
+    }
+    const seeds = Array.isArray(rawSeeds) ? rawSeeds : []
     let seeded = 0
-    for (const raw of config.feeds) {
+    for (const raw of seeds) {
+      const source = String(raw)
       let feedId: string
       try {
-        feedId = normalizeFeedUrl(raw)
+        feedId = normalizeFeedUrl(source)
       } catch {
-        log('忽略非法订阅源：' + raw)
+        log('忽略非法订阅源：' + source)
         continue
       }
       if (target.feed(feedId) === undefined) {
