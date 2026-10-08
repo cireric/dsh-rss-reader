@@ -24,16 +24,26 @@ const ENTITIES: Record<string, string> = {
   yen: '¥', sect: '§', para: '¶', bull: '•', dagger: '†', prime: '′', permil: '‰',
 }
 
+/**
+ * Unicode 码点上限。越界的字符引用（如 &#x110000;）会让 String.fromCodePoint 抛
+ * RangeError —— 那是任意网页可控的输入，一次抛错就毁掉整页抽取（2026-10-07 安全评审 R4）。
+ */
+const MAX_CODE_POINT = 0x10ffff
+
+function inCodePointRange(code: number): boolean {
+  return Number.isFinite(code) && code >= 0 && code <= MAX_CODE_POINT
+}
+
 /** 解码实体（命名 + 十进制 + 十六进制）。 */
 export function decodeEntities(text: string): string {
   return text.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/g, (whole, body: string) => {
     if (body.startsWith('#x') || body.startsWith('#X')) {
       const code = Number.parseInt(body.slice(2), 16)
-      return Number.isFinite(code) ? String.fromCodePoint(code) : whole
+      return inCodePointRange(code) ? String.fromCodePoint(code) : whole
     }
     if (body.startsWith('#')) {
       const code = Number.parseInt(body.slice(1), 10)
-      return Number.isFinite(code) ? String.fromCodePoint(code) : whole
+      return inCodePointRange(code) ? String.fromCodePoint(code) : whole
     }
     return ENTITIES[body] ?? whole
   })

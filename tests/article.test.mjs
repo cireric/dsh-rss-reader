@@ -141,3 +141,11 @@ test('退化路径：没有 <p> 的 div 版式也能抽出正文', () => {
 test('抽不出正文时返回空块（而不是编造内容）', () => {
   assert.deepEqual(extractArticle('<html><body><nav>仅导航</nav></body></html>').blocks, [])
 })
+
+test('实体解码：越界码点不得抛错（否则一次输入就能毁掉整页抽取）', () => {
+  // 2026-10-07 安全评审 R4：&#x110000; 会让 String.fromCodePoint 抛 RangeError
+  assert.equal(decodeEntities('&#x110000;'), '&#x110000;', '越界的十六进制引用按原文保留')
+  assert.equal(decodeEntities('&#1114112;'), '&#1114112;', '越界的十进制引用同理')
+  assert.equal(decodeEntities('&#x10ffff;'), '\u{10ffff}', '边界内的最大码点照常解码')
+  assert.equal(decodeEntities('&#x41;'), 'A', '常规引用不受影响')
+})
