@@ -53,6 +53,8 @@ export interface ReaderState {
   layout: 'list' | 'expanded'
   /** 「全部标为已读」的时间范围，见 MarkAllRange */
   markAllRange: MarkAllRange
+  /** 是否显示未读计数（规格 §5 不变量 8：**未读计数可隐藏**）。默认显示 = 既有行为。 */
+  showUnread: boolean
   /** 最近一次导入的报告（坏源要逐条列出，不能只报总数） */
   importReport: OpmlImportResult | undefined
   /** 订阅管理里的忙碌标记（导入要逐源抓取，可能数秒） */
@@ -109,7 +111,7 @@ export function createReaderStore() {
   let state: ReaderState = {
     items: [], feeds: [], unread: 0, filter: 'all',
     selectedId: undefined, loading: true, error: undefined, undo: undefined,
-    view: 'list', layout: 'list', markAllRange: 'all', article: undefined, notice: undefined,
+    view: 'list', layout: 'list', markAllRange: 'all', showUnread: true, article: undefined, notice: undefined,
     importReport: undefined, feedsBusy: false,
   }
   const listeners = new Set<() => void>()
@@ -415,6 +417,17 @@ export function createReaderStore() {
   /** 切「全部标为已读」的时间范围。 */
   const setMarkAllRange = (markAllRange: MarkAllRange): void => { set({ markAllRange }) }
 
+  /** 隐藏 / 显示未读计数（规格 §5 不变量 8）。只影响呈现，不动数据。 */
+  const setShowUnread = (showUnread: boolean): void => { set({ showUnread }) }
+
+  /**
+   * 刷新未读计数（规格 §5 不变量 8 的 r 键）。
+   *
+   * 走的是 overview（宿主把已收集的条目与计数回给我们），**不触发抓取** —— 这正是规格不变量 1
+   * 的区分：「Refresh 只更新本地视图，抓取由服务端按自己的节奏做」。
+   */
+  const refreshCount = async (): Promise<void> => { await load('overview') }
+
   const toggleFeeds = (): void => { set({ view: state.view === 'feeds' ? 'list' : 'feeds' }) }
 
   /** 导出 OPML：拿到文本后交给浏览器下载（File System Access 不可用时退化为 blob 下载）。 */
@@ -499,7 +512,7 @@ export function createReaderStore() {
   return {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
     get, visible, load, markRead, selectRelative, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllRead, undoMarkAll,
-    setLayout, setMarkAllRange,
+    setLayout, setMarkAllRange, setShowUnread, refreshCount,
     openArticle, closeArticle, toggleArticleRender, cleanup, stepArticle, canStepArticle,
     toggleFeeds, exportOpml, importOpml, addFeed, removeFeed,
     dismissNotice: (): void => { set({ notice: undefined }) },

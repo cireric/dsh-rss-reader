@@ -133,10 +133,10 @@ export function ArticleView({ article, link, onBack, onToggleRender, setBox, can
         <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
           disabled={!frameable || article?.loading === true}
           title={frameable
-            ? '在原站原样页面与抽取正文之间切换（R 切换；本页可直接按 R）'
+            ? '在原站原样页面与抽取正文之间切换（W 切换；本页可直接按 W）'
             : '该站点通过 X-Frame-Options / CSP 禁止被嵌入，只能看抽取版或去原站'}
           onClick={onToggleRender}>
-          {original ? '阅读视图（R）' : '原站视图（R）'}
+          {original ? '阅读视图（W）' : '原站视图（W）'}
         </button>
         {link !== undefined && link !== '' && (
           <a href={link} target="_blank" rel="noreferrer" style={{ fontSize: 12 }}>打开原站 ↗</a>

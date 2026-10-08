@@ -243,6 +243,8 @@ export function createReader(store: ReaderStore): () => ReactNode {
           case 'openExternal': run(() => store.openSelected()); break
           case 'openArticle': if (view !== 'list') return; run(() => { void store.openArticle() }); break
           case 'toggleRender': if (view !== 'article') return; run(() => store.toggleArticleRender()); break
+          // r：刷新未读计数（只重取本地视图，不抓取 —— 规格不变量 1）
+          case 'refreshCount': run(() => { void store.refreshCount() }); break
           case 'manageFeeds': run(() => store.toggleFeeds()); break
           // Esc：从正文回到列表；列表态下不拦截（不抢弹层的 Esc）
           // Esc：正文 → 列表；订阅管理 → 列表。列表态不拦截（不抢弹层的 Esc）
@@ -277,7 +279,12 @@ export function createReader(store: ReaderStore): () => ReactNode {
         <style>{STYLE}</style>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 20px', borderBottom: '1px solid color-mix(in srgb, currentColor 12%, transparent)' }}>
           <strong>RSS 阅读器</strong>
-          <span style={{ opacity: 0.7 }}>{state.unread} 条未读 / {state.items.length} 条</span>
+          {state.showUnread && <span style={{ opacity: 0.7 }}>{state.unread} 条未读 / {state.items.length} 条</span>}
+          {/* 「未读计数可隐藏」（规格 §5 不变量 8）：默认显示，勾掉即隐藏 —— 徽标也跟着消失 */}
+          <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, opacity: 0.85 }}>
+            <input type="checkbox" checked={state.showUnread} onChange={(event) => store.setShowUnread(event.target.checked)} />
+            显示未读计数
+          </label>
           {/* 「全部标为已读」的时间范围（规格 §3.3 的 panic button）：默认全量，不选就等于没变 */}
           <label style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 'auto', fontSize: 12, opacity: 0.85 }}>
             A 键范围
@@ -453,7 +460,8 @@ export function createReader(store: ReaderStore): () => ReactNode {
 
 function Badge({ store }: { store: ReaderStore }): ReactNode {
   const state = useReaderStore(store)
-  if (state.unread === 0) return null
+  // 计数被隐藏时徽标也必须消失 —— 否则「隐藏」只做了一半
+  if (!state.showUnread || state.unread === 0) return null
   return <span title={state.unread + ' 条未读'} style={{ fontSize: 10 }}>{state.unread > 99 ? '99+' : state.unread}</span>
 }
 

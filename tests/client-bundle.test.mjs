@@ -665,3 +665,18 @@ test('A 的默认范围是全部：不带阈值时行为与以前完全一致', 
   assert.deepEqual(body.payload.itemIds, ['recent'])
   assert.equal(body.payload.before, undefined, '全量时不传截止时间')
 })
+
+test('r 刷新未读计数：只重取本地视图，不触发抓取（规格不变量 1）', async () => {
+  const { store, endpoints } = await driveStore({ items: [item()] })
+  await store.refreshCount()
+  assert.ok(endpoints.includes('overview'), '要重取 overview')
+  assert.ok(!endpoints.includes('refresh'), 'r 不该触发抓取 —— 那是 refresh 端点的事')
+})
+
+test('未读计数可隐藏（规格不变量 8）：默认显示，隐藏只动呈现不动数据', async () => {
+  const { store } = await driveStore({ items: [item()] })
+  assert.equal(store.get().showUnread, true, '默认必须显示 —— 否则就是悄悄改了既有行为')
+  store.setShowUnread(false)
+  assert.equal(store.get().showUnread, false)
+  assert.equal(store.get().unread, 1, '隐藏只是呈现，计数本身不该被改掉')
+})

@@ -9,7 +9,7 @@
 /** 键盘动作：与具体按键解耦，客户端只负责把动作落到 store 上。 */
 export type ReaderKeyAction =
   | 'next' | 'prev' | 'expand' | 'openExternal' | 'openArticle'
-  | 'toggleRender' | 'back' | 'star' | 'toggleRead' | 'markAll' | 'manageFeeds'
+  | 'toggleRender' | 'refreshCount' | 'back' | 'star' | 'toggleRead' | 'markAll' | 'manageFeeds'
   | 'scanNext' | 'scanPrev' | 'pageDown' | 'pageUp'
   | 'expandedView' | 'listView'
   | 'none'
@@ -35,9 +35,14 @@ export function resolveReaderKey(key: string, shift = false): ReaderKeyAction {
     // v 开外部浏览器、V（shift+v）在阅读器内读正文：这是刻意区分的一对
     case 'v': return 'openExternal'
     case 'V': return 'openArticle'
-    // r 与 R 都接受：界面标签写的是「（R）」，不写 shift 就不该要求 shift
+    // r = 刷新未读计数（规格 §5 不变量 8：计数刷新有独立快捷键 r）。
+    // 注意它**不抓取外部站点** —— 不变量 1 明写「Refresh ≠ 重新抓取」，所以这个动作只重取本地视图。
     case 'r':
-    case 'R': return 'toggleRender'
+    case 'R': return 'refreshCount'
+    // 视图切换（抽取正文 ⇄ 原站 iframe）改到 w/W：GR 的 r 是刷新计数，而我们原先用它切视图。
+    // 标签跟着改（article-pane.tsx 的「（W）」）—— 「标签与实现各说各话」这个仓库栽过，不许再犯。
+    case 'w':
+    case 'W': return 'toggleRender'
     case 'Escape': return 'back'
     // f 与 F 都接受：界面标签与 README 写的都是「F」，不写 shift 就不该要求 shift
     // （与上面 r/R 同一处理；2026-10-07 修——这条是同类缺陷的复发）

@@ -6,9 +6,13 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { resolveReaderKey } from '../lib/keys.js'
 
-test('视图切换键：r 与 R 都要认（标签写 R 就不能要求 shift）', () => {
-  assert.equal(resolveReaderKey('r'), 'toggleRender')
-  assert.equal(resolveReaderKey('R'), 'toggleRender')
+test('键位：r 刷新计数、w 切视图（2026-10-08 改键，标签同步改了）', () => {
+  // 2026-10-08 改键：r 归还给「刷新未读计数」（规格 §5 不变量 8），视图切换移到 w/W。
+  // 标签（article-pane 的「（W）」）已同步改，免得又出现「标签与实现各说各话」。
+  assert.equal(resolveReaderKey('r'), 'refreshCount')
+  assert.equal(resolveReaderKey('R'), 'refreshCount')
+  assert.equal(resolveReaderKey('w'), 'toggleRender')
+  assert.equal(resolveReaderKey('W'), 'toggleRender')
 })
 
 test('v 与 V 是刻意区分的一对：外部浏览器 vs 阅读器内读正文', () => {
