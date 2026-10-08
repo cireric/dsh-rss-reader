@@ -36,7 +36,10 @@ Host/Origin 与浏览器鉴权（实测：未带 token 的请求得 401，不存
 | `src/store.ts` | 域 → 窄接口适配器（编排层只依赖接口，测试用内存实现替换） |
 | `src/refresh.ts` | 刷新编排：逐源抓取 → 解析 → 去重 → 入库 → 更新游标 |
 | `src/index.ts` | Config + apply：开域、播种、刷新、日志 |
-| `src/client/index.tsx` | 侧栏图标 `sidebar.panellist` + 同 id 主面板 `main`（M0 占位） |
+| `src/client/index.tsx` | 浏览器半入口：常量、图标、条目流渲染与键盘接线、`apply`（槽位注册：`main` 面板 + `sidebar.panellist` 图标 + `sidebar.toggle.badge` 徽标） |
+| `src/client/store.ts` | 浏览器半的状态与数据通道（无 JSX）：`get()`/`subscribe()` + 动作方法 |
+| `src/client/feeds-view.tsx` | 订阅管理面板：OPML 导入导出 / 加源 / 退订（纯展示，动作由入口传入） |
+| `src/client/article-pane.tsx` | 正文面：结构化块渲染 +「阅读视图 / 原站视图」切换（iframe 的沙箱属性也在此） |
 
 数据落盘在宿主存储域的 JSON 后端：`$DSH_HOME/storages/rss_reader.json`。
 
