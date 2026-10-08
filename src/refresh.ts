@@ -81,6 +81,7 @@ async function prune(store: ReaderStore, feedId: string, maxItems: number): Prom
   const rows: RetentionRow[] = store.listItems(feedId).map(([itemId, record]) => ({
     id: itemId,
     starred: record.starred,
+    kept: record.keptUnread === true,
     read: record.readAt !== undefined,
     recency: recencyOf(record),
   }))

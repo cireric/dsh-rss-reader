@@ -21,8 +21,8 @@ const ROOT = process.cwd()
  */
 const MUTATIONS = [
   { id: 'retention-星标保护', file: 'lib/retention.js',
-    from: 'const unread = byOldest.filter((row) => !row.starred && !row.read);',
-    to: 'const unread = byOldest.filter((row) => !row.read);' },
+    from: 'const protectedFromPrune = (row) => row.starred || row.kept;',
+    to: 'const protectedFromPrune = (row) => row.kept;' },
   { id: 'retention-未读优先级', file: 'lib/retention.js',
     from: 'return [...unread, ...read].slice(0, overflow).map((row) => row.id);',
     to: 'return [...read, ...unread].slice(0, overflow).map((row) => row.id);' },
@@ -59,6 +59,9 @@ const MUTATIONS = [
   { id: 'domain-rebuildItem 的 omit', file: 'lib/domain.js',
     from: 'if (change.omit?.includes(field) === true)',
     to: 'if (false)' },
+  { id: 'retention-保持未读不裁剪', file: 'lib/retention.js',
+    from: 'row.starred || row.kept',
+    to: 'row.starred' },
   { id: 'fetch-重定向目标不可信', file: 'lib/feed/fetch.js',
     from: 'const hopBlocked = await resolvedBlockedReason(next, false);',
     to: 'const hopBlocked = await resolvedBlockedReason(next, trusted);' },

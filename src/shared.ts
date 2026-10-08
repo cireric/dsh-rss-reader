@@ -16,7 +16,7 @@
  */
 export const ROUTE_PATH = '/rss-reader-api'
 
-export type Endpoint = 'overview' | 'refresh' | 'markRead' | 'unmarkRead' | 'toggleStar' | 'article' | 'cleanup'
+export type Endpoint = 'overview' | 'refresh' | 'markRead' | 'unmarkRead' | 'toggleStar' | 'toggleKeepUnread' | 'article' | 'cleanup'
   | 'opmlExport' | 'opmlImport' | 'addFeed' | 'removeFeed'
 
 export type RpcResult<T> =
@@ -45,6 +45,8 @@ export interface ItemView {
   /** 已读 = 有值（用户 2026-10-05 定的粒度） */
   readAt?: string
   starred: boolean
+  /** 「保持未读」（规格 §3.3）：为真时批量「全部标为已读」会跳过它 */
+  keptUnread?: boolean
   summary?: string
 }
 

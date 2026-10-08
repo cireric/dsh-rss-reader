@@ -66,6 +66,7 @@ const ARTICLE_REVISION = 2
         fetchedAt: item.fetchedAt,
         readAt: item.readAt,
         starred: item.starred,
+        keptUnread: item.keptUnread,
         summary: item.summary,
       })
     }
@@ -104,17 +105,21 @@ const ARTICLE_REVISION = 2
         }
 
         case 'markRead': {
-          const itemIds = Array.isArray((payload as { itemIds?: unknown } | null)?.itemIds)
-            ? ((payload as { itemIds: unknown[] }).itemIds.map(String))
-            : []
+          const body = payload as { itemIds?: unknown; skipKept?: unknown } | null
+          const itemIds = Array.isArray(body?.itemIds) ? (body as { itemIds: unknown[] }).itemIds.map(String) : []
           if (itemIds.length === 0) return fail('bad-request', 'markRead 需要 itemIds 数组')
+          // 「全部标为已读」（A 键）走这条时带 skipKept：**保持未读的条目要活下来**
+          // —— 那正是规格 §3.3 里 kept-unread 的用处；而单条打开/显式标记不带它，
+          // 那种情况下按规格「标为已读即移除 kept-unread」。
+          const skipKept = body?.skipKept === true
           const stamp = new Date().toISOString()
           let changed = 0
           for (const itemId of itemIds) {
             const existing = target.item(itemId)
             if (existing === undefined || existing.readAt !== undefined) continue
-            // 幂等：已读的原时间戳不动
-            await target.saveItem(itemId, { ...existing, readAt: stamp })
+            if (skipKept && existing.keptUnread === true) continue
+            // 幂等：已读的原时间戳不动。用 rebuildItem 是为了同时把 kept-unread 去掉
+            await target.saveItem(itemId, rebuildItem(existing, { omit: ['keptUnread'], set: { readAt: stamp } }))
             changed += 1
           }
           return ok({ changed, unread: countUnread(target) })
@@ -292,6 +297,7 @@ const ARTICLE_REVISION = 2
           const rows: CleanupRow[] = all.map(([itemId, record]) => ({
             id: itemId,
             starred: record.starred,
+            kept: record.keptUnread === true,
             read: record.readAt !== undefined,
             recency: recencyOf(record),
             articleChars: articleCharsOf(record.article),
@@ -303,6 +309,21 @@ const ARTICLE_REVISION = 2
           log('清理：删除 ' + doomed.length + ' 条已读旧条目（阈值 ' + config.cleanupAfterDays + ' 天，释放约 ' +
             freedChars + ' 字符）')
           return ok({ deleted: doomed.length, freedChars, cutoff, unread: countUnread(target) })
+        }
+
+        case 'toggleKeepUnread': {
+          // 「保持未读」在 GR 里**没有快捷键**（规格 §3.4 的键位列是「—」），是条目下方的链接。
+          // 所以这个端点服务于客户端的那个链接，不接键位。
+          const itemId = String((payload as { itemId?: unknown } | null)?.itemId ?? '')
+          if (!itemId) return fail('bad-request', 'toggleKeepUnread 需要 itemId')
+          const existing = target.item(itemId)
+          if (existing === undefined) return fail('not-found', '条目不存在：' + itemId)
+          const keptUnread = existing.keptUnread !== true
+          // 取消时把键去掉而不是写 false —— 缺省即「未保持」，少一个键更干净
+          await target.saveItem(itemId, keptUnread
+            ? rebuildItem(existing, { set: { keptUnread: true } })
+            : rebuildItem(existing, { omit: ['keptUnread'] }))
+          return ok({ itemId, keptUnread, unread: countUnread(target) })
         }
 
         case 'toggleStar': {

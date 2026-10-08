@@ -13,6 +13,8 @@
 export interface RetentionRow {
   readonly id: string
   readonly starred: boolean
+  /** 「保持未读」：用户明确说了「别动它」，与星标同级保护 */
+  readonly kept: boolean
   readonly read: boolean
   /** 排序用的时间（发布时间优先，缺则抓取时间）；ISO 字符串，按字典序即时间序。 */
   readonly recency: string
@@ -22,15 +24,16 @@ export interface RetentionRow {
  * 选出要被裁剪删除的条目 id（按源）。
  *
  * 两级：**先删未读**（它们是噪声），**再删已读**（历史，需要时才让位），
- * **星标条目一律不动**——星标是用户明确的「我要留着」。若全被星标占满，
- * 宁可超过上限也不删（返回的列表会短于需要量）。
+ * **星标与「保持未读」的条目一律不动**——两者都是用户明确说的「我要留着」。
+ * 若全被它们占满，宁可超过上限也不删（返回的列表会短于需要量）。
  */
 export function selectPrunable(rows: readonly RetentionRow[], maxItems: number): string[] {
   const overflow = rows.length - maxItems
   if (overflow <= 0) return []
   const byOldest = [...rows].sort((a, b) => a.recency.localeCompare(b.recency) || a.id.localeCompare(b.id))
-  const unread = byOldest.filter((row) => !row.starred && !row.read)
-  const read = byOldest.filter((row) => !row.starred && row.read)
+  const protectedFromPrune = (row: RetentionRow): boolean => row.starred || row.kept
+  const unread = byOldest.filter((row) => !protectedFromPrune(row) && !row.read)
+  const read = byOldest.filter((row) => !protectedFromPrune(row) && row.read)
   return [...unread, ...read].slice(0, overflow).map((row) => row.id)
 }
 

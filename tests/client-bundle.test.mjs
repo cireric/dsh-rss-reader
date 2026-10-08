@@ -96,9 +96,12 @@ function loadClientBundle() {
 async function driveStore({ items = [], article } = {}) {
   const { exports, sandbox, opened } = loadClientBundle()
   const endpoints = []
+  // calls 是加法式的：给「请求体本身也要断言」的用例用（例如 markRead 的 skipKept）
+  const calls = []
   sandbox.fetch = async (_url, init) => {
     const body = JSON.parse(init.body)
     endpoints.push(body.endpoint)
+    calls.push(body)
     const ok = (value) => ({ ok: true, status: 200, json: async () => ({ ok: true, value }) })
     if (body.endpoint === 'overview') {
       return ok({ feeds: [], unread: items.filter((i) => i.readAt === undefined).length, items })
@@ -108,7 +111,7 @@ async function driveStore({ items = [], article } = {}) {
   }
   const store = exports.createReaderStore()
   await store.load('overview')
-  return { store, endpoints, opened }
+  return { store, endpoints, calls, opened }
 }
 
 /** 一条最小可用的条目。 */
@@ -605,4 +608,25 @@ test('A 的撤销窗口：5 秒后自动撤掉（此前 until 只写不读，撤
 
   armed.fn()
   assert.equal(harness.store.get().undo, undefined, '窗口到期后撤销条必须消失')
+})
+
+test('A 全部标为已读必须跳过「保持未读」的条目（规格 §3.3 的存在理由）', async () => {
+  const { store, calls } = await driveStore({ items: [item({ id: 'a' }), item({ id: 'b', keptUnread: true }), item({ id: 'c' })] })
+  await store.markAllRead()
+  const body = calls.find((call) => call.endpoint === 'markRead')
+  assert.ok(body !== undefined, '应当调 markRead')
+  assert.deepEqual(body.payload.itemIds.slice().sort(), ['a', 'c'], '被保持的条目不该进批量名单')
+  assert.equal(body.payload.skipKept, true, '还要让宿主侧再挡一次（客户端列表只是快照）')
+  const items = store.get().items
+  assert.equal(items.find((entry) => entry.id === 'b').readAt, undefined, '被保持的条目在本地也不该被标已读')
+  assert.notEqual(items.find((entry) => entry.id === 'a').readAt, undefined, '其余条目照常标记')
+})
+
+test('保持未读可切换，并把状态回填到条目上', async () => {
+  const { store, calls } = await driveStore({ items: [item({ id: 'a' })] })
+  await store.toggleKeepUnread('a')
+  assert.ok(calls.some((call) => call.endpoint === 'toggleKeepUnread' && call.payload.itemId === 'a'), '应当调 toggleKeepUnread')
+  assert.equal(store.get().items[0].keptUnread, true)
+  await store.toggleKeepUnread('a')
+  assert.equal(store.get().items[0].keptUnread, false, '再切一次应取消')
 })

@@ -77,3 +77,29 @@ test('显式清理：边界是严格早于阈值（等于阈值不清）', () =>
   const equal = [{ ...row('exactly', cutoff, { read: true }), articleChars: 0 }]
   assert.deepEqual(selectCleanup(equal, cutoff), [], '恰好等于阈值不该被清')
 })
+
+test('裁剪：星标与保持未读的条目一律不动（其余按未读优先删）', () => {
+  // recency 用真实时间串：字典序 = 时间序，小的更旧
+  const rows = [
+    { id: 'read-old', starred: false, kept: false, read: true, recency: '2026-01-01' },
+    { id: 'unread-old', starred: false, kept: false, read: false, recency: '2026-01-02' },
+    { id: 'kept', starred: false, kept: true, read: false, recency: '2026-01-03' },
+    { id: 'starred', starred: true, kept: false, read: false, recency: '2026-01-04' },
+    { id: 'unread-new', starred: false, kept: false, read: false, recency: '2026-01-05' },
+  ]
+  // 溢出 2 条：**未读桶内最旧优先** ⇒ 删 unread-old / unread-new，
+  // 而真正最旧的 read-old 反而留着 —— 这正是「先删未读」这条策略的可见后果
+  const picked = selectPrunable(rows, 3)
+  assert.ok(!picked.includes('kept'), '保持未读不该被自动裁剪')
+  assert.ok(!picked.includes('starred'), '星标不该被自动裁剪')
+  assert.deepEqual(picked, ['unread-old', 'unread-new'], '先删未读、再删已读，且按最旧优先')
+})
+
+test('裁剪：全被星标/保持占满时，宁可超上限也不删', () => {
+  const rows = [
+    { id: 'a', starred: true, kept: false, read: false, recency: '1' },
+    { id: 'b', starred: false, kept: true, read: true, recency: '2' },
+    { id: 'c', starred: false, kept: false, read: true, recency: '3' },
+  ]
+  assert.deepEqual(selectPrunable(rows, 1), ['c'], '只剩一条可删，不该动被保护的')
+})

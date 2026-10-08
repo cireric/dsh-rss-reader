@@ -390,7 +390,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
                   <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', flex: '0 0 auto', marginTop: 6, background: unread ? 'currentColor' : 'transparent' }} />
                   <span style={{ flex: 1, minWidth: 0 }}>
                     <span style={{ display: 'block', fontWeight: unread ? 600 : 400, opacity: unread ? 1 : 0.7 }}>
-                      {item.starred ? '★ ' : ''}{item.title || item.link || '(无标题)'}
+                      {item.starred ? '★ ' : ''}{item.keptUnread === true ? '⚑ ' : ''}{item.title || item.link || '(无标题)'}
                     </span>
                     <span style={{ display: 'block', fontSize: 12, opacity: 0.6, marginTop: 2 }}>
                       {item.feedTitle} · {relativeTime(recencyOf(item))}
@@ -415,6 +415,12 @@ export function createReader(store: ReaderStore): () => ReactNode {
                             <span key={index} style={{ display: 'block', margin: index === 0 ? '0' : '0.6em 0 0' }}>{paragraph}</span>
                           ))
                         })()}
+                        {/* 「保持未读」按规格是**条目下方的链接**（GR 没给它快捷键），所以这里不放键位 */}
+                        <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
+                          style={{ fontSize: 12, marginTop: 8, marginRight: item.link === '' ? 0 : 12 }}
+                          onClick={(event) => { event.stopPropagation(); void store.toggleKeepUnread(item.id) }}>
+                          {item.keptUnread === true ? '取消保持未读' : '保持未读'}
+                        </button>
                         {item.link !== '' && (
                           <a href={item.link} target="_blank" rel="noreferrer" style={{ fontSize: 12, display: 'inline-block', marginTop: 8 }}>打开原站 ↗</a>
                         )}

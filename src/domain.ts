@@ -61,6 +61,14 @@ export const itemRecordSchema = z.object({
   readAt: z.string().optional(),
   starred: z.boolean(),
   /**
+   * 「保持未读」——**独立于 readAt 的用户状态**（规格 §5 不变量 3：kept-unread 不等于没有 read）。
+   *
+   * 语义按规格 §3.3：被打上之后**直到条目被真正标记为已读才移除**。所以它只保护批量操作
+   * （A 全部标为已读会跳过它），而单条打开/显式标记已读会把它一起清掉。
+   * 缺省即「未保持」，所以是可选字段 —— 与 starred 的必填布尔不同，这里有「没打标」的自然表达。
+   */
+  keptUnread: z.boolean().optional(),
+  /**
    * 按需抓取的正文缓存（D 方案：V 键触发宿主抓原站 + 抽正文）。
    * 缓存在条目上——重开不再跑网络；失败原因另存 `articleFailure`，两者互斥。
    */

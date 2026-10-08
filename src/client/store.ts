@@ -238,6 +238,24 @@ export function createReaderStore() {
     }
   }
 
+  /**
+   * 切换「保持未读」（规格 §3.3）。
+   *
+   * 接收显式 id：这条链接挂在每个条目下方，点的那一行未必是当前选中的那一行。
+   */
+  const toggleKeepUnread = async (itemId: string): Promise<void> => {
+    const item = state.items.find((entry) => entry.id === itemId)
+    if (item === undefined) return
+    const next = item.keptUnread !== true
+    patchItem(itemId, { keptUnread: next })
+    try {
+      await callRpc('toggleKeepUnread', { itemId })
+    } catch (failure) {
+      patchItem(itemId, { keptUnread: item.keptUnread })
+      set({ error: failure instanceof Error ? failure.message : String(failure) })
+    }
+  }
+
   const toggleRead = async (): Promise<void> => {
     const item = visible().find((entry) => entry.id === state.selectedId)
     if (item === undefined) return
@@ -257,7 +275,9 @@ export function createReaderStore() {
 
   /** A：把**当前过滤下**的未读全部标为已读，留一个短时撤销窗口。 */
   const markAllRead = async (): Promise<void> => {
-    const ids = visible().filter((item) => item.readAt === undefined).map((item) => item.id)
+    // **保持未读的条目要活下来**（规格 §3.3）——这正是 kept-unread 的存在理由。本地乐观更新与请求
+    // 两处都要跳过；宿主侧也会按 skipKept 再挡一次（客户端列表只是快照）。
+    const ids = visible().filter((item) => item.readAt === undefined && item.keptUnread !== true).map((item) => item.id)
     if (ids.length === 0) return
     const stamp = new Date().toISOString()
     set({
@@ -267,7 +287,7 @@ export function createReaderStore() {
     })
     armUndoExpiry()
     try {
-      const result = await callRpc<{ unread: number }>('markRead', { itemIds: ids })
+      const result = await callRpc<{ unread: number }>('markRead', { itemIds: ids, skipKept: true })
       set({ unread: result.unread })
     } catch (failure) {
       set({ error: failure instanceof Error ? failure.message : String(failure) })
@@ -452,7 +472,7 @@ export function createReaderStore() {
 
   return {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
-    get, visible, load, markRead, selectRelative, openSelected, toggleStar, toggleRead, markAllRead, undoMarkAll,
+    get, visible, load, markRead, selectRelative, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllRead, undoMarkAll,
     openArticle, closeArticle, toggleArticleRender, cleanup, stepArticle, canStepArticle,
     toggleFeeds, exportOpml, importOpml, addFeed, removeFeed,
     dismissNotice: (): void => { set({ notice: undefined }) },
