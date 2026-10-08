@@ -35,8 +35,10 @@ export function resolveReaderKey(key: string, shift = false): ReaderKeyAction {
     case 'r':
     case 'R': return 'toggleRender'
     case 'Escape': return 'back'
-    // f：订阅管理（GR 里 f 是全屏，但本插件没有全屏概念，用作 manage 更实用）
-    case 'f': return 'manageFeeds'
+    // f 与 F 都接受：界面标签与 README 写的都是「F」，不写 shift 就不该要求 shift
+    // （与上面 r/R 同一处理；2026-10-07 修——这条是同类缺陷的复发）
+    case 'f':
+    case 'F': return 'manageFeeds'
     case 's': return 'star'
     case 'm': return 'toggleRead'
     // Google Reader 里「全部已读」就是 shift+a，故只认大写

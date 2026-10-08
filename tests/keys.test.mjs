@@ -49,3 +49,7 @@ test('未绑定的键一律返回 none（不误触发）', () => {
     assert.equal(resolveReaderKey(key), 'none', key + ' 不该被绑定')
   }
 })
+test('订阅管理键：f 与 F 都要认（标签写的是「F」）', () => {
+  assert.equal(resolveReaderKey('f'), 'manageFeeds')
+  assert.equal(resolveReaderKey('F', true), 'manageFeeds', '标签写 F，按 Shift+F 也必须能用')
+})
