@@ -28,7 +28,7 @@ function memoryStore() {
   }
 }
 
-const LIMITS = { timeoutMs: 2000, maxBytes: 1_000_000, allowPrivateHosts: true }
+const LIMITS = { timeoutMs: 2000, maxBytes: 1_000_000, trustedTarget: true }
 const BASE_OPTIONS = { limits: LIMITS, maxItemsPerFeed: 100, maxSeenPerFeed: 1000, maxContentChars: 100000, maxArticleCacheChars: 1000000, refreshConcurrency: 4 }
 
 async function withServer(handler, run) {

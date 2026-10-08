@@ -17,15 +17,17 @@ export interface FetchLimits {
   /** 单次响应体积上限（字节） */
   maxBytes: number
   /**
-   * 是否允许回环/私有/链路本地地址。默认**不允许**。
+   * 目标是否来自**用户自己的配置**（订阅源、正在添加的源、OPML 里的源）——而不是 feed 内容里的
+   * 链接。默认不是。
    *
-   * 这个开关只给测试与本地调试用（桩服务器都在 127.0.0.1）。插件的生产路径（index.ts 里
-   * 构造 limits 的三处）一律不设置它，也就是走默认的拒绝策略。
+   * 它只放宽「内网地址」这一条判定，而且**只对第一个请求生效**：重定向的目标永远按不可信处理
+   * （响应内容由发布者控制，一个正常域名完全可以把我们 302 到 169.254.169.254）。
    *
-   * 已知取舍：自建在内网的 RSS 服务因此用不了。要支持它应当区分「用户配置的源」与「feed
-   * 内容里的链接」（前者可信、后者由发布者控制），那是另一个改动。
+   * 为什么需要这个区分（2026-10-07 的取舍修正）：SSRF 策略一律拒内网之后，自建在局域网的 RSS
+   * 服务就用不了了——那是用户主动配置的可信目标，不该被当成攻击面。而「feed 里的条目链接」才是
+   * 发布者可控的那一类，一律拒。
    */
-  allowPrivateHosts?: boolean
+  trustedTarget?: boolean
 }
 
 /** 有 location 才值得跟的重定向状态码。 */
@@ -237,8 +239,8 @@ export async function fetchFeed(
   if (validators.etag) headers['if-none-match'] = validators.etag
   if (validators.lastModified) headers['if-modified-since'] = validators.lastModified
 
-  const allowPrivate = limits.allowPrivateHosts === true
-  const blocked = await resolvedBlockedReason(url, allowPrivate)
+  const trusted = limits.trustedTarget === true
+  const blocked = await resolvedBlockedReason(url, trusted)
   if (blocked !== undefined) return { kind: 'failed', reason: blocked }
 
   const timeout = AbortSignal.timeout(limits.timeoutMs)
@@ -267,7 +269,8 @@ export async function fetchFeed(
     } catch {
       return { kind: 'failed', reason: '重定向到一个非法地址' }
     }
-    const hopBlocked = await resolvedBlockedReason(next, allowPrivate)
+    // 重定向目标**永远**按不可信处理：它的地址由响应内容决定，连可变 chain 都不算
+    const hopBlocked = await resolvedBlockedReason(next, false)
     if (hopBlocked !== undefined) return { kind: 'failed', reason: '重定向被拒：' + hopBlocked }
     current = next
   }

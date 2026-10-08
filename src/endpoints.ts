@@ -209,7 +209,7 @@ const ARTICLE_REVISION = 2
 
           const checked = await validateSubscriptions(
             parsed.subscriptions.map((subscription) => subscription.xmlUrl),
-            { limits: { timeoutMs: config.timeoutMs, maxBytes: config.maxBytes }, concurrency: config.importConcurrency },
+            { limits: { timeoutMs: config.timeoutMs, maxBytes: config.maxBytes, trustedTarget: true }, concurrency: config.importConcurrency },
           )
 
           const byUrl = new Map(parsed.subscriptions.map((subscription) => [subscription.xmlUrl, subscription]))
@@ -247,7 +247,7 @@ const ARTICLE_REVISION = 2
         case 'addFeed': {
           const raw = String((payload as { url?: unknown } | null)?.url ?? '')
           const checked = await validateSubscriptions([raw], {
-            limits: { timeoutMs: config.timeoutMs, maxBytes: config.maxBytes },
+            limits: { timeoutMs: config.timeoutMs, maxBytes: config.maxBytes, trustedTarget: true },
             concurrency: 1,
           })
           const result = checked[0]

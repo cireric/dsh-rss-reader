@@ -210,7 +210,8 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
     const subscriptions = target.listFeeds().map(([feedId]) => feedId)
     inFlight = (async () => {
       const outcomes = await refreshFeeds(subscriptions, target, {
-        limits: { timeoutMs: config.timeoutMs, maxBytes: config.maxBytes },
+        // 订阅源来自用户自己的配置 ⇒ 可信目标（因此允许内网自建服务）；feed 内容里的链接不受此待见
+        limits: { timeoutMs: config.timeoutMs, maxBytes: config.maxBytes, trustedTarget: true },
         maxItemsPerFeed: config.maxItemsPerFeed,
         maxSeenPerFeed: config.maxSeenPerFeed,
         maxContentChars: config.maxContentChars,

@@ -8,7 +8,7 @@ import { createServer } from 'node:http'
 import { blockedReason, resolvedBlockedReason, fetchFeed, decodeXmlBody } from '../lib/feed/fetch.js'
 
 // allowPrivateHosts 只给测试用：桩服务器都在 127.0.0.1，而生产默认是拒绝内网地址
-const LIMITS = { timeoutMs: 2000, maxBytes: 1_000_000, allowPrivateHosts: true }
+const LIMITS = { timeoutMs: 2000, maxBytes: 1_000_000, trustedTarget: true }
 
 async function withServer(handler, run) {
   const server = createServer(handler)
@@ -67,7 +67,7 @@ test('超时判失败，不挂死刷新', async () => {
       res.end('late')
     }, 500)
   }, async (base) => {
-    const result = await fetchFeed(base + '/feed.xml', {}, { timeoutMs: 80, maxBytes: 1024, allowPrivateHosts: true })
+    const result = await fetchFeed(base + '/feed.xml', {}, { timeoutMs: 80, maxBytes: 1024, trustedTarget: true })
     assert.equal(result.kind, 'failed')
     assert.match(result.reason, /超时/)
   })
@@ -78,7 +78,7 @@ test('响应超过体积上限即中止，不整份读进内存', async () => {
     res.writeHead(200, { 'content-type': 'text/xml' })
     res.end('x'.repeat(200_000))
   }, async (base) => {
-    const result = await fetchFeed(base + '/feed.xml', {}, { timeoutMs: 2000, maxBytes: 4096, allowPrivateHosts: true })
+    const result = await fetchFeed(base + '/feed.xml', {}, { timeoutMs: 2000, maxBytes: 4096, trustedTarget: true })
     assert.equal(result.kind, 'failed')
     assert.match(result.reason, /体积上限/)
   })
@@ -130,17 +130,23 @@ test('出网策略：协议与内网段的判定', () => {
 
 test('出网策略：重定向到非 http(s) 被拒（每一跳都复核）', async () => {
   await withServer((_req, res) => { res.writeHead(302, { location: 'data:text/html,<h1>x</h1>' }); res.end() }, async (base) => {
-    const result = await fetchFeed(base + '/feed.xml', {}, { timeoutMs: 2000, maxBytes: 1000, allowPrivateHosts: true })
+    const result = await fetchFeed(base + '/feed.xml', {}, { timeoutMs: 2000, maxBytes: 1000, trustedTarget: true })
     assert.equal(result.kind, 'failed')
     assert.match(result.reason, /重定向被拒/)
   })
 })
 
-test('出网策略：重定向环被跳数上限截断', async () => {
+test('出网策略：重定向的目标一律按不可信处理（哪怕起始地址可信）', async () => {
+  // 起始地址可以是用户配置的可信目标（trustedTarget），但**重定向目标不接受这个信任**：它由响应
+  // 内容决定，一个正常域名完全可以把我们 302 到 169.254.169.254。这里用本地桩复现：302 回自己
+  // 也算内网，所以第一跳就该被拒。
+  //
+  // 注：跳数上限（5 跳）因此只能从**公网起点**触发——本地桩服务器都在 127.0.0.1，走不到那一步。
+  // 那一段现在只有读代码这一层证据，不再有用例（如实记在这里，别以为它被测过）。
   await withServer((_req, res) => { res.writeHead(302, { location: '/loop' }); res.end() }, async (base) => {
-    const result = await fetchFeed(base + '/feed.xml', {}, { timeoutMs: 2000, maxBytes: 1000, allowPrivateHosts: true })
+    const result = await fetchFeed(base + '/feed.xml', {}, { timeoutMs: 2000, maxBytes: 1000, trustedTarget: true })
     assert.equal(result.kind, 'failed')
-    assert.match(result.reason, /重定向超过/)
+    assert.match(result.reason, /重定向被拒/, '重定向目标不该继承起始地址的可信度')
   })
 })
 

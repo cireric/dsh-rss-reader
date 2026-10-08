@@ -6,7 +6,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { validateSubscriptions } from '../lib/subscribe.js'
 
-const LIMITS = { timeoutMs: 1000, maxBytes: 1024 * 1024, allowPrivateHosts: true }
+const LIMITS = { timeoutMs: 1000, maxBytes: 1024 * 1024, trustedTarget: true }
 const RSS = '<?xml version="1.0"?><rss version="2.0"><channel><title>合法源</title><item><title>a</title><link>https://ex.test/a</link><guid>g1</guid></item></channel></rss>'
 
 /** 桩：按 URL 决定返回什么。 */
