@@ -25,7 +25,12 @@ import { blocksToText, fetchArticle } from './article.js'
 import { articleCharsOf, selectCleanup, type CleanupRow } from './retention.js'
 import { buildOpml, parseOpml } from './opml.js'
 import { validateSubscriptions } from './subscribe.js'
-import { Config as ReaderConfig, type Config } from './config.js'
+import { Config } from './config.js'
+import type { Config as ConfigShape } from './config.js'
+// **入口必须导出 schema 本身**：宿主（含注入器）靠它给 config 补默认值。
+// 2026-10-08 实测的回归：拆分把 Config 搬进 config.ts 时只 import 没再导出，于是注入器传进来的
+// config 不再经过 schema —— 全字段 undefined，抓取 / 正文缓存闸门 / 清理端点三处硬故障。
+export { Config }
 import { createDispatch } from './endpoints.js'
 import { fail } from './shared.js'
 import { ROUTE_PATH, type Endpoint, type ItemView, type Overview, type RpcResult } from './shared.js'
@@ -99,7 +104,9 @@ async function openDomainWithRetry(
 }
 
 
-export function apply(ctx: Context, config: Config): void {
+export function apply(ctx: Context, rawConfig: ConfigShape): void {
+  // 先解析配置：下面 logFile 那一行就要用 config，所以它必须是 apply 的第一件事
+  const config = Config(rawConfig ?? {} as ConfigShape)
   const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
   const logFile = config.logFile || join(dshHome, 'state', 'dsh-rss-reader', 'reader.log')
 
@@ -129,26 +136,35 @@ export function apply(ctx: Context, config: Config): void {
   let lastRefreshCompletedAt: number | undefined
   let inFlight: Promise<void> | undefined
 
+  /**
+   * **自己解析一次配置**，不假设宿主替我们做过。
+   *
+   * 2026-10-08 实测：注入器路径把未经 schema 解析的 config 直接传进来（实际是 {}），于是
+   * feeds / timeoutMs / maxArticleCacheChars / cleanupAfterDays 全是 undefined。后果不是「少几个
+   * 功能」而是三处硬故障（逐一实测）：每次抓取在 AbortSignal.timeout(undefined) 上抛 TypeError；
+   * 正文缓存闸门拿到 undefined 上限会把缓存**整份清空**；清理端点 new Date(NaN).toISOString()
+   * 抛 RangeError。
+   *
+   * schemastery 的 schema 本身可调用且会补默认值（schema({}) 即全默认），所以在边界解析一次就够了
+   * —— 比在每个字段上散 ?? 默认值更不容易漂。
+   */
+  // 宿主没替我们解析过 config 时要留痕（见上面 Config 导出的注释：缺了它就是这个症状）
+  if (rawConfig?.feeds === undefined || rawConfig?.timeoutMs === undefined) {
+    log('宿主传入的配置未经 schema 解析（' + JSON.stringify(rawConfig ?? null).slice(0, 60) + '），已按 schema 默认值补齐')
+  }
+
   const ready = (): ReaderStore | undefined => (cancelled ? undefined : store)
 
   /** 把 Config.feeds 里还没落库的源幂等写进存储域（订阅源的真相在域里）。 */
   const seedConfiguredFeeds = async (target: ReaderStore): Promise<number> => {
-    // 种子的真相在存储域里（README），这里只是首次落库的便利。所以当 config 没经过 schema 解析
-    // （2026-10-08 实测：注入器路径下连报 3 次 `config.feeds is not iterable`，fiber 直接失败）
-    // 时按「没有种子」降级并响亮记一笔，而不是让整个插件起不来。
-    const rawSeeds: unknown = config.feeds
-    if (!Array.isArray(rawSeeds)) {
-      log('config.feeds 不是数组（配置未经 schema 解析？），按「无种子」继续：' + String(rawSeeds))
-    }
-    const seeds = Array.isArray(rawSeeds) ? rawSeeds : []
+    // 配置已在 apply 入口按 schema 解析过，所以 config.feeds 必然是 string[] —— 这里不需要再兜底。
     let seeded = 0
-    for (const raw of seeds) {
-      const source = String(raw)
+    for (const raw of config.feeds) {
       let feedId: string
       try {
-        feedId = normalizeFeedUrl(source)
+        feedId = normalizeFeedUrl(raw)
       } catch {
-        log('忽略非法订阅源：' + source)
+        log('忽略非法订阅源：' + raw)
         continue
       }
       if (target.feed(feedId) === undefined) {
