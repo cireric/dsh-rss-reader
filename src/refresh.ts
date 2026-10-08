@@ -10,7 +10,7 @@
 import { mapConcurrent } from './concurrency.js'
 import { recencyOf } from './shared.js'
 import { rebuildItem } from './domain.js'
-import { deriveItemId } from './feed/item-id.js'
+import { resolveItemIds } from './feed/item-id.js'
 import { fetchFeed, type FetchLimits } from './feed/fetch.js'
 import { articleCharsOf, selectPrunable, selectArticleEvictions, type RetentionRow } from './retention.js'
 import { parseFeed } from './feed/parse.js'
@@ -54,6 +54,11 @@ export interface FeedOutcome {
   status: FeedStatus
   /** 本次新增条目数 */
   added: number
+  /**
+   * 本次响应里「身份不可信」的条目数（不变量 2：同响应内 id 撞车但 URL 不同，已按 URL 重算）。
+   * 它不是一个错误，所以不走 reason；但源在撒谎这件事必须看得见。
+   */
+  untrusted?: number
   reason?: string
 }
 
@@ -187,13 +192,15 @@ async function refreshOne(
   }
 
   const parsed = parseFeed(result.body, feedId)
+  // 一次响应内先把身份解析干净：撞车的条目不信源给的 id（规格 §5 不变量 2）
+  const resolved = resolveItemIds(feedId, parsed.items)
   const cursor = store.cursor(feedId)
   const seen = cursor?.seen ?? []
   const seenSet = new Set(seen)
   const freshIds: string[] = []
 
-  for (const item of parsed.items) {
-    const itemId = deriveItemId(feedId, item)
+  for (const [index, item] of parsed.items.entries()) {
+    const itemId = resolved.ids[index]
     const summary = truncateContent(item.summary, options.maxContentChars)
     const existing = store.item(itemId)
 
@@ -235,5 +242,12 @@ async function refreshOne(
   await prune(store, feedId, options.maxItemsPerFeed)
   await capArticleCache(store, feedId, options.maxArticleCacheChars)
 
-  return { feedId, url: feedId, status: 'added', added: freshIds.length }
+  return {
+    feedId,
+    url: feedId,
+    status: 'added',
+    added: freshIds.length,
+    // 源在撒谎（同一次响应里 id 撞车）时留痕，由刷新摘要渲染出来 —— 它不该静默
+    untrusted: resolved.untrusted > 0 ? resolved.untrusted : undefined,
+  }
 }

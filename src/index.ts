@@ -49,7 +49,12 @@ function summarize(outcomes: readonly FeedOutcome[]): string {
   if (outcomes.length === 0) return '未配置订阅源（Config.feeds 为空），跳过刷新'
   const lines = outcomes.map((outcome) => {
     const head = outcome.url + ' → ' + outcome.status + (outcome.status === 'added' ? '(+' + outcome.added + ')' : '')
-    return outcome.reason === undefined ? head : head + '（' + outcome.reason + '）'
+    const notes: string[] = []
+    if (outcome.untrusted !== undefined) {
+      notes.push('⚠ ' + outcome.untrusted + ' 条身份不可信（源内 id 撞车且 URL 不同，已按 URL 重算）')
+    }
+    if (outcome.reason !== undefined) notes.push(outcome.reason)
+    return notes.length === 0 ? head : head + '（' + notes.join('；') + '）'
   })
   return '刷新完成，共 ' + outcomes.length + ' 源:\n' + lines.join('\n')
 }

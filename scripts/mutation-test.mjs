@@ -59,6 +59,8 @@ const MUTATIONS = [
   { id: 'domain-rebuildItem 的 omit', file: 'lib/domain.js',
     from: 'if (change.omit?.includes(field) === true)',
     to: 'if (false)' },
+  { id: 'item-id-撞车即不可信', file: 'lib/feed/item-id.js',
+    from: 'if (links.size < 2)', to: 'if (false)' },
   { id: 'retention-保持未读不裁剪', file: 'lib/retention.js',
     from: 'row.starred || row.kept',
     to: 'row.starred' },

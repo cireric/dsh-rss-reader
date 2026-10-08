@@ -9,7 +9,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseFeed } from '../lib/feed/parse.js'
 import { toIsoUtc } from '../lib/feed/date.js'
-import { deriveItemId } from '../lib/feed/item-id.js'
+import { deriveItemId, resolveItemIds } from '../lib/feed/item-id.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const fixture = (name) => readFileSync(join(ROOT, 'tests', 'fixtures', name), 'utf8')
@@ -114,4 +114,44 @@ test('条目 id 稳定派生：同一输入恒等，不同 guid 不同 id', () =
   // 无 guid 时退到 link
   const byLink = deriveItemId('feed-1', { link: 'https://x/2' })
   assert.equal(byLink, deriveItemId('feed-1', { link: 'https://x/2', title: '变了也不影响' }))
+})
+test('身份解析：同一响应里 id 重复但 URL 不同 ⇒ 不信源给的 id，退到 URL（不变量 2）', () => {
+  const items = [
+    { id: 'dup', link: 'https://x/1', title: 'A' },
+    { id: 'dup', link: 'https://x/2', title: 'B' },
+  ]
+  const { ids, untrusted } = resolveItemIds("feed-1", items)
+  assert.equal(untrusted, 2, '两条都换了派生依据')
+  assert.notEqual(ids[0], ids[1], '不能塌成同一条 —— 否则后写的会覆盖前一条，静默丢数据')
+  assert.equal(ids[0], deriveItemId('feed-1', { link: 'https://x/1', title: 'A' }), '退一级的含义：结果应与本来就没有 id 时一致')
+  assert.equal(ids[1], deriveItemId('feed-1', { link: 'https://x/2', title: 'B' }))
+})
+
+test('身份解析：id 重复且 URL 也相同 ⇒ 是源里重复列出的同一条，保持同一个 id 交给下游去重', () => {
+  const items = [
+    { id: 'dup', link: 'https://x/1', title: 'A' },
+    { id: 'dup', link: 'https://x/1', title: 'A' },
+  ]
+  const { ids, untrusted } = resolveItemIds("feed-1", items)
+  assert.equal(untrusted, 0, '这不是源不可信，是同一篇文章被列了两遍')
+  assert.equal(ids[0], ids[1])
+})
+
+test('身份解析：没有重复时逐条结果与 deriveItemId 完全一致（不改变既有行为）', () => {
+  const items = [{ id: 'a', link: 'https://x/1' }, { id: 'b', link: 'https://x/2' }, { link: 'https://x/3' }]
+  const { ids, untrusted } = resolveItemIds("feed-1", items)
+  assert.equal(untrusted, 0)
+  assert.deepEqual(ids, items.map((item) => deriveItemId('feed-1', item)))
+})
+
+test('身份解析：三条里两条同 URL、一条不同 ⇒ 只重算撞车组，同 URL 的仍是同一条', () => {
+  const items = [
+    { id: 'dup', link: 'https://x/1' },
+    { id: 'dup', link: 'https://x/1' },
+    { id: 'dup', link: 'https://x/2' },
+  ]
+  const { ids, untrusted } = resolveItemIds("feed-1", items)
+  assert.equal(untrusted, 3)
+  assert.equal(ids[0], ids[1], 'URL 相同就还是同一条')
+  assert.notEqual(ids[0], ids[2])
 })
