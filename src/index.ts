@@ -209,7 +209,9 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   ctx.effect(() => {
-    const dispose = ctx.webServer.register({
+    let dispose: (() => void) | undefined
+    try {
+      dispose = ctx.webServer.register({
       kind: 'prefix',
       path: ROUTE_PATH,
       handler: async (req, res) => {
@@ -234,10 +236,20 @@ export function apply(ctx: Context, config: Config): void {
         }
         res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
         res.end(JSON.stringify(result))
-      },
-    })
+        },
+      })
+    } catch (error) {
+      // 热重载竞态：上一代 fiber 的路由没被释放时，这里会撞 "duplicate prefix route"。
+      // webServer 只提供 register(route) 返回 disposer，**没有「列出/注销路由」的公开 API**，
+      // 所以插件侧无法自救（清残留路由是注入器 dev_clear_routes 的事，或重启 DSH）。
+      // 但至少要响亮地说清楚发生了什么、怎么恢复 —— 而不是让 fiber 带着一条只躺在注入器日志里的
+      // 错误静默死掉。2026-10-08 实测：插件因此静默宕机约 7 小时，测试全绿、插件日志毫无痕迹。
+      log('HTTP 路由注册失败：' + String(error))
+      log('恢复：先清残留路由再重新注入（注入器 dev_clear_routes prefix=' + ROUTE_PATH + ' → dev_inject_plugin），或重启 DSH 进程')
+      throw error
+    }
     return () => {
-      dispose()
+      dispose?.()
     }
   }, 'dsh-rss-reader: http route')
 
