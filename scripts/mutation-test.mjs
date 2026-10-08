@@ -20,6 +20,8 @@ const ROOT = process.cwd()
  * 缺口。等价变异混进来会让这道门槛变成狼来了。
  */
 const MUTATIONS = [
+  { id: 'client-A 的范围阈值过滤', file: 'lib/client.js',
+    from: 'recencyOf(item) < before', to: 'true' },
   { id: 'subscribe-信任不跨源传播', file: 'lib/subscribe.js',
     from: 'const inherited = options.limits.trustedTarget === true && isSameOrigin(candidate, pageUrl);',
     to: 'const inherited = options.limits.trustedTarget === true;' },

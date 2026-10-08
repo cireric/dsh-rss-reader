@@ -641,3 +641,27 @@ test('按键接线：1 切展开视图、2 切回列表（且默认是列表 = �
   handler(keyEvent('2'))
   assert.equal(harness.store.get().layout, 'list', '2 必须切回列表视图')
 })
+
+test('A 的范围阈值：只标「早于所选范围」的条目（规格 §3.3 的 panic button）', async () => {
+  // 时间基准现算，避免用例随真实日期漂移
+  const old = new Date(Date.now() - 10 * 24 * 3600 * 1000).toISOString()
+  const recent = new Date(Date.now() - 60 * 1000).toISOString()
+  const { store, calls } = await driveStore({ items: [item({ id: 'old', fetchedAt: old }), item({ id: 'recent', fetchedAt: recent })] })
+  store.setMarkAllRange('day')
+  await store.markAllRead()
+  const body = calls.find((call) => call.endpoint === 'markRead')
+  assert.deepEqual(body.payload.itemIds, ['old'], '范围阈值必须挡掉尚未「早于」的条目')
+  assert.equal(typeof body.payload.before, 'string', '还要把截止时间交给宿主再挡一次')
+  assert.equal(store.get().items.find((entry) => entry.id === 'recent').readAt, undefined, '刚发布的条目不该被标已读')
+  assert.notEqual(store.get().items.find((entry) => entry.id === 'old').readAt, undefined, '早于阈值的条目照常标记')
+})
+
+test('A 的默认范围是全部：不带阈值时行为与以前完全一致', async () => {
+  const recent = new Date(Date.now() - 60 * 1000).toISOString()
+  const { store, calls } = await driveStore({ items: [item({ id: 'recent', fetchedAt: recent })] })
+  assert.equal(store.get().markAllRange, 'all', '默认必须是全量 —— 否则就是悄悄改了既有行为')
+  await store.markAllRead()
+  const body = calls.find((call) => call.endpoint === 'markRead')
+  assert.deepEqual(body.payload.itemIds, ['recent'])
+  assert.equal(body.payload.before, undefined, '全量时不传截止时间')
+})

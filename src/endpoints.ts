@@ -105,19 +105,24 @@ const ARTICLE_REVISION = 2
         }
 
         case 'markRead': {
-          const body = payload as { itemIds?: unknown; skipKept?: unknown } | null
+          const body = payload as { itemIds?: unknown; skipKept?: unknown; before?: unknown } | null
           const itemIds = Array.isArray(body?.itemIds) ? (body as { itemIds: unknown[] }).itemIds.map(String) : []
           if (itemIds.length === 0) return fail('bad-request', 'markRead 需要 itemIds 数组')
           // 「全部标为已读」（A 键）走这条时带 skipKept：**保持未读的条目要活下来**
           // —— 那正是规格 §3.3 里 kept-unread 的用处；而单条打开/显式标记不带它，
           // 那种情况下按规格「标为已读即移除 kept-unread」。
           const skipKept = body?.skipKept === true
+          // 「只标**早于** X 的」（规格 §3.3 的 panic button，2009-08 加入）。客户端会先按范围过滤一遍，
+          // 这里是**第二道闸**：客户端列表只是快照，宿主手上的 recency 才是权威。
+          const before = typeof body?.before === 'string' && body.before !== '' ? body.before : undefined
           const stamp = new Date().toISOString()
           let changed = 0
           for (const itemId of itemIds) {
             const existing = target.item(itemId)
             if (existing === undefined || existing.readAt !== undefined) continue
             if (skipKept && existing.keptUnread === true) continue
+            // 判据与排序同源（recency = 发布时间优先、缺则抓取时间），ISO 字符串可直接比大小
+            if (before !== undefined && recencyOf(existing) >= before) continue
             // 幂等：已读的原时间戳不动。用 rebuildItem 是为了同时把 kept-unread 去掉
             await target.saveItem(itemId, rebuildItem(existing, { omit: ['keptUnread'], set: { readAt: stamp } }))
             changed += 1

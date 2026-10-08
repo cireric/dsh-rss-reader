@@ -24,7 +24,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-slots'
 // 用到的槽位键由这两个包声明进 SlotMap（main 来自 layout，sidebar.* 来自 sidebar）
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
-import { createReaderStore, relativeTime, useReaderStore, type Filter, type ReaderStore } from './store.js'
+import { createReaderStore, relativeTime, useReaderStore, type Filter, type MarkAllRange, type ReaderStore } from './store.js'
 // 导出面是构建产物对外的契约（契约测试直接调它），store 搬家后仍要从入口转出去
 export { createReaderStore }
 import { FeedsView } from './feeds-view.js'
@@ -278,6 +278,16 @@ export function createReader(store: ReaderStore): () => ReactNode {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 20px', borderBottom: '1px solid color-mix(in srgb, currentColor 12%, transparent)' }}>
           <strong>RSS 阅读器</strong>
           <span style={{ opacity: 0.7 }}>{state.unread} 条未读 / {state.items.length} 条</span>
+          {/* 「全部标为已读」的时间范围（规格 §3.3 的 panic button）：默认全量，不选就等于没变 */}
+          <label style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 'auto', fontSize: 12, opacity: 0.85 }}>
+            A 键范围
+            <select value={state.markAllRange} onChange={(event) => store.setMarkAllRange(event.target.value as MarkAllRange)}>
+              <option value="all">全部</option>
+              <option value="day">早于 1 天</option>
+              <option value="week">早于 1 周</option>
+              <option value="month">早于 1 月</option>
+            </select>
+          </label>
           <span style={{ display: 'flex', gap: 4, marginLeft: 8 }}>
             {filters.map((filter) => (
               <button key={filter.key} type="button" className="dsh-rss-btn dsh-rss-btn--ghost"

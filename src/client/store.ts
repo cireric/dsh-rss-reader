@@ -6,10 +6,17 @@
  * 列表、正文、订阅管理与键盘接线，任一改动都要动同一个文件。
  */
 import { useEffect, useState } from 'react'
-import { ROUTE_PATH, type ArticlePayload, type CleanupResult, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult } from '../shared.js'
+import { ROUTE_PATH, recencyOf, type ArticlePayload, type CleanupResult, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult } from '../shared.js'
 import { nextRender, pickInitialRender } from '../article-view.js'
 
 export type Filter = 'all' | 'unread' | 'starred'
+
+/**
+ * 「全部标为已读」的时间范围（规格 §3.3 的 panic button：可选择「只把**早于**某个时间范围的条目标为
+ * 已读」）。默认 all = 全量，也就是改动前的行为 —— 不选就什么都没变。
+ */
+export type MarkAllRange = 'all' | 'day' | 'week' | 'month'
+const RANGE_DAYS: Record<MarkAllRange, number | undefined> = { all: undefined, day: 1, week: 7, month: 30 }
 
 /** 按需正文的运行态（D 方案：V 进正文、Esc 回列表）。 */
 export interface ArticleState {
@@ -44,6 +51,8 @@ export interface ReaderState {
    * 注意与上面的 view 是两条正交的轴：view 决定「看哪个面板」，layout 决定「条目流怎么排」。
    */
   layout: 'list' | 'expanded'
+  /** 「全部标为已读」的时间范围，见 MarkAllRange */
+  markAllRange: MarkAllRange
   /** 最近一次导入的报告（坏源要逐条列出，不能只报总数） */
   importReport: OpmlImportResult | undefined
   /** 订阅管理里的忙碌标记（导入要逐源抓取，可能数秒） */
@@ -100,7 +109,7 @@ export function createReaderStore() {
   let state: ReaderState = {
     items: [], feeds: [], unread: 0, filter: 'all',
     selectedId: undefined, loading: true, error: undefined, undo: undefined,
-    view: 'list', layout: 'list', article: undefined, notice: undefined,
+    view: 'list', layout: 'list', markAllRange: 'all', article: undefined, notice: undefined,
     importReport: undefined, feedsBusy: false,
   }
   const listeners = new Set<() => void>()
@@ -282,7 +291,13 @@ export function createReaderStore() {
   const markAllRead = async (): Promise<void> => {
     // **保持未读的条目要活下来**（规格 §3.3）——这正是 kept-unread 的存在理由。本地乐观更新与请求
     // 两处都要跳过；宿主侧也会按 skipKept 再挡一次（客户端列表只是快照）。
-    const ids = visible().filter((item) => item.readAt === undefined && item.keptUnread !== true).map((item) => item.id)
+    const days = RANGE_DAYS[state.markAllRange]
+    const before = days === undefined ? undefined : new Date(Date.now() - days * 24 * 3600 * 1000).toISOString()
+    const ids = visible()
+      .filter((item) => item.readAt === undefined && item.keptUnread !== true)
+      // 范围阈值同样判两次：这里决定乐观更新与名单，宿主那边再按 before 挡一次
+      .filter((item) => before === undefined || recencyOf(item) < before)
+      .map((item) => item.id)
     if (ids.length === 0) return
     const stamp = new Date().toISOString()
     set({
@@ -292,7 +307,7 @@ export function createReaderStore() {
     })
     armUndoExpiry()
     try {
-      const result = await callRpc<{ unread: number }>('markRead', { itemIds: ids, skipKept: true })
+      const result = await callRpc<{ unread: number }>('markRead', { itemIds: ids, skipKept: true, before })
       set({ unread: result.unread })
     } catch (failure) {
       set({ error: failure instanceof Error ? failure.message : String(failure) })
@@ -397,6 +412,9 @@ export function createReaderStore() {
   /** 切视图密度。默认 list = 本插件既有的紧凑行为，所以切成 expanded 是「多显示」而不是改默认。 */
   const setLayout = (layout: ReaderState['layout']): void => { set({ layout }) }
 
+  /** 切「全部标为已读」的时间范围。 */
+  const setMarkAllRange = (markAllRange: MarkAllRange): void => { set({ markAllRange }) }
+
   const toggleFeeds = (): void => { set({ view: state.view === 'feeds' ? 'list' : 'feeds' }) }
 
   /** 导出 OPML：拿到文本后交给浏览器下载（File System Access 不可用时退化为 blob 下载）。 */
@@ -481,7 +499,7 @@ export function createReaderStore() {
   return {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
     get, visible, load, markRead, selectRelative, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllRead, undoMarkAll,
-    setLayout,
+    setLayout, setMarkAllRange,
     openArticle, closeArticle, toggleArticleRender, cleanup, stepArticle, canStepArticle,
     toggleFeeds, exportOpml, importOpml, addFeed, removeFeed,
     dismissNotice: (): void => { set({ notice: undefined }) },
