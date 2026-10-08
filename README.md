@@ -263,17 +263,27 @@ Host/Origin 与浏览器鉴权（实测：未带 token 的请求得 401，不存
 ## 命令
 
 ```bash
-npm test                 # 22 条：解析/抓取边界/刷新编排/client bundle 契约（需先构建）
-bash scripts/build.sh    # host：链接依赖 + tsc → lib/
+npm test                 # 126 条：解析/抓取边界/刷新编排/保留策略/并发/客户端契约（需先构建）
+npm run build            # host：链接依赖 + tsc → lib/
 npm run build:client     # client：tsdown → lib/client.js
-npm run typecheck        # 仅覆盖 host 半（见「已知缺口」）
+npm run typecheck        # 两个工程：host（tsconfig.json）+ client（tsconfig.client.json）
 ```
+
+⚠️ **`npm run build` 不含客户端**：改了 `src/client/**` 必须另外跑 `npm run build:client`，
+否则 `lib/client.js` 是旧的——只有「产物不能过期」那条测试会报警。
 
 注入器环境内：`dev_build_plugin` → `dev_reload_package`（本阶段刷新由重载触发，**无定时器**）。
 
+**依赖怎么来的**：`scripts/build.sh` 从 dsh 源码 checkout **符号链接**依赖，不联网安装，依次探测
+`$HOME/dsh-harness`、`$HOME/dsh`、`$HOME/.dsh/dsh-harness`、`$HOME/deepseek-harness`；都不命中时用
+`DSH_CHECKOUT=<checkout 路径> npm run build`。**本仓库没有锁文件**——依赖图不是 `npm install` 出来的，
+而是每次构建现链的，所以这个包不适合被独立安装（要独立安装得先有锁文件与自足的依赖声明）。
+
 ## 已知缺口与踩坑
 
-- **client 半不参与类型检查**：tsconfig 排除 `src/client`，`.tsx` 只经 tsdown 转译。M2 落地真实 UI 时补。
+- ~~**client 半不参与类型检查**~~（2026-10-07 已修）：`tsconfig.client.json` 覆盖 `src/client`，
+  `npm run typecheck` 跑两个工程。类型链依赖 checkout 里的 `@types/react` 与几个模块增强包
+  （`ui-renderer/client` 声明 `ctx.slots`、`ui-layout`/`ui-sidebar` 声明槽位键），都由 `build.sh` 链接。
 - **`htmlEntities: true` 不能省**：fast-xml-parser 默认不解数字字符引用，`&#8217;` 会原样留在正文里（实测）。
 - **storageDomain 域名/表名必须匹配 `^[a-z][a-z0-9_]*$`**（连字符非法，故用 `rss_reader`）。
 - **域 disposer 必须返回 `close()` 的 promise**：写成 `void domain.close()` 会让「卸载完成」跑在域真正释放之前。
