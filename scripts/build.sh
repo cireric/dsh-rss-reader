@@ -46,13 +46,32 @@ echo "=== Linking build dependencies (checkout: $CHECKOUT) ==="
 mkdir -p node_modules/@deepseek-ai
 node -e "const fs=require('fs');fs.rmSync('node_modules/@standard-schema',{recursive:true,force:true})"
 link_pkg cordis vendor/cordis
+# vendor/cordis 的真实包名是 @deepseek-ai/cordis：socket 增强（declare module '@deepseek-ai/cordis'）
+# 是按带 scope 的名字写的，所以两个名字都要在
+link_pkg @deepseek-ai/cordis vendor/cordis
 link_pkg cosmokit vendor/cosmokit
 link_pkg schemastery vendor/schemastery
 link_pkg @deepseek-ai/dsh-tools packages/core/tools
 link_pkg @deepseek-ai/dsh-llm packages/llm/llm
 link_pkg @deepseek-ai/dsh-system-prompt packages/core/system-prompt
+# 客户端半的类型：ctx.slots 的声明在 ui-renderer/client 里（它 declare module '@deepseek-ai/cordis'），
+# 而 SlotRegistry 等类型来自 ui-slots，两个都要链
+link_pkg @deepseek-ai/dsh-client-ui-slots packages/client/ui-slots
+link_pkg @deepseek-ai/dsh-client-ui-renderer packages/client/ui-renderer
+# 用到的槽位键（main / sidebar.*）的 SlotMap 声明在这两个包里，官方客户端插件同样要 import
+link_pkg @deepseek-ai/dsh-client-ui-layout packages/client/ui-layout
+link_pkg @deepseek-ai/dsh-client-ui-sidebar packages/client/ui-sidebar
 # @types/node（编译类型；checkout 自带）
 link_pkg @types/node node_modules/@types/node
+
+# @types/react（客户端半的类型检查需要它）。checkout 的 .pnpm 里用的是 @types+react@x.y.z 这种
+# 扁平名，不能走 link_pkg 直链，照下面 @standard-schema 的先例用 find 定位再链。
+TYPES_REACT=$(find "$CHECKOUT/node_modules/.pnpm" -maxdepth 1 -type d -iname '@types+react@*' 2>/dev/null | head -1)
+if [ -z "$TYPES_REACT" ]; then
+  echo "build: 找不到 @types/react —— 客户端半的类型检查需要它（checkout 里没有？）" >&2
+  exit 1
+fi
+link_pkg @types/react "${TYPES_REACT#$CHECKOUT/}/node_modules/@types/react"
 
 # 本插件自己的运行时依赖：从 checkout 的 .pnpm 里按包名取（不联网安装）
 link_pnpm() {
