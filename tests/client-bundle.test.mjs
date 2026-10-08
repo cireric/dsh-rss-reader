@@ -243,27 +243,29 @@ test('已读条目在未读筛选下正常不可见（sticky 只作用于当前�
   // setFilter 会把选中项设为过滤后的第一条（b）；已读的 a 不是选中项，不该出现
   assert.ok(!store.visible().some((i) => i.id === 'a'), '非选中的已读条目不该被 sticky 规则带出来')
 })
-test('V 打开：可嵌站点默认进原站视图，不可嵌回落阅读视图（用户要的体验）', async () => {
+test('V 打开：默认一律抽取视图（可嵌性只决定切换按钮是否可用）', async () => {
+  // 2026-10-08 更正：此前可嵌站点默认开原站视图，但那个沙箱会让现代站点整页错乱（见 article-view.ts）。
   const frameable = await driveStore({
     items: [item()],
     article: { itemId: 'item-1', cached: false, paragraphs: ['正文'], frameable: true },
   })
   await frameable.store.openArticle()
-  assert.equal(frameable.store.get().article.render, 'original', '可嵌站点应当默认开原站视图')
+  assert.equal(frameable.store.get().article.render, 'reading', '可嵌站点也默认抽取视图')
+  assert.equal(frameable.store.get().article.frameable, true, '但可嵌性要留下来 —— 切换按钮靠它') 
 
   const blocked = await driveStore({
     items: [item()],
     article: { itemId: 'item-1', cached: false, paragraphs: ['正文'], frameable: false },
   })
   await blocked.store.openArticle()
-  assert.equal(blocked.store.get().article.render, 'reading', '不可嵌站点应当回落到阅读视图')
+  assert.equal(blocked.store.get().article.render, 'reading', '不可嵌站点当然是阅读视图')
 
   const unknown = await driveStore({
     items: [item()],
     article: { itemId: 'item-1', cached: false, paragraphs: ['正文'] },
   })
   await unknown.store.openArticle()
-  assert.equal(unknown.store.get().article.render, 'reading', '可嵌性未知时保守回落，别给白屏 iframe')
+  assert.equal(unknown.store.get().article.render, 'reading', '可嵌性未知同样是阅读视图')
 })
 
 test('V 打开：抓取失败时不进入任何视图，而是显示失败原因', async () => {
@@ -290,9 +292,11 @@ test('切换视图：不可嵌时切不动（避免白屏），可嵌时能往�
     article: { itemId: 'item-1', cached: false, paragraphs: ['正文'], frameable: true },
   })
   await ok.store.openArticle()
-  assert.equal(ok.store.get().article.render, 'original')
+  assert.equal(ok.store.get().article.render, 'reading', '默认抽取版（2026-10-08 更正）')
   ok.store.toggleArticleRender()
-  assert.equal(ok.store.get().article.render, 'reading', '可嵌站点应当能切回阅读视图')
+  assert.equal(ok.store.get().article.render, 'original', '可嵌站点能切到原站视图')
+  ok.store.toggleArticleRender()
+  assert.equal(ok.store.get().article.render, 'reading', '再切一次应当切回来（可往返）')
 })
 /** 造一份多条目的列表，供正文页 j/k 测试用。 */
 function manyItems(count) {

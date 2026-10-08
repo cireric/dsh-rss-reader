@@ -20,6 +20,8 @@ const ROOT = process.cwd()
  * 缺口。等价变异混进来会让这道门槛变成狼来了。
  */
 const MUTATIONS = [
+  { id: 'article-view-默认抽取版', file: 'lib/article-view.js',
+    from: "return explicit ?? 'reading';", to: "return explicit ?? 'original';" },
   { id: 'keys-r 归还刷新计数', file: 'lib/keys.js',
     from: "return 'refreshCount';", to: "return 'toggleRender';" },
   { id: 'client-A 的范围阈值过滤', file: 'lib/client.js',

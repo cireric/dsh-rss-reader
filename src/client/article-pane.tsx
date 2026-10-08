@@ -133,7 +133,7 @@ export function ArticleView({ article, link, onBack, onToggleRender, setBox, can
         <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
           disabled={!frameable || article?.loading === true}
           title={frameable
-            ? '在原站原样页面与抽取正文之间切换（W 切换；本页可直接按 W）'
+            ? '在原站原样页面与抽取正文之间切换（W 切换；本页可直接按 W）。注意沙箱渲染：部分站点会缺样式'
             : '该站点通过 X-Frame-Options / CSP 禁止被嵌入，只能看抽取版或去原站'}
           onClick={onToggleRender}>
           {original ? '阅读视图（W）' : '原站视图（W）'}
@@ -154,7 +154,9 @@ export function ArticleView({ article, link, onBack, onToggleRender, setBox, can
         // 原站视图：浏览器内嵌整页，样式/代码/交互全是原样（已被 X-Frame-Options 放行的站点才可用）
         <>
           <div style={{ padding: '4px 20px', fontSize: 11, opacity: 0.6 }}>
-            原站视图：页面内的按键由原站接管，本插件的快捷键需先点回面板——或直接用上方按钮切回阅读视图
+            原站视图：页面内的按键由原站接管，本插件的快捷键需先点回面板——或直接用上方按钮切回阅读视图。
+            {' '}
+            <strong>沙箱渲染：部分站点会缺样式（只剩裸 HTML），那种情况请切回阅读视图。</strong>
           </div>
           <iframe
             src={link}

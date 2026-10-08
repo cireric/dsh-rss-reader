@@ -358,8 +358,8 @@ export function createReaderStore() {
             blocks: result.blocks,
             paragraphs: result.paragraphs ?? [],
             frameable,
-            // 站点允许被嵌入就直接给原站原样页面，否则回落到抽取正文（决策在 article-view.ts）
-            render: pickInitialRender(frameable),
+            // 默认一律抽取版（决策与理由在 article-view.ts）；frameable 只决定切换按钮是否可用
+            render: pickInitialRender(),
           },
         })
       }

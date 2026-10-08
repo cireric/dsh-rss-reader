@@ -6,22 +6,16 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { pickInitialRender, nextRender } from '../lib/article-view.js'
 
-test('可嵌站点：默认直接开原站视图（用户要的体验）', () => {
-  assert.equal(pickInitialRender(true), 'original')
+test('默认一律抽取版（2026-10-08 更正：不再「能嵌就默认原样」）', () => {
+  // 曾经的规则是 frameable === true 就默认开原站视图。实测证明它错：原站视图的沙箱不给
+  // allow-same-origin，框架内是不透明源，现代站点因此在启动早期抛错、样式全丢（只剩裸 HTML）。
+  // 现在默认值与可嵌性无关 —— 这条用例钉住的正是「无关」这件事。
+  assert.equal(pickInitialRender(), 'reading')
 })
 
-test('不可嵌站点：回落到阅读视图', () => {
-  assert.equal(pickInitialRender(false), 'reading')
-})
-
-test('可嵌性未知（抓取失败/字段缺失）：保守回落到阅读视图', () => {
-  // 老缓存没有 frameable 字段时就是这种情形——宁可显示抽取版，也不要给一个白屏的 iframe
-  assert.equal(pickInitialRender(undefined), 'reading')
-})
-
-test('用户当次的选择优先于任何默认值', () => {
-  assert.equal(pickInitialRender(true, 'reading'), 'reading')
-  assert.equal(pickInitialRender(false, 'original'), 'original')
+test('用户当次的选择优先于默认值（切过就尊重用户意图）', () => {
+  assert.equal(pickInitialRender('original'), 'original')
+  assert.equal(pickInitialRender('reading'), 'reading')
 })
 
 test('切换：可嵌时在两视图间往返', () => {
