@@ -18,7 +18,7 @@ import { appendFileSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import z from 'schemastery'
-import { readerDomain, rebuildItem } from './domain.js'
+import { normalizeLegacyArticle, readerDomain, rebuildItem } from './domain.js'
 import { createStore, type ReaderStore } from './store.js'
 import { normalizeFeedUrl, refreshFeeds, type FeedOutcome } from './refresh.js'
 import { blocksToText, fetchArticle } from './article.js'
@@ -156,6 +156,18 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
   const ready = (): ReaderStore | undefined => (cancelled ? undefined : store)
 
   /** 把 Config.feeds 里还没落库的源幂等写进存储域（订阅源的真相在域里）。 */
+  /** 把全表的老正文缓存规范化成结构化块。返回改动条数（0 表示本来就没有老数据）。 */
+  const normalizeLegacyArticles = async (target: ReaderStore): Promise<number> => {
+    let changed = 0
+    for (const [itemId, record] of target.allItems()) {
+      const next = normalizeLegacyArticle(record)
+      if (next === record) continue
+      await target.saveItem(itemId, next)
+      changed += 1
+    }
+    return changed
+  }
+
   const seedConfiguredFeeds = async (target: ReaderStore): Promise<number> => {
     // 配置已在 apply 入口按 schema 解析过，所以 config.feeds 必然是 string[] —— 这里不需要再兜底。
     let seeded = 0
@@ -296,6 +308,10 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
         }
         domain = opened
         store = createStore(opened)
+        // 老正文缓存规范化（域版本 1 → 2，见 domain.ts 的说明）：跑一次之后老数据不再带 paragraphs，
+        // 下一版本才可能把那个字段删掉。幂等，所以每次打开都跑也不亏。
+        const normalized = await normalizeLegacyArticles(store)
+        if (normalized > 0) log('规范化老正文缓存 ' + normalized + ' 条（段落文本 → 结构化块）')
         const seeded = await seedConfiguredFeeds(store)
         if (seeded > 0) log('新增订阅源种子 ' + seeded + ' 个')
         if (config.refreshOnStart) await refreshNow({ force: true, signal: controller.signal })

@@ -7,7 +7,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { rebuildItem } from '../lib/domain.js'
+import { normalizeLegacyArticle, rebuildItem } from '../lib/domain.js'
 
 const ITEM = {
   feedId: 'https://ex.test/feed',
@@ -53,4 +53,33 @@ test('rebuildItem：字段表覆盖了输入的每个已定义字段（防「手
     if (value === undefined) continue
     assert.deepEqual(next[key], value, '字段 ' + key + ' 没被搬运 —— 字段表可能漏了它')
   }
+})
+
+test('normalizeLegacyArticle：老段落缓存折成结构化块，其余字段原样保留', () => {
+  const legacy = { ...ITEM, article: { fetchedAt: '2024-06-02T00:00:00.000Z', revision: 1, title: '标题', frameable: true, paragraphs: ['第一段', '第二段'] } }
+  const next = normalizeLegacyArticle(legacy)
+  assert.notEqual(next, legacy, '有老数据时必须返回新对象 —— 调用方靠这个判断要不要写回')
+  assert.deepEqual(next.article.blocks, [{ kind: 'p', text: '第一段' }, { kind: 'p', text: '第二段' }])
+  assert.equal(next.article.paragraphs, undefined, '规范化之后不该再留 paragraphs')
+  assert.equal(next.article.frameable, true, '可嵌性要继承下来')
+  assert.equal(next.article.revision, 1, '内容版本要继承，否则会被判过期重抓')
+  assert.equal(next.readAt, legacy.readAt, '已读态不许被动')
+  assert.equal(next.starred, legacy.starred)
+})
+
+test('normalizeLegacyArticle：空的老段落等于没有缓存，整份丢掉 article', () => {
+  const legacy = { ...ITEM, article: { fetchedAt: '2024-06-02T00:00:00.000Z', paragraphs: [] } }
+  const next = normalizeLegacyArticle(legacy)
+  assert.equal(next.article, undefined, '空缓存没有保留价值，丢掉让用户下次打开重抓')
+  assert.equal(next.readAt, legacy.readAt)
+})
+
+test('normalizeLegacyArticle：已是新形态就返回同一个对象（幂等，可反复跑全表）', () => {
+  const modern = { ...ITEM, article: { fetchedAt: '2024-06-02T00:00:00.000Z', revision: 2, blocks: [{ kind: 'p', text: '正文' }] } }
+  assert.equal(normalizeLegacyArticle(modern), modern, '必须是同一个引用 —— 否则每次打开都会写全表')
+})
+
+test('normalizeLegacyArticle：没有正文缓存的记录不受影响', () => {
+  const bare = { ...ITEM, article: undefined }
+  assert.equal(normalizeLegacyArticle(bare), bare)
 })

@@ -70,6 +70,31 @@ export const itemRecordSchema = z.object({
 export type ItemRecord = z.infer<typeof itemRecordSchema>
 
 /**
+ * 把一个条目记录里的老正文缓存（paragraphs 形态）规范化成结构化块。
+ *
+ * 纯函数；**返回原对象表示「无需改动」**（调用方靠这个判断要不要写回），所以它可以对全表反复跑、
+ * 幂等。没有 paragraphs 就原样返回。
+ */
+export function normalizeLegacyArticle(record: ItemRecord): ItemRecord {
+  const article = record.article
+  if (article?.paragraphs === undefined) return record
+  // 空的 legacy 段落等于没有缓存：整份丢掉 article，用户下次打开会重抓（本来就是「降级」语义）
+  if (article.paragraphs.length === 0) return rebuildItem(record, { omit: ['article'] })
+  return rebuildItem(record, {
+    set: {
+      article: {
+        fetchedAt: article.fetchedAt,
+        revision: article.revision,
+        title: article.title,
+        frameable: article.frameable,
+        // 老形态每段都是纯文本 ⇒ 一律折成段落块（客户端本来也是这样渲染它们的）
+        blocks: article.paragraphs.map((text) => ({ kind: 'p', text })),
+      },
+    },
+  })
+}
+
+/**
  * 条目记录的全部字段名，**从 schema 派生而不是手抄一份**。
  *
  * 为什么必须派生：rebuildItem 靠这张表逐字段搬运。手抄一份的话，schema 加了字段而这里忘了加，
@@ -117,6 +142,22 @@ export const cursorRecordSchema = z.object({
 }).strict()
 export type CursorRecord = z.infer<typeof cursorRecordSchema>
 
+/**
+ * 域版本 2 = 正文缓存从「纯文本段落」改成「结构化块」（2026-10-07）。
+ *
+ * 关于「什么时候能删掉 legacy 的 paragraphs 字段」——2026-10-07 实测把两条路都堵死了：
+ *
+ * ① **不能靠版本号**：spec 的 compatibleVersions 注释说的是「per-record backend 会读version 在列表里
+ *    的文档」，而本域用的是默认的 **single** layout ⇒ 版本是**硬相等**检查。实测把 version 升到 2
+ *    并声明 compatibleVersions: [1] 之后，打开域直接失败：unit 'rss_reader': stored version 1 !=
+ *    expected 2（数据没被写坏，失败发生在任何写入之前，已回滚）。
+ * ② **不能靠 onInvalidRecord: 'backup-and-skip'**：那是给「可丢弃的派生数据」的，而 items 表里混着
+ *    用户的已读态与星标，skip 会把它们一起丢掉。
+ *
+ * 所以现状是：**schema 继续声明 paragraphs（只为兼容读）**，而打开域后由 normalizeLegacyArticle
+ * 把老缓存就地规范化成 blocks —— 跑过一次之后数据里就不再有 paragraphs。要真正删掉字段，只剩
+ * 「换 per-record layout」或「一次性数据迁移脚本」两条路，都得单独评估（不是这一版的事）。
+ */
 export const readerDomain = defineDomain({
   name: 'rss_reader',
   version: 1,
