@@ -32,6 +32,7 @@ import { ArticleView } from './article-pane.js'
 // 契约测试断言的就是这一份（iframe 沙箱属性）；它现在住在 article-view 里
 export { ORIGINAL_VIEW_FRAME_PROPS } from './article-pane.js'
 import { ROUTE_PATH, type ArticlePayload, type CleanupResult, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult } from '../shared.js'
+import { htmlToText } from '../html-text.js'
 import { resolveReaderKey } from '../keys.js'
 import { nextScrollTop, scanTop, pageTop } from '../list-scroll.js'
 
@@ -87,15 +88,10 @@ function RefreshIcon({ spinning }: { spinning?: boolean }): ReactNode {
 }
 
 function toParagraphs(html: string | undefined): string[] {
-  if (!html) return []
-  const withBreaks = html
-    .replace(/<\s*br\s*\/?>/gi, '\n')
-    .replace(/<\s*\/(p|div|li|h[1-6]|blockquote|tr|section|article|figure)\s*>/gi, '\n')
-    .replace(/<[^>]*>/g, ' ')
-  return withBreaks
-    .split('\n')
-    .map((line) => line.replace(/[ \t\u00a0]+/g, ' ').trim())
-    .filter((line) => line !== '')
+  // 直接用抽取层那套共享实现（html-text.ts）。原先这里自己抄了一份：标签处理规则逐字相同，
+  // 但少了解码实体那一步，闭合标签清单也少了 pre —— 两份实现注定会越走越远。
+  if (html === undefined || html === '') return []
+  return htmlToText(html).split('\n')
 }
 
 

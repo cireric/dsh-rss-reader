@@ -10,7 +10,9 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { decodeEntities, extractArticle, htmlToText, isFrameable, pickImageUrl, attrOf, blocksToText } from '../lib/article.js'
+import { extractArticle, isFrameable, pickImageUrl, attrOf, blocksToText } from '../lib/article.js'
+// decodeEntities / htmlToText 已搬到 html-text.ts（2026-10-07），断言一条没动
+import { decodeEntities, htmlToText } from '../lib/html-text.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const fixture = readFileSync(join(here, 'fixtures', 'article.html'), 'utf8')
