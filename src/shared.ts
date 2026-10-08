@@ -1,7 +1,8 @@
 /**
  * 浏览器半 ↔ 主进程半的 wire 约定（见 dsh-plugin-dev: references/connection-rpc.md）。
  *
- * 只放字符串与类型，不放实现——两侧各自 import，谁也不需要运行时依赖对方。
+ * 只放字符串、类型，以及与两侧都无关的纯常量与纯函数——没有实现细节，也保证两侧各自 import
+ * 时谁都不需要运行时依赖对方。
  */
 
 /**
@@ -100,4 +101,23 @@ export interface OpmlImportResult {
   skipped: Array<{ title?: string; reason: string }>
   /** 通过校验并落库的源（供界面回显） */
   accepted: Array<{ url: string; title?: string; folder?: string }>
+}
+
+/**
+ * 「这算不算正文」的长度门槛（字符）。
+ *
+ * 一个值、两个使用面：抽取层用它滤掉导航残留（低于它的段落多是「分类：xxx」「相关阅读」），
+ * 列表里用它判断摘要够不够读（实测 HN 的 feed 里 description 恒为 68 字符的 HTML，剥标签后
+ * 只剩 Comments 一个词）。**必须是同一个值** —— 否则会出现「抽取时丢掉的，列表里却当正文显示」。
+ */
+export const MIN_CONTENT_CHARS = 40
+
+/**
+ * 条目的排序用时间：优先发布时间，缺则退到抓取时间。
+ *
+ * 宿主侧（列表排序、按源裁剪、显式清理）与浏览器半（列表显示）都用它——原先三处各写一份，
+ * 任何一处改了规则都会让列表顺序与清理判据悄悄不一致。
+ */
+export function recencyOf(record: { publishedAt?: string; fetchedAt: string }): string {
+  return record.publishedAt ?? record.fetchedAt
 }

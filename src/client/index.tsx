@@ -31,7 +31,7 @@ import { FeedsView } from './feeds-view.js'
 import { ArticleView } from './article-pane.js'
 // 契约测试断言的就是这一份（iframe 沙箱属性）；它现在住在 article-view 里
 export { ORIGINAL_VIEW_FRAME_PROPS } from './article-pane.js'
-import { ROUTE_PATH, type ArticlePayload, type CleanupResult, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult } from '../shared.js'
+import { MIN_CONTENT_CHARS, recencyOf, ROUTE_PATH, type ArticlePayload, type CleanupResult, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult } from '../shared.js'
 import { htmlToText } from '../html-text.js'
 import { resolveReaderKey } from '../keys.js'
 import { nextScrollTop, scanTop, pageTop } from '../list-scroll.js'
@@ -42,13 +42,6 @@ export const inject = ['slots']
 const PANEL_ID = 'dsh-rss-reader'
 /** 阅读器根节点的标记：快捷键用它判断焦点是否在本面板内。 */
 const ROOT_ATTR = 'data-dsh-rss-reader'
-/**
- * 正文「够不够当正文」的门槛（字符）。
- *
- * 与抽取层的 MIN_PARAGRAPH_CHARS 同源：低于它的内容在列表里读不出信息量，只会在视觉上
- * 冒充正文。实测 HN 的 feed 里 description 恒为 68 字符的 HTML，剥标签后只剩 "Comments"。
- */
-const MIN_BODY_CHARS = 40
 
 
 /**
@@ -400,7 +393,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
                       {item.starred ? '★ ' : ''}{item.title || item.link || '(无标题)'}
                     </span>
                     <span style={{ display: 'block', fontSize: 12, opacity: 0.6, marginTop: 2 }}>
-                      {item.feedTitle} · {relativeTime(item.publishedAt ?? item.fetchedAt)}
+                      {item.feedTitle} · {relativeTime(recencyOf(item))}
                     </span>
                     {isOpen && (
                       <span style={{ display: 'block', marginTop: 8, opacity: 0.85, fontSize: 13 }}>
@@ -409,7 +402,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
                           const bodyText = paragraphs.join(' ').trim()
                           // 「勉强算有正文」不该冒充正文：像 HN 那样 feed 里只有一串 Comments 链接时，
                           // 剥完标签只剩几个字符——与其显示一行孤零零的 "Comments"，不如如实说明。
-                          if (bodyText.length < MIN_BODY_CHARS) {
+                          if (bodyText.length < MIN_CONTENT_CHARS) {
                             return (
                               <span style={{ display: 'block', opacity: 0.7 }}>
                                 {paragraphs.length === 0

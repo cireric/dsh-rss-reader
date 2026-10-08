@@ -12,13 +12,12 @@
  * 已知它会漏掉少数与导航混排的版式，这种失败是**可见**的（内容明显不对），而不是静默出错。
  */
 import { fetchFeed, type FetchLimits } from './feed/fetch.js'
+import { MIN_CONTENT_CHARS } from './shared.js'
 import { decodeEntities, htmlToText, preToText } from './html-text.js'
 
 /** 整块丢弃的标签（连同内容）：这些几乎从不属于正文。 */
 const DROP_BLOCKS = ['script', 'style', 'noscript', 'svg', 'iframe', 'form', 'nav', 'header', 'footer', 'aside', 'template'] as const
 
-/** 段落最小长度：低于此值的 <p> 多为「分类：xxx」「订阅」「相关阅读」这类栏目。 */
-const MIN_PARAGRAPH_CHARS = 40
 
 /**
  * 结构化正文块。
@@ -333,7 +332,7 @@ export function extractArticle(html: string, baseUrl?: string): ExtractedArticle
       if (text !== '') items.push(text)
     }
     // 只有一个短项的「列表」多半是导航残留，丢掉
-    if (items.length === 0 || (items.length === 1 && items[0].length < MIN_PARAGRAPH_CHARS)) return ' '
+    if (items.length === 0 || (items.length === 1 && items[0].length < MIN_CONTENT_CHARS)) return ' '
     return stash({ kind: 'list', ordered: name === 'ol', items })
   })
   body = rewriteTagRegions(body, (name) => name === 'blockquote', (_name, inner) => {
@@ -366,14 +365,14 @@ export function extractArticle(html: string, baseUrl?: string): ExtractedArticle
     // 一个 piece 里可能含多行（被换行切开的相邻块）：逐行判断，避免把两段并成一段
     for (const line of htmlToText(piece).split('\n')) {
       const text = line.replace(/\s+/g, ' ').trim()
-      if (text.length >= MIN_PARAGRAPH_CHARS) blocks.push({ kind: 'p', text })
+      if (text.length >= MIN_CONTENT_CHARS) blocks.push({ kind: 'p', text })
     }
   }
 
   // ⑤ 兜底：一个块都没有时按行取全文（会带导航噪声，故只作最后手段）
   if (blocks.length === 0) {
     for (const line of htmlToText(body).split('\n')) {
-      if (line.length >= MIN_PARAGRAPH_CHARS) blocks.push({ kind: 'p', text: line })
+      if (line.length >= MIN_CONTENT_CHARS) blocks.push({ kind: 'p', text: line })
     }
   }
   return { title: normalizeTitle(title), blocks }

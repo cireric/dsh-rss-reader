@@ -8,6 +8,8 @@
  * 只做「文本 ⇄ 结构化」这一层；抓取校验、去重、落库都由调用方编排。
  */
 import { XMLParser } from 'fast-xml-parser'
+import { normalizeFeedUrl } from './refresh.js'
+import { asArray } from './xml-node.js'
 
 /** 导入得到的一条订阅：URL 必填，其余可选。 */
 export interface OpmlSubscription {
@@ -45,10 +47,7 @@ function childOf(node: Record<string, unknown>, name: string): unknown {
   return undefined
 }
 
-function asArray(value: unknown): unknown[] {
-  if (value === undefined || value === null) return []
-  return Array.isArray(value) ? value : [value]
-}
+
 
 /**
  * 解析 OPML 文本。
@@ -93,7 +92,7 @@ export function parseOpml(xml: string): OpmlParseResult {
       if (xmlUrl !== undefined) {
         let normalized: string
         try {
-          normalized = new URL(xmlUrl).toString()
+          normalized = normalizeFeedUrl(xmlUrl)
         } catch {
           skipped.push({ title, reason: 'URL 非法：' + xmlUrl })
           continue

@@ -7,6 +7,7 @@
  * maxNestedTags 设限，体积另由抓取层封顶（5 MB）。
  */
 import { XMLParser } from 'fast-xml-parser'
+import { asArray } from '../xml-node.js'
 import { toIsoUtc } from './date.js'
 
 export type FeedFormat = 'rss2' | 'rss1' | 'atom' | 'unknown'
@@ -42,10 +43,7 @@ const parser = new XMLParser({
 
 type XmlNode = Record<string, unknown>
 
-function asArray(value: unknown): unknown[] {
-  if (value === undefined || value === null) return []
-  return Array.isArray(value) ? value : [value]
-}
+
 
 /** 取元素文本：兼容 CDATA 容器与带属性元素（文本落在 #text）。 */
 export function textOf(value: unknown): string | undefined {

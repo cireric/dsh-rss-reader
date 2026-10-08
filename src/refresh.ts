@@ -8,6 +8,7 @@
  *      前者必须远大于后者，否则老条目会借「滚出去重窗口」重新变成未读。
  */
 import { mapConcurrent } from './concurrency.js'
+import { recencyOf } from './shared.js'
 import { rebuildItem } from './domain.js'
 import { deriveItemId } from './feed/item-id.js'
 import { fetchFeed, type FetchLimits } from './feed/fetch.js'
@@ -59,11 +60,6 @@ export interface FeedOutcome {
 /** 源标识即归一化后的 URL：稳定、可读、便于在存储里直接排查。 */
 export function normalizeFeedUrl(url: string): string {
   return new URL(url.trim()).toString()
-}
-
-/** 条目排序用的时间：优先发布时间，缺则退到抓取时间。 */
-function recencyOf(record: { publishedAt?: string; fetchedAt: string }): string {
-  return record.publishedAt ?? record.fetchedAt
 }
 
 /** 单条正文截断；给截断留一句可辨认的标记，避免被误当成正文结尾。 */

@@ -11,6 +11,7 @@
  * 也不注册模型工具：模型可见即已记录（技能硬规则 #8），阅读面走 UI。
  */
 import type { Context } from 'cordis'
+import { recencyOf } from './shared.js'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { appendFileSync, mkdirSync } from 'node:fs'
@@ -19,7 +20,7 @@ import { dirname, join } from 'node:path'
 import z from 'schemastery'
 import { readerDomain, rebuildItem } from './domain.js'
 import { createStore, type ReaderStore } from './store.js'
-import { refreshFeeds, type FeedOutcome } from './refresh.js'
+import { normalizeFeedUrl, refreshFeeds, type FeedOutcome } from './refresh.js'
 import { blocksToText, fetchArticle } from './article.js'
 import { articleCharsOf, selectCleanup, type CleanupRow } from './retention.js'
 import { buildOpml, parseOpml } from './opml.js'
@@ -206,7 +207,7 @@ export function apply(ctx: Context, config: Config): void {
     for (const raw of config.feeds) {
       let feedId: string
       try {
-        feedId = new URL(raw.trim()).toString()
+        feedId = normalizeFeedUrl(raw)
       } catch {
         log('忽略非法订阅源：' + raw)
         continue
@@ -289,7 +290,6 @@ export function apply(ctx: Context, config: Config): void {
         })
       }
     }
-    const recencyOf = (item: ItemView): string => item.publishedAt ?? item.fetchedAt
     items.sort((a, b) => {
       const byTime = recencyOf(b).localeCompare(recencyOf(a))
       return byTime !== 0 ? byTime : a.id.localeCompare(b.id)
@@ -514,7 +514,7 @@ export function apply(ctx: Context, config: Config): void {
             id: itemId,
             starred: record.starred,
             read: record.readAt !== undefined,
-            recency: record.publishedAt ?? record.fetchedAt,
+            recency: recencyOf(record),
             articleChars: articleCharsOf(record.article),
           }))
           const doomed = selectCleanup(rows, cutoff)
