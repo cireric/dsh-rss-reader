@@ -29,7 +29,7 @@ function memoryStore() {
 }
 
 const LIMITS = { timeoutMs: 2000, maxBytes: 1_000_000 }
-const BASE_OPTIONS = { limits: LIMITS, maxItemsPerFeed: 100, maxSeenPerFeed: 1000, maxContentChars: 100000, maxArticleCacheChars: 1000000 }
+const BASE_OPTIONS = { limits: LIMITS, maxItemsPerFeed: 100, maxSeenPerFeed: 1000, maxContentChars: 100000, maxArticleCacheChars: 1000000, refreshConcurrency: 4 }
 
 async function withServer(handler, run) {
   const server = createServer(handler)
@@ -169,7 +169,7 @@ test('已读态在重复抓取后必须保持（有 readAt 就不得回退成未
 test('去重窗口与保留量解耦：条目被裁掉后不得重新抓成新条目', async () => {
   const store = memoryStore()
   await withServer(serveFeed(THREE_ITEMS), async (base) => {
-    const options = { limits: LIMITS, maxItemsPerFeed: 1, maxSeenPerFeed: 100, maxContentChars: 100000, maxArticleCacheChars: 1000000 }
+    const options = { limits: LIMITS, maxItemsPerFeed: 1, maxSeenPerFeed: 100, maxContentChars: 100000, maxArticleCacheChars: 1000000, refreshConcurrency: 1 }
     await refreshFeeds([base + '/feed.xml'], store, options)
     assert.equal(store.items.size, 1)
 
@@ -344,4 +344,24 @@ test('正文缓存闸门：现行的 blocks 形态同样要被统计到（2026-1
     assert.equal(cached.length, 1, 'blocks 形态也必须被闸门统计到；实际还剩 ' + cached.length + ' 条缓存')
     assert.equal(store.items.size, 3, '清缓存不得删条目')
   })
+})
+
+test('并发受控：同时在飞的抓取数不超过上限，且结果顺序与输入一致', async () => {
+  const store = memoryStore()
+  let inFlight = 0
+  let peak = 0
+  const slowFetch = async () => {
+    inFlight += 1
+    peak = Math.max(peak, inFlight)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    inFlight -= 1
+    return { kind: 'ok', body: rss(THREE_ITEMS) }
+  }
+  const urls = Array.from({ length: 12 }, (_, i) => 'https://f' + i + '.test/feed')
+  const outcomes = await refreshFeeds(urls, store, { ...BASE_OPTIONS, refreshConcurrency: 4, fetchFeedImpl: slowFetch })
+
+  assert.equal(outcomes.length, 12, '每个输入都必须有结果，一个都不能少')
+  assert.ok(peak >= 2, '并发峰值只有 ' + peak + ' —— 说明仍然是串行，并发没生效')
+  assert.ok(peak <= 4, '并发峰值 ' + peak + ' 超过上限 4')
+  assert.deepEqual(outcomes.map((o) => o.url), urls, '结果顺序必须与输入一致（并发不能打乱对应关系）')
 })

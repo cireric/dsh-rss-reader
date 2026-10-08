@@ -4,6 +4,7 @@
  * 抽成独立模块是为了可测：并发上限、失败隔离、"校验通过才算订阅"这三条都是编排语义，
  * 用桩抓取函数就能完整覆盖，不必起宿主也不必真的出网。
  */
+import { mapConcurrent } from './concurrency.js'
 import { fetchFeed, type FetchLimits } from './feed/fetch.js'
 import { parseFeed } from './feed/parse.js'
 import { normalizeFeedUrl } from './refresh.js'
@@ -38,22 +39,8 @@ export async function validateSubscriptions(
   options: SubscribeOptions,
 ): Promise<SubscribeOutcome[]> {
   const fetchImpl = options.fetchImpl ?? fetchFeed
-  const results: SubscribeOutcome[] = new Array(urls.length)
-  let cursor = 0
-
-  const worker = async (): Promise<void> => {
-    for (;;) {
-      const index = cursor
-      cursor += 1
-      if (index >= urls.length) return
-      const raw = urls[index]
-      results[index] = await validateOne(raw, options, fetchImpl)
-    }
-  }
-
-  const workers = Math.max(1, Math.min(options.concurrency, urls.length))
-  await Promise.all(Array.from({ length: workers }, () => worker()))
-  return results
+  // 有界并发 + 保序：与 refresh.ts 共用同一个实现（见 concurrency.ts）
+  return mapConcurrent(urls, options.concurrency, (raw) => validateOne(raw, options, fetchImpl))
 }
 
 async function validateOne(

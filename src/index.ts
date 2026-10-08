@@ -58,6 +58,8 @@ export interface Config {
   cleanupAfterDays: number
   /** OPML 导入时的逐源校验并发上限（≥20 源逐个抓太慢，全放出去又不友好） */
   importConcurrency: number
+  /** 刷新时同时在飞的抓取数（逐源串行是 N x RTT 的线性等待，见 refresh.ts） */
+  refreshConcurrency: number
   /** 按需抓原站正文的体积上限（字节）——单篇文章比 feed 大，与 maxBytes 分开 */
   articleMaxBytes: number
   /** 同一篇文章两次抓取之间的最小间隔（缓存未命中时），防连按造成的请求风暴 */
@@ -82,6 +84,7 @@ export const Config: z<Config> = z.object({
   maxArticleCacheChars: z.number().default(8_000_000),
   cleanupAfterDays: z.number().default(30),
   importConcurrency: z.number().default(5),
+  refreshConcurrency: z.number().default(5),
   articleMaxBytes: z.number().default(2 * 1024 * 1024),
   articleCooldownMs: z.number().default(30000),
   refreshOnStart: z.boolean().default(true),
@@ -244,6 +247,7 @@ export function apply(ctx: Context, config: Config): void {
         maxSeenPerFeed: config.maxSeenPerFeed,
         maxContentChars: config.maxContentChars,
         maxArticleCacheChars: config.maxArticleCacheChars,
+        refreshConcurrency: config.refreshConcurrency,
       }, options.signal)
       log(summarize(outcomes))
     })()

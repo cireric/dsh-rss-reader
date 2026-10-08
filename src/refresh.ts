@@ -7,6 +7,7 @@
  *   ③ 去重窗口（maxSeenPerFeed）与条目保留量（maxItemsPerFeed）是两件事，
  *      前者必须远大于后者，否则老条目会借「滚出去重窗口」重新变成未读。
  */
+import { mapConcurrent } from './concurrency.js'
 import { deriveItemId } from './feed/item-id.js'
 import { fetchFeed, type FetchLimits } from './feed/fetch.js'
 import { articleCharsOf, selectPrunable, selectArticleEvictions, type RetentionRow } from './retention.js'
@@ -33,6 +34,12 @@ export interface RefreshOptions {
   maxContentChars: number
   /** 每个源的按需正文缓存总量上限（字符）；超限从最旧的缓存开始清，见 capArticleCache */
   maxArticleCacheChars: number
+  /**
+   * 同时在飞的抓取数上限。逐源串行是 N x RTT 的线性等待（实测每源 100ms 时 10 源 1056ms、
+   * 20 源 2089ms），而验收标准要求导入 ≥20 个源；最坏情况一个卡住的源会按 timeoutMs 拖住
+   * 它后面的所有源（20 x 15s = 300s）。与 subscribe.ts 的并发校验同一套模式。
+   */
+  refreshConcurrency: number
   now?: () => Date
   fetchFeedImpl?: typeof fetchFeed
 }
@@ -129,105 +136,115 @@ export async function refreshFeeds(
 ): Promise<FeedOutcome[]> {
   const now = options.now ?? (() => new Date())
   const doFetch = options.fetchFeedImpl ?? fetchFeed
-  const outcomes: FeedOutcome[] = []
+  /**
+   * 有界并发 + 保序（见 concurrency.ts；与 subscribe.ts 共用同一个实现）。
+   *
+   * 为什么可以并发落库：存储域的每次写入都排在它的**单条 write chain** 上
+   * （storage-domain/src/domain.ts：「every write queues on the chain」），而每次调度的
+   * feedId 都不同（调用方传的是 listFeeds() 的键，天然唯一），所以写之间没有共享状态。
+   */
+  return mapConcurrent(urls, options.refreshConcurrency, (rawUrl) =>
+    refreshOne(rawUrl, store, options, now, doFetch, signal))
+}
 
-  for (const rawUrl of urls) {
-    let feedId: string
-    try {
-      feedId = normalizeFeedUrl(rawUrl)
-    } catch {
-      outcomes.push({ feedId: rawUrl, url: rawUrl, status: 'failed', added: 0, reason: '不是合法 URL' })
-      continue
-    }
+/** 抓取并落库单个源；结果由调用方按输入下标放回数组。 */
+async function refreshOne(
+  rawUrl: string,
+  store: ReaderStore,
+  options: RefreshOptions,
+  now: () => Date,
+  doFetch: typeof fetchFeed,
+  signal: AbortSignal | undefined,
+): Promise<FeedOutcome> {
+  let feedId: string
+  try {
+    feedId = normalizeFeedUrl(rawUrl)
+  } catch {
+    return { feedId: rawUrl, url: rawUrl, status: 'failed', added: 0, reason: '不是合法 URL' }
+  }
 
-    const previous = store.feed(feedId)
-    // 内容版本落后 ⇒ 这一轮不带条件请求，强制拿 200 以便回填正文
-    const needsContentUpgrade = (previous?.contentRevision ?? 1) < CONTENT_REVISION
-    const result = await doFetch(
-      feedId,
-      needsContentUpgrade ? {} : { etag: previous?.etag, lastModified: previous?.lastModified },
-      options.limits,
-      signal,
-    )
-    const stamp = now().toISOString()
+  const previous = store.feed(feedId)
+  // 内容版本落后 ⇒ 这一轮不带条件请求，强制拿 200 以便回填正文
+  const needsContentUpgrade = (previous?.contentRevision ?? 1) < CONTENT_REVISION
+  const result = await doFetch(
+    feedId,
+    needsContentUpgrade ? {} : { etag: previous?.etag, lastModified: previous?.lastModified },
+    options.limits,
+    signal,
+  )
+  const stamp = now().toISOString()
 
-    if (result.kind === 'failed') {
-      await store.saveFeed(feedId, {
-        ...(previous ?? {}),
-        url: feedId,
-        lastFailure: result.reason,
-      })
-      outcomes.push({ feedId, url: feedId, status: 'failed', added: 0, reason: result.reason })
-      continue
-    }
-
-    if (result.kind === 'not-modified') {
-      // 升级轮里还被判 304（源忽略了无条件请求）：写回版本号避免每轮都重试，并留下痕迹
-      if (needsContentUpgrade) {
-        outcomes.push({ feedId, url: feedId, status: 'not-modified', added: 0, reason: '源未响应无条件请求，正文升级跳过' })
-      }
-      await store.saveFeed(feedId, {
-        ...(previous ?? {}),
-        url: feedId,
-        lastFetchedAt: stamp,
-        contentRevision: CONTENT_REVISION,
-      })
-      if (needsContentUpgrade) continue
-      outcomes.push({ feedId, url: feedId, status: 'not-modified', added: 0 })
-      continue
-    }
-
-    const parsed = parseFeed(result.body, feedId)
-    const cursor = store.cursor(feedId)
-    const seen = cursor?.seen ?? []
-    const seenSet = new Set(seen)
-    const freshIds: string[] = []
-
-    for (const item of parsed.items) {
-      const itemId = deriveItemId(feedId, item)
-      const summary = truncateContent(item.summary, options.maxContentChars)
-      const existing = store.item(itemId)
-
-      if (existing !== undefined || seenSet.has(itemId)) {
-        // 已见过：只补「更完整的正文」，绝不碰 readAt / starred（已读与星标是用户数据）。
-        // 这条同时承担回填：解析优先级修好后，老条目在下一次抓取里就能拿到全文。
-        if (existing !== undefined && (summary?.length ?? 0) > (existing.summary?.length ?? 0)) {
-          await store.saveItem(itemId, { ...existing, summary })
-        }
-        continue
-      }
-
-      seenSet.add(itemId)
-      freshIds.push(itemId)
-      await store.saveItem(itemId, {
-        feedId,
-        title: item.title,
-        link: item.link,
-        publishedAt: item.publishedAt,
-        summary,
-        fetchedAt: stamp,
-        starred: false,
-      })
-    }
-
-    await store.saveCursor(feedId, {
-      seen: [...freshIds, ...seen].slice(0, options.maxSeenPerFeed),
-      cursorAt: stamp,
-    })
+  if (result.kind === 'failed') {
     await store.saveFeed(feedId, {
+      ...(previous ?? {}),
       url: feedId,
-      title: parsed.title ?? previous?.title,
-      folder: previous?.folder,
-      etag: result.etag,
-      lastModified: result.lastModified,
+      lastFailure: result.reason,
+    })
+    return { feedId, url: feedId, status: 'failed', added: 0, reason: result.reason }
+  }
+
+  if (result.kind === 'not-modified') {
+    // 升级轮里还被判 304（源忽略了无条件请求）：写回版本号避免每轮都重试，并留下痕迹
+    const upgradeSkipped = needsContentUpgrade
+    await store.saveFeed(feedId, {
+      ...(previous ?? {}),
+      url: feedId,
       lastFetchedAt: stamp,
       contentRevision: CONTENT_REVISION,
     })
-    await prune(store, feedId, options.maxItemsPerFeed)
-    await capArticleCache(store, feedId, options.maxArticleCacheChars)
-
-    outcomes.push({ feedId, url: feedId, status: 'added', added: freshIds.length })
+    return upgradeSkipped
+      ? { feedId, url: feedId, status: 'not-modified', added: 0, reason: '源未响应无条件请求，正文升级跳过' }
+      : { feedId, url: feedId, status: 'not-modified', added: 0 }
   }
 
-  return outcomes
+  const parsed = parseFeed(result.body, feedId)
+  const cursor = store.cursor(feedId)
+  const seen = cursor?.seen ?? []
+  const seenSet = new Set(seen)
+  const freshIds: string[] = []
+
+  for (const item of parsed.items) {
+    const itemId = deriveItemId(feedId, item)
+    const summary = truncateContent(item.summary, options.maxContentChars)
+    const existing = store.item(itemId)
+
+    if (existing !== undefined || seenSet.has(itemId)) {
+      // 已见过：只补「更完整的正文」，绝不碰 readAt / starred（已读与星标是用户数据）。
+      // 这条同时承担回填：解析优先级修好后，老条目在下一次抓取里就能拿到全文。
+      if (existing !== undefined && (summary?.length ?? 0) > (existing.summary?.length ?? 0)) {
+        await store.saveItem(itemId, { ...existing, summary })
+      }
+      continue
+    }
+
+    seenSet.add(itemId)
+    freshIds.push(itemId)
+    await store.saveItem(itemId, {
+      feedId,
+      title: item.title,
+      link: item.link,
+      publishedAt: item.publishedAt,
+      summary,
+      fetchedAt: stamp,
+      starred: false,
+    })
+  }
+
+  await store.saveCursor(feedId, {
+    seen: [...freshIds, ...seen].slice(0, options.maxSeenPerFeed),
+    cursorAt: stamp,
+  })
+  await store.saveFeed(feedId, {
+    url: feedId,
+    title: parsed.title ?? previous?.title,
+    folder: previous?.folder,
+    etag: result.etag,
+    lastModified: result.lastModified,
+    lastFetchedAt: stamp,
+    contentRevision: CONTENT_REVISION,
+  })
+  await prune(store, feedId, options.maxItemsPerFeed)
+  await capArticleCache(store, feedId, options.maxArticleCacheChars)
+
+  return { feedId, url: feedId, status: 'added', added: freshIds.length }
 }
