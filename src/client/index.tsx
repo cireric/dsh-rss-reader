@@ -113,7 +113,10 @@ function isTypingTarget(target: EventTarget | null): boolean {
     if (target.closest('[role="dialog"], [aria-modal="true"], dialog') !== null) return true
     const tag = target.tagName
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true
-  } catch {
+  } catch (error) {
+    // 不能静默降级：判定失败意味着「这次按键会被当成非输入框而放行」，那是行为上的改变，
+    // 必须在控制台留下证据（浏览器里 console 是本插件唯一可见的通道）。
+    console.warn('[rss-reader] 输入框判定失败，本次按键按「非输入框」处理', error)
     return false
   }
   return false
