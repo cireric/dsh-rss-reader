@@ -20,6 +20,11 @@ const ROOT = process.cwd()
  * 缺口。等价变异混进来会让这道门槛变成狼来了。
  */
 const MUTATIONS = [
+  { id: 'subscribe-信任不跨源传播', file: 'lib/subscribe.js',
+    from: 'const inherited = options.limits.trustedTarget === true && isSameOrigin(candidate, pageUrl);',
+    to: 'const inherited = options.limits.trustedTarget === true;' },
+  { id: 'discover-只认 rel=alternate', file: 'lib/feed/discover.js',
+    from: 'if (!/\\balternate\\b/i.test(rel))', to: 'if (false)' },
   { id: 'client-1 键切展开视图', file: 'lib/client.js',
     from: 'setLayout("expanded")', to: 'setLayout("list")' },
   { id: 'retention-星标保护', file: 'lib/retention.js',

@@ -84,3 +84,39 @@ test('空输入返回空数组，不抛异常', async () => {
   const results = await validateSubscriptions([], { limits: LIMITS, concurrency: 4, fetchImpl: async () => ({ kind: 'failed', reason: 'x' }) })
   assert.deepEqual(results, [])
 })
+
+test('首页 URL 自动发现：用页面声明的 feed，并标出 discoveredFrom', async () => {
+  const html = '<html><head><link rel="alternate" type="application/rss+xml" href="/feed.xml"></head></html>'
+  const map = { 'https://site.test/': { kind: 'ok', body: html }, 'https://site.test/feed.xml': { kind: 'ok', body: RSS } }
+  const results = await validateSubscriptions(['https://site.test/'], { limits: LIMITS, concurrency: 1, fetchImpl: stubFetch(map) })
+  assert.equal(results[0].ok, true, '首页应当被发现成可订阅')
+  assert.equal(results[0].url, 'https://site.test/feed.xml', '订阅的必须是 feed 本身，不是首页')
+  assert.equal(results[0].discoveredFrom, 'https://site.test/')
+  assert.equal(results[0].format, 'rss2')
+})
+
+test('信任不跨源传播：同源候选继承可信目标、跨源候选一律不可信（安全边界）', async () => {
+  const seen = []
+  const fetchImpl = async (url, _headers, limits) => {
+    seen.push({ url, trusted: limits.trustedTarget === true })
+    if (url === 'https://site.test/') {
+      const body = '<link rel="alternate" type="application/rss+xml" href="/feed.xml">'
+        + '<link rel="alternate" type="application/rss+xml" href="https://evil.test/feed.xml">'
+      return { kind: "ok", body }
+    }
+    return { kind: "failed", reason: "未通过" }
+  }
+  await validateSubscriptions(['https://site.test/'], { limits: LIMITS, concurrency: 1, fetchImpl })
+  assert.deepEqual(seen[0], { url: 'https://site.test/', trusted: true }, '用户给的那个 URL 才是可信目标')
+  const same = seen.find((entry) => entry.url === 'https://site.test/feed.xml')
+  const cross = seen.find((entry) => entry.url === 'https://evil.test/feed.xml')
+  assert.equal(same.trusted, true, '同源候选继承信任（否则内网自建站的 feed 会被自己拒掉）')
+  assert.equal(cross.trusted, false, '跨源候选由页面内容决定，必须按不可信处理')
+})
+
+test('首页没有任何 feed 声明：原因要说清是「页面里没声明」，好指导下一步', async () => {
+  const map = { 'https://plain.test/': { kind: 'ok', body: '<html><body>普通网页</body></html>' } }
+  const results = await validateSubscriptions(['https://plain.test/'], { limits: LIMITS, concurrency: 1, fetchImpl: stubFetch(map) })
+  assert.equal(results[0].ok, false)
+  assert.match(results[0].reason, /也没声明 feed/)
+})

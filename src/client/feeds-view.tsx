@@ -55,7 +55,7 @@ export function FeedsView({ feeds, busy, report, notice, onImport, onExport, onA
         </label>
         <button type="button" className="dsh-rss-btn" disabled={busy || feeds.length === 0} onClick={onExport}>导出 OPML</button>
         <span style={{ flex: 1 }} />
-        <input value={draft} placeholder="或直接粘贴 feed 地址后回车" disabled={busy}
+        <input value={draft} placeholder="粘贴 feed 地址或站点首页（会自动发现 feed）后回车" disabled={busy}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {
             // 本插件的全局快捷键挂在 document 上，输入框里的键不该被它截走；

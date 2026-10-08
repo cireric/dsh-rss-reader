@@ -8,6 +8,7 @@ import { mapConcurrent } from './concurrency.js'
 import { fetchFeed, type FetchLimits } from './feed/fetch.js'
 import { parseFeed } from './feed/parse.js'
 import { normalizeFeedUrl } from './refresh.js'
+import { discoverFeedUrls, isSameOrigin } from './feed/discover.js'
 
 /** 一条导入结果。`ok` 为假时 reason 必须给出可直接展示的原因。 */
 export interface SubscribeOutcome {
@@ -17,6 +18,8 @@ export interface SubscribeOutcome {
   title?: string
   format?: string
   itemCount?: number
+  /** 这条是通过**首页自动发现**拿到的：值是用户原本给的那个页面 URL */
+  discoveredFrom?: string
   reason?: string
 }
 
@@ -64,7 +67,8 @@ async function validateOne(
 
   const parsed = parseFeed(fetched.body, feedUrl)
   if (parsed.format === 'unknown') {
-    return { url: feedUrl, ok: false, reason: '不是可识别的 feed（RSS 2.0 / RSS 1.0 / Atom 皆不匹配）' }
+    // 不是 feed —— 也许用户给的是**站点首页**：按 §3.1 找它自己声明的 feed（auto-discovery）
+    return await discoverAndValidate(feedUrl, fetched.body, options, fetchImpl)
   }
   return {
     url: feedUrl,
@@ -73,4 +77,40 @@ async function validateOne(
     format: parsed.format,
     itemCount: parsed.items.length,
   }
+}
+
+/**
+ * 首页 → feed：把页面里声明的候选逐个试，第一个能解析成 feed 的就算成功。
+ *
+ * **信任不跨源传播**（这里是最要紧的一条）：候选链接是**页面内容**决定的（发布者可控），
+ * 所以只有当它与用户给的那个 URL 同源时才继承「用户配置的可信目标」；跨源一律按不可信处理，
+ * 内网地址会被拒。没有这条，一个正常站点就能用 link rel=alternate 把我们指向 169.254.169.254。
+ */
+async function discoverAndValidate(
+  pageUrl: string,
+  html: string,
+  options: SubscribeOptions,
+  fetchImpl: typeof fetchFeed,
+): Promise<SubscribeOutcome> {
+  const candidates = discoverFeedUrls(html, pageUrl)
+  if (candidates.length === 0) {
+    return { url: pageUrl, ok: false, reason: '不是可识别的 feed（RSS 2.0 / RSS 1.0 / Atom 皆不匹配），页面里也没声明 feed' }
+  }
+  for (const candidate of candidates) {
+    const inherited = options.limits.trustedTarget === true && isSameOrigin(candidate, pageUrl)
+    const limits = inherited ? options.limits : { ...options.limits, trustedTarget: false }
+    const attempt = await fetchImpl(candidate, {}, limits)
+    if (attempt.kind !== 'ok') continue
+    const retry = parseFeed(attempt.body, candidate)
+    if (retry.format === 'unknown') continue
+    return {
+      url: candidate,
+      ok: true,
+      title: retry.title,
+      format: retry.format,
+      itemCount: retry.items.length,
+      discoveredFrom: pageUrl,
+    }
+  }
+  return { url: pageUrl, ok: false, reason: '页面里声明了 feed，但都没有通过校验（共 ' + candidates.length + ' 个候选）' }
 }
