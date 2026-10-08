@@ -42,10 +42,12 @@ export function decodeEntities(text: string): string {
 /** HTML 片段 → 纯文本（块级标签转换行，其余标签当空白，收敛空白）。 */
 export function htmlToText(fragment: string): string {
   return decodeEntities(
-    fragment
-      .replace(/<\s*br\s*\/?>/gi, '\n')
-      .replace(/<\s*\/(p|div|li|h[1-6]|blockquote|tr|section|article|figure|pre)\s*>/gi, '\n')
-      .replace(/<[^>]*>/g, ' '),
+    stripTagsTo(
+      fragment
+        .replace(/<\s*br\s*\/?>/gi, '\n')
+        .replace(/<\s*\/(p|div|li|h[1-6]|blockquote|tr|section|article|figure|pre)\s*>/gi, '\n'),
+      ' ',
+    ),
   )
     .split('\n')
     .map((line) => line.replace(/[ \t\u00a0]+/g, ' ').trim())
@@ -61,7 +63,7 @@ export function htmlToText(fragment: string): string {
  * 并且标签替换成空串而不是空格（否则 <code> 之类会在词中间插空格）。
  */
 export function preToText(fragment: string): string {
-  return decodeEntities(fragment.replace(/<[^>]*>/g, ''))
+  return decodeEntities(stripTagsTo(fragment, ''))
     .replace(/\r\n?/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .replace(/[ \t]+$/gm, '')
@@ -165,18 +167,202 @@ export function pickImageUrl(tag: string, base: string | undefined): string | un
   return undefined
 }
 
+/**
+ * —— 线性标签扫描基本件（2026-10-07 补）——
+ *
+ * 动机：抽取层原先每一段都是「惰性匹配 + 全局替换」的形状，遇到**没有闭合标签**的载荷会在
+ * 每个起点重扫到文末，退化成 O(标签数 x 全文)。实测 25,000 个标签时就已超预算：
+ * 未闭合 script 654ms、title 599ms、figure 672ms、裸尖括号 219ms；外推到默认的 2MB 上限
+ * （约 25 万个标签）是 60 秒级——而这段代码跑在 host 进程里，一次按键足以冻住整个 DSH
+ * （所有会话、所有流）。
+ *
+ * 下面这套基本件把同一批载荷压到 1~10ms，且对正常页面的结果与原先一致
+ * （既有 article 单测继续作为行为护栏）。
+ */
+
+/** 标签头：可选斜杠 + 名字。sticky——只在 lastIndex 处试一次，O(1)。 */
+const TAG_HEAD = /<\/?([a-zA-Z][a-zA-Z0-9-]*)/y
+
+/** 把每个尖括号标签换成 replacement；没有闭合尖括号的按普通文本留下。O(n)。 */
+function stripTagsTo(text: string, replacement: string): string {
+  let out = ''
+  let cursor = 0
+  for (;;) {
+    const lt = text.indexOf('<', cursor)
+    if (lt === -1) return out + text.slice(cursor)
+    const gt = text.indexOf('>', lt + 1)
+    if (gt === -1) return out + text.slice(cursor)
+    out += text.slice(cursor, lt) + replacement
+    cursor = gt + 1
+  }
+}
+
+/** 去掉 HTML 注释；没有闭合标记的当普通文本留下（与正则同义）。O(n)。 */
+function stripComments(html: string): string {
+  let out = ''
+  let cursor = 0
+  for (;;) {
+    const at = html.indexOf('<!--', cursor)
+    if (at === -1) return out + html.slice(cursor)
+    const end = html.indexOf('-->', at + 4)
+    if (end === -1) return out + html.slice(cursor)
+    out += html.slice(cursor, at) + ' '
+    cursor = end + 3
+  }
+}
+
+interface TagHit {
+  readonly name: string
+  readonly closing: boolean
+  readonly start: number
+  readonly end: number
+}
+
+/** 线性遍历正文里的每个标签；不能构成标签的尖括号只前进一个字符。整体 O(n)。 */
+function* eachTag(text: string): Generator<TagHit> {
+  let i = 0
+  for (;;) {
+    const lt = text.indexOf('<', i)
+    if (lt === -1) return
+    TAG_HEAD.lastIndex = lt
+    const head = TAG_HEAD.exec(text)
+    if (head === null) {
+      i = lt + 1
+      continue
+    }
+    const gt = text.indexOf('>', TAG_HEAD.lastIndex)
+    if (gt === -1) return
+    yield { name: head[1].toLowerCase(), closing: text[lt + 1] === '/', start: lt, end: gt + 1 }
+    i = gt + 1
+  }
+}
+
+/**
+ * 找同名闭合标签的位置。
+ *
+ * 同一个名字一旦在某个位置之后就再也没有闭合标签，就记下来不再尝试——否则「很多开标签 +
+ * 一个闭合标签」的载荷仍会让每个开标签各扫一遍文末，又退回二次行为。
+ */
+function makeClosingFinder(text: string, lower: string): (name: string, from: number) => number {
+  const exhausted = new Set<string>()
+  return (name, from) => {
+    if (exhausted.has(name)) return -1
+    let searchFrom = from
+    for (;;) {
+      const at = lower.indexOf('</' + name, searchFrom)
+      if (at === -1) {
+        exhausted.add(name)
+        return -1
+      }
+      if (text[at + 2 + name.length] === '>') return at
+      searchFrom = at + 2
+    }
+  }
+}
+
+/**
+ * 把开闭标签之间的整段交给 render 重写（只看第一个同名闭合标签，与惰性正则同义）。
+ * 一次前进，整体 O(n)。
+ */
+function rewriteTagRegions(
+  body: string,
+  isTarget: (name: string) => boolean,
+  render: (name: string, inner: string) => string,
+): string {
+  const lower = body.toLowerCase()
+  const findClosing = makeClosingFinder(body, lower)
+  let out = ''
+  let cursor = 0
+  for (const hit of eachTag(body)) {
+    if (hit.closing || hit.start < cursor || !isTarget(hit.name)) continue
+    const closeAt = findClosing(hit.name, hit.end)
+    if (closeAt === -1) continue
+    const closeEnd = body.indexOf('>', closeAt) + 1
+    out += body.slice(cursor, hit.start) + render(hit.name, body.slice(hit.end, closeAt))
+    cursor = closeEnd
+  }
+  return out + body.slice(cursor)
+}
+
+/** 把整段丢弃标签换成空格（等价于逐标签惰性替换，但只走一遍）。 */
+function dropRegions(html: string): string {
+  return rewriteTagRegions(html, (name) => DROP_SET.has(name), () => ' ')
+}
+
+/** 空元素：把标签本身交给 render。O(n)。 */
+function rewriteVoidTags(body: string, name: string, render: (tag: string) => string): string {
+  let out = ''
+  let cursor = 0
+  for (const hit of eachTag(body)) {
+    if (hit.closing || hit.name !== name || hit.start < cursor) continue
+    out += body.slice(cursor, hit.start) + render(body.slice(hit.start, hit.end))
+    cursor = hit.end
+  }
+  return out + body.slice(cursor)
+}
+
+/** 第一个同名开闭标签之间的内容（与惰性正则的首个匹配同义）。O(n)。 */
+function firstRegion(text: string, lower: string, name: string): string | undefined {
+  const findClosing = makeClosingFinder(text, lower)
+  for (const hit of eachTag(text)) {
+    if (hit.closing || hit.name !== name) continue
+    const closeAt = findClosing(name, hit.end)
+    return closeAt === -1 ? undefined : text.slice(hit.end, closeAt)
+  }
+  return undefined
+}
+
+/** 第一个同名空元素的标签本身。O(n)。 */
+function firstVoidTag(text: string, name: string): string | undefined {
+  for (const hit of eachTag(text)) {
+    if (!hit.closing && hit.name === name) return text.slice(hit.start, hit.end)
+  }
+  return undefined
+}
+
+/** 按顺序收集所有同名开闭标签之间的内容（等价于全局惰性匹配）。O(n)。 */
+function allRegions(text: string, name: string): string[] {
+  const lower = text.toLowerCase()
+  const findClosing = makeClosingFinder(text, lower)
+  const found: string[] = []
+  let cursor = 0
+  for (const hit of eachTag(text)) {
+    if (hit.closing || hit.name !== name || hit.start < cursor) continue
+    const closeAt = findClosing(name, hit.end)
+    if (closeAt === -1) continue
+    found.push(text.slice(hit.end, closeAt))
+    cursor = text.indexOf('>', closeAt) + 1
+  }
+  return found
+}
+
+/** 丢弃标签的集合形态（线性扫描用成员判断，不再逐标签编译正则）。 */
+const DROP_SET: ReadonlySet<string> = new Set<string>(DROP_BLOCKS)
+
+/** 从 meta 标签里取指定 property 的 content。O(n)。 */
+function metaContent(html: string, property: string): string | undefined {
+  const want = property.toLowerCase()
+  for (const hit of eachTag(html)) {
+    if (hit.closing || hit.name !== 'meta') continue
+    const tag = html.slice(hit.start, hit.end)
+    const declared = attrOf(tag, 'property')
+    if (declared === undefined || declared.toLowerCase() !== want) continue
+    const content = attrOf(tag, 'content')
+    if (content !== undefined) return content
+  }
+  return undefined
+}
+
 /** 从 HTML 里抽正文。纯函数——单测直接喂夹具。 */
 export function extractArticle(html: string, baseUrl?: string): ExtractedArticle {
+  const lower = html.toLowerCase()
   const title =
-    firstGroup(html, /<meta[^>]+property=["']og:title["'][^>]*content=["']([^"']+)["']/i)
-    ?? firstGroup(html, /<meta[^>]+content=["']([^"']+)["'][^>]*property=["']og:title["']/i)
-    ?? firstGroup(html, /<title[^>]*>([\s\S]*?)<\/title>/i)
-    ?? firstGroup(html, /<h1[^>]*>([\s\S]*?)<\/h1>/i)
+    metaContent(html, 'og:title')
+    ?? firstRegion(html, lower, 'title')
+    ?? firstRegion(html, lower, 'h1')
 
-  let body = html.replace(/<!--[\s\S]*?-->/g, ' ')
-  for (const tag of DROP_BLOCKS) {
-    body = body.replace(new RegExp('<' + tag + '\\b[^>]*>[\\s\\S]*?<\\/' + tag + '>', 'gi'), ' ')
-  }
+  let body = dropRegions(stripComments(html))
+  body = lower.length === 0 ? body : body
 
   /**
    * 块先存进 Map 并留下占位符，**最后按占位符在文档里的位置重建顺序**。
@@ -194,40 +380,40 @@ export function extractArticle(html: string, baseUrl?: string): ExtractedArticle
   }
 
   // ①②③ 按「越具体越先」的顺序保护：figure 含 img、list 含 li、pre 可能含大量符号
-  body = body.replace(/<figure\b[^>]*>([\s\S]*?)<\/figure>/gi, (_whole, inner: string) => {
-    const imgTag = /<img\b[^>]*>/i.exec(inner)?.[0]
+  body = rewriteTagRegions(body, (name) => name === 'figure', (_name, inner) => {
+    const imgTag = firstVoidTag(inner, 'img')
     const src = imgTag === undefined ? undefined : pickImageUrl(imgTag, baseUrl)
     if (src === undefined) return ' '
-    const caption = firstGroup(inner, /<figcaption\b[^>]*>([\s\S]*?)<\/figcaption>/i)
+    const caption = firstRegion(inner, inner.toLowerCase(), 'figcaption')
     const text = caption === undefined ? '' : htmlToText(caption).replace(/\n/g, ' ').trim()
     return stash({ kind: 'img', src, alt: imgTag === undefined ? undefined : attrOf(imgTag, 'alt'), caption: text === '' ? undefined : text })
   })
-  body = body.replace(/<pre\b[^>]*>([\s\S]*?)<\/pre>/gi, (_whole, inner: string) => {
+  body = rewriteTagRegions(body, (name) => name === 'pre', (_name, inner) => {
     const text = preToText(inner)
     return text === '' ? ' ' : stash({ kind: 'pre', text })
   })
-  body = body.replace(/<(ul|ol)\b[^>]*>([\s\S]*?)<\/\1>/gi, (_whole, tag: string, inner: string) => {
+  body = rewriteTagRegions(body, (name) => name === 'ul' || name === 'ol', (name, inner) => {
     const items: string[] = []
-    for (const match of inner.matchAll(/<li\b[^>]*>([\s\S]*?)<\/li>/gi)) {
-      const text = htmlToText(match[1]).replace(/\n/g, ' ').trim()
+    for (const li of allRegions(inner, 'li')) {
+      const text = htmlToText(li).replace(/\n/g, ' ').trim()
       if (text !== '') items.push(text)
     }
     // 只有一个短项的「列表」多半是导航残留，丢掉
     if (items.length === 0 || (items.length === 1 && items[0].length < MIN_PARAGRAPH_CHARS)) return ' '
-    return stash({ kind: 'list', ordered: tag.toLowerCase() === 'ol', items })
+    return stash({ kind: 'list', ordered: name === 'ol', items })
   })
-  body = body.replace(/<blockquote\b[^>]*>([\s\S]*?)<\/blockquote>/gi, (_whole, inner: string) => {
+  body = rewriteTagRegions(body, (name) => name === 'blockquote', (_name, inner) => {
     const text = htmlToText(inner).replace(/\n+/g, ' ').trim()
     // 引用**不套散文长度门槛**：blockquote 标签本身就是语义信号，短引用（一句被引的话）也是引用
     return text === '' ? ' ' : stash({ kind: 'quote', text })
   })
-  body = body.replace(/<img\b[^>]*>/gi, (tag: string) => {
+  body = rewriteVoidTags(body, 'img', (tag) => {
     const src = pickImageUrl(tag, baseUrl)
     return src === undefined ? ' ' : stash({ kind: 'img', src, alt: attrOf(tag, 'alt') })
   })
-  body = body.replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi, (_whole, level: string, inner: string) => {
+  body = rewriteTagRegions(body, (name) => /^h[1-6]$/.test(name), (name, inner) => {
     const text = htmlToText(inner).replace(/\n/g, ' ').trim()
-    return text === '' ? ' ' : stash({ kind: 'h', level: Number(level), text })
+    return text === '' ? ' ' : stash({ kind: 'h', level: Number(name.slice(1)), text })
   })
 
   // ④ 按边界切分剩余散文，并**在同一遍里按文档顺序重建块**
@@ -268,11 +454,6 @@ export function blocksToText(blocks: readonly ArticleBlock[]): string {
       return block.text
     })
     .join('\n')
-}
-
-function firstGroup(text: string, pattern: RegExp): string | undefined {
-  const match = pattern.exec(text)
-  return match?.[1]
 }
 
 function normalizeTitle(raw: string | undefined): string | undefined {
