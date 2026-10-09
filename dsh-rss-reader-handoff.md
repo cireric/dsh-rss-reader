@@ -50,7 +50,8 @@ npm run mutation                                  # 19 条变异，全中才退 
 | `src/config.ts` | 配置面（Schemastery 接口 + schema，必须挨着放） |
 | `src/index.ts` | 插件入口：apply、日志、域生命周期、refreshNow、HTTP 路由注册 |
 | `src/endpoints.ts` | 11 个端点；闭包依赖显式收进 `EndpointDeps` |
-| `src/refresh.ts` / `src/feed/*` | 刷新编排 / 条件请求 / 三格式解析 / 日期 / 条目 id |
+| `src/refresh.ts` / `src/feed/*` | 刷新编排 / 条件请求 / 三格式解析 / 日期 / 条目 id（含候选身份表） |
+| `src/identity-repair.ts` | 存量重复条目合并（打开域时跑，幂等） |
 | `src/article.ts` + `src/html-text.ts` | 正文抓取与抽取 / 纯 HTML→文本（后者可被浏览器半共用） |
 | `src/domain.ts` / `src/store.ts` | 存储域 schema / 域 → 窄接口适配器 |
 | `src/opml.ts` `src/subscribe.ts` `src/retention.ts` `src/concurrency.ts` `src/xml-node.ts` | 见名 |
@@ -105,6 +106,17 @@ npm run mutation                                  # 19 条变异，全中才退 
   `dev_clear_routes {prefix:'/rss-reader-api'}` → `dev_inject_plugin`（或重启 DSH）。
 - **存储域热重载会撞 `already-open`**：已有有界接管（`openDomainWithRetry` + 孤儿句柄回收），
   日志里会写「上一代 fiber 遗留域句柄（无持有者），接管并关闭」。
+- **条目身份会「分叉」，且分叉是写进存储的**（2026-10-09 修，用户实测「同一篇文章两条」）：id 按
+  「源 id → 链接 → 标题签名」派生，但**依据本身会变**（爱范儿的 guid 从 `?p=123` 换成永久链接、
+  云风换 entry id 写法、链接增删 utm）。修法三处缺一不可：候选身份表（item-id.ts 的
+  `itemIdCandidates`）、落库前认回（`resolveItemIds` 的 known 索引 + `corroborates` 旁证）、
+  存量合并（identity-repair.ts）。**别把「撞车退级」改回用源给的 id**——退完还用同一个 id 等于
+  原地踏步，两条不同文章仍会塌成一条（既有单测抓这条）。
+- **改 `lib/` 产物要在 isolates 里跑变异门槛**：注入器的 watch 会按 lib 指纹自动重载，而
+  `npm run mutation` 会**临时把 lib 改坏再还原**（含 SSRF 拦截那几条）——在源目录直接跑，
+  等于把带变异的代码热载进正在运行的插件。做法：把仓库复制到 /tmp（软链 node_modules）再跑。
+  另外这条脚本硬杀会留下带变异的 lib（本次实测踩到：隔离副本里残留了上一次的变异，基线直接红），
+  隔离副本重跑前务必从源目录**重新拷 lib**。
 - **改文件前必须用 read 工具读过它**；批量改写要用**锚点唯一**的替换，别用会跨段吞噬的惰性正则
   （本会话有一次把客户端入口的 import 块整段删了，bundle 从 178KB 掉到 56KB）。
 - **`lib/` 是构建产物**：它不在 git 里，但被 `package.json` 的 `files` 打进 tgz —— 发布前

@@ -10,7 +10,7 @@
 import { mapConcurrent } from './concurrency.js'
 import { recencyOf } from './shared.js'
 import { rebuildItem } from './domain.js'
-import { resolveItemIds } from './feed/item-id.js'
+import { resolveItemIds, type KnownIdentities } from './feed/item-id.js'
 import { fetchFeed, type FetchLimits } from './feed/fetch.js'
 import { articleCharsOf, selectPrunable, selectArticleEvictions, type RetentionRow } from './retention.js'
 import { parseFeed } from './feed/parse.js'
@@ -59,6 +59,11 @@ export interface FeedOutcome {
    * 它不是一个错误，所以不走 reason；但源在撒谎这件事必须看得见。
    */
   untrusted?: number
+  /**
+   * 本次响应里「认出是已见过的那一条」的条数（源改了 guid 写法 / 链接换过 / 撞车退回后又回来）。
+   * 同样不是错误，但它是**分叉过**的信号：这个数不为 0 就说明源的身份依据变过，值得留痕。
+   */
+  reclaimed?: number
   reason?: string
 }
 
@@ -192,10 +197,40 @@ async function refreshOne(
   }
 
   const parsed = parseFeed(result.body, feedId)
-  // 一次响应内先把身份解析干净：撞车的条目不信源给的 id（规格 §5 不变量 2）
-  const resolved = resolveItemIds(feedId, parsed.items)
   const cursor = store.cursor(feedId)
   const seen = cursor?.seen ?? []
+
+  /**
+   * 身份索引：**这个源里我们见过什么**，供 resolveItemIds 判断「这条是不是老条目换了个身份」。
+   *
+   * 两个来源缺一不可：
+   * - items 表里的条目 ⇒ 知道「老身份」是什么（源换 guid 写法后候选表里没有它了）；
+   * - 游标里的 seen ⇒ 知道被保留量裁掉的条目（它不在表里，但身份仍被占用，见「去重不是归档」）。
+   * 链接反查只走条目表：链接是**现在的**链接，只对还在表里的条目有意义。
+   */
+  const knownIds = new Set(seen)
+  const idByLink = new Map<string, string>()
+  /** 同链接分叉出多条时留下**最早**那条的记录：修复动作认的是它，与 identity-repair 同一判据 */
+  const recordById = new Map<string, { link: string; title: string; publishedAt?: string; fetchedAt: string }>()
+  for (const [itemId, record] of store.listItems(feedId)) {
+    knownIds.add(itemId)
+    recordById.set(itemId, { link: record.link, title: record.title, publishedAt: record.publishedAt, fetchedAt: record.fetchedAt })
+    const link = record.link.trim()
+    const previous = idByLink.get(link)
+    if (previous === undefined) idByLink.set(link, itemId)
+    else {
+      const a = recordById.get(previous)
+      if (record.fetchedAt < (a?.fetchedAt ?? record.fetchedAt)) idByLink.set(link, itemId)
+    }
+  }
+  const known: KnownIdentities = {
+    has: (id) => knownIds.has(id),
+    idOf: (link) => idByLink.get(link),
+    recordOf: (id) => recordById.get(id),
+  }
+
+  // 一次响应内先把身份解析干净：认回老身份，再处理撞车（规格 §5 不变量 2）
+  const resolved = resolveItemIds(feedId, parsed.items, known)
   const seenSet = new Set(seen)
   const freshIds: string[] = []
 
@@ -249,5 +284,7 @@ async function refreshOne(
     added: freshIds.length,
     // 源在撒谎（同一次响应里 id 撞车）时留痕，由刷新摘要渲染出来 —— 它不该静默
     untrusted: resolved.untrusted > 0 ? resolved.untrusted : undefined,
+    // 「认回了老条目」也留痕：它是「源的身份依据变过」这唯一一个可观测信号
+    reclaimed: resolved.reclaimed > 0 ? resolved.reclaimed : undefined,
   }
 }

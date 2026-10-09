@@ -21,6 +21,7 @@ import z from 'schemastery'
 import { normalizeLegacyArticle, readerDomain, rebuildItem } from './domain.js'
 import { createStore, type ReaderStore } from './store.js'
 import { normalizeFeedUrl, refreshFeeds, type FeedOutcome } from './refresh.js'
+import { repairIdentities } from './identity-repair.js'
 import { blocksToText, fetchArticle } from './article.js'
 import { articleCharsOf, selectCleanup, type CleanupRow } from './retention.js'
 import { buildOpml, parseOpml } from './opml.js'
@@ -52,6 +53,9 @@ function summarize(outcomes: readonly FeedOutcome[]): string {
     const notes: string[] = []
     if (outcome.untrusted !== undefined) {
       notes.push('⚠ ' + outcome.untrusted + ' 条身份不可信（源内 id 撞车且 URL 不同，已按 URL 重算）')
+    }
+    if (outcome.reclaimed !== undefined) {
+      notes.push('ℹ ' + outcome.reclaimed + ' 条认回老身份（源改过 id 形态或链接，未产生重复）')
     }
     if (outcome.reason !== undefined) notes.push(outcome.reason)
     return notes.length === 0 ? head : head + '（' + notes.join('；') + '）'
@@ -320,6 +324,12 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
         if (normalized > 0) log('规范化老正文缓存 ' + normalized + ' 条（段落文本 → 结构化块）')
         const seeded = await seedConfiguredFeeds(store)
         if (seeded > 0) log('新增订阅源种子 ' + seeded + ' 个')
+        // 身份修复：把历史上因「源换 id 形态」分叉出的重复条目合并回一条（幂等，跑过一次就无事可做）。
+        // 放在每次打开域之后，是因为它不依赖网络——而分叉可能发生在任何一次抓取里。
+        const repaired = await repairIdentities(store)
+        if (repaired.merged > 0) {
+          log('身份修复：合并 ' + repaired.groups + ' 组重复条目（共 ' + repaired.merged + ' 条并入幸存者，用户状态已保留）')
+        }
         if (config.refreshOnStart) await refreshNow({ force: true, signal: controller.signal })
         else log('refreshOnStart=false，跳过启动刷新')
       } catch (error) {

@@ -46,6 +46,7 @@ export const articleRecordSchema = z.object({
   /** 旧版本存过纯文本段落；保留以便读回老缓存，不再写入 */
   paragraphs: z.array(z.string()).optional(),
 }).strict()
+export type ArticleRecord = z.infer<typeof articleRecordSchema>
 
 export const itemRecordSchema = z.object({
   feedId: z.string().min(1),
