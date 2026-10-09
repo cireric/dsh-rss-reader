@@ -7,6 +7,15 @@
  * 「打开原站 ↗」在新标签页看——那是浏览器自己的上下文，没有沙箱折衷。
  */
 import type { ReactNode } from 'react'
+
+/**
+ * 正文图片的最大显示高度（像素）。
+ *
+ * 为什么需要：正文里常混着超长截图（整页截图、长对话）与原图。只限宽时，一张像素高度很大的图
+ * 会把版面撑出几十屏，读者要滚很久才能回到正文——「默认视图」的可读性直接崩掉。限高之后超长图
+ * 缩成可辨认尺寸，需要看细节时点「打开原站」。
+ */
+const ARTICLE_IMAGE_MAX_HEIGHT = 640
 import type { ArticlePayload } from '../shared.js'
 import type { ArticleState } from './store.js'
 
@@ -28,9 +37,17 @@ function ArticleBlockView({ block }: { block: Record<string, unknown> }): ReactN
     const caption = typeof block['caption'] === 'string' ? block['caption'] : ''
     return (
       <figure style={{ margin: '0 0 1.3em' }}>
-        {/* loading=lazy：长文里的图片很多，一次性加载会拖慢首屏 */}
-        <img src={src} alt={alt} loading="lazy"
-          style={{ display: 'block', maxWidth: '100%', height: 'auto', borderRadius: 6 }} />
+        {/*
+         * loading=lazy：长文里的图片很多，一次性加载会拖慢首屏。
+         * decoding=async 让解码不阻塞滚动。
+         * maxHeight 与 objectFit：正文里混着长截图与原图，只限宽的话一张 1×3000 的图会把版面撑出
+         * 几十屏。限高之后超长图缩成可辨认的尺寸（点开原站看大图），版面保持连续。
+         */}
+        <img src={src} alt={alt} loading="lazy" decoding="async"
+          style={{
+            display: 'block', margin: '0 auto', maxWidth: '100%', height: 'auto',
+            maxHeight: ARTICLE_IMAGE_MAX_HEIGHT, objectFit: 'contain', borderRadius: 6,
+          }} />
         {caption !== '' && (
           <figcaption style={{ fontSize: 13, opacity: 0.65, marginTop: 6, textAlign: 'center' }}>{caption}</figcaption>
         )}

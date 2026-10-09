@@ -27,6 +27,16 @@ const MUTATIONS = [
     to: 'if (false)' },
   { id: 'article-重复图去重', file: 'lib/article.js',
     from: 'if (count > MAX_SAME_IMAGE)', to: 'if (false)' },
+  // 容器识别（2026-10-09）：它替代了「按尺寸/路径逐条猜杂图」的做法，失效就意味着站点头像与
+  // 页脚二维码重新回到正文里 —— 正是用户截图里的现象，所以必须有人看着它。
+  // ⚠️ 刻意**没有**「正文容器收窄」那条变异：它实测是**等价变异**，不是测试缺口。
+  // 设子容器文本 c、父容器额外文本 x，子全为段落时子分数 = c、父分数 = c + 0.35x；
+  // 要让收窄被接受需 c ≥ 0.9(c + 0.35x) ⇒ x ≤ 0.317c，而文本比阈值要求 c ≥ 0.5(c + x) ⇒ x ≤ c。
+  // 后者被前者严格蕴含 ⇒ 去掉文本比检查后**没有任何输入**会改变结果，套件全绿是正确行为。
+  { id: 'article-容器识别的整页兜底', file: 'lib/article.js',
+    // 兜底失效 ⇒ 容器一旦选错就是「正文全丢」，这是本设计最危险的失效模式，必须有断言看住
+    from: 'const blocks = focused.length > 0 ? focused : collectBlocks(scoped, baseUrl)',
+    to: 'const blocks = focused' },
   { id: 'keys-r 归还刷新计数', file: 'lib/keys.js',
     from: "return 'refreshCount';", to: "return 'toggleRender';" },
   { id: 'client-A 的范围阈值过滤', file: 'lib/client.js',

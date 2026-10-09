@@ -15,8 +15,23 @@ import { fetchFeed, type FetchLimits } from './feed/fetch.js'
 import { MIN_CONTENT_CHARS } from './shared.js'
 import { decodeEntities, htmlToText, preToText } from './html-text.js'
 
+/**
+ * 抽取器的**内容版本**：抽取行为一变就要 +1。
+ *
+ * 为什么必须放在这个文件里（2026-10-09 补）：这个常量原先写死在 endpoints.ts，与抽取逻辑分居两地。
+ * 上一轮修复改了抽取规则却没抬版本号，于是**已经缓存过的文章永远显示修复前的块**——用户反馈
+ * 「修了还是老样子」，根因就在这里（实测：库里那篇文章的缓存时间早于修复 1 小时）。
+ * 放在抽取逻辑旁边，改抽取的人改的就是同一个文件，漏抬版本变成「看得见的不一致」而不是静默事故。
+ *
+ * 版本 1 = 纯文本段落（已废弃）；2 = 结构化块；3 = 正文容器识别（去掉站点杂图）。
+ */
+export const EXTRACTOR_REVISION = 3
+
 /** 整块丢弃的标签（连同内容）：这些几乎从不属于正文。 */
 const DROP_BLOCKS = ['script', 'style', 'noscript', 'svg', 'iframe', 'form', 'nav', 'header', 'footer', 'aside', 'template'] as const
+
+/** 标题剥离的最小长度：短于它的标题一律不剥（避免把「A | B」这种本身就是标题的写法切坏）。 */
+const MIN_TITLE_CHARS = 10
 
 /** CDN 尺寸描述符小于等于这个值就当作装饰性小图（头像/图标/徽标）。见 isDecorativeImage。 */
 const DECORATIVE_IMAGE_MAX = 200
@@ -310,16 +325,272 @@ function metaContent(html: string, property: string): string | undefined {
   return undefined
 }
 
+/**
+ * —— 正文容器识别（2026-10-09 补）——
+ *
+ * 为什么必须做：抽取层原先**在整页范围内**找段落/图片，于是页面上的站点头像、二维码、
+ * 相关阅读卡片与正文一样满足「是个 p」「是个 img」的条件，只能靠长度门槛与尺寸描述符这类
+ * 逐条规则去猜，猜不到的就留在正文里（实测：sspai 头像 6 张、爱范儿尾部 6 张二维码）。
+ *
+ * 换成「先认正文容器、再在容器里抽块」之后，站点杂图不再需要任何规则——它们根本不在容器里。
+ * 判据只用容器自身的可测量形状（文本量 / 链接密度 / 段落占比），不看 class 名或路径关键词：
+ * 那是脆弱的，而且每个站点的 class 名都不一样。
+ *
+ * 代价与兜底：容器可能选错。选错的后果被三层兜住 —— ①向下只收窄到「仍保有父容器至少 50%
+ * 文本与 90% 分数」的更内层容器；②收窄总量不得低于最高分候选的 40%；③收窄结果若一个块都
+ * 抽不出，就退回整页（改动前的行为）。所以最坏情况是「回到今天的样子」，不会把能读的文章变成读不了。
+ */
+
+/** 容器识别的最小文本量：低于它的元素不可能承载正文。 */
+const CONTAINER_MIN_CHARS = 300
+
+/** 向下收窄的边界：仍须保有此比例的文本与分数，才算「更精确的正文容器」。 */
+const NARROW_MIN_TEXT_RATIO = 0.5
+const NARROW_MIN_SCORE_RATIO = 0.9
+
+/** 整体收窄的下限：收窄后不得低于**最高分候选**的这个比例（防止层层收窄把正文削光）。 */
+const CONTAINER_MIN_RETAINED = 0.4
+
+/** 这些标签天生不是正文容器（即使它们的文本量很大）。 */
+const NOT_CONTENT_ROOT: ReadonlySet<string> = new Set(['html', 'head', 'body', 'header', 'footer', 'nav', 'aside', 'form', 'select', 'table', 'ul', 'ol', 'dl', 'figure', 'blockquote', 'pre', 'a', 'button', 'template', 'svg'])
+
+/** 自己的标签不是正文边界：度量与抽取都要跳过（内容另行处理）。 */
+const MEASURE_SKIP: ReadonlySet<string> = new Set([...DROP_BLOCKS, 'head', 'title'])
+
+const VOID_ELEMENTS: ReadonlySet<string> = new Set(['img', 'br', 'hr', 'meta', 'link', 'input', 'source', 'area', 'base', 'col', 'embed', 'param', 'track', 'wbr'])
+
+/** 一个候选容器的度量结果。 */
+interface ContainerMetric {
+  readonly id: number
+  readonly parent: number
+  readonly name: string
+  readonly innerStart: number
+  readonly innerEnd: number
+  readonly textLen: number
+  readonly linkLen: number
+  readonly paraLen: number
+  readonly depth: number
+}
+
+/** 度量过程中未闭合的栈帧。 */
+interface MeasureFrame {
+  readonly id: number
+  readonly parent: number
+  readonly name: string
+  readonly innerStart: number
+  innerEnd: number
+  depth: number
+  text: number
+  link: number
+  para: number
+}
+
+/** 文本的「可见长度」：连续空白算一个字符（缩进/换行不该虚增文本量）。 */
+function visibleLength(raw: string): number {
+  let length = 0
+  let run = 0
+  let space = false
+  for (const char of raw) {
+    if (char === ' ' || char === '\n' || char === '\t' || char === '\r' || char === '\f' || char === '\u00a0') {
+      space = true
+      continue
+    }
+    if (space) { length += 1; space = false }
+    run += 1
+    length += 1
+  }
+  return length
+}
+
+/** 容器的正文分数：文本量 × 非链接占比 × 段落占比加成。 */
+function containerScore(metric: { textLen: number; linkLen: number; paraLen: number }): number {
+  if (metric.textLen <= 0) return 0
+  const linkRatio = Math.min(1, metric.linkLen / metric.textLen)
+  const paraRatio = Math.min(1, metric.paraLen / metric.textLen)
+  return metric.textLen * (1 - linkRatio) * (0.35 + 0.65 * paraRatio)
+}
+
+/**
+ * 一次线性扫描算出每个元素的内容区间与子树度量（可见文本量 / 链接文本量 / 段落文本量）。
+ *
+ * 为什么要自己走一遍而不是数正则：p 与 a 是**嵌套**结构，正则分不清「这段文本在不在链接里」，
+ * 而链接密度正是区分正文与导航/卡片列表最有效的那一项。扫描是 O(n)：文本片段只累加到栈顶，
+ * 元素闭合时并入父元素，不重复遍历子树。
+ */
+function measureContainers(html: string): ContainerMetric[] {
+  const frames: MeasureFrame[] = []
+  const measure: MeasureFrame[] = []
+  const skipped: boolean[] = []
+  const found: ContainerMetric[] = []
+  let skipDepth = 0
+  let nextId = 0
+  let cursor = 0
+
+  const addText = (raw: string): void => {
+    if (skipDepth > 0 || raw === '') return
+    const length = visibleLength(raw)
+    if (length === 0) return
+    for (let i = measure.length - 1; i >= 0; i -= 1) {
+      const frame = measure[i]
+      frame.text += length
+      if (frame.name === 'a') frame.link += length
+      if (frame.name === 'p') frame.para += length
+      return
+    }
+  }
+
+  const closeFrame = (frame: MeasureFrame): void => {
+    // measure 与非跳过帧同序，闭合又是后进先出 ⇒ 正常情况下面这行第一次就命中（O(1)）。
+    // 这个「就地弹出」是本函数的关键：早先写成从栈顶往下线性找自己，遇到两万多个未闭合标签
+    // 的载荷就退化成 O(n²)（实测 285ms，逼近性能闸门），而抽取跑在 host 进程里、会卡住整个 DSH。
+    let index = measure.length - 1
+    while (index >= 0 && measure[index].id !== frame.id) index -= 1
+    if (index >= 0) {
+      const parent = index > 0 ? measure[index - 1] : undefined
+      if (parent !== undefined) {
+        // 父元素是 a/p 时，子元素的全部文本都算成父元素的链接/段落文本（这正是嵌套的意义）
+        parent.text += frame.text
+        parent.link += parent.name === 'a' ? frame.text : frame.link
+        parent.para += parent.name === 'p' ? frame.text : frame.para
+      }
+      measure.length = index
+    }
+    found.push({
+      id: frame.id,
+      parent: frame.parent,
+      name: frame.name,
+      innerStart: frame.innerStart,
+      innerEnd: frame.innerEnd,
+      textLen: frame.text,
+      linkLen: frame.link,
+      paraLen: frame.para,
+      depth: frame.depth,
+    })
+  }
+
+  const popTo = (name: string, at: number, closingEnd: number): void => {
+    let target = -1
+    for (let i = frames.length - 1; i >= 0; i -= 1) {
+      if (frames[i].name === name) { target = i; break }
+    }
+    if (target === -1) return
+    let popped = 0
+    for (let i = frames.length - 1; i >= target; i -= 1) {
+      const frame = frames[i]
+      frame.innerEnd = i === target ? at : closingEnd
+      if (skipped[i]) skipDepth -= 1
+      else { closeFrame(frame); popped += 1 }
+    }
+    frames.length = target
+    skipped.length = target
+    // measure 栈由 closeFrame 就地收缩（它知道每个闭合帧在栈里的位置）。这里**不能**再减一次：
+    // 重复收缩会把仍打开的外层帧一起丢掉，后续文本随之记到错误的容器上（实测踩到）。
+    void popped
+  }
+
+  for (const hit of eachTag(html)) {
+    addText(html.slice(cursor, hit.start))
+    cursor = hit.end
+    if (hit.closing) {
+      popTo(hit.name, hit.start, hit.end)
+      continue
+    }
+    if (VOID_ELEMENTS.has(hit.name)) continue
+    const frame: MeasureFrame = {
+      id: nextId,
+      parent: frames.length > 0 ? frames[frames.length - 1].id : -1,
+      name: hit.name,
+      innerStart: hit.end,
+      innerEnd: html.length,
+      depth: frames.length,
+      text: 0,
+      link: 0,
+      para: 0,
+    }
+    nextId += 1
+    const skip = skipDepth > 0 || MEASURE_SKIP.has(hit.name)
+    frames.push(frame)
+    skipped.push(skip)
+    if (skip) { skipDepth += 1 } else { measure.push(frame) }
+  }
+
+  // 收尾：真实页面常见省略闭合标签，未闭合的元素按「一直到文末」算
+  addText(html.slice(cursor))
+  for (let i = frames.length - 1; i >= 0; i -= 1) {
+    const frame = frames[i]
+    frame.innerEnd = html.length
+    if (skipped[i]) skipDepth -= 1
+    else closeFrame(frame)
+  }
+  return found
+}
+
+/**
+ * 选出正文容器。三步：挑分数最高的候选（排除 html/body/导航这类天生不是正文的标签）→
+ * 向下收窄到「更小但同样完整」的最内层容器 → 收窄过头就退回最高分候选。
+ *
+ * 返回 undefined 表示没有可信容器，调用方应当整页抽取（改动前的行为）。
+ */
+function pickContentRoot(html: string): { start: number; end: number } | undefined {
+  const metrics = measureContainers(html)
+  const scored = metrics
+    .filter((metric) => !NOT_CONTENT_ROOT.has(metric.name) && metric.textLen >= CONTAINER_MIN_CHARS)
+    .map((metric) => ({ metric, score: containerScore(metric) }))
+    .sort((a, b) => b.score - a.score)
+  const best = scored[0]
+  if (best === undefined) return undefined
+
+  const childrenOf = new Map<number, ContainerMetric[]>()
+  for (const metric of metrics) {
+    if (metric.parent === -1) continue
+    const list = childrenOf.get(metric.parent)
+    if (list === undefined) childrenOf.set(metric.parent, [metric])
+    else list.push(metric)
+  }
+
+  let current = best
+  for (let step = 0; step < 8; step += 1) {
+    let next: { metric: ContainerMetric; score: number } | undefined
+    for (const child of childrenOf.get(current.metric.id) ?? []) {
+      if (NOT_CONTENT_ROOT.has(child.name)) continue
+      if (child.textLen < current.metric.textLen * NARROW_MIN_TEXT_RATIO) continue
+      const score = containerScore(child)
+      if (score < current.score * NARROW_MIN_SCORE_RATIO) continue
+      if (next === undefined || score > next.score) next = { metric: child, score }
+    }
+    if (next === undefined) break
+    current = next
+  }
+
+  if (current.metric.textLen < best.metric.textLen * CONTAINER_MIN_RETAINED) current = best
+  if (current.metric.innerEnd <= current.metric.innerStart) return undefined
+  return { start: current.metric.innerStart, end: current.metric.innerEnd }
+}
+
 /** 从 HTML 里抽正文。纯函数——单测直接喂夹具。 */
 export function extractArticle(html: string, baseUrl?: string): ExtractedArticle {
-  const lower = html.toLowerCase()
+  const scoped = stripComments(html)
+  const lower = scoped.toLowerCase()
+  // 标题必须从**全页**取：og:title / <title> 在 head 里，正文容器限定之后就没有它们了
   const title =
-    metaContent(html, 'og:title')
-    ?? firstRegion(html, lower, 'title')
-    ?? firstRegion(html, lower, 'h1')
+    metaContent(scoped, 'og:title')
+    ?? firstRegion(scoped, lower, 'title')
+    ?? firstRegion(scoped, lower, 'h1')
 
-  let body = dropRegions(stripComments(html))
-  body = lower.length === 0 ? body : body
+  const root = pickContentRoot(scoped)
+  // 容器取**内部**（不含容器自己的标签——容器标签自己不该被当成正文边界）
+  const focused = root === undefined ? [] : collectBlocks(scoped.slice(root.start, root.end), baseUrl)
+  // 容器里一个块都没抽到就退回整页。选错容器的代价必须是「回到改动前的行为」，而不是「正文没了」——
+  // 这条回退让容器识别只可能变好，不可能让原本能读的文章变成读不了。
+  const blocks = focused.length > 0 ? focused : collectBlocks(scoped, baseUrl)
+  return { title: normalizeTitle(title), blocks: dedupeImages(blocks) }
+}
+
+/**
+ * 块抽取本体：段落 / 标题 / 代码 / 图片 / 列表 / 引用。输入是 HTML 片段（整页或某个容器）。
+ */
+function collectBlocks(html: string, baseUrl: string | undefined): ArticleBlock[] {
+  let body = dropRegions(html)
 
   /**
    * 块先存进 Map 并留下占位符，**最后按占位符在文档里的位置重建顺序**。
@@ -401,7 +672,7 @@ export function extractArticle(html: string, baseUrl?: string): ExtractedArticle
       if (line.length >= MIN_CONTENT_CHARS) blocks.push({ kind: 'p', text: line })
     }
   }
-  return { title: normalizeTitle(title), blocks: dedupeImages(blocks) }
+  return blocks
 }
 
 /**
@@ -435,10 +706,38 @@ export function blocksToText(blocks: readonly ArticleBlock[]): string {
     .join('\n')
 }
 
+/**
+ * 标题里的站点后缀分隔符，**只认实测到的两种**：`标题 - 少数派`（少数派）、`标题 | 爱范儿`（爱范儿）。
+ *
+ * 为什么要剥掉（2026-10-09）：og:title 常带站点名，而正文里另有一个 h1 是纯标题 —— 两者同时在
+ * 阅读视图里出现时，读者看到的是同一个标题写了两遍（用户截图里的现象）。
+ *
+ * 为什么**不认**中文破折号 `——`：中文标题里它更常是副标题分隔符（`标题 —— 副标题`），而不是站点名，
+ * 拿它当站点后缀会把标题拦腰砍断。同理不认 `·` —— 两者都没有实测样本，按「不为未经实测的样本扩规则」
+ * 留在外面。没有分隔符的标题一律原样保留（不猜、不改写）。
+ */
+const TITLE_SUFFIX = /\s+[|\-]\s+\S/
+
+function stripSiteSuffix(title: string): string {
+  // 从右往左找到第一个分隔符；只接受「后缀明显短于标题」的情况，避免把含连字符的长标题切掉
+  for (let at = title.length - 1; at > 0; at -= 1) {
+    if (!/\s/.test(title[at])) continue
+    const rest = title.slice(at)
+    if (!TITLE_SUFFIX.test(rest)) continue
+    const head = title.slice(0, at).trim()
+    const tail = title.slice(at).replace(/^\s+[|\-–—·]\s+/, '').trim()
+    if (head.length < MIN_TITLE_CHARS || tail.length === 0 || tail.length > head.length / 2) return title
+    return head
+  }
+  return title
+}
+
 function normalizeTitle(raw: string | undefined): string | undefined {
   if (raw === undefined) return undefined
   const title = htmlToText(raw).replace(/\n/g, ' ').trim()
-  return title === '' ? undefined : title
+  if (title === '') return undefined
+  const stripped = stripSiteSuffix(title)
+  return stripped === '' ? undefined : stripped
 }
 
 /** 抓原站并抽正文；返回段落文本。 */

@@ -6,7 +6,7 @@
  * apply 的局部变量。
  */
 import type { Config } from './config.js'
-import { fetchArticle, blocksToText } from './article.js'
+import { EXTRACTOR_REVISION, fetchArticle, blocksToText } from './article.js'
 import { rebuildItem } from './domain.js'
 import { articleCharsOf, selectCleanup, type CleanupRow } from './retention.js'
 import { buildOpml, parseOpml } from './opml.js'
@@ -29,13 +29,13 @@ export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: 
   const { config, log, ready, refreshNow, lastRefreshCompletedAt, articleAttempts } = deps
 
 /**
- * 按需正文缓存的**内容版本**。
+ * 按需正文缓存的**内容版本** = 抽取器版本（定义在 article.ts，与抽取逻辑同文件）。
  *
- * 1 = 纯文本段落（已废弃）；2 = 结构化块（段落/标题/代码/图片/列表/引用）。
- * 缓存命中要求版本相等——老缓存会被判为过期并**自动重抓一次**，否则模型升级对已有缓存
- * 永远不生效（实测：库里 9 条老缓存导致「图片怎么都不显示」）。
+ * 缓存命中要求版本相等——版本落后就被判为过期并**自动重抓一次**，否则抽取规则的改进对已有
+ * 缓存永远不生效（实测两次：库里 9 条老缓存导致「图片怎么都不显示」；上一轮改了抽取但没抬版本，
+ * 已缓存的文章继续显示站点头像与二维码）。**不要再在这里写死数字**——那正是它上次漂移的方式。
  */
-const ARTICLE_REVISION = 2
+const ARTICLE_REVISION = EXTRACTOR_REVISION
   const buildOverview = (refreshed: boolean): Overview => {
     const refreshedAtMs = lastRefreshCompletedAt()
     const target = ready()

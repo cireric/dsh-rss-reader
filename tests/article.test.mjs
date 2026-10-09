@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { extractArticle, isDecorativeImage, isFrameable, pickImageUrl, attrOf, blocksToText } from '../lib/article.js'
+import { EXTRACTOR_REVISION, extractArticle, isDecorativeImage, isFrameable, pickImageUrl, attrOf, blocksToText } from '../lib/article.js'
 // decodeEntities / htmlToText 已搬到 html-text.ts（2026-10-07），断言一条没动
 import { decodeEntities, htmlToText } from '../lib/html-text.js'
 
@@ -184,4 +184,99 @@ test('抽取：装饰性小图与重复图都不进正文（sspai 那篇的回�
   assert.ok(!imgs.some((s) => s.includes('avatar')), '头像（小尺寸描述符）不该进正文')
   assert.equal(imgs.filter((s) => s === body1).length, 2, '同一张正文图最多留 ' + 2 + ' 次（超过的重复丢掉）')
   assert.ok(imgs.includes(body2), '另一张正文图要留着')
+})
+/**
+ * —— 正文容器识别（2026-10-09）——
+ *
+ * 为什么补这一层：抽取出图片/段落原先在**整页范围**里找，站点头像、页脚二维码、相关阅读卡片
+ * 与正文一样满足「是个 img」「是个 p」，只能靠长度门槛与尺寸描述符逐条去猜（实测仍漏 6 张二维码）。
+ * 改成「先认正文容器再抽块」之后，这些杂图不需要任何规则——它们根本不在容器里。
+ *
+ * 下面用**合成页面**把判据钉死（真实站点页面太大，不适合进夹具）。
+ */
+function wrapPage(sidebarLinks, bodyParagraphs, bodyImages = []) {
+  const link = (i) => '<a href="/nav/' + i + '">导航条目' + i + '，这是一段足够长的链接文字用来抬高链接密度</a>'
+  return '<html><body>'
+    + '<div id="sidebar"><ul>' + Array.from({ length: sidebarLinks }, (_, i) => '<li>' + link(i) + '</li>').join('') + '</ul></div>'
+    + '<div id="main"><article>'
+    + bodyParagraphs.map((text) => '<p>' + text + '</p>').join('')
+    + bodyImages.map((src) => '<img src="' + src + '" alt="正文图">').join('')
+    + '</article></div>'
+    + '<div id="footer"><img src="https://ex.test/static/qrcode.png" alt="站点二维码"></div>'
+    + '</body></html>'
+}
+
+test('容器识别：导航列表与页脚二维码不进正文（杂图不再需要逐条规则）', () => {
+  // 正文段落按**真实文章体量**写：容器识别的门槛是按「一篇文章」定的，夹具若只有几十个字符，
+  // 侧栏链接反而比正文长，测的就不是判据而是夹具（第一版夹具踩到过）。
+  const long = (n) => ('这是一段真正的正文内容，' + '重复以跨过容器识别与长度门槛。'.repeat(6) + '第' + n + '段。')
+  const html = wrapPage(
+    12,
+    [long(1), long(2), long(3), long(4), long(5), long(6)],
+    ['https://ex.test/photo/a.png'],
+  )
+  const article = extractArticle(html, 'https://ex.test/post/1')
+  const text = blocksToText(article.blocks)
+  assert.ok(text.includes('真正的正文内容'), '正文必须被抽出来，实际两段都丢了：' + text.slice(0, 120))
+  assert.ok(!text.includes('导航条目'), '侧栏导航不该进正文（链接密度高）')
+  const imgs = article.blocks.filter((b) => b.kind === 'img').map((b) => String(b.src))
+  assert.ok(imgs.includes('https://ex.test/photo/a.png'), '正文图必须留着')
+  assert.ok(!imgs.some((s) => s.includes('qrcode')), '页脚二维码不该进正文')
+})
+
+test('容器识别的兜底：认不出容器时必须退回整页，而不是把正文丢掉', () => {
+  // 没有 p/div 分层、只有平铺长文本的版式（容器识别应当不产生可信候选，抽取照旧工作）
+  const flat = '平铺正文'.repeat(40)
+  const article = extractArticle('<html><body>' + flat + '</body></html>', 'https://ex.test/p')
+  assert.ok(blocksToText(article.blocks).includes('平铺正文'), '认不出容器时仍必须抽到正文')
+})
+
+test('容器识别不得吃掉标题：标题仍从全页取（og:title 在 head 里，容器限定后不存在）', () => {
+  const long = (n) => '正文段落内容重复以跨过门槛的判断。'.repeat(4) + n
+  const html = '<html><head><meta property="og:title" content="容器限定后仍要拿到的标题"></head><body>'
+    + '<div id="main"><article><p>' + long(1) + '</p><p>' + long(2) + '</p></article></div>'
+    + '</body></html>'
+  const article = extractArticle(html, 'https://ex.test/p')
+  assert.equal(article.title, '容器限定后仍要拿到的标题')
+  assert.ok(article.blocks.length >= 2, '正文段落不该丢')
+})
+/**
+ * 抽取版本号的守护（2026-10-09 补）。
+ *
+ * 为什么值得专门钉一条：这个常量原先写死在 endpoints.ts，与抽取逻辑分居两地。上一轮改了抽取
+ * 规则却没抬版本号，于是**已经缓存过的文章永远显示修复前的块** —— 用户看到的是「修了还是老样子」，
+ * 而所有单测都是绿的（测试用的是新代码，缓存里躺着的是旧结果）。这类事故测试抓不到行为，只能抓
+ * 「版本与应用它的地方是否还对得上」。
+ */
+test('抽取版本：常量必须由 article.ts 导出，且 endpoints 不得再写死数字', () => {
+  assert.equal(typeof EXTRACTOR_REVISION, 'number')
+  assert.ok(EXTRACTOR_REVISION >= 3, '容器识别这一版至少是 3，实际 ' + EXTRACTOR_REVISION)
+  const endpoints = readFileSync(join(here, '..', 'src', 'endpoints.ts'), 'utf8')
+  assert.match(endpoints, /ARTICLE_REVISION = EXTRACTOR_REVISION/, 'endpoints 必须引用抽取器导出的版本，而不是写字面量')
+  assert.ok(
+    !/const ARTICLE_REVISION = \d/.test(endpoints),
+    'ARTICLE_REVISION 又被写死成数字了 —— 抽取规则一变它就会漂，缓存会一直挡住新结果',
+  )
+})
+/**
+ * 标题剥站点后缀（2026-10-09）。
+ *
+ * 起因是用户截图里标题出现两遍：og:title 带站点名，而正文里另有一个纯标题的 h1。
+ * 判据刻意保守 —— 只在「确有分隔符 + 后缀明显短于标题」时才剥，其余原样保留。
+ */
+test('标题：剥掉站点后缀，但不碰本身就是标题的写法', () => {
+  const page = (title) => '<html><head><meta property="og:title" content="' + title + '"></head><body>'
+    + '<div id="main"><article><p>' + '正文段落内容重复以跨过门槛的判断。'.repeat(4) + '</p>'
+    + '<p>' + '第二段同样长度的正文内容，用来让容器识别有足够依据。'.repeat(3) + '</p></article></div></body></html>'
+
+  // 三种真实分隔符（实测：少数派用「-」、爱范儿用「|」）
+  assert.equal(extractArticle(page('iPhone Duo，和它尚未解答的疑问 - 少数派')).title, 'iPhone Duo，和它尚未解答的疑问')
+  assert.equal(extractArticle(page('黄仁勋发布史上最强 Surface！专为「无限智能」设计 | 爱范儿')).title, '黄仁勋发布史上最强 Surface！专为「无限智能」设计')
+  // 中文破折号**不是**站点分隔符：它在中文标题里多用于副标题，拿它剥会把标题砍断
+  assert.equal(extractArticle(page('一个足够长的标题 —— 副标题在这里')).title, '一个足够长的标题 —— 副标题在这里')
+
+  // 边界：没有分隔符、后缀过长（多半是标题本身而非站点名）、标题过短 —— 都必须原样保留
+  assert.equal(extractArticle(page('一个没有分隔符的普通标题')).title, '一个没有分隔符的普通标题')
+  assert.equal(extractArticle(page('短标题 | 这里是一个非常长的后半段，明显不是站点名')).title, '短标题 | 这里是一个非常长的后半段，明显不是站点名')
+  assert.equal(extractArticle(page('A | B')).title, 'A | B', '过短的标题一律不剥')
 })
