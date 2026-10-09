@@ -5,3 +5,4 @@ lib/
 
 .scratch/
 docs/inbox/
+.worktrees/
