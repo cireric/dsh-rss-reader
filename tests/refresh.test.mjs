@@ -1,6 +1,6 @@
 /**
  * 刷新编排测试：用内存 store + 本地 HTTP 源，把三条不变式钉死。
- * 关键是第 6、7 条——它们是交接件 §8「去重不是归档」的那两个坑。
+ * 关键是第 6、7 条——它们是「去重不是归档」的那两个坑（见 docs/pitfalls.md §5.2）。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'

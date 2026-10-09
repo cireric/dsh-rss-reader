@@ -44,7 +44,7 @@ export interface ReaderState {
   /** 刚被「全部标记已读」的条目，供短时撤销 */
   /** 一键已读的撤销条。窗口到期由 armUndoExpiry 的定时器负责，所以这里不需要存时间戳。 */
   undo: { ids: string[] } | undefined
-  /** 当前视图：列表 / 正文 / 订阅管理（订阅管理同样在主栏内切换，见 handoff §19） */
+  /** 当前视图：列表 / 正文 / 订阅管理（订阅管理同样在主栏内切换） */
   view: 'list' | 'article' | 'feeds'
   /**
    * 条目流的**视图密度**（GR 的两视图）：expanded 含条目描述/正文摘录，list 只有标题行。

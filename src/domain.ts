@@ -2,7 +2,7 @@
  * 持久化域声明（host 半）。
  *
  * 用宿主自带的 ctx.storageDomain：schema 校验 + 落盘后才 resolve + domain/changed，
- * 迁移/并发/落盘语义由设施负责（交接件 §6：别自己上 SQLite）。
+ * 迁移/并发/落盘语义由设施负责（别自己上 SQLite）。
  *
  * 域名与表名必须匹配 UNIT_NAME_RE = /^[a-z][a-z0-9_]*$/（连字符非法，故用下划线）。
  * 记录 schema 用 zod——设施要求；插件 Config 仍用 schemastery——宿主约定。
@@ -143,7 +143,7 @@ export const cursorRecordSchema = z.object({
   /**
    * 去重窗口：本次新增的 id 在前（批次内保持 feed 文档顺序，不保证时间序），
    * 其后是历史窗口；截断只丢最老的那批。**只存 id**，与条目保留量解耦：
-   * 交接件 §8「去重不是归档」——窗口若跟着保留量一起截短，
+   * 「去重不是归档」（见 docs/pitfalls.md §5.2）——窗口若跟着保留量一起截短，
    * 滚出窗口的老条目会在下次抓取时被当成新条目重新变成未读。
    */
   seen: z.array(z.string()),

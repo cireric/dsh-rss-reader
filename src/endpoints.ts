@@ -295,7 +295,7 @@ const ARTICLE_REVISION = EXTRACTOR_REVISION
         }
 
         case 'cleanup': {
-          // 显式清理（用户点按钮触发，**不设定时器**——交接件验收项之一就是不残留定时器）。
+          // 显式清理（用户点按钮触发，**不设定时器**——验收项之一就是不残留定时器）。
           // 判据刻意保守：已读 + 未星标 + 早于阈值，三个条件缺一不可（见 retention.ts 注释）。
           const cutoff = new Date(Date.now() - config.cleanupAfterDays * 24 * 3600 * 1000).toISOString()
           const all = target.allItems()

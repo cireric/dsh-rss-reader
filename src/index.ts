@@ -309,7 +309,7 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
         const opened = await openDomainWithRetry(ctx, log, () => cancelled)
         if (cancelled) {
           // 取消途中才开出来的域必须立刻关掉：关失败会留下一个无人可及的句柄，名字被占住后
-          // 下一代 fiber 会一直撞 already-open（handoff §19 记过这个坑）。所以这里不能像原先
+          // 下一代 fiber 会一直撞 already-open（docs/pitfalls.md §4.6 记过这个坑）。所以这里不能像原先
           // 那样把错误吞掉——要和下面的正常关闭一样留下证据。
           await opened.close().catch((error: unknown) => {
             log('取消途中关闭存储域失败：' + String(error))
