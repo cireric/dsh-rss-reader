@@ -10,7 +10,7 @@
 export type ReaderKeyAction =
   | 'next' | 'prev' | 'expand' | 'openExternal' | 'openArticle'
   | 'refreshCount' | 'back' | 'star' | 'toggleRead' | 'markAll' | 'manageFeeds'
-  | 'scanNext' | 'scanPrev' | 'pageDown' | 'pageUp'
+  | 'scanNext' | 'scanPrev' | 'pageDown' | 'pageUp' | 'halfPageDown' | 'halfPageUp'
   | 'expandedView' | 'listView'
   | 'none'
 
@@ -28,6 +28,11 @@ export function resolveReaderKey(key: string, shift = false): ReaderKeyAction {
     case 'p': return 'scanPrev'
     // 空格 = 翻页（按一屏）。空格不分大小写，所以必须看 shift 标志才能分辨方向
     case ' ': return shift === true ? 'pageUp' : 'pageDown'
+    // d/u = 翻半页（vim 的 Ctrl-d / Ctrl-u 去掉 ctrl）。
+    // 为什么另立一档而不是复用空格的整屏：整屏在长文里会跳过头，读者常常只想「再往下看一段」。
+    // 只认小写：大写由用户按到 CapsLock 时误触，且 D/U 在本插件里没有其他语义先例。
+    case 'd': return 'halfPageDown'
+    case 'u': return 'halfPageUp'
     case 'o': return 'expand'
     // 1/2 = 视图密度（GR 原键位）：1 = expanded view「含条目描述/正文摘录」、2 = list view「只有标题行」
     case '1': return 'expandedView'

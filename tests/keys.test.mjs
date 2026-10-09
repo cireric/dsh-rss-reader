@@ -50,6 +50,17 @@ test('空格翻页：必须用 shift 标志分辨方向（空格本身大小写�
   assert.equal(resolveReaderKey(' ', true), 'pageUp', 'shift+空格应当向上翻页')
 })
 
+test('d / u 翻半页：与整屏是两个不同的动作', () => {
+  assert.equal(resolveReaderKey('d'), 'halfPageDown', 'd 应当向下翻半页')
+  assert.equal(resolveReaderKey('u'), 'halfPageUp', 'u 应当向上翻半页')
+  // 大写不另给语义：CapsLock 误触时不该做别的事（本插件的先例是只认小写的 n/p）
+  assert.equal(resolveReaderKey('D'), 'none')
+  assert.equal(resolveReaderKey('U'), 'none')
+  // 半页若与整页解析成同一个动作，「另立一档」在键位层就退化了
+  assert.notEqual(resolveReaderKey('d'), resolveReaderKey(' '))
+  assert.notEqual(resolveReaderKey('u'), resolveReaderKey(' ', true))
+})
+
 test('未绑定的键一律返回 none（不误触发）', () => {
   for (const key of ['q', 'z', 'Enter', 'F1', '阿', 'Shift', 'ArrowDown', 'N', 'P']) {
     assert.equal(resolveReaderKey(key), 'none', key + ' 不该被绑定')

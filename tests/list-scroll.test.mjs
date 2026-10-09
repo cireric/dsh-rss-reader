@@ -1,7 +1,11 @@
 /** 跟随滚动的边界行为：三种情况必须各归其位，且"已在视内"不得抖动。 */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { nextScrollTop, clampScrollTop, scanTop, pageTop } from '../lib/list-scroll.js'
+import {
+  nextScrollTop, clampScrollTop, scanTop, pageTop, halfPageTop,
+  scanStepFor, lineStepFrom, scrollSelectorFor, isElementNode, edgeTopFor, SCROLL_ATTR,
+  LIST_ROW_STEP_FALLBACK, ARTICLE_LINE_STEP_FALLBACK,
+} from '../lib/list-scroll.js'
 
 const H = 300 // 容器可视高度
 
@@ -46,6 +50,82 @@ test('翻页 空格/shift+空格：按一屏滚动并夹住边界', () => {
   assert.equal(pageTop(600, 300, 5000, -1), 300)
   assert.equal(pageTop(0, 300, 5000, -1), 0, '顶部再往上翻页应当停在 0')
   assert.equal(pageTop(4900, 300, 5000, 1), 5000, '接近底部应当夹在上限而不是越界')
+})
+
+test('半页 d/u：按半屏滚动并夹住边界', () => {
+  assert.equal(halfPageTop(0, 300, 5000, 1), 150, 'd 应当向下滚半屏')
+  assert.equal(halfPageTop(600, 300, 5000, -1), 450, 'u 应当向上滚半屏')
+  assert.equal(halfPageTop(0, 300, 5000, -1), 0, '顶部再往上滚应当停在 0')
+  assert.equal(halfPageTop(4900, 300, 5000, 1), 5000, '接近底部应当夹在上限')
+  // 半页必须严格小于整页 —— 否则「另立一档」就没有意义，长文里照样跳过头
+  assert.ok(halfPageTop(0, 300, 5000, 1) < pageTop(0, 300, 5000, 1), '半页必须比整页短')
+})
+
+test('容器选择器：列表/正文各一个，其他视图没有容器（订阅管理页不该刷警告）', () => {
+  assert.equal(scrollSelectorFor('list'), '[' + SCROLL_ATTR + '="list"]')
+  assert.equal(scrollSelectorFor('article'), '[' + SCROLL_ATTR + '="article"]')
+  // undefined 与「选择器查不到节点」是两回事：前者静默，后者必须告警
+  assert.equal(scrollSelectorFor('feeds'), undefined)
+  assert.equal(scrollSelectorFor('nonsense'), undefined)
+})
+
+test('跳到文章一端：顶部为 0、底部为上限，且越界被夹住', () => {
+  assert.equal(edgeTopFor(5000, 'top'), 0)
+  assert.equal(edgeTopFor(5000, 'bottom'), 5000)
+  // 内容不足一屏时 maxTop 是负数 —— 不能把它写进 scrollTop，由纯函数夹回 0
+  assert.equal(edgeTopFor(-200, 'bottom'), 0, '不足一屏时「底部」就是 0')
+  assert.equal(edgeTopFor(Number.NaN, 'bottom'), 0, 'NaN 不该写坏滚动位置')
+  assert.equal(edgeTopFor(5000, 'top'), 0, '顶部恒定 0，与上限无关')
+})
+
+test('isElementNode：只看节点自身的形状，不依赖环境全局', () => {
+  // 元素节点：nodeType === 1
+  assert.equal(isElementNode({ nodeType: 1 }), true)
+  // 非元素：文本节点(3)/注释(8)/文档(9)、null/undefined、普通对象、字符串
+  for (const value of [{ nodeType: 3 }, { nodeType: 8 }, { nodeType: 9 }, null, undefined, {}, 'div', 42, []]) {
+    assert.equal(isElementNode(value), false, JSON.stringify(value) + ' 不该被当成元素')
+  }
+  // ⚠️ 这条是本函数存在的理由：判定必须与「realm 里有没有 HTMLElement 全局」无关。
+  // 历史故障：全局缺失时 instanceof 抛 ReferenceError，被事件派发吞掉 ⇒ 所有快捷键全哑且无日志。
+  const saved = globalThis.HTMLElement
+  try {
+    // @ts-expect-error 故意移除全局，验证判定不依赖它（本文件是 .mjs，运行时才生效）
+    delete globalThis.HTMLElement
+    assert.equal(isElementNode({ nodeType: 1 }), true, '全局缺失时仍应认得出元素节点')
+    assert.equal(isElementNode({ nodeType: 3 }), false)
+  } finally {
+    globalThis.HTMLElement = saved
+  }
+})
+
+test('一行是多少像素：行高写倍数要乘字号，写 px 直接用', () => {
+  assert.equal(lineStepFrom('16px', '1.85'), 29.6, '正文样式 16px × 1.85')
+  assert.equal(lineStepFrom('16px', '24px'), 24, 'px 形式不该再乘字号')
+  assert.equal(lineStepFrom(undefined, '1.85'), undefined)
+  assert.equal(lineStepFrom('16px', undefined), undefined)
+  assert.equal(lineStepFrom('0px', '1.85'), undefined, '字号为 0 视为量不到')
+  assert.equal(lineStepFrom('16px', 'auto'), undefined, 'auto 不是行高数值')
+})
+
+test('逐行扫视的步长按视图分流（正文页此前退化成硬编码 48px = 一行半）', () => {
+  // 列表：用条目行高
+  assert.equal(scanStepFor('list', { rowHeight: 40 }), 40)
+  // 正文：用正文行高，绝不回落到列表的 48
+  assert.equal(scanStepFor('article', { lineHeight: 29.6 }), 29.6)
+  // 量不到时各用各的兜底
+  assert.equal(scanStepFor('list', {}), LIST_ROW_STEP_FALLBACK)
+  assert.equal(scanStepFor('article', {}), ARTICLE_LINE_STEP_FALLBACK)
+  // 关键不变量：正文页即使只量到了「列表行高」也不许用它 —— 那正是原来的病
+  assert.notEqual(scanStepFor('article', { rowHeight: 48 }), LIST_ROW_STEP_FALLBACK)
+  // 非法值不产生 NaN
+  for (const step of [scanStepFor('list', { rowHeight: Number.NaN }), scanStepFor('article', { lineHeight: -1 })]) {
+    assert.equal(Number.isFinite(step), true)
+  }
+})
+
+test('扫视步长量不到时不动（不再回落到「看起来能动」的常数）', () => {
+  assert.equal(scanTop(100, 0, 1000, 1), 100, '步长 0 应当原地不动')
+  assert.equal(scanTop(100, Number.NaN, 1000, 1), 100, 'NaN 步长应当原地不动')
 })
 
 test('滚动计算对非法输入免疫（NaN/0/负数不该把滚动条写坏）', () => {

@@ -13,7 +13,7 @@
  *
  * 数据只经同源 HTTP 通道走主进程（见 shared.ts），浏览器半不直连存储。
  */
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import type { Context as ClientContext } from 'cordis'
 // 只为触发模块增强（与官方客户端插件同一写法）：ctx.slots 由 ui-renderer/client 声明
 // （它 declare module '@deepseek-ai/cordis' 把 slots 挂到 Context 上），运行时由宿主提供，
@@ -32,7 +32,7 @@ import { ArticleView } from './article-pane.js'
 import { MIN_CONTENT_CHARS, recencyOf, ROUTE_PATH, type ArticlePayload, type CleanupResult, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult } from '../shared.js'
 import { htmlToText } from '../html-text.js'
 import { resolveReaderKey } from '../keys.js'
-import { nextScrollTop, scanTop, pageTop } from '../list-scroll.js'
+import { nextScrollTop, scanTop, pageTop, halfPageTop, scanStepFor, scrollSelectorFor, lineStepFrom, isElementNode, SCROLL_ATTR } from '../list-scroll.js'
 
 export const inject = ['slots']
 
@@ -44,7 +44,7 @@ const ROOT_ATTR = 'data-dsh-rss-reader'
 
 /**
  * 加载指示的消抖阈值：刷新常常在毫秒级返回，立刻显示「刷新中」会闪一下。
- * 超过这个时长才把加载态画出来（handoff §8 记过这条教训）。
+ * 超过这个时长才把加载态画出来（docs/pitfalls.md「刷新与加载态」那条教训）。
  */
 const SLOW_LOADING_MS = 180
 
@@ -78,6 +78,32 @@ function RefreshIcon({ spinning }: { spinning?: boolean }): ReactNode {
   )
 }
 
+/**
+ * 量列表「一行条目」的高度。量不到返回 undefined，由 scanStepFor 决定兜底 ——
+ * 这里不自己编一个常数，否则「兜底多少」就会散落在两个文件里。
+ */
+/**
+ * 量「正文一行」的高度。
+ *
+ * ⚠️ 必须量**承载正文的元素**，不能量容器本身：容器上只有 flex/overflow 这些布局样式，
+ * 字号行高是从面板根继承来的（14px × 1.55 = 21.7），而正文是内层块自己的
+ * 16px × 1.85 = 29.6 —— 量错对象会得到一个小一号的步长，而且看起来「有值」，不会被兜底发现。
+ * 优先取正文段落（`p`），它才是读者眼里的「一行」。
+ */
+function measureLineStep(box: HTMLElement, win: Window | undefined): number | undefined {
+  if (win === undefined) return undefined
+  const sample = box.querySelector('p') ?? box
+  const style = win.getComputedStyle(sample)
+  return lineStepFrom(style.fontSize, style.lineHeight)
+}
+
+function measureRowHeight(box: HTMLElement): number | undefined {
+  const row = box.querySelector('[data-rss-row]')
+  if (!isElementNode(row)) return undefined
+  const height = row.offsetHeight
+  return Number.isFinite(height) && height > 0 ? height : undefined
+}
+
 function toParagraphs(html: string | undefined): string[] {
   // 直接用抽取层那套共享实现（html-text.ts）。原先这里自己抄了一份：标签处理规则逐字相同，
   // 但少了解码实体那一步，闭合标签清单也少了 pre —— 两份实现注定会越走越远。
@@ -94,7 +120,9 @@ function toParagraphs(html: string | undefined): string[] {
  * 于是「只有阅读器存在时才可能响应」由生命周期保证，而「别抢输入框的键」由本函数保证。
  */
 function isTypingTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false
+  // 用 isElementNode 而不是 instanceof HTMLElement：后者依赖全局标识符，
+  // 全局缺失时会在这一行抛 ReferenceError，把整套键位一起带走（见 list-scroll.ts 的说明）
+  if (!isElementNode(target)) return false
   try {
     if (target.isContentEditable) return true
     if (target.closest('[role="dialog"], [aria-modal="true"], dialog') !== null) return true
@@ -131,9 +159,14 @@ export function createReader(store: ReaderStore): () => ReactNode {
   return function Reader(): ReactNode {
     const state = useReaderStore(store)
     const [root, setRoot] = useState<HTMLDivElement | null>(null)
-    const [listBox, setListBox] = useState<HTMLDivElement | null>(null)
-    // 详情页阅读视图的滚动容器：空格翻页要作用在它上面
-    const [articleBox, setArticleBox] = useState<HTMLDivElement | null>(null)
+    /**
+     * 滚动容器句柄。**刻意不用 useState**：这两个值是给长驻的 keydown 监听器读的，
+     * 而那个 effect 的依赖数组不会因为「articleBox 在别处被赋值」而重跑 ⇒ 监听器闭包里
+     * 读到的是注册那一刻的 null，详情页空格 / n / p 全部静默失效就是这么来的（2026-10-09）。
+     * useRef 的身份跨渲染稳定，读的永远是最新的 .current。
+     */
+    const listBox = useRef<HTMLDivElement | null>(null)
+    const articleBox = useRef<HTMLDivElement | null>(null)
     const [expanded, setExpanded] = useState<string | undefined>(undefined)
     // 慢加载：只有超过 180ms 还在加载时才把「刷新中」画出来，避免毫秒级请求闪一下
     const [slowLoading, setSlowLoading] = useState(false)
@@ -157,14 +190,31 @@ export function createReader(store: ReaderStore): () => ReactNode {
     // 跟随滚动：选中项超出可视区时才滚（j/k 走到边界后屏幕要跟着动——用户实测缺失）。
     // 位置计算在 src/list-scroll.ts 里，是纯函数且有单测；这里只负责量 DOM 并写入。
     useEffect(() => {
-      if (listBox === null || state.view !== 'list') return
+      const box = listBox.current
+      if (box === null || state.view !== 'list') return
       const selected = state.selectedId
       if (selected === undefined) return
-      const row = listBox.querySelector('[data-rss-row="' + selected + '"]')
-      if (!(row instanceof HTMLElement)) return
-      const target = nextScrollTop(listBox.scrollTop, listBox.clientHeight, row.offsetTop, row.offsetHeight)
-      if (target !== listBox.scrollTop) listBox.scrollTop = target
-    }, [listBox, state.selectedId, state.view])
+      const row = box.querySelector('[data-rss-row="' + selected + '"]')
+      if (!isElementNode(row)) return
+      const target = nextScrollTop(box.scrollTop, box.clientHeight, row.offsetTop, row.offsetHeight)
+      if (target !== box.scrollTop) box.scrollTop = target
+      // 依赖里没有 listBox：它现在是稳定句柄，变了也不该重跑（每次渲染都会变的话反而是噪音）
+    }, [state.selectedId, state.view])
+
+    // 切文章时把阅读位置归零（2026-10-09 修）。
+    // 为什么需要：React 会复用正文容器的 DOM 节点，节点不换 ⇒ scrollTop 保留上一条的位置。
+    // 读了一半按 j，新文章会从半截开始 —— 而 j/k 的语义是「换条目」，不是「同一篇里翻页」。
+    // 以 itemId 为键而不是 view：连续按 j 时 view 一直是 'article'，只有 itemId 在变。
+    useEffect(() => {
+      const box = articleBox.current
+      if (box === null) return
+      box.scrollTop = 0
+    }, [state.article?.itemId])
+
+    // ref 回调写成稳定引用：内联箭头每次渲染都是新函数，React 会在每次提交时先置 null 再挂载，
+    // 于是 articleBox.current 在两次提交之间短暂为 null（同时也会让上面那条归零 effect 误判）。
+    const setArticleBox = useCallback((node: HTMLDivElement | null): void => { articleBox.current = node }, [])
+    const setListBox = useCallback((node: HTMLDivElement | null): void => { listBox.current = node }, [])
 
     // 键盘流：挂在 document 上 + 输入框守卫。
     // 原实现挂在面板根节点并要求其持有焦点，导致「必须先点一下页面」才响应（用户实测）。
@@ -173,11 +223,33 @@ export function createReader(store: ReaderStore): () => ReactNode {
     // ⚠️ 不走 ctx.shortcuts：平台规则禁止无修饰键的绑定（configuration.ts:100 ——
     // modifiers 为空或全为 shift 即 modifier-required，register 会直接 throw，实测会炸掉整个 client 半）。
     useEffect(() => {
+      /**
+       * 按键时刻解析滚动容器 —— **不读渲染期捕获的值**。
+       *
+       * 为什么必须现取：这个监听器挂在 document 上、生命周期跨很多次重渲染，而它的依赖数组
+       * 只在 root/store 变化时重跑。此前容器存在 state 里被闭包捕获，进详情页不会重新注册监听，
+       * 闭包读到的永远是 null ⇒ 空格 / n / p 全部静默 no-op（2026-10-09 用户实测）。
+       * 第一版修法是 useRef 句柄，但那只解决「值变了」；现取还能覆盖容器**换了个节点**
+       * （切换文章、重新挂载）的情况，闭包里索性不存在任何会变的东西。
+       */
+      const focusScrollBox = (view: string): HTMLElement | null => {
+        const selector = scrollSelectorFor(view)
+        if (selector === undefined) return null
+        const container = root === null ? null : root.querySelector(selector)
+        if (container === null) {
+          // 不静默降级：按了键却没反应是**行为上的改变**，必须留下证据（浏览器里 console 是唯一通道）
+          console.warn('[rss-reader] 找不到滚动容器 ' + selector + '（view=' + view + '）')
+          return null
+        }
+        return isElementNode(container) ? container : null
+      }
       const onKeyDown = (event: KeyboardEvent): void => {
         if (isTypingTarget(event.target)) return
         // 宿主可能把非当前主栏面板保活在后台（ui-layout 的 retainMainPanels 就是这个意图）：
         // 面板没真正显示时不响应，否则你在对话里按 j/k 会去动一个看不见的列表。
         // 用 getClientRects().length 判可见：display:none 或未挂载时为 0，且不受定位方式影响。
+        // root 来自 useState 且**在依赖数组里**：root 一变这个 effect 就重注册监听，
+        // 所以它不属于「闭包捕获」那一类缺陷，这里保持读闭包值即可（2026-10-09 核对）。
         if (root === null || root.getClientRects().length === 0) return
         if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return
         // 键位语义在 src/keys.ts（纯函数，宿主侧有单测）；这里只把动作落到 store 上
@@ -218,23 +290,38 @@ export function createReader(store: ReaderStore): () => ReactNode {
           case 'scanNext':
           case 'scanPrev': {
             const direction: 1 | -1 = action === 'scanNext' ? 1 : -1
-            const box = view === 'list' ? listBox : view === 'article' ? articleBox : null
+            const box = focusScrollBox(view)
             if (box === null) return
             run(() => {
-              const row = box.querySelector('[data-rss-row]')
-              const rowHeight = row instanceof HTMLElement ? row.offsetHeight : 48
-              box.scrollTop = scanTop(box.scrollTop, rowHeight, box.scrollHeight - box.clientHeight, direction)
+              // 步长按视图算：列表用「一行条目」的高度，正文用「一行正文」的高度。
+              // 此前两者共用列表行高，正文页量不到就落回硬编码 48px —— 正文行高约 29.6px，
+              // 于是 n/p 在详情页成了「按一次滚一行半」（2026-10-09 修）。
+              // 用面板自己的 document 取样式，不用裸 getComputedStyle 全局：
+              // bundle 会被塞进宿主页面，多窗口/测试环境里裸全局并不保证存在（实测踩到）。
+              const win = root === null ? undefined : root.ownerDocument.defaultView
+              const step = scanStepFor(view, {
+                rowHeight: measureRowHeight(box),
+                lineHeight: measureLineStep(box, win ?? undefined),
+              })
+              box.scrollTop = scanTop(box.scrollTop, step, box.scrollHeight - box.clientHeight, direction)
             })
             break
           }
-          // 空格 / shift+空格 = 按一屏翻页（列表与详情页都适用）
+          // 空格 / shift+空格 = 整屏；d / u = 半屏。三档距离并存，长文里整屏容易跳过头
           case 'pageDown':
-          case 'pageUp': {
-            const direction: 1 | -1 = action === 'pageDown' ? 1 : -1
-            const box = view === 'list' ? listBox : view === 'article' ? articleBox : null
+          case 'pageUp':
+          case 'halfPageDown':
+          case 'halfPageUp': {
+            const forward = action === 'pageDown' || action === 'halfPageDown'
+            const direction: 1 | -1 = forward ? 1 : -1
+            const half = action === 'halfPageDown' || action === 'halfPageUp'
+            const box = focusScrollBox(view)
             if (box === null) return
             run(() => {
-              box.scrollTop = pageTop(box.scrollTop, box.clientHeight, box.scrollHeight - box.clientHeight, direction)
+              const maxTop = box.scrollHeight - box.clientHeight
+              box.scrollTop = half
+                ? halfPageTop(box.scrollTop, box.clientHeight, maxTop, direction)
+                : pageTop(box.scrollTop, box.clientHeight, maxTop, direction)
             })
             break
           }
@@ -305,7 +392,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
             ))}
           </span>
           <span style={{ flex: 1 }} />
-          <span style={{ fontSize: 11, opacity: 0.55 }}>j/k 移动 · n/p 扫视 · 空格翻页 · o 展开并已读 · V 读正文 · v 开原站 · s 星标 · m 已读 · A 全部 · F 订阅</span>
+          <span style={{ fontSize: 11, opacity: 0.55 }}>j/k 移动 · n/p 扫视 · 空格翻页 · d/u 半页 · o 展开并已读 · V 读正文 · v 开原站 · s 星标 · m 已读 · A 全部 · F 订阅</span>
           <button type="button" className="dsh-rss-btn"
             title="订阅管理：导入/导出 OPML、加源、退订（F 键）"
             onClick={() => store.toggleFeeds()}>订阅</button>
@@ -365,6 +452,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
             link={state.items.find((entry) => entry.id === state.article?.itemId)?.link}
             onBack={() => store.closeArticle()}
             setBox={setArticleBox}
+            scrollAttr={SCROLL_ATTR}
             canPrev={store.canStepArticle(-1)}
             canNext={store.canStepArticle(1)}
             onPrev={() => { store.stepArticle(-1) }}
@@ -372,7 +460,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
           />
         )}
 
-        <div ref={setListBox} style={{
+        <div ref={setListBox} {...{ [SCROLL_ATTR]: 'list' }} style={{
           // position:relative 是必需的：row.offsetTop 以最近的定位祖先为参照，
           // 少了它量到的是相对页面/body 的位置，滚动计算会整体偏掉。
           position: 'relative',

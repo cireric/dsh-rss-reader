@@ -62,6 +62,15 @@ function loadClientBundle() {
         jsxs: createElement,
         Fragment: Symbol('Fragment'),
         useCallback: (fn) => fn,
+        // useRef：**身份跨渲染稳定**是它的全部要点（容器句柄就靠这条活着）。
+        // 若这里每次都新建对象，按键处理器会拿到一个永远为 null 的句柄 ——
+        // 那正好是本文件顶部记着的那类「闭包捕获」缺陷，假夹具不该自己再造一个。
+        useRef: (initial) => {
+          const at = hookIndex
+          hookIndex += 1
+          if (!(at in hooks)) hooks[at] = { current: initial }
+          return hooks[at]
+        },
         // 立即执行 effect：组件挂载时的转发动作要能被测试观察到
         useEffect: (fn) => { fn() },
         useState: (initial) => {

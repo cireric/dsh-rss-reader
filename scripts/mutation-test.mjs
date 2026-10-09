@@ -125,6 +125,48 @@ const MUTATIONS = [
   { id: 'client-不注册监听器', file: 'lib/client.js',
     from: 'document.addEventListener("keydown", onKeyDown);',
     to: ';' },
+  // 滚动容器这一族（2026-10-09 修）。变异目标是**按键时刻现取容器**这条机制：
+  // 它一旦退回「渲染期取一次」，详情页就会重新变成静默 no-op，而旧的假 React 夹具对此全绿。
+  // 判据由 tests/scroll-dom.test.mjs 用真实 React + jsdom 看着（那一层才能表达这个失效）。
+  { id: 'client-容器退回渲染期捕获', file: 'lib/client.js',
+    from: 'const container = root === null ? null : root.querySelector(selector);',
+    to: 'const container = null;' },
+  // ⚠️ 变异模式必须照**编译产物**的实际形状写（多行 if、单引号），
+  // 照源码格式写会「未应用」——那等于这条变异根本没跑，比幸存更隐蔽。
+  { id: 'client-容器选择器不分视图', file: 'lib/list-scroll.js',
+    from: "return '[' + SCROLL_ATTR + '=\"article\"]';",
+    to: "return '[' + SCROLL_ATTR + '=\"list\"]';" },
+  { id: 'client-正文行高量错对象', file: 'lib/client.js',
+    from: 'const sample = box.querySelector("p") ?? box;',
+    to: 'const sample = box;' },
+  { id: 'client-半页退化成整页', file: 'lib/client.js',
+    from: "? halfPageTop(box.scrollTop, box.clientHeight, maxTop, direction)",
+    to: "? pageTop(box.scrollTop, box.clientHeight, maxTop, direction)" },
+  { id: 'client-换文章不归零', file: 'lib/client.js',
+    from: 'box.scrollTop = 0;',
+    to: 'box.scrollTop = box.scrollTop;' },
+  // 按键守卫不许依赖环境全局（2026-10-09）。变异回 instanceof 后，
+  // 判据是 tests/scroll-dom.test.mjs 的「本 realm 没有 HTMLElement 时快捷键照样能用」。
+  { id: 'client-守卫改回环境全局', file: 'lib/client.js',
+    from: 'function isElementNode(node) {',
+    to: 'function isElementNode(node) { return node instanceof HTMLElement;' },
+  // 右下角「回顶部 / 去底部」（2026-10-09）。两条各钉一个方向：
+  // 反了或都不动，tests/scroll-dom.test.mjs 的箭头用例必须翻红。
+  { id: 'client-去底部反成回顶部', file: 'lib/client.js',
+    from: 'function edgeTopFor(maxTop, edge) {',
+    to: 'function edgeTopFor(maxTop, edge) { return 0;' },
+  { id: 'client-箭头按钮不接容器', file: 'lib/client.js',
+    from: 'boxRef.current = node;',
+    to: 'boxRef.current = null;' },
+  // 「点 ↓ 之后贴住底部」（2026-10-09，用户实测：新文章首点到不了底）。
+  // 病因是懒加载图片进场把内容撑高，而 scrollTop 留在原地；判据在 scroll-dom 的第 10 条用例。
+  { id: 'client-到底后不贴住底部', file: 'lib/client.js',
+    from: 'if (pinnedRef.current)',
+    to: 'if (false)' },
+  // 用户滚走必须解除贴底 —— 少了它会把读者的滚动硬拽回底部。
+  { id: 'client-用户滚走不解除贴底', file: 'lib/client.js',
+    from: 'if (Math.abs(box.scrollTop - expectedTopRef.current) > 2)',
+    to: 'if (false)' },
 ]
 
 function runSuite() {
