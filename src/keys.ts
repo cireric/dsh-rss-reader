@@ -12,6 +12,9 @@ export type ReaderKeyAction =
   | 'refreshCount' | 'back' | 'star' | 'toggleRead' | 'markAll' | 'manageFeeds'
   | 'scanNext' | 'scanPrev' | 'pageDown' | 'pageUp' | 'halfPageDown' | 'halfPageUp'
   | 'expandedView' | 'listView'
+  // 左栏导航（GR spec §3.8）：导航内移动选中 / 打开导航选中项 / 左栏显隐。
+  // 与 j/k 是两条不同的轴：j/k 动的是右栏文章列表的选中项，navNext/navPrev 动的是左栏那一列。
+  | 'navNext' | 'navPrev' | 'navOpen' | 'toggleNav'
   | 'none'
 
 /**
@@ -28,11 +31,25 @@ export function resolveReaderKey(key: string, shift = false): ReaderKeyAction {
     case 'p': return 'scanPrev'
     // 空格 = 翻页（按一屏）。空格不分大小写，所以必须看 shift 标志才能分辨方向
     case ' ': return shift === true ? 'pageUp' : 'pageDown'
+    // shift+n / shift+p = 在**左栏导航**里移动选中（GR spec §3.8 第 209 行 navigation down/up）。
+    // 2026-10-10 用户拍板 A 方案：本仓库此前刻意不绑定大写 N/P，本轮按 GR 原义补上。
+    // 只认大写：小写 n/p 是「扫视」（滚动视野但不改选中），两者是正交的两条轴，不能互相顶掉。
+    // 注意浏览器给的是大写字母本身（shift+n ⇒ 'N'），所以这里写的是大写 case，与上面 r/R、f/F 同理。
+    case 'N': return 'navNext'
+    case 'P': return 'navPrev'
+    // shift+o = 打开导航中选中的订阅/文件夹（GR spec §3.8 第 212 行）。小写 o 仍是「展开选中条目」。
+    case 'O': return 'navOpen'
     // d/u = 翻半页（vim 的 Ctrl-d / Ctrl-u 去掉 ctrl）。
     // 为什么另立一档而不是复用空格的整屏：整屏在长文里会跳过头，读者常常只想「再往下看一段」。
-    // 只认小写：大写由用户按到 CapsLock 时误触，且 D/U 在本插件里没有其他语义先例。
-    case 'd': return 'halfPageDown'
-    case 'u': return 'halfPageUp'
+    // 2026-10-10 用户拍板 A 方案：u **归还 GR 原义**「订阅列表显隐」（§3.8 第 250 行，本插件的左栏），
+    // 原本由 u 承担的上半页改由 shift+d 接盘。旧语义是本仓库自加的（vim 习惯），GR 史料里 u 就是显隐。
+    // 上/下半页共用 d 一条 case：上半页必须看 shift 标志（与空格那一对同一处理，空格也不分大小写）。
+    // 同时**必须**认大写 'D'：真实浏览器里 shift+d 给的 event.key 就是 'D'，只看小写 + shift 标志
+    // 会让真机上的 shift+d 静默无反应 —— 正是本文件开头记着的那类缺陷（标签写着 R、实现只认 shift+R）。
+    // 不带 shift 的 'D' 只可能来自 CapsLock，仍不做事（沿用本条原有的误触约定）。
+    case 'd': return shift === true ? 'halfPageUp' : 'halfPageDown'
+    case 'D': return shift === true ? 'halfPageUp' : 'none'
+    case 'u': return 'toggleNav'
     case 'o': return 'expand'
     // 1/2 = 视图密度（GR 原键位）：1 = expanded view「含条目描述/正文摘录」、2 = list view「只有标题行」
     case '1': return 'expandedView'

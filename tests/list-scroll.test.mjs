@@ -137,3 +137,18 @@ test('滚动计算对非法输入免疫（NaN/0/负数不该把滚动条写坏�
   assert.equal(Number.isFinite(scanTop(0, Number.NaN, 1000, 1)), true)
   assert.equal(Number.isFinite(pageTop(0, Number.NaN, 1000, 1)), true)
 })
+
+/**
+ * 两列布局之后（2026-10-10 任务 4）：左栏自己也是 overflowY: auto 的可滚动容器，
+ * 但滚动按键靠**标记属性**定位，而左栏打的是 data-rss-nav。
+ *
+ * 为什么值得再钉一次：读者眼里「左栏能滚」与「滚动键会去滚左栏」只差一个属性名，
+ * 而后者在界面上表现为「按键毫无反应」——最贵的那类沉默失败（本仓库 2026-10-09 的
+ * 详情页空格即同一族故障）。本用例把语义钉在选择器这一层；真 DOM 层的判据在
+ * tests/scroll-dom.test.mjs 的「滚动不误命中左栏」。
+ */
+test('两列后：列表类视图共用右栏容器选择器，feeds 仍无容器', () => {
+  assert.equal(scrollSelectorFor('list'), '[' + SCROLL_ATTR + '="list"]')
+  // undefined 与「选择器查不到节点」是两回事：前者静默（订阅管理页不该刷警告），后者必须告警
+  assert.equal(scrollSelectorFor('feeds'), undefined)
+})

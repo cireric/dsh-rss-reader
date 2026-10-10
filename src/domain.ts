@@ -9,6 +9,7 @@
  */
 import { z } from 'zod'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
+import { DEFAULT_VIEW_PREFERENCES } from './shared.js'
 
 export const feedRecordSchema = z.object({
   url: z.string().min(1),
@@ -170,6 +171,34 @@ export type CursorRecord = z.infer<typeof cursorRecordSchema>
 export const readerDomain = defineDomain({
   name: 'rss_reader',
   version: 1,
+  /**
+   * UI 偏好的**单例槽**（两列布局任务 7 的视图记忆）。
+   *
+   * 为什么走 global 而不是新增一张表：global 与 tables 并列，**不是表**，所以它既不触发
+   * 「域的表集合」变更、也与 version 无关 —— 老用户不必升级数据。原先只有「加表」与
+   * 「塞进 Config」两条路，前者要动 schema、后者会把 UI 状态混进订阅源配置面。
+   *
+   * schema 刻意是 **z.unknown() + 非 null 细化**，不是逐字段的严格形状。两个理由：
+   *
+   * ① 设施**要求**它拒绝 null（lib/types/spec.d.ts:83-89）：媒介用 null 表示「从未写过」，
+   *    可空就会让「存进去的 null」与「没写过」不可区分，重开后静默变回 initial。
+   *    所以这条细化只做一件事 —— 把 null 挡在外面。
+   * ② 校验分两层：这里只管**媒介层面的合法性**（非 null、任何值都能存），形状归一化交给
+   *    shared.ts 的 sanitizeViewPreferences 在**读写两端**做。若把严格形状写在这里，一条存坏的
+   *    偏好就会让整个域打不开（invalid-record 是开域失败，不是「这一项读不出来」）——
+   *    拿用户的面板当赌注去换一个「schema 更严谨」的外观，不值。
+   *
+   * ⇓ 老用户（域文件里没有 global）能否打开：**2026-10 实测可以**。构造真实老文件
+   *（unit v1、有表无 global，以及 global: null 两种形态），经真实 JsonStorageBackend +
+   * DomainFacility 打开：两者都成功，global.get() 回落到 initial，原有表记录原样在，
+   * 首次 set 后文件被就地补上 global 且 version 仍是 1。判据在
+   * tests/nav-persistence.test.mjs 的「老域（文件里没有 global）能正常打开并回落到 initial」。
+   * **不要**因为「文档说可以」就省掉这条用例 —— 这正是本仓库升 version 那次翻车的同一类赌注。
+   */
+  global: {
+    schema: z.unknown().refine((value) => value !== null),
+    initial: DEFAULT_VIEW_PREFERENCES as unknown,
+  },
   tables: {
     feeds: domainTable<string, FeedRecord>(feedRecordSchema),
     items: domainTable<string, ItemRecord>(itemRecordSchema),

@@ -12,7 +12,7 @@ import { articleCharsOf, selectCleanup, type CleanupRow } from './retention.js'
 import { buildOpml, parseOpml } from './opml.js'
 import { validateSubscriptions } from './subscribe.js'
 import type { ReaderStore } from './store.js'
-import { fail, ok, recencyOf, type Endpoint, type ItemView, type Overview, type RpcResult } from './shared.js'
+import { countUnreadPerFeed, fail, isUnread, ok, recencyOf, sanitizeViewPreferences, type Endpoint, type ItemView, type Overview, type RpcResult, type UnreadAccount } from './shared.js'
 
 /** 端点需要的运行时依赖（显式传入，不靠闭包）。 */
 export interface EndpointDeps {
@@ -39,7 +39,7 @@ const ARTICLE_REVISION = EXTRACTOR_REVISION
   const buildOverview = (refreshed: boolean): Overview => {
     const refreshedAtMs = lastRefreshCompletedAt()
     const target = ready()
-    if (!target) return { feeds: [], items: [], unread: 0, refreshed }
+    if (!target) return { feeds: [], items: [], unread: 0, perFeedUnread: {}, refreshed }
 
     const feeds = target.listFeeds().map(([feedId, record]) => ({
       id: feedId,
@@ -51,8 +51,15 @@ const ARTICLE_REVISION = EXTRACTOR_REVISION
     // **一次遍历全部条目**。原先是对每个源各调一次 listItems(feedId)，而那个实现每次都要遍历
     // 全表 ⇒ O(源数 × 条目数)：实测 100 源 × 400 条时遍历 400 万次、耗时 35ms（2026-10-07 实测）。
     // 只收「所属源还在」的条目，与原先由 listFeeds 驱动的语义保持一致。
-    const titles = new Map(feeds.map((feed) => [feed.id, feed.title]))
+    // 「源 id → 标题」与「每源未读数」都以 feeds 表为键域，所以合在一次遍历里建：
+    // 让「键域 = feeds 表」这个约定只有一处来源 —— 分居两处时改了一处就漂移。
+    // 铺 0 而不是留空：在订但当前 0 未读的源也要有键，左栏按 feeds 表逐行渲染时无条件命中，
+    // 不必区分「缺键」与「0」。
+    const titles = new Map<string, string>()
+    for (const feed of feeds) titles.set(feed.id, feed.title)
     const items: ItemView[] = []
+    // **一次遍历**：累加每源未读与收条目同在这一个全表循环内 —— 下面 items 会被 slice 截断，
+    // 截断之后再统计就会漏掉尾部那批条目（账目之所以必须由宿主下发，正因如此）。
     for (const [itemId, item] of target.allItems()) {
       const feedTitle = titles.get(item.feedId)
       if (feedTitle === undefined) continue
@@ -75,18 +82,38 @@ const ARTICLE_REVISION = EXTRACTOR_REVISION
       return byTime !== 0 ? byTime : a.id.localeCompare(b.id)
     })
 
+    // 每源账目走**与标读回包同一份**算法（shared.ts 的 countUnreadPerFeed + isUnread）：
+    // 键域 = feeds 表、判据 = readAt === undefined，两处复制口径必然漂移（任务 1 / 任务 5 的教训）。
+    // 传 items 而不是原始记录：这一步的「只算在订源」已由上面的 feedTitle 判定做掉，而 ItemView
+    // 的 readAt 是原样带过来的。
+    const perFeedUnread = countUnreadPerFeed(feeds.map((feed) => feed.id), items)
     return {
       feeds,
       items: items.slice(0, config.maxItemsShown),
-      unread: items.filter((item) => item.readAt === undefined).length,
+      // 总数由每源账目**求和派生**，不再单独数一遍：两处各算一次时，截断/漂移截面下迟早对不上，
+      // 而「左栏各源之和 === 顶栏总未读」正是 spec §4 不变量 1。
+      unread: sumOf(perFeedUnread),
+      perFeedUnread,
       refreshed,
       // 让界面能说明「上次到底什么时候抓过」——否则「按住刷新没反应」无从判断
       refreshedAt: refreshedAtMs === undefined ? undefined : new Date(refreshedAtMs).toISOString(),
     }
   }
 
-  const countUnread = (target: ReaderStore): number =>
-    target.listFeeds().reduce((sum, [feedId]) => sum + target.listItems(feedId).filter(([, i]) => i.readAt === undefined).length, 0)
+  /** 账目的总数：与 buildOverview 一样由每源账目**求和派生**，绝不另数一遍（两处口径必然漂移）。 */
+  const sumOf = (perFeedUnread: Record<string, number>): number =>
+    Object.values(perFeedUnread).reduce((sum, count) => sum + count, 0)
+
+  /** 读一次完整的未读账（总数 + 每源）。只读，不改任何条目。 */
+  const accountOf = (target: ReaderStore): UnreadAccount => {
+    // 键域与判据都走 shared.ts 那**一份**（countUnreadPerFeed + isUnread）：这里若再写一遍
+    // listItems 过滤，就又变成两处口径 —— 任务 1 的键域、任务 5 的 unread 都是这么漂的。
+    const perFeedUnread = countUnreadPerFeed(
+      target.listFeeds().map(([feedId]) => feedId),
+      target.allItems().map(([, record]) => record),
+    )
+    return { unread: sumOf(perFeedUnread), perFeedUnread }
+  }
 
   // 浏览器半的读写通道：宿主自有 HTTP 路由 + connection 的准入检查（见 shared.ts 注释）。
   const dispatch = async (endpoint: string, payload: unknown): Promise<RpcResult<unknown>> => {
@@ -127,7 +154,9 @@ const ARTICLE_REVISION = EXTRACTOR_REVISION
             await target.saveItem(itemId, rebuildItem(existing, { omit: ['keptUnread'], set: { readAt: stamp } }))
             changed += 1
           }
-          return ok({ changed, unread: countUnread(target) })
+          // 回包**必须带 perFeedUnread**：客户端在截断场景下看不见全量条目，只能靠这份整体覆盖
+          // （spec §4 不变量 1；任务 9 实测：本地 3 条/宿主 20，外部把本地不可见的源标空 ⇒ 差 3）。
+          return ok({ changed, ...accountOf(target) })
         }
 
         case 'unmarkRead': {
@@ -145,7 +174,8 @@ const ARTICLE_REVISION = EXTRACTOR_REVISION
             await target.saveItem(itemId, rebuildItem(existing, { omit: ['readAt'] }))
             changed += 1
           }
-          return ok({ changed, unread: countUnread(target) })
+          // 同上：撤销也要把每源账目一并下发，客户端才不必拿本地增量去猜（同一个不变量）。
+          return ok({ changed, ...accountOf(target) })
         }
 
         case 'article': {
@@ -313,7 +343,7 @@ const ARTICLE_REVISION = EXTRACTOR_REVISION
           for (const itemId of doomed) await target.deleteItem(itemId)
           log('清理：删除 ' + doomed.length + ' 条已读旧条目（阈值 ' + config.cleanupAfterDays + ' 天，释放约 ' +
             freedChars + ' 字符）')
-          return ok({ deleted: doomed.length, freedChars, cutoff, unread: countUnread(target) })
+          return ok({ deleted: doomed.length, freedChars, cutoff, ...accountOf(target) })
         }
 
         case 'toggleKeepUnread': {
@@ -328,7 +358,29 @@ const ARTICLE_REVISION = EXTRACTOR_REVISION
           await target.saveItem(itemId, keptUnread
             ? rebuildItem(existing, { set: { keptUnread: true } })
             : rebuildItem(existing, { omit: ['keptUnread'] }))
-          return ok({ itemId, keptUnread, unread: countUnread(target) })
+          return ok({ itemId, keptUnread, ...accountOf(target) })
+        }
+
+        // 视图记忆（两列布局任务 7）：UI 偏好的读/写端点是两个，而不是挂在 overview 上。
+        //
+        // 为什么不并进 overview（省一次往返）：
+        //  · overview 的语义是「条目数据」，它已经被 unread / perFeedUnread / 截断三件事占满；
+        //    往里塞 UI 偏好会让「什么都不动时读一次面板也会写盘」—— 恢复与写盘会互相触发。
+        //  · 写侧必须独立：客户端只在**关键动作**后写一次，不能顺路搭在每次数据刷新上。
+        //  · 读取必须**早于** feeds 数据可用：客户端一挂载就恢复，不能等 overview 回来再改视图
+        //    （那会让用户先看到默认态再跳一下）。
+        //
+        // 复用既有 HTTP 通道（ROUTE_PATH + requestRejection 准入），与其余 12 个端点同一条路
+        // —— 不新开机制、不加注入口。
+        case 'viewPreferences': {
+          return ok({ preferences: target.viewPreferences() })
+        }
+
+        case 'saveViewPreferences': {
+          // 传进来的值一律不可信（可能是别的版本写的、也可能根本不是一个对象）：
+          // 交给 store 归一后再落库。认不出就回落默认，绝不抛错、绝不把垃圾写进域。
+          const saved = await target.saveViewPreferences((payload as { preferences?: unknown } | null)?.preferences)
+          return ok({ preferences: saved })
         }
 
         case 'toggleStar': {
@@ -338,7 +390,7 @@ const ARTICLE_REVISION = EXTRACTOR_REVISION
           if (existing === undefined) return fail('not-found', '条目不存在：' + itemId)
           const starred = !existing.starred
           await target.saveItem(itemId, { ...existing, starred })
-          return ok({ itemId, starred, unread: countUnread(target) })
+          return ok({ itemId, starred, ...accountOf(target) })
         }
 
         default:

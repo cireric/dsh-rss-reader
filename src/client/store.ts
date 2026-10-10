@@ -6,9 +6,61 @@
  * 列表、正文、订阅管理与键盘接线，任一改动都要动同一个文件。
  */
 import { useEffect, useState } from 'react'
-import { ROUTE_PATH, recencyOf, type ArticlePayload, type CleanupResult, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult } from '../shared.js'
+import { ROUTE_PATH, recencyOf, sanitizeViewPreferences, type ArticlePayload, type CleanupResult, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult, type UnreadAccount, type ViewPreferences } from '../shared.js'
 
 export type Filter = 'all' | 'unread' | 'starred'
+
+/**
+ * 导航选中：虚拟视图（跨源聚合）或某个具体订阅源。
+ *
+ * 与 Filter 是**两条正交的轴**且叠加生效（源 × 过滤），不是二选一 —— 所以这里不引入
+ * 第四个「当前视图」概念：view 看面板、layout 看密度、filter 看全局过滤、navSelection 看导航选中。
+ */
+export type NavSelection = { kind: 'virtual' } | { kind: 'feed'; feedId: string }
+
+/**
+ * 导航**光标**：键盘在左栏那一列里现在停在哪一行。
+ *
+ * 与 NavSelection 是**两件事**（规格 §2.4 把 shift+n/p「移动」与 shift+o「打开」写成两行）：
+ *  - 光标 = 「我看到的高亮在哪」——纯的，**不改变**任何过滤结果、不影响 selectedId；
+ *  - navSelection = 「此刻哪个视图真的在生效」——只有「打开」（shift+o / 鼠标点击）才改它。
+ *
+ * 为什么必须拆开：第一版让 navSelection 同时兼任两者，于是 shift+n 走一行**就等于**打开它，
+ * shift+o 实测只剩「取消」——规格 §2.4 的两行行为塌缩成一行，规格无从满足（2026-10-10 返工）。
+ *
+ * 行序与左栏渲染逐行对应：虚拟视图三行在前、订阅源在后（见 navRowsOf）。
+ */
+export type NavCursor = { kind: 'filter'; filter: Filter } | { kind: 'feed'; feedId: string }
+
+/**
+ * 虚拟视图三行：全部 / 未读 / 星标。
+ *
+ * 顶栏那组 filter 按钮与左栏导航的三行是**同一份东西**（左栏是顶栏的镜像），所以这个顺序只定义
+ * 在这里一处：键盘光标的行序、顶栏按钮的顺序、左栏渲染的顺序都读它。三处各写一份迟早错位。
+ */
+export const VIRTUAL_VIEWS: ReadonlyArray<{ key: Filter; label: string }> = [
+  { key: 'all', label: '全部' },
+  { key: 'unread', label: '未读' },
+  { key: 'starred', label: '星标' },
+]
+
+/**
+ * 左栏导航的行序：虚拟视图三行 + 订阅源。
+ *
+ * 顺序即**界面顺序**（feed-nav.tsx 自上而下渲染的就是它），键盘上下移动必须与眼睛看到的那一列
+ * 同序 —— 换个顺序不影响单步移动，但会让「按一下 shift+n 跳到不相邻的那一行」。
+ */
+export function navRowsOf(feeds: ReadonlyArray<Pick<FeedView, 'id'>>): NavCursor[] {
+  return [
+    ...VIRTUAL_VIEWS.map((view): NavCursor => ({ kind: 'filter', filter: view.key })),
+    ...feeds.map((feed): NavCursor => ({ kind: 'feed', feedId: feed.id })),
+  ]
+}
+
+/** 光标 → 行 id；与 feed-nav.tsx 的 `data-rss-nav-row` 逐字同构（`filter:<key>` / `feed:<id>`）。 */
+export function navCursorKey(cursor: NavCursor): string {
+  return cursor.kind === 'filter' ? 'filter:' + cursor.filter : 'feed:' + cursor.feedId
+}
 
 /**
  * 「全部标为已读」的时间范围（规格 §3.3 的 panic button：可选择「只把**早于**某个时间范围的条目标为
@@ -62,6 +114,19 @@ export interface ReaderState {
   /** 一次性提示（如清理结果）：显示后由用户下一个动作清掉，不设定时器 */
   notice: string | undefined
   article: ArticleState | undefined
+  /** 导航选中（虚拟视图 / 某个具体源）。与 filter 叠加生效，见 NavSelection。 */
+  navSelection: NavSelection
+  /** 导航**光标**（左栏键盘高亮所在行）。与 navSelection 是两件事，见 NavCursor。 */
+  navCursor: NavCursor
+  /**
+   * 每源未读数（feedId → 该源未读数），来自 Overview.perFeedUnread（左栏角标的数据来源）。
+   *
+   * 必须由宿主下发而非从 items 派生：items 按 maxItemsShown 截断，派生出的各源之和会与
+   * 顶栏总数对不上 —— 左栏角标靠「各源之和 === unread」这条守恒式自洽。
+   */
+  perFeedUnread: Record<string, number>
+  /** 左栏显隐（任务 6 的 u 键接线用；默认显示，避免改动既有布局）。 */
+  navVisible: boolean
 }
 
 /** 调一个端点并解信封；失败抛出 `code: message`，由面板渲染。 */
@@ -94,13 +159,6 @@ export function relativeTime(iso: string | undefined): string {
 }
 
 /**
- * feed 正文（HTML 片段）→ 段落数组。
- *
- * 只做「块级标签换成换行 + 去掉其余标签 + 收敛空白」，全程当**文本**渲染，不注入 DOM：
- * 因此没有 XSS 面，也不需要 sanitizer 依赖。体积上限由存储层负责（Config.maxContentChars）。
- * 注意实体解码在解析层已经做过（htmlEntities），这里不重复处理。
- */
-/**
  * 阅读器状态与动作。
  *
  * 刻意 `export`：客户端行为在浏览器里跑，我无法自测；导出来之后，测试可以直接驱动
@@ -113,6 +171,10 @@ export function createReaderStore() {
     selectedId: undefined, loading: true, error: undefined, undo: undefined,
     view: 'list', layout: 'list', markAllRange: 'all', showUnread: true, article: undefined, notice: undefined,
     importReport: undefined, feedsBusy: false,
+    navSelection: { kind: 'virtual' }, perFeedUnread: {}, navVisible: true,
+    // 光标初值 = 与初始 filter 一致的那一行（初始 filter 是 'all'，故就是「全部」那一行）：
+    // 「我停在哪」与「此刻生效的是哪」在开局是同一行，之后才由 shift+n/p 与 shift+o 分开。
+    navCursor: { kind: 'filter', filter: 'all' },
   }
   const listeners = new Set<() => void>()
   const emit = (): void => { for (const listener of listeners) listener() }
@@ -150,15 +212,47 @@ export function createReaderStore() {
    * 实现上是「按过滤条件保留，或 id 等于当前选中」——用整表过滤而不是「过滤后再插入」，
    * 这样保留下来的位置仍是原来的全局顺序，不会跳到列表首尾。
    */
+  /**
+   * 「源 + 过滤」双条件是否成立——两者相乘，不是二选一。
+   *
+   * 单独抽出来是因为它有第二个使用面：切视图后要把 selectedId 落到新列表第一条
+   * （setFilter 的既有 precedent），那个判定必须与 visible() 用的**同一个**，否则迟早出现
+   * 「列表里选着一个自己都看不见的条目」。
+   */
+  const inScope = (item: ItemView): boolean => {
+    if (state.navSelection.kind === 'feed' && item.feedId !== state.navSelection.feedId) return false
+    if (state.filter === 'unread') return item.readAt === undefined
+    if (state.filter === 'starred') return item.starred
+    return true
+  }
+
   const visible = (): ItemView[] => {
     const selectedId = state.selectedId
     const matches = (item: ItemView): boolean => {
       if (item.id === selectedId) return true
-      if (state.filter === 'unread') return item.readAt === undefined
-      if (state.filter === 'starred') return item.starred
-      return true
+      return inScope(item)
     }
     return state.items.filter(matches)
+  }
+
+  /**
+   * 把 selectedId 落到当前作用域的第一条（沿用 setFilter 的既有 precedent）。
+   *
+   * 不做这一步就会出现「列表空了但还选着一个看不见的条目」，此时按 j/k 毫无反应。
+   */
+  const relocateSelection = (): void => { set({ selectedId: state.items.filter(inScope)[0]?.id }) }
+
+  /**
+   * 切换全局过滤（顶栏那组按钮 / 左栏虚拟视图三行 / 键盘打开虚拟视图行都走它）。
+   *
+   * 光标同步（2026-10-10 任务 6 返工）：换 filter 就是「当前项换了一行」，光标跟着落到那一行，
+   * 否则键盘接着 shift+n 会从旧位置跳。**无条件同步**是一条规则、没有特例：光标只表示「我停在哪行」，
+   * 而「哪一行此刻生效」由 selected 标记独立表达（选着源时它仍亮在源那一行 —— 规格 §2.1 的叠加）。
+   */
+  const setFilter = (filter: Filter): void => {
+    set({ filter, navCursor: { kind: 'filter', filter } })
+    relocateSelection()
+    persistView()
   }
 
   const applyOverview = (overview: Overview): void => {
@@ -168,17 +262,108 @@ export function createReaderStore() {
       items: overview.items,
       feeds: overview.feeds,
       unread: overview.unread,
+      perFeedUnread: overview.perFeedUnread,
       loading: false,
       error: undefined,
-      selectedId: stillThere ? selected : overview.items[0]?.id,
+      selectedId: stillThere ? selected : undefined,
     })
+    // 兜底走 relocateSelection 而不是「取 items[0]」：后者不含源条件，选源状态下按 r 刷新
+    // 会把选中项送到源外（那一刻 visible() 里没有它，j/k 直接失灵）。
+    if (!stillThere) relocateSelection()
+  }
+
+  /**
+   * 视图记忆（两列布局任务 7）：把「上次看到哪儿」从宿主存储域读回来。
+   *
+   * 三件事必须一起成立，所以它们挨着放：
+   *
+   *  ① **读回来的东西一律不可信** —— 走 shared.ts 的 sanitizeViewPreferences，形状认不出就回落默认，
+   *     绝不抛错（存储里可能是旧版本写的、也可能是别的写入者塞的）。已退订的源在这里回落：
+   *     判据用**刚下发的 feeds 表**，所以恢复发生在 applyOverview 之后（那时才看得见在订的源）。
+   *  ② **恢复不写盘**：一挂载就把读到的值写回去，等于每次打开面板都写一次同一个值 —— 白热存储，
+   *     还会把「读」和「写」两条路径耦合成环（读到的旧值刚好覆盖掉用户刚做的动作）。
+   *  ③ **用户的手势优先**：恢复是异步的，用户在它到达之前按了 u / 点了源，就不能再拿旧记忆盖掉
+   *     他的手势（touched 标志）。否则表现为「按了没反应，过一会儿自己弹回去」。
+   */
+  let viewRestored = false
+  let viewTouched = false
+  /** 写盘串行化：记忆按用户动作的先后收敛，不能让两个在飞的请求乱序落库（后发的先到 ⇒ 记忆回退）。 */
+  let viewWriteChain: Promise<void> = Promise.resolve()
+
+  /**
+   * 就地把恢复值落到 state。
+   *
+   * 刻意**直接 set**，不走 setFilter / selectNav：那三个动作会触发写盘，而恢复本身不该写盘（见上）。
+   * 光标按既有规则同步到「生效的那一行」——与鼠标点源、shift+o 打开源行同一条，恢复不会引入新规则。
+   */
+  const applyRestoredView = (raw: unknown): void => {
+    viewRestored = true
+    if (viewTouched) return
+    const known = new Set(state.feeds.map((feed) => feed.id))
+    const prefs = sanitizeViewPreferences(raw, (feedId) => known.has(feedId))
+    set({
+      navSelection: prefs.navSelection,
+      filter: prefs.filter,
+      navVisible: prefs.navVisible,
+      navCursor: prefs.navSelection.kind === 'feed'
+        ? { kind: 'feed', feedId: prefs.navSelection.feedId }
+        : { kind: 'filter', filter: prefs.filter },
+    })
+    relocateSelection()
+  }
+
+  /**
+   * 落盘当前视图偏好（**只在关键动作时调**，见三个动作方法）。
+   *
+   * 为什么不做防抖定时器：被记的是「选中的导航项 / filter / 左栏显隐」，它们只在**离散的用户动作**
+   * 里变（点源、点 filter、按 u），一次动作一次写，本来就不存在「每按一次键都写」的量。
+   * 而移动光标（shift+n/p）是唯一高频的那个，它**刻意不记**（见 NavCursor 注释：那是焦点，不是「看到哪儿」）。
+   * 加一个定时器反而要给面板引入常驻资源（验收要求卸载不留残余），收益为零。
+   */
+  const persistView = (): void => {
+    viewTouched = true
+    const preferences: ViewPreferences = {
+      navSelection: state.navSelection.kind === 'feed'
+        ? { kind: 'feed', feedId: state.navSelection.feedId }
+        : { kind: 'virtual' },
+      filter: state.filter,
+      navVisible: state.navVisible,
+    }
+    viewWriteChain = viewWriteChain
+      .then(() => callRpc('saveViewPreferences', { preferences }))
+      // 写盘失败要有可见后果（AGENTS.md 禁空 catch）：进 error 让面板说出来。
+      // 界面状态不回滚 —— 它与「能不能记住」是两件事，把左栏再翻回去只会让用户更困惑。
+      .then(() => {}, (failure: unknown) => {
+        set({ error: failure instanceof Error ? failure.message : String(failure) })
+      })
+  }
+
+  /**
+   * 读一次记忆（**只读，不应用**）。
+   *
+   * 与应用分开的理由：未知源要按刚下发的 feeds 表校验，所以读必须早于 overview、应用必须晚于它。
+   * 读失败只警告不打断面板 —— 读不到就按默认态用（记忆是锦上添花，不该让它挡住条目流）。
+   * 但**不许静默**：浏览器里 console 是本插件唯一可见的通道，静默会让「记忆怎么不恢复」无从查起。
+   */
+  const readViewPreferences = async (): Promise<unknown> => {
+    try {
+      const result = await callRpc<{ preferences?: unknown }>('viewPreferences')
+      return result?.preferences
+    } catch (failure) {
+      console.warn('[rss-reader] 读取视图记忆失败，本次按默认态使用', failure)
+      return undefined
+    }
   }
 
   const load = async (endpoint: 'overview' | 'refresh'): Promise<void> => {
     set({ loading: true })
     try {
+      // 恢复必须在 feeds 表到手之后生效（未知源要回落），所以**先读、后应用**：
+      // 读一次拿到记忆，等 overview 落地再按在订的源校验。两次 load 并发时也只读一次。
+      const preferences = viewRestored ? undefined : await readViewPreferences()
       const overview = await callRpc<Overview>(endpoint)
       applyOverview(overview)
+      if (!viewRestored) applyRestoredView(preferences)
       // 「按了刷新没反应」是本插件最早的体验投诉：界面从不说明发生了什么。
       // 这里如实区分——真抓了 / 被最小间隔节流（附上次完成时间）。
       if (endpoint === 'refresh') {
@@ -199,12 +384,58 @@ export function createReaderStore() {
     set({ items: state.items.map((item) => (item.id === itemId ? { ...item, ...patch } : item)) })
   }
 
+  /**
+   * 拿**宿主回包的那份账**整体覆盖本地未读账（unread + perFeedUnread）。
+   *
+   * ⚠️ 为什么是整体覆盖、而不是「按本地看得见的条目做增量」——这是本文件最容易踩回去的一个坑，
+   * 也是任务 9 实测复现的缺陷本体：客户端只拿得到 maxItemsShown（默认 300）条 items，而宿主按
+   * 每源 maxItemsPerFeed（默认 500）条的**全量表**记账（src/config.ts）。本地增量只能覆盖
+   * 「本地看得见的那几条」，一旦有**本地看不见的漂移**（另一个面板/标签页标掉了某些条目），
+   * 增量就把那份过期基线原样留下 ⇒ 左栏各源之和 ≠ 顶栏总未读（幽灵未读，两个数都是真实渲染的）。
+   *
+   * 所以标读端点**必须回 perFeedUnread**（src/shared.ts 的 UnreadAccount），客户端照单全收：
+   * 这与任务 1 拒绝「客户端从 items 派生 perFeedUnread」是同一条理由 —— 口径只能由宿主给。
+   * 乐观更新仍由调用方先做（手感），回包到达时以宿主为准纠正。
+   */
+  const applyAccount = (account: UnreadAccount): void => {
+    set({ unread: account.unread, perFeedUnread: account.perFeedUnread })
+  }
+  /**
+   * **仅供乐观更新**：按本批「本地看得见、且确实被标掉」的条目增量调整本地镜像，让角标从按下那一刻
+   * 就动起来。它**不是**账目的真相来源 —— 真相只在宿主回包里（见 applyAccount）。
+   *
+   * 键域 = 宿主下发的键（0 未读的源也必须留键）；对不上号的 id（不在 items 里、或其源无键）跳过，
+   * 不猜源、不造键。回包一到就被整体覆盖，所以这里算少/算错都不会留在界面上。
+   */
+  const shiftPerFeedUnread = (ids: readonly string[], delta: number): Record<string, number> => {
+    const next: Record<string, number> = { ...state.perFeedUnread }
+    for (const id of ids) {
+      const feedId = state.items.find((item) => item.id === id)?.feedId
+      if (feedId === undefined || next[feedId] === undefined) continue
+      next[feedId] = Math.max(0, next[feedId] + delta)
+    }
+    return next
+  }
+
   const markRead = async (itemId: string): Promise<void> => {
-    if (state.items.find((item) => item.id === itemId)?.readAt !== undefined) return
+    const target = state.items.find((item) => item.id === itemId)
+    if (target?.readAt !== undefined) return
     patchItem(itemId, { readAt: new Date().toISOString() })
-    set({ unread: Math.max(0, state.unread - 1) })
+    // 左栏角标（perFeedUnread）与顶栏总数（unread）是同一条守恒式的两边——各源之和 === unread。
+    // 只减 unread 会让界面自相矛盾：角标还写着 3、顶栏已经 2（index.tsx:374 与 :385 分读两处）。
+    // 宿主侧 unread 由 countUnread 重算，客户端这一侧的每源账目必须跟着一起补。
+    set(target === undefined
+      ? { unread: Math.max(0, state.unread - 1) }
+      : {
+        unread: Math.max(0, state.unread - 1),
+        perFeedUnread: {
+          ...state.perFeedUnread,
+          [target.feedId]: Math.max(0, (state.perFeedUnread[target.feedId] ?? 0) - 1),
+        },
+      })
     try {
-      await callRpc('markRead', { itemIds: [itemId] })
+      // 宿主回包带着每源账目，落地时以它为准 —— 本地那笔只是乐观镜像
+      applyAccount(await callRpc<UnreadAccount>('markRead', { itemIds: [itemId] }))
     } catch (failure) {
       set({ error: failure instanceof Error ? failure.message : String(failure) })
     }
@@ -280,12 +511,21 @@ export function createReaderStore() {
       return
     }
     patchItem(item.id, { readAt: undefined })
-    set({ unread: state.unread + 1 })
+    // 同上：取消已读要把这条账加回**它所属源**，否则角标会比顶栏少一
+    set({
+      unread: state.unread + 1,
+      perFeedUnread: { ...state.perFeedUnread, [item.feedId]: (state.perFeedUnread[item.feedId] ?? 0) + 1 },
+    })
     try {
-      await callRpc('unmarkRead', { itemIds: [item.id] })
+      // 同 markRead：撤销也以宿主回包为准（截断场景下本地增量看不见的账由回包纠正）
+      applyAccount(await callRpc<UnreadAccount>('unmarkRead', { itemIds: [item.id] }))
     } catch (failure) {
       patchItem(item.id, { readAt: item.readAt })
-      set({ unread: Math.max(0, state.unread - 1), error: failure instanceof Error ? failure.message : String(failure) })
+      set({
+        unread: Math.max(0, state.unread - 1),
+        perFeedUnread: { ...state.perFeedUnread, [item.feedId]: Math.max(0, (state.perFeedUnread[item.feedId] ?? 0) - 1) },
+        error: failure instanceof Error ? failure.message : String(failure),
+      })
     }
   }
 
@@ -305,12 +545,17 @@ export function createReaderStore() {
     set({
       items: state.items.map((item) => (ids.includes(item.id) ? { ...item, readAt: stamp } : item)),
       unread: Math.max(0, state.unread - ids.length),
+      // 乐观更新也要带上每源账目：否则从按下 A 到宿主回包之间，左栏角标停在旧数上。
+      // 基线用宿主下发的那份（含截断之外的账），只按本批 ids 增量减。
+      perFeedUnread: shiftPerFeedUnread(ids, -1),
       undo: { ids },
     })
     armUndoExpiry()
     try {
-      const result = await callRpc<{ unread: number }>('markRead', { itemIds: ids, skipKept: true, before })
-      set({ unread: result.unread })
+      // 回包里同时有 unread 与 perFeedUnread（宿主按全量表算的真值），整体覆盖本地那份乐观镜像：
+      // 只覆盖 unread 会把「本地看不见的外部漂移」留在 perFeedUnread 里 ⇒ 幽灵未读（任务 9 实测）。
+      const result = await callRpc<UnreadAccount>('markRead', { itemIds: ids, skipKept: true, before })
+      applyAccount(result)
     } catch (failure) {
       set({ error: failure instanceof Error ? failure.message : String(failure) })
     }
@@ -321,10 +566,13 @@ export function createReaderStore() {
     if (undo === undefined) return
     clearUndoExpiry()
     set({ undo: undefined })
-    set({ items: state.items.map((item) => (undo.ids.includes(item.id) ? { ...item, readAt: undefined } : item)) })
+    set({
+      items: state.items.map((item) => (undo.ids.includes(item.id) ? { ...item, readAt: undefined } : item)),
+      perFeedUnread: shiftPerFeedUnread(undo.ids, 1),
+    })
     try {
-      const result = await callRpc<{ unread: number }>('unmarkRead', { itemIds: undo.ids })
-      set({ unread: result.unread })
+      // 同上：撤销同样以宿主回包为准（否则会把外部漂移那部分凭空加回去）
+      applyAccount(await callRpc<UnreadAccount>('unmarkRead', { itemIds: undo.ids }))
     } catch (failure) {
       set({ error: failure instanceof Error ? failure.message : String(failure) })
     }
@@ -426,6 +674,71 @@ export function createReaderStore() {
    */
   const refreshCount = async (): Promise<void> => { await load('overview') }
 
+  /**
+   * 切导航选中（左栏点源 / 任务 6 的键位都走这里）。
+   *
+   * 再选中同一个源 = **取消选中**：左栏里点亮的项再点一次回到聚合视图，这条与既有
+   * 「点同一项收起」的直觉一致，也让键盘路径不用再单独给一个「回到全部」的键。
+   *
+   * 切回虚拟视图时把 filter 归位到 'all'：否则「虚拟视图 = 某个残留过滤」会变成与 filter
+   * 并存的第二套过滤状态——界面上只看得到 filter 顶栏，用户无从知道还有一层。
+   */
+  const selectNav = (next: NavSelection): void => {
+    const current = state.navSelection
+    const cancelled = next.kind === 'feed' && current.kind === 'feed' && current.feedId === next.feedId
+    if (cancelled || next.kind === 'virtual') {
+      // 退出源作用域时把光标带回「生效的那一行」：navSelection 变回 virtual、filter 归 'all'，
+      // 生效的就是「全部」，光标留在刚开过的那个源上会与左栏高亮自相矛盾
+      // （读者看到源行还停着光标，可右栏已经是聚合视图）。
+      set({ navSelection: { kind: 'virtual' }, filter: 'all', navCursor: { kind: 'filter', filter: 'all' } })
+    } else {
+      set({ navSelection: next, navCursor: { kind: 'feed', feedId: next.feedId } })
+    }
+    relocateSelection()
+    persistView()
+  }
+
+  /**
+   * 移动导航光标（规格 §2.4 的 shift+n / shift+p）——**只动光标**。
+   *
+   * 这是本函数存在的全部理由：它**必须不碰** navSelection / filter / selectedId。
+   * 第一版把「移动」与「打开」合成一步（移动即 selectNav），于是 shift+o 只剩「取消」，
+   * 规格 §2.4 的两行行为塌缩成一行（2026-10-10 返工）。
+   *
+   * 边界：到头/到尾**夹住不动**（不绕回）。光标一开始就不在表里（选中的源刚被退订）时退回表首，
+   * 而不是静默不动 —— 停在一个不存在的行上会让之后每一键都毫无反应。
+   */
+  const moveNavCursor = (delta: 1 | -1): void => {
+    const rows = navRowsOf(state.feeds)
+    if (rows.length === 0) return
+    const at = rows.findIndex((row) => navCursorKey(row) === navCursorKey(state.navCursor))
+    const from = at < 0 ? 0 : at
+    const next = rows[Math.min(rows.length - 1, Math.max(0, from + delta))]
+    if (next === undefined || navCursorKey(next) === navCursorKey(state.navCursor)) return
+    set({ navCursor: next })
+  }
+
+  /**
+   * 打开光标所在行（规格 §2.4 的 shift+o）——**等同点击它**，所以逐行复用鼠标那条动作：
+   *   - 源行     → selectNav（含「再选同源 = 取消」的既有裁决，键盘路径原样继承）；
+   *   - 虚拟视图行 → setFilter（顶栏那组按钮的同一个入口，左栏三行是它的镜像）。
+   *
+   * 刻意**不**自作主张「打开虚拟视图行就退出源作用域」：鼠标点左栏那个「未读」行也只走 setFilter，
+   * 选着源时两处都会变成「源 × filter 叠加」（规格 §2.1 / 任务 2 的裁决）。
+   * 「等同点击」这句话要成立，键盘就不能比鼠标多做一步。
+   */
+  const openNavCursor = (): void => {
+    const cursor = state.navCursor
+    if (cursor.kind === 'feed') { selectNav({ kind: 'feed', feedId: cursor.feedId }); return }
+    setFilter(cursor.filter)
+  }
+
+  /** 左栏显隐（任务 6 的 u 键接线用）。左栏曾经收起过是用户会期待的「重开后还是那样」，故一并记忆。 */
+  const toggleNav = (): void => {
+    set({ navVisible: !state.navVisible })
+    persistView()
+  }
+
   const toggleFeeds = (): void => { set({ view: state.view === 'feeds' ? 'list' : 'feeds' }) }
 
   /** 导出 OPML：拿到文本后交给浏览器下载（File System Access 不可用时退化为 blob 下载）。 */
@@ -507,8 +820,12 @@ export function createReaderStore() {
     openArticle, closeArticle, cleanup, stepArticle, canStepArticle,
     toggleFeeds, exportOpml, importOpml, addFeed, removeFeed,
     dismissNotice: (): void => { set({ notice: undefined }) },
-    setFilter: (filter: Filter): void => { set({ filter }); const list = filter === 'all' ? state.items : state.items.filter((i) => (filter === 'unread' ? i.readAt === undefined : i.starred)); set({ selectedId: list[0]?.id }) },
+    setFilter,
     select: (itemId: string): void => { set({ selectedId: itemId }) },
+    selectNav,
+    moveNavCursor,
+    openNavCursor,
+    toggleNav,
   }
 }
 

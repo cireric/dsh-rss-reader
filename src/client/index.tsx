@@ -24,10 +24,13 @@ import type {} from '@deepseek-ai/dsh-client-ui-slots'
 // 用到的槽位键由这两个包声明进 SlotMap（main 来自 layout，sidebar.* 来自 sidebar）
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
-import { createReaderStore, relativeTime, useReaderStore, type Filter, type MarkAllRange, type ReaderStore } from './store.js'
+import { createReaderStore, relativeTime, useReaderStore, VIRTUAL_VIEWS, type Filter, type MarkAllRange, type ReaderStore } from './store.js'
 // 导出面是构建产物对外的契约（契约测试直接调它），store 搬家后仍要从入口转出去
 export { createReaderStore }
+// 左栏宽度：横向 flex 布局与本组件共用同一个常量（feed-nav.tsx），分散写会出现 1px 的缝
+export { LEFT_NAV_WIDTH } from './feed-nav.js'
 import { FeedsView } from './feeds-view.js'
+import { FeedNav } from './feed-nav.js'
 import { ArticleView } from './article-pane.js'
 import { MIN_CONTENT_CHARS, recencyOf, ROUTE_PATH, type ArticlePayload, type CleanupResult, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult } from '../shared.js'
 import { htmlToText } from '../html-text.js'
@@ -307,7 +310,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
             })
             break
           }
-          // 空格 / shift+空格 = 整屏；d / u = 半屏。三档距离并存，长文里整屏容易跳过头
+          // 空格 / shift+空格 = 整屏；d / shift+d = 半屏。三档距离并存，长文里整屏容易跳过头
           case 'pageDown':
           case 'pageUp':
           case 'halfPageDown':
@@ -325,6 +328,37 @@ export function createReader(store: ReaderStore): () => ReactNode {
             })
             break
           }
+          // u = 左栏显隐（GR spec §3.8 第 250 行）。2026-10-10 用户拍板 A 方案：u 从「向上半页」归还
+          // 给 GR 原义（旧语义是本仓库按 vim 习惯自加的），上半页改由 shift+d 接盘。
+          // 只在列表页生效：左栏**只影响条目流**（过滤/选源），正文页与订阅管理页里它属于「背后的东西」。
+          // 沿用上面 o 键的同一条裁决（正文页按 o 会展开背后那个看不见的列表，2026-10-06 修）——
+          // 在正文页按 u 收起左栏，读者回列表时才发现导航没了，而那一刻他正需要它。
+          case 'toggleNav':
+            if (view !== 'list') return
+            run(() => store.toggleNav())
+            break
+          // shift+n / shift+p = 在左栏导航里**移动光标**（GR spec §3.8 第 209 行的 navigation down/up；
+          // 规格 §2.4 把它与 shift+o 的「打开」写成两行）。
+          // 与 j/k 是两条轴：j/k 动右栏文章列表的选中项，这里动左栏那一列的光标。
+          // ⚠️ 移动**不改变**右栏看到什么（那要 shift+o 才发生）—— 行序、边界夹取、退订兜底都在
+          // store.moveNavCursor 里，此处只传方向，不在组件里重算一遍行表（两处各算一份迟早错位）。
+          // 为什么限定列表页：左栏只在列表页渲染，正文页里移动一个看不见的光标没有意义。
+          case 'navNext':
+          case 'navPrev':
+            if (view !== 'list') return
+            // 左栏折叠时没有「导航里的位置」可动，也没有任何可见反馈（按 u 找回来再动，链路不绕）。
+            if (!store.get().navVisible) return
+            run(() => store.moveNavCursor(action === 'navNext' ? 1 : -1))
+            break
+          // shift+o = **打开**光标所在行（GR spec §3.8 第 212 行 / 规格 §2.4）= 等价于点击它。
+          // 走到与鼠标点击**同一组动作**（虚拟视图行 → setFilter，源行 → selectNav），
+          // 而不是另写一套「按源过滤」的逻辑：那会变成第二份过滤状态，与顶栏那组 filter 各说各话。
+          case 'navOpen':
+            if (view !== 'list') return
+            // 同 navNext/navPrev：折叠态下没有「导航里的一行」可打开
+            if (!store.get().navVisible) return
+            run(() => store.openNavCursor())
+            break
           case 'openExternal': run(() => store.openSelected()); break
           case 'openArticle': if (view !== 'list') return; run(() => { void store.openArticle() }); break
           // r：刷新未读计数（只重取本地视图，不抓取 —— 规格不变量 1）
@@ -351,16 +385,30 @@ export function createReader(store: ReaderStore): () => ReactNode {
 
     const items = store.visible()
     const failing = state.feeds.filter((feed) => feed.lastFailure)
-    const filters: Array<{ key: Filter; label: string }> = [
-      { key: 'all', label: '全部' },
-      { key: 'unread', label: '未读' },
-      { key: 'starred', label: '星标' },
-    ]
+    // 顶栏那组 filter 按钮与键盘导航的行序共用同一份定义（见 VIRTUAL_VIEWS 的注释）
+    const filters = VIRTUAL_VIEWS
 
     return (
       <div ref={setRoot} tabIndex={0} {...{ [ROOT_ATTR]: '' }}
         style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, fontSize: 14, lineHeight: 1.55, outline: 'none' }}>
         <style>{STYLE}</style>
+        {/* 横向 flex 由这一层承担：左栏常驻导航，右栏沿用原来的纵向结构（内部一律不动）。
+            折叠时**不渲染左栏**而不是给它 width:0 —— width:0 会留下一条边框的缝，
+            而「收起」在视觉上必须等于「这一列不存在」。 */}
+        <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
+        {state.navVisible && (
+          <FeedNav
+            feeds={state.feeds}
+            perFeedUnread={state.perFeedUnread}
+            filter={state.filter}
+            navSelection={state.navSelection}
+            navCursor={state.navCursor}
+            showUnread={state.showUnread}
+            onSelectFilter={(next) => store.setFilter(next)}
+            onSelectFeed={(feedId) => store.selectNav({ kind: 'feed', feedId })}
+          />
+        )}
+        <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 20px', borderBottom: '1px solid color-mix(in srgb, currentColor 12%, transparent)' }}>
           <strong>RSS 阅读器</strong>
           {state.showUnread && <span style={{ opacity: 0.7 }}>{state.unread} 条未读 / {state.items.length} 条</span>}
@@ -392,7 +440,11 @@ export function createReader(store: ReaderStore): () => ReactNode {
             ))}
           </span>
           <span style={{ flex: 1 }} />
-          <span style={{ fontSize: 11, opacity: 0.55 }}>j/k 移动 · n/p 扫视 · 空格翻页 · d/u 半页 · o 展开并已读 · V 读正文 · v 开原站 · s 星标 · m 已读 · A 全部 · F 订阅</span>
+          {/* 键位帮助行必须与 keys.ts 的映射逐字一致：界面标签与实现各说各话是本仓库的既有故障
+              （按钮写「（R）」而实现只认 shift+R），所以 2026-10-10 改键时这里一并改。
+              半页键写「d / shift+d」而不是「d/u」：u 已改归左栏显隐，再写 d/u 半页就是假标签。
+              修饰键一律写 shift+ 而不是 ⇧ —— 同一行里 ⇧d 与 shift+o 两种写法并存，读者会以为是两种键。 */}
+          <span style={{ fontSize: 11, opacity: 0.55 }}>j/k 移动 · n/p 扫视 · 空格翻页 · d/shift+d 半页 · u 左栏 · shift+n/p 导航 · shift+o 打开 · o 展开并已读 · V 读正文 · v 开原站 · s 星标 · m 已读 · A 全部 · F 订阅</span>
           <button type="button" className="dsh-rss-btn"
             title="订阅管理：导入/导出 OPML、加源、退订（F 键）"
             onClick={() => store.toggleFeeds()}>订阅</button>
@@ -536,6 +588,8 @@ export function createReader(store: ReaderStore): () => ReactNode {
               </div>
             )
           })}
+          </div>
+        </div>
         </div>
       </div>
     )

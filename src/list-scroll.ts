@@ -123,7 +123,7 @@ export function scanStepFor(view: string, measured: { rowHeight?: number; lineHe
 }
 
 /**
- * 「半页」：按**半屏**为单位滚动视野（d / u）。
+ * 「半页」：按**半屏**为单位滚动视野（d / shift+d；2026-10-10 起 u 归还左栏显隐，不再参与翻页）。
  *
  * 与 pageTop 的分工：整屏翻页在长文里会跳过头 —— 读者往往只想「再往下看一段」，
  * 而不是把上一屏的最后一行挤走。整屏、半页、逐行三档并存，各管一段距离。

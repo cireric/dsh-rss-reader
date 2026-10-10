@@ -107,20 +107,84 @@ async function driveStore({ items = [], article } = {}) {
   const endpoints = []
   // calls 是加法式的：给「请求体本身也要断言」的用例用（例如 markRead 的 skipKept）
   const calls = []
+  const host = hostAccount(items)
   sandbox.fetch = async (_url, init) => {
     const body = JSON.parse(init.body)
     endpoints.push(body.endpoint)
     calls.push(body)
     const ok = (value) => ({ ok: true, status: 200, json: async () => ({ ok: true, value }) })
-    if (body.endpoint === 'overview') {
-      return ok({ feeds: [], unread: items.filter((i) => i.readAt === undefined).length, items })
+    // refresh 与 overview 都回完整 Overview（src/endpoints.ts:112-118）：面板挂载时走的是
+    // refresh（index.tsx:184），桩件若把 refresh 回成 {changed,unread}，applyOverview 会拿到
+    // 一堆 undefined。这是夹具要守的契约，不是代码该容忍的形状。
+    if (body.endpoint === 'overview' || body.endpoint === 'refresh') {
+      return ok(overviewStub(items))
     }
     if (body.endpoint === 'article') return ok(article ?? { itemId: body.payload.itemId, cached: false, paragraphs: ['正文'] })
+    if (body.endpoint === 'markRead' || body.endpoint === 'unmarkRead') {
+      const ids = Array.isArray(body.payload?.itemIds) ? body.payload.itemIds : []
+      return ok(host.reply(body.endpoint, ids))
+    }
     return ok({ changed: 1, unread: 0 })
   }
   const store = exports.createReaderStore()
   await store.load('overview')
   return { store, endpoints, calls, opened }
+}
+
+/**
+ * 桩 overview：一份**守宿主契约**的返回值（feeds 表 + items + perFeedUnread）。
+ *
+ * 为什么封装成一份而不是三处各拼一个对象：perFeedUnread 的**键域严格 = feeds 表**（0 未读的源
+ * 也保留 0 值键）是任务 1 裁决下来的契约，散在几处迟早写出三份语义不同的桩 —— 本文件此前就是
+ * 三份（两处只给未读 > 0 的源发键），而缺键的表现是「角标空白 vs 角标 0」，界面上无从分辨。
+ *
+ * 为什么是**给桩补数据**而不是让客户端去容忍缺失：宿主既已裁决它是必填字段（src/shared.ts:58-65
+ * 的注释即契约原文），客户端就该无条件使用它。作品代码里写 `?? {}` 去兜，等于掩盖一个
+ * 契约上不该存在的形状，代价要等任务 3 用这个字段渲染左栏时才显现。
+ *
+ * @param items 条目表
+ * @param feeds 订阅源表；不给则按 items 里出现过的 feedId 推导（此时两者恰好相等）
+ */
+function overviewStub(items, feeds) {
+  const table = feeds ?? [...new Set(items.map((entry) => entry.feedId))].map((feedId) => ({ id: feedId, title: feedId }))
+  const perFeedUnread = {}
+  // 先按 feeds 表铺 0：这一步是键域的全部要点，缺了它 0 未读的源就会丢键
+  for (const feed of table) perFeedUnread[feed.id] = 0
+  for (const entry of items) {
+    // 已退订源的条目可能仍在 items 里，但那种源不该出现在 map 中（契约：键域 = feeds 表）
+    if (entry.readAt === undefined && entry.feedId in perFeedUnread) perFeedUnread[entry.feedId] += 1
+  }
+  return {
+    feeds: table, items,
+    unread: items.filter((entry) => entry.readAt === undefined).length,
+    perFeedUnread,
+    refreshed: false,
+  }
+}
+
+/**
+ * 宿主账目的**可动副本** + markRead/unmarkRead 的回包形状（照 src/endpoints.ts 的 accountOf）。
+ *
+ * 为什么桩件必须回 perFeedUnread：作品代码在截断场景下只能靠这份账目整体覆盖（否则本地增量
+ * 会把本地看不见的外部漂移留成幽灵未读）。桩件少给一个字段，就等于要求作品代码去容忍一个
+ * **契约上不该存在的形状** —— 本仓库明确不选那条路（docs/pitfalls.md 二、2.5 / 2.6）。
+ */
+function hostAccount(items) {
+  const base = overviewStub(items)
+  const account = { unread: base.unread, perFeedUnread: { ...base.perFeedUnread } }
+  const feedOf = new Map(items.map((entry) => [entry.id, entry.feedId]))
+  return {
+    reply(endpoint, ids) {
+      const delta = endpoint === 'markRead' ? -1 : 1
+      for (const id of ids) {
+        const feedId = feedOf.get(id)
+        if (feedId === undefined || account.perFeedUnread[feedId] === undefined) continue
+        account.perFeedUnread[feedId] = Math.max(0, account.perFeedUnread[feedId] + delta)
+        account.unread += delta
+      }
+      return { changed: ids.length, unread: account.unread, perFeedUnread: { ...account.perFeedUnread } }
+    },
+  }
 }
 
 /** 一条最小可用的条目。 */
@@ -364,12 +428,17 @@ function mountReader({ items = [], article } = {}) {
   const { exports, sandbox, opened, listeners } = loadClientBundle()
   const endpoints = []
   const created = []
+  const host = hostAccount(items)
   sandbox.fetch = async (_url, init) => {
     const body = JSON.parse(init.body)
     endpoints.push(body.endpoint)
     const ok = (value) => ({ ok: true, status: 200, json: async () => ({ ok: true, value }) })
-    if (body.endpoint === 'overview') return ok({ feeds: [], unread: items.length, items })
+    if (body.endpoint === 'overview' || body.endpoint === 'refresh') return ok(overviewStub(items))
     if (body.endpoint === 'article') return ok(article ?? { itemId: body.payload.itemId, cached: false, paragraphs: ['正文'], frameable: false })
+    if (body.endpoint === 'markRead' || body.endpoint === 'unmarkRead') {
+      const ids = Array.isArray(body.payload?.itemIds) ? body.payload.itemIds : []
+      return ok(host.reply(body.endpoint, ids))
+    }
     return ok({ changed: 1, unread: 0 })
   }
   const ctx = {
@@ -486,11 +555,16 @@ function renderReader({ items = [] } = {}) {
   const harness = loadClientBundle()
   const { exports, sandbox, listeners } = harness
   const endpoints = []
+  const host = hostAccount(items)
   sandbox.fetch = async (_url, init) => {
     const body = JSON.parse(init.body)
     endpoints.push(body.endpoint)
     const ok = (value) => ({ ok: true, status: 200, json: async () => ({ ok: true, value }) })
-    if (body.endpoint === 'overview') return ok({ feeds: [], unread: items.length, items })
+    if (body.endpoint === 'overview' || body.endpoint === 'refresh') return ok(overviewStub(items))
+    if (body.endpoint === 'markRead' || body.endpoint === 'unmarkRead') {
+      const ids = Array.isArray(body.payload?.itemIds) ? body.payload.itemIds : []
+      return ok(host.reply(body.endpoint, ids))
+    }
     return ok({ changed: 1, unread: 0 })
   }
   const store = exports.createReaderStore()

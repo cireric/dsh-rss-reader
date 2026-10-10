@@ -18,6 +18,7 @@ export const ROUTE_PATH = '/rss-reader-api'
 
 export type Endpoint = 'overview' | 'refresh' | 'markRead' | 'unmarkRead' | 'toggleStar' | 'toggleKeepUnread' | 'article' | 'cleanup'
   | 'opmlExport' | 'opmlImport' | 'addFeed' | 'removeFeed'
+  | 'viewPreferences' | 'saveViewPreferences'
 
 export type RpcResult<T> =
   | { ok: true; value: T }
@@ -50,11 +51,59 @@ export interface ItemView {
   summary?: string
 }
 
-export interface Overview {
+/**
+ * 未读的**唯一判据**：已读 = readAt 有值（粒度见上面的 ItemView.readAt，用户 2026-10-05 定）。
+ *
+ * 抽成函数不是为了复用代码，是为了让「未读怎么算」**只有一处**：本计划已经两次栽在
+ * 「同一条不变式在两个地方各算一遍」上（任务 1 的键域、任务 5 的 unread 口径），每次都表现为
+ * 两个数各自自洽、合起来对不上，且只在特定截断/漂移截面才显形。
+ * 宿主侧任何算未读的地方（buildOverview 的全表遍历、markRead/unmarkRead 的回包）都必须走它。
+ */
+export const isUnread = (item: Pick<ItemView, 'readAt'>): boolean => item.readAt === undefined
+
+/**
+ * 每源未读账目的**唯一算法**：键域 = feeds 表（0 未读的源也铺 0 值键），未读判据 = isUnread。
+ *
+ * 两个独立的陷阱都由这里一处挡掉：
+ *  ① **不得从 items 派生**——items 是按 maxItemsShown 截断的，而账目按全量表算（endpoints.ts 的
+ *     buildOverview 注释）：从截断后的 items 派生，各源之和必然小于顶栏总未读。
+ *  ② **已退订源的残留条目不进账**——键域严格 = feeds 表，多一个键就等于左栏多一行幽灵。
+ *
+ * @param feedIds 订阅表当前的全部源 id（只用于定键域，顺序不影响结果）
+ * @param items   条目表（宿主传全量；已退订源的残留条目会被 ① 的键域判定挡掉）
+ */
+export function countUnreadPerFeed(
+  feedIds: Iterable<string>,
+  items: Iterable<Pick<ItemView, 'feedId' | 'readAt'>>,
+): Record<string, number> {
+  const unread: Record<string, number> = {}
+  // 先按 feeds 表铺 0：左栏按 feeds 表逐行渲染时无条件命中，不必区分「缺键」与「0」
+  for (const feedId of feedIds) unread[feedId] = 0
+  for (const item of items) {
+    if (unread[item.feedId] === undefined) continue
+    if (isUnread(item)) unread[item.feedId] += 1
+  }
+  return unread
+}
+
+/**
+ * 未读账的 wire 形状：overview 与 markRead / unmarkRead **共用同一份**。
+ *
+ * 标读端点必须回它（不能只回 unread）：客户端只拿得到 maxItemsShown 条 items，截断之外那部分
+ * 账（含**另一个面板刚标掉的**）它看不见；只回总数会让客户端拿本地盲增量去补每源账目，
+ * 于是左栏各源之和 ≠ 顶栏总未读（spec §4 不变量 1，任务 9 实测复现：本地 3 条/宿主 20，
+ * 外部把某本地不可见的源标空 ⇒ 差 3）。
+ */
+export interface UnreadAccount {
+  unread: number
+  /** 键域 = feeds 表，见 countUnreadPerFeed */
+  perFeedUnread: Record<string, number>
+}
+
+export interface Overview extends UnreadAccount {
   feeds: FeedView[]
   /** 跨源合并、按时间倒序（river of news） */
   items: ItemView[]
-  unread: number
   /** 本次调用是否真的发起了抓取（被节流或并入在途刷新时为 false） */
   refreshed: boolean
   /** 上次抓取完成时间（ISO）；undefined = 本次进程内还没成功抓过 */
@@ -103,6 +152,75 @@ export interface OpmlImportResult {
   skipped: Array<{ title?: string; reason: string }>
   /** 通过校验并落库的源（供界面回显） */
   accepted: Array<{ url: string; title?: string; folder?: string }>
+}
+
+/**
+ * 视图记忆：面板重开后要恢复起来的那几项（两列布局任务 7）。
+ *
+ * 三份状态刻意**只列被记忆的**：navSelection（虚拟视图 / 某个源）、filter、navVisible。
+ * 特别**不含 navCursor**（键盘光标）—— 理由见客户端 store 的恢复注释：光标是「焦点在哪」，
+ * 是瞬时的指向，而这里记的是「上次看到哪儿」；恢复时按既有规则把它落到生效的那一行即可。
+ */
+export interface ViewPreferences {
+  navSelection: { kind: 'virtual' } | { kind: 'feed'; feedId: string }
+  filter: 'all' | 'unread' | 'starred'
+  navVisible: boolean
+}
+
+/** 没有任何记忆时的值。同时是存储域 global 槽的 initial（首次 set 才落盘）。 */
+export const DEFAULT_VIEW_PREFERENCES: ViewPreferences = {
+  navSelection: { kind: 'virtual' },
+  filter: 'all',
+  navVisible: true,
+}
+
+const FILTERS: ReadonlyArray<ViewPreferences['filter']> = ['all', 'unread', 'starred']
+
+/**
+ * 把「存储里读到的东西」归一成一份可信的视图记忆（**读侧唯一的判定点**）。
+ *
+ * 为什么必须逐字段独立回落而不是整份二选一：一次坏值不该把另外两项的记忆一起抹掉 ——
+ * 那会让「filter 字段写坏」表现为「选中的源也丢了」，用户完全无从理解。
+ *
+ * @param raw - 任何来源的值（存储域 global、端点回包）。**一律当作不可信**。
+ * @param isKnownFeed - 可选的「这个源还在订吗」判据。给了它，指向已退订源的选中态才回落成虚拟视图。
+ *   宿主侧给（它手上有 feeds 表）；客户端恢复时也给（用刚下发的 feeds 表）。
+ *   **不给则只验形状** —— 客户端在 feeds 表到手之前空手校验会把正常记忆全吃掉。
+ * @returns 一定是新对象：校验没过的原值绝不能被引到 state 或写回存储里。
+ */
+export function sanitizeViewPreferences(
+  raw: unknown,
+  isKnownFeed?: (feedId: string) => boolean,
+): ViewPreferences {
+  const source = typeof raw === 'object' && raw !== null && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>)
+    : {}
+
+  const selectionRaw = source['navSelection']
+  let navSelection: ViewPreferences['navSelection'] = DEFAULT_VIEW_PREFERENCES.navSelection
+  if (typeof selectionRaw === 'object' && selectionRaw !== null && !Array.isArray(selectionRaw)) {
+    const selection = selectionRaw as Record<string, unknown>
+    if (selection['kind'] === 'virtual') {
+      navSelection = { kind: 'virtual' }
+    } else if (selection['kind'] === 'feed'
+      && typeof selection['feedId'] === 'string' && selection['feedId'] !== ''
+      && (isKnownFeed === undefined || isKnownFeed(selection['feedId']))) {
+      navSelection = { kind: 'feed', feedId: selection['feedId'] }
+    }
+  }
+
+  const filterRaw = source['filter']
+  const filter = FILTERS.includes(filterRaw as ViewPreferences['filter'])
+    ? (filterRaw as ViewPreferences['filter'])
+    : DEFAULT_VIEW_PREFERENCES.filter
+
+  const navVisible = typeof source['navVisible'] === 'boolean'
+    ? source['navVisible']
+    : DEFAULT_VIEW_PREFERENCES.navVisible
+
+  // 只搬运点名的三个字段：认不出的键（历史版本留下的、或被别的写入者塞进来的）一律丢掉，
+  // 否则它们会被原样写回存储，攒够几版就成了没人敢删的历史包袱。
+  return { navSelection, filter, navVisible }
 }
 
 /**
