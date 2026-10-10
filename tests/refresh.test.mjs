@@ -140,6 +140,62 @@ test('单源失败就地降级，不阻断其余源', async () => {
   })
 })
 
+/**
+ * 失败标记必须只反映**最近一次**结果（契约见 src/domain.ts:28「最近一次失败原因；成功后清掉」）。
+ *
+ * 用户实测的病象：横幅一直写「月光博客（HTTP 502）」，而日志里该源连续十几次都是 not-modified ——
+ * 即 502 只出现过一次、之后一路成功，标记却再没人清。根因是 304 分支用 `{...previous}` 写回，
+ * 把旧的 lastFailure 一起带了回来。两条用例把「304 也是成功」这条钉住（200 那条防回归）。
+ */
+test('失败标记只反映最近一次：先 500 失败、再 304 成功 ⇒ 标记必须清掉', async () => {
+  const store = memoryStore()
+  let first = true
+  await withServer((req, res) => {
+    if (first) {
+      first = false
+      res.writeHead(500)
+      res.end('boom')
+      return
+    }
+    res.writeHead(304)
+    res.end()
+  }, async (base) => {
+    const url = base + '/feed.xml'
+    const [failed] = await refreshFeeds([url], store, BASE_OPTIONS)
+    assert.equal(failed.status, 'failed', '前置条件：第一次失败')
+    assert.match(store.feed(url).lastFailure, /500/, '前置条件：失败原因已记录')
+
+    const [recovered] = await refreshFeeds([url], store, BASE_OPTIONS)
+    assert.equal(recovered.status, 'not-modified', '前置条件：第二次是 304（源说内容没变）')
+    assert.equal(store.feed(url).lastFailure, undefined,
+      '304 也是成功：失败标记必须清掉 —— 否则「502 一闪而过、之后一路 304」的源会永远挂着失败横幅（用户实测）')
+    assert.ok(store.feed(url).lastFetchedAt, '304 仍要记抓取时间')
+  })
+})
+
+test('失败标记只反映最近一次：先 500 失败、再 200 成功 ⇒ 标记必须清掉', async () => {
+  const store = memoryStore()
+  let first = true
+  await withServer((req, res) => {
+    if (first) {
+      first = false
+      res.writeHead(500)
+      res.end('boom')
+      return
+    }
+    res.writeHead(200, { 'content-type': 'application/rss+xml' })
+    res.end(rss(THREE_ITEMS))
+  }, async (base) => {
+    const url = base + '/feed.xml'
+    const [failed] = await refreshFeeds([url], store, BASE_OPTIONS)
+    assert.equal(failed.status, 'failed', '前置条件：第一次失败')
+
+    const [recovered] = await refreshFeeds([url], store, BASE_OPTIONS)
+    assert.equal(recovered.status, 'added', '前置条件：第二次成功拿到内容')
+    assert.equal(store.feed(url).lastFailure, undefined, '成功之后不该再显示上一次的失败原因')
+  })
+})
+
 test('保留量裁剪：只留最新的 N 条', async () => {
   const store = memoryStore()
   await withServer(serveFeed(THREE_ITEMS), async (base) => {

@@ -185,9 +185,16 @@ async function refreshOne(
   if (result.kind === 'not-modified') {
     // 升级轮里还被判 304（源忽略了无条件请求）：写回版本号避免每轮都重试，并留下痕迹
     const upgradeSkipped = needsContentUpgrade
+    // **字段必须显式列出，不能展开 previous**：展开会把上一次失败留下的 lastFailure 一起带回来，
+    // 于是「502 一闪而过、之后一路 304 成功」的源会永远挂着失败横幅（用户实测：月光博客连续十几次
+    // not-modified，横幅仍写 HTTP 502）。304 也是**成功**（源说「内容没变」），按 domain.ts:28 的
+    // 契约「成功后清掉」，它必须把失败标记清掉 —— 横幅只能反映**最近一次**真实结果。
     await store.saveFeed(feedId, {
-      ...(previous ?? {}),
       url: feedId,
+      title: previous?.title,
+      folder: previous?.folder,
+      etag: previous?.etag,
+      lastModified: previous?.lastModified,
       lastFetchedAt: stamp,
       contentRevision: CONTENT_REVISION,
     })

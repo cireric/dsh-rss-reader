@@ -374,6 +374,12 @@ const MUTATIONS = [
   { id: 'client-过滤行对 all 特殊对待（三个标签不一致）', file: 'lib/client.js',
     from: 'const selected = filter === view.key;',
     to: 'const selected = filter === view.key && filter !== "all";' },
+  // 失败标记必须只反映**最近一次**结果（2026-10-10 用户实测：横幅一直写「月光博客（HTTP 502）」，
+  // 而日志里该源连续十几次都是 not-modified —— 502 只出现过一次、之后一路成功）。
+  // 变异把 lastFailure 塞回 304 分支的写回对象：一旦恢复「展开 previous」的写法，标记就再没人清。
+  { id: 'refresh-304 成功不残留上次失败标记', file: 'lib/refresh.js',
+    from: 'url: feedId,\n            title: previous?.title,',
+    to: 'url: feedId,\n            lastFailure: previous?.lastFailure,\n            title: previous?.title,' },
 ]
 
 function runSuite() {
