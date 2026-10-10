@@ -595,9 +595,12 @@ test('点击某个源：右栏列表只剩该源条目', skip, async () => {
     h.win.document.querySelector('[data-rss-nav-row="feed:f1"]').getAttribute('data-rss-nav-selected'), '',
     '被选中的源应当高亮',
   )
+  // 2026-10-10 用户实测反馈后改判：三个过滤标签必须**同等对待**。旧断言写的是「选了源之后
+  // 「全部」不该还亮着」，后来又加了一个只为 'all' 开的口子 —— 结果是「未读/星标」亮、「全部」不亮，
+  // 用户一眼就当成 bug。现在统一为：生效的过滤行始终点亮（与源行同时亮是正确的，两条正交轴）。
   assert.equal(
-    h.win.document.querySelector('[data-rss-nav-row="filter:all"]').getAttribute('data-rss-nav-selected'), null,
-    '选了源之后「全部」不该还亮着',
+    h.win.document.querySelector('[data-rss-nav-row="filter:all"]').getAttribute('data-rss-nav-selected'), '',
+    '选中的源要亮，生效的过滤行（这里是「全部」）同样要亮 —— 三个标签一律同等对待',
   )
   // 鼠标点击必须把**键盘光标**同步落到被点的那一行（2026-10-10 任务 6 返工）：
   // 否则光标还停在旧位置，读者接着按 shift+n 会从旧位置跳，而不是从「我刚点的那里」走。
@@ -615,6 +618,82 @@ test('点击某个源：右栏列表只剩该源条目', skip, async () => {
   await sleep(30)
   assert.deepEqual(h.store.get().navSelection, { kind: 'virtual' }, '再点同一个源应当取消选中')
   assert.deepEqual(listTitles(), ['a', 'b', 'c'], '取消后应当回到聚合视图')
+})
+
+test('选了「未读」再选源：源与过滤两条轴各自生效，未读行仍亮着（用户实测反馈）', skip, async () => {
+  // 用户报的现象：「先选未读，再选源，未读的选择状态丢了」。
+  // 实测定性：filter **没有**被清掉（右栏确实只剩该源的未读），丢的是**左栏那一行的点亮** ——
+  // 旧的点亮条件是 `selectedFeedId === undefined && filter === view.key`，选了源就整组不亮。
+  // 本用例把「功能没丢」与「指示没丢」两件事都钉住：缺前者是 bug，缺后者就是这次反馈的复发。
+  const h = await mountReader({
+    items: [
+      item({ id: 'a', feedId: 'f1', feedTitle: '源一' }),
+      item({ id: 'b', feedId: 'f1', feedTitle: '源一', readAt: '2026-10-01T00:00:00.000Z' }),
+      item({ id: 'c', feedId: 'f2', feedTitle: '源二' }),
+    ],
+    feeds: [{ id: 'f1', title: '源一' }, { id: 'f2', title: '源二' }],
+  })
+  await h.store.load('overview')
+  await sleep(30)
+
+  const row = (key) => h.win.document.querySelector('[data-rss-nav-row="' + key + '"]')
+  const marked = (key) => row(key).getAttribute('data-rss-nav-selected') === ''
+
+  // ① 先点左栏「未读」
+  row('filter:unread').dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
+  await sleep(30)
+  assert.equal(h.store.get().filter, 'unread', '前置条件：过滤切到未读')
+
+  // ② 再点源一
+  row('feed:f1').dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
+  await sleep(30)
+
+  // ③ 功能：源 × filter 相乘，右栏只剩「源一的未读」
+  assert.deepEqual(h.store.get().navSelection, { kind: 'feed', feedId: 'f1' }, '前置条件：已选中源一')
+  assert.equal(h.store.get().filter, 'unread', '选源不得把过滤清掉（两条轴相乘，不是二选一）')
+  const titles = [...h.win.document.querySelectorAll('[data-rss-row]')].map((el) => el.getAttribute('data-rss-row'))
+  assert.deepEqual(titles, ['a'], '右栏应当只剩「源一的未读」，实际 ' + JSON.stringify(titles))
+
+  // ④ 指示：源行与「未读」行都要亮，读者才看得出过滤仍在生效
+  assert.equal(marked('feed:f1'), true, '选中的源要亮')
+  assert.equal(marked('filter:unread'), true,
+    '「未读」仍在对结果收窄，必须继续亮 —— 它一灭，读者就以为过滤被清掉了（用户实测反馈）')
+  // 「全部」与「未读」必须一视同仁：曾经为 'all' 开过一个不点亮的口子，
+  // 用户实测反馈把它当成 bug（三个标签两个亮一个不亮）—— 一致性优先。
+  assert.equal(marked('filter:all'), false, '前置条件：此刻生效的是「未读」，所以「全部」不该亮')
+  // 真正的一致性判据：把 filter 切回 all，该亮的换成「全部」
+  row('filter:all').dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
+  await sleep(30)
+  assert.equal(h.store.get().filter, 'all', '前置条件：过滤切回全部')
+  assert.equal(marked('filter:all'), true, '「全部」生效时必须点亮 —— 它与其他两个标签同等对待')
+})
+
+test('过滤三连只显示一处：左栏可见时顶栏不重复（收起左栏则回落到顶栏）', skip, async () => {
+  // 用户实测反馈：左栏顶部与右列顶栏各有一组「全部/未读/星标」，是同一个状态的两个入口，
+  // 摆两处会让人问「哪边算数」。定策：左栏可见时由左栏承担，顶栏只在左栏收起时回落显示 ——
+  // 这样「收起导航」不会让过滤失去入口，同时任何时刻都只有一处。
+  const h = await mountReader({
+    items: [item({ id: 'a', feedId: 'f1', feedTitle: '源一' })],
+    feeds: [{ id: 'f1', title: '源一' }],
+  })
+  await h.store.load('overview')
+  await sleep(30)
+
+  // 左栏那份：虚拟视图三行（带 data-rss-nav-row="filter:*"）
+  const navFilterRows = () => h.win.document.querySelectorAll('[data-rss-nav-row^="filter:"]').length
+  // 顶栏那份：正文按钮里文本恰好是三个标签之一的
+  const toolbarFilterButtons = () => [...h.win.document.querySelectorAll('button')]
+    .filter((el) => ['全部', '未读', '星标'].includes((el.textContent ?? '').trim())).length
+
+  assert.equal(navFilterRows(), 3, '前置条件：左栏有虚拟视图三行')
+  assert.equal(toolbarFilterButtons(), 0,
+    '左栏可见时顶栏不得再放一份同样的过滤按钮 —— 同一状态两处显示，读者会问「哪边算数」（用户实测反馈）')
+
+  // 收起左栏：入口必须回落到顶栏，不能因为「收起导航」就没有过滤入口了
+  h.store.toggleNav()
+  await sleep(30)
+  assert.equal(navFilterRows(), 0, '前置条件：左栏已收起')
+  assert.equal(toolbarFilterButtons(), 3, '左栏收起后过滤入口应回落到顶栏（3 个按钮）')
 })
 
 

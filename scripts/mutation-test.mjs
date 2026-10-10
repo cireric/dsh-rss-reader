@@ -365,6 +365,15 @@ const MUTATIONS = [
   { id: 'persist-global schema 接受 null', file: 'lib/domain.js',
     from: 'schema: z.unknown().refine((value) => value !== null),',
     to: 'schema: z.unknown(),' },
+  // 过滤行的点亮条件（2026-10-10，两轮用户实测反馈合并）：
+  //  ① 选源后**仍在生效**的过滤（未读/星标）必须继续点亮，否则读者以为过滤被清掉了，
+  //     而右栏其实还在按它过滤 —— 功能与指示脱节，最难自察的一类；
+  //  ② 三个标签必须**同等对待**：曾为 'all' 单独开过一个「不点亮」的口子，
+  //     用户一眼当成 bug（两个亮、一个不亮）。一致性优先于省一次高亮。
+  // 这条变异给 'all' 重新加上那个例外，①② 会同时被它守住。
+  { id: 'client-过滤行对 all 特殊对待（三个标签不一致）', file: 'lib/client.js',
+    from: 'const selected = filter === view.key;',
+    to: 'const selected = filter === view.key && filter !== "all";' },
 ]
 
 function runSuite() {

@@ -427,18 +427,23 @@ export function createReader(store: ReaderStore): () => ReactNode {
               <option value="month">早于 1 月</option>
             </select>
           </label>
-          <span style={{ display: 'flex', gap: 4, marginLeft: 8 }}>
-            {filters.map((filter) => (
-              <button key={filter.key} type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
-                onClick={() => store.setFilter(filter.key)}
-                style={{
-                  fontWeight: state.filter === filter.key ? 600 : 400,
-                  opacity: state.filter === filter.key ? 1 : 0.65,
-                }}>
-                {filter.label}
-              </button>
-            ))}
-          </span>
+          {/* 过滤三连（全部/未读/星标）与左栏顶部那三行是**同一个状态**（都走 store.setFilter）。
+              左栏可见时由左栏承担显示与切换 —— 同一状态摆两处，读者会问「哪边算数」（用户实测反馈）。
+              左栏收起（u 键）时回落到顶栏，保证「收起导航」不会让过滤失去入口。 */}
+          {!state.navVisible && (
+            <span style={{ display: 'flex', gap: 4, marginLeft: 8 }}>
+              {filters.map((filter) => (
+                <button key={filter.key} type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
+                  onClick={() => store.setFilter(filter.key)}
+                  style={{
+                    fontWeight: state.filter === filter.key ? 600 : 400,
+                    opacity: state.filter === filter.key ? 1 : 0.65,
+                  }}>
+                  {filter.label}
+                </button>
+              ))}
+            </span>
+          )}
           <span style={{ flex: 1 }} />
           {/* 键位帮助行必须与 keys.ts 的映射逐字一致：界面标签与实现各说各话是本仓库的既有故障
               （按钮写「（R）」而实现只认 shift+R），所以 2026-10-10 改键时这里一并改。

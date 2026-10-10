@@ -41,7 +41,8 @@ export function FeedNav({ feeds, perFeedUnread, filter, navSelection, navCursor,
   onSelectFilter: (filter: Filter) => void
   onSelectFeed: (feedId: string) => void
 }): ReactNode {
-  // 生效态：选了具体源时，虚拟视图三行整组都不生效（两轴相乘，见 store.ts 的 NavSelection 注释）
+  // 生效态有两条**正交**轴：源（navSelection）与过滤（filter）各自独立生效，两者相乘（见 store.ts 的
+  // NavSelection 注释）。所以「选了源」并不意味着「过滤失效」—— 两者要各自显示自己的生效状态。
   const selectedFeedId = navSelection.kind === 'feed' ? navSelection.feedId : undefined
   // 光标态与生效态各算各的：光标可以停在源那一行而生效的仍是虚拟视图（还没按 shift+o）
   const cursorFeedId = navCursor.kind === 'feed' ? navCursor.feedId : undefined
@@ -56,7 +57,14 @@ export function FeedNav({ feeds, perFeedUnread, filter, navSelection, navCursor,
       overflowY: 'auto', fontSize: 13,
     }}>
       {VIRTUAL_VIEWS.map((view) => {
-        const selected = selectedFeedId === undefined && filter === view.key
+        // 过滤行：**生效的那一行始终点亮**，三个标签一律同等对待。
+        //
+        // 曾经在这里加过一个例外：选了源之后 filter='all' 不点亮，理由是「它不构成额外限制」、
+        // 且担心「全部」与源行同时亮被读成「正在看全部」。用户实测反馈把这个取舍打回了 ——
+        // 三个标签里两个会亮、一个不亮，读起来就是 bug，而不是「有意省了一次高亮」。
+        // **一致性优先于省一次高亮**：与源行同时亮本身是对的，源与过滤是两条正交轴，
+        // 各自表达自己生效了没有（见 store.ts 的 NavSelection 注释）。
+        const selected = filter === view.key
         const cursor = cursorFilter === view.key
         return (
         <div key={view.key} role="button" tabIndex={0}
