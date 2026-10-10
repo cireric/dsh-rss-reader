@@ -380,6 +380,21 @@ const MUTATIONS = [
   { id: 'refresh-304 成功不残留上次失败标记', file: 'lib/refresh.js',
     from: 'url: feedId,\n            title: previous?.title,',
     to: 'url: feedId,\n            lastFailure: previous?.lastFailure,\n            title: previous?.title,' },
+  // 正文写入必须**合并进当前记录**（2026-10-10 用户实测：详情页逐篇读，已读状态丢失）。
+  // 退回「用抓取前的快照整体写回」会把窗口期内并发 markRead 写进去的 readAt 抹掉 —— 丢失更新。
+  // 判据：tests/article-markread-race.test.mjs（并发 markRead + 正文写入，断言 readAt 存活）。
+  { id: 'article-用旧快照整体写回覆盖并发写入', file: 'lib/endpoints.js',
+    from: 'await target.updateItem(itemId, (current) => ({ ...current, articleFailure: fetched.reason }));',
+    to: 'await target.saveItem(itemId, { ...existing, articleFailure: fetched.reason });' },
+  // 刷新期间的写同样必须合并进当前记录（2026-10-10 与 article 端点同类）：
+  // 抓取/淘汰是长任务，期间用户完全可能标已读、加星；用快照整体写回会静默抹掉这些用户数据。
+  // 判据：tests/refresh.test.mjs 的两条「并发标已读」用例（各自注入一次窗口内并发写）。
+  { id: 'refresh-缓存淘汰用旧快照覆盖并发写入', file: 'lib/refresh.js',
+    from: "await store.updateItem(itemId, (current) => rebuildItem(current, { omit: ['article', 'articleFailure'] }));",
+    to: "await store.saveItem(itemId, rebuildItem(store.item(itemId), { omit: ['article', 'articleFailure'] }));" },
+  { id: 'refresh-正文回填用旧快照覆盖并发写入', file: 'lib/refresh.js',
+    from: "await store.updateItem(itemId, (current) => ({ ...current, summary }));",
+    to: "await store.saveItem(itemId, { ...store.item(itemId), summary });" },
 ]
 
 function runSuite() {

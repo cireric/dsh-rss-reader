@@ -119,10 +119,13 @@ async function capArticleCache(store: ReaderStore, feedId: string, maxChars: num
     }))
   const evicted = selectArticleEvictions(entries, maxChars)
   for (const itemId of evicted) {
-    const record = store.item(itemId)
-    if (record === undefined) continue
-    // 清掉 article，其余字段（含 readAt/starred）原样保留——交给 rebuildItem 按 schema 搬运
-    await store.saveItem(itemId, rebuildItem(record, { omit: ['article', 'articleFailure'] }))
+    // 条目可能在算完名单之后就不在了（退订/重建）—— 原子改写对缺失键会拒绝，所以先确认它在
+    if (store.item(itemId) === undefined) continue
+    // 清掉 article，其余字段（含 readAt/starred）原样保留——交给 rebuildItem 按 schema 搬运。
+    // ⚠️ 必须**原子读改写**：上面读到的那份 record 只是快照，若用它整体写回，会覆盖窗口期内别人
+    // 写进去的字段（用户在刷新途中标已读/加星）。2026-10-10 与 article 端点同一个丢失更新类别，
+    // 判据在 tests/refresh.test.mjs 的「正文缓存淘汰期间并发标已读」。
+    await store.updateItem(itemId, (current) => rebuildItem(current, { omit: ['article', 'articleFailure'] }))
   }
   return evicted.length
 }
@@ -250,7 +253,10 @@ async function refreshOne(
       // 已见过：只补「更完整的正文」，绝不碰 readAt / starred（已读与星标是用户数据）。
       // 这条同时承担回填：解析优先级修好后，老条目在下一次抓取里就能拿到全文。
       if (existing !== undefined && (summary?.length ?? 0) > (existing.summary?.length ?? 0)) {
-        await store.saveItem(itemId, { ...existing, summary })
+        // ⚠️ 合并进**当前**记录，不要用循环开头那份 existing 快照整体写回：抓取是长任务，
+        // 期间用户完全可能把它标已读/加星，用旧快照写回会把这些用户数据一起抹掉。
+        // （2026-10-10 与 article 端点同一个丢失更新类别，判据在 tests/refresh.test.mjs）
+        await store.updateItem(itemId, (current) => ({ ...current, summary }))
       }
       continue
     }

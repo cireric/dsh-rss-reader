@@ -151,6 +151,8 @@ function memoryStore() {
     deleteFeed: async (feedId) => { feeds.delete(feedId) },
     item: (id) => items.get(id),
     saveItem: async (id, record) => { items.set(id, record) },
+    // 原子读改写（ReaderStore 契约的一部分）：fn 在写入槽位看到当前记录，见 src/store.ts 的注释
+    updateItem: async (id, fn) => { items.set(id, fn(items.get(id))) },
     deleteItem: async (id) => { items.delete(id) },
     listItems: (feedId) => [...items.entries()].filter(([, record]) => record.feedId === feedId),
     allItems: () => [...items.entries()],

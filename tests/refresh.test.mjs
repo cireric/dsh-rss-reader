@@ -23,6 +23,8 @@ function memoryStore() {
     allItems: () => [...items.entries()],
     deleteFeed: async (feedId) => { feeds.delete(feedId); cursors.delete(feedId) },
     saveItem: async (id, record) => { items.set(id, record) },
+    // 原子读改写（ReaderStore 契约的一部分）：fn 在写入槽位看到当前记录，见 src/store.ts 的注释
+    updateItem: async (id, fn) => { items.set(id, fn(items.get(id))) },
     deleteItem: async (id) => { items.delete(id) },
     listItems: (feedId) => [...items.entries()].filter(([, record]) => record.feedId === feedId),
   }
@@ -443,5 +445,89 @@ test('正文回填的反面：源变短时不得用更短的正文覆盖更完�
     assert.equal(second[0].added, 0, '已见过不该算新增')
     assert.equal(store.items.get(itemId).summary, full,
       '已存的完整正文不得被更短的版本覆盖：降级会静默丢掉用户本来能读到的内容')
+  })
+})
+
+/* ================= 丢失更新：刷新期间的写不得覆盖并发写入（2026-10-10） ================= */
+
+/**
+ * 让**下一次**对 `id` 的写入在其「窗口内」先落一次并发写（把 readAt 写进去）。
+ *
+ * 为什么用注入而不是真实并发：这两处的窗口只有一个微任务（读与构造之间没有 await），
+ * 真实并发无法稳定复现；而缺陷的判据是明确的 —— 写入必须**合并进当前记录**，
+ * 不许用写入前那份快照整体覆盖。注入把「窗口内有人写」变成确定性调度。
+ *
+ * ⚠️ 注入发生在写入方法内部、落盘之前：
+ *   saveItem 那种「payload 早已定稿」的写法照样会把它盖掉；
+ *   updateItem 的 fn 看到的则是含 readAt 的当前值 —— 这正是两者的分水岭。
+ */
+function armConcurrentRead(store, id, readAt) {
+  let armed = true
+  const inject = (target) => {
+    if (!armed || target !== id) return
+    armed = false
+    const record = store.items.get(id)
+    if (record !== undefined) store.items.set(id, { ...record, readAt })
+  }
+  const originalSave = store.saveItem
+  const originalUpdate = store.updateItem
+  store.saveItem = async (itemId, record) => { inject(itemId); return originalSave(itemId, record) }
+  store.updateItem = async (itemId, fn) => { inject(itemId); return originalUpdate(itemId, fn) }
+}
+
+const RACE_READ_AT = '2024-06-01T00:00:00.000Z'
+
+test('正文回填期间并发标已读：不得用旧快照整体写回（丢失更新）', async () => {
+  const store = memoryStore()
+  const item = { title: '一篇', link: 'https://ex.test/race-backfill', guid: 'g-race-backfill', date: 'Mon, 01 Jan 2024 00:00:00 GMT' }
+  let description = '短摘要'
+  await withServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/rss+xml' })
+    res.end(rss([{ ...item, description }]))
+  }, async (base) => {
+    await refreshFeeds([base + '/feed.xml'], store, BASE_OPTIONS)
+    const itemId = [...store.items.keys()][0]
+    assert.equal(store.items.get(itemId).readAt, undefined, '前置条件：该条目未读')
+
+    // 回填这一次写的窗口内，用户把它标成已读（真机上由详情页切换/点击触发）
+    armConcurrentRead(store, itemId, RACE_READ_AT)
+    description = '完整正文。'.repeat(300)
+    await refreshFeeds([base + '/feed.xml'], store, BASE_OPTIONS)
+
+    assert.equal(store.items.get(itemId).summary, description, '前置条件：回填确实发生了')
+    assert.equal(store.items.get(itemId).readAt, RACE_READ_AT,
+      '回填不得抹掉窗口期内写入的已读态 —— 用户数据被并发写覆盖，正是详情页丢已读的同一类缺陷')
+  })
+})
+
+test('正文缓存淘汰期间并发标已读：不得用旧快照整体写回（丢失更新）', async () => {
+  const store = memoryStore()
+  await withServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/rss+xml' })
+    res.end(rss(THREE_ITEMS))
+  }, async (base) => {
+    const feedUrl = base + '/feed.xml'
+    await refreshFeeds([feedUrl], store, BASE_OPTIONS)
+    const ids = [...store.items.keys()]
+    assert.equal(ids.length, 3)
+
+    // 三条都挂正文缓存（各 1000 字符），抓取时间递增 ⇒ 淘汰从最旧开始（见 selectArticleEvictions）
+    for (const [index, id] of ids.entries()) {
+      const record = store.items.get(id)
+      await store.saveItem(id, {
+        ...record,
+        article: { fetchedAt: '2024-0' + (index + 1) + '-01T00:00:00.000Z', paragraphs: ['x'.repeat(1000)] },
+      })
+    }
+    const oldest = ids[0]
+    assert.ok(store.items.get(oldest).article !== undefined, '前置条件：最旧那条有正文缓存')
+
+    // 淘汰这一次写的窗口内，用户把它标成已读
+    armConcurrentRead(store, oldest, RACE_READ_AT)
+    await refreshFeeds([feedUrl], store, { ...BASE_OPTIONS, maxArticleCacheChars: 1500 })
+
+    assert.equal(store.items.get(oldest).article, undefined, '前置条件：最旧那条的缓存已被淘汰')
+    assert.equal(store.items.get(oldest).readAt, RACE_READ_AT,
+      '淘汰缓存只能去掉 article，不得抹掉窗口期内写入的已读态（丢失更新）')
   })
 })

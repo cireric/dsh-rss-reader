@@ -210,8 +210,11 @@ const ARTICLE_REVISION = EXTRACTOR_REVISION
             maxBytes: config.articleMaxBytes,
           })
           if (fetched.kind === 'failed') {
-            // 失败原因存进条目：用户重开时能看到，且不必再等一次网络往返
-            await target.saveItem(itemId, { ...existing, articleFailure: fetched.reason })
+            // 失败原因存进条目：用户重开时能看到，且不必再等一次网络往返。
+            // ⚠️ 必须**合并进当前记录**（updateItem），不能用抓取前那份 existing 快照整体写回 ——
+            // 抓取窗口里客户端并发发出的 markRead 已经把 readAt 写进去了，用旧快照写回会把它抹掉。
+            // 2026-10-10 用户实测：详情页逐篇读，已读状态丢失（缓存命中的条目因早退不写盘而幸免）。
+            await target.updateItem(itemId, (current) => ({ ...current, articleFailure: fetched.reason }))
             log('取正文失败：' + existing.link + ' → ' + fetched.reason)
             return ok({ itemId, cached: false, failure: fetched.reason })
           }
@@ -222,8 +225,11 @@ const ARTICLE_REVISION = EXTRACTOR_REVISION
             blocks: fetched.blocks,
             frameable: fetched.frameable,
           }
-          // 成功要清掉旧的失败原因：交给 rebuildItem（它按 schema 字段表搬运，不会漏字段）
-          await target.saveItem(itemId, rebuildItem(existing, { omit: ['articleFailure'], set: { article } }))
+          // 成功要清掉旧的失败原因：交给 rebuildItem（它按 schema 字段表搬运，不会漏字段）。
+          // 基准必须是**当前**记录、不是抓取前的 existing —— 否则会抹掉窗口期内的并发写
+          // （readAt），与上面失败路径同一个丢失更新（用户实测的那个 bug）。
+          await target.updateItem(itemId, (current) =>
+            rebuildItem(current, { omit: ['articleFailure'], set: { article } }))
           log('取正文成功：' + existing.link + '（' + fetched.blocks.length + ' 块 ' +
             blocksToText(fetched.blocks).length + ' 字符）')
           return ok({ itemId, cached: false, title: article.title, blocks: article.blocks, frameable: article.frameable })
