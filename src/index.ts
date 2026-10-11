@@ -153,10 +153,11 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
   const articleAttempts = new Map<string, number>()
 
   const log = (message: string): void => {
-    // ⚠️ 时钟只取**一次**，行首时间戳与文件名必须来自同一个时刻：这里若各取一次 new Date()，
-    // 中间还隔着一次 ctx.logger.info（同步但可能触发宿主的同步副作用，窗口远不止亚毫秒），
-    // 跨过 UTC 零点时就会出现「2026-10-11T23:59:59.999Z 这一行落在 reader-2026-10-12.log 里」——
-    // 排障时按日期找日志会找不到那一行，而它明明在。一次取值就从根上排除这种跨界。
+    // ⚠️ 时钟只取**一次**，行首时间戳与文件名必须来自同一个时刻。
+    // 各取一次 new Date() 时，两次读取之间隔着一次 ctx.logger?.info?.() 调用 —— 它的耗时由宿主
+    // 实现决定，本插件无从约束（本仓库的取向是「不假设调用方快」）。跨过 UTC 零点时就会出现
+    // 「2026-10-11T23:59:59.999Z 这一行落在 reader-2026-10-12.log 里」：排障时按日期找日志
+    // 会找不到那一行，而它明明在。一次取值就从根上排除这种跨界，不依赖「这两行之间足够快」。
     const at = new Date()
     const line = '[' + at.toISOString() + '] ' + message
     ctx.logger?.info?.(line)
