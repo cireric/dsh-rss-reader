@@ -716,6 +716,37 @@ const MUTATIONS = [
     // 判据：tests/nav-selection.test.mjs 的「在途时忽略重复的 loadMore」。
     from: 'if (cursor === void 0 || state.loadingMore)',
     to: 'if (cursor === void 0)' },
+  // ── 刷新日志按天分文件 + 保留 14 天（2026-10-11 大规模存储任务 7）────────────────────
+  // 病象：日志是一个写到天荒地老的单文件（本机实测 503 KB），且与用户数据分居两处。
+  // 修法：搬进 storages/rss-reader/，按 UTC 日期分文件，装载时 prune 掉超期的。
+  //
+  // ⚠️ 这一族「改坏」的代价与别处不同级：**prune 一旦宽了一个字符，删掉的就是用户的订阅真相
+  // （config.json）或已读态/星标（rss.db）** —— 不可逆，且界面上只表现为「订阅少了一批」，
+  // 不会报错。所以文件名判据与保留窗口边界各钉一条，两条 from 均照**编译产物**
+  // lib/storage/log-file.js 的真实形状逐字抄，并已独立核对 OCCURRENCES=1（docs/pitfalls.md 一、1.4）。
+  { id: 'log-文件名判据放宽成前缀匹配', file: 'lib/storage/log-file.js',
+    // 这是本任务最危险的一处：`/^reader-/` 下 reader-backup.log、reader-2026-13-99.log 全都
+    // 「认得出」（dayMsOf 返回 undefined 那条已在正则层被绕开），凡是名字以 reader- 开头的
+    // 邻居都会被当成日志删掉；再松一点（把日志放进数据目录却用 `*.log`）就是删别的日志。
+    // 判据：tests/log-file.test.mjs 的「对认不出的文件名既不删也不崩」与「只删超期 reader-*.log」。
+    // lib/storage/log-file.js:29，独立实测 OCCURRENCES=1。
+    from: 'const LOG_NAME = /^reader-(\\d{4})-(\\d{2})-(\\d{2})\\.log$/;',
+    to: 'const LOG_NAME = /^reader-/;' },
+  { id: 'log-保留窗口多留一天（边界偏移）', file: 'lib/storage/log-file.js',
+    // keepDays 少减一天 ⇒ 窗口变成「今天 + 前 14 天」= 15 份。这类错**没有症状**：日志多留一份
+    // 看起来永远是对的，只有钉在两侧的边界用例能抓到它（只断言「有老文件被删」的用例放走它）。
+    // 判据：tests/log-file.test.mjs 的「保留窗口是闭区间：今天 + 前 13 天留，第 14 天前删」——
+    // 它断言第 14 天前那份**必须**消失，同时第 13 天前那份**必须**还在。
+    // lib/storage/log-file.js:96，独立实测 OCCURRENCES=1。
+    from: 'const cutoff = today - (keepDays - 1) * DAY_MS;',
+    to: 'const cutoff = today - keepDays * DAY_MS;' },
+  // ⚠️ 本轮**刻意没加**的两条，都是实测（或推导即知）的**等价变异**，按 AGENTS.md 不入门槛：
+  // ① 「删掉 day === undefined 这半边」（只留 day >= cutoff）：dayMsOf 认不出时返回 undefined 而非
+  //    任何数字，undefined >= cutoff 恒 false ⇒ 与 day === undefined 同样是 continue，**没有输入**
+  //    能区分两者。真正守着「认不出就跳过」的是上面那条正则变异。
+  // ② 「prune 改成看 mtime」：mtime 判定需要 statSync，改动已经不止一处（要换掉整个循环体），
+  //    而它表达的行为差异（文件名 vs 修改时间）已由「对认不出的文件名…且判据只看文件名不看 mtime」
+  //    那条用例钉住（6 个认不出的名字 mtime 全设成 2000 年，混进 mtime 就会被一起删掉）。
 ]
 
 function runSuite() {

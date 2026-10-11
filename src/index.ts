@@ -16,12 +16,12 @@ import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { DatabaseSync } from 'node:sqlite'
 import { appendFileSync, mkdirSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import z from 'schemastery'
 import { readerDomain } from './domain.js'
 import { type ReaderStore } from './store.js'
 import { storageRoot, ensureStorageRoot } from './storage/paths.js'
+import { dailyLogPath, pruneOldLogs } from './storage/log-file.js'
 import { openDatabase, migrateSchema } from './storage/db.js'
 import { migrateFromDomainFile } from './storage/migrate.js'
 import { createSqliteStore } from './store-sqlite.js'
@@ -124,12 +124,24 @@ async function openDomainWithRetry(
 export function apply(ctx: Context, rawConfig: ConfigShape): void {
   // 先解析配置：下面 logFile 那一行就要用 config，所以它必须是 apply 的第一件事
   const config = Config(rawConfig ?? {} as ConfigShape)
-  const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
-  const logFile = config.logFile || join(dshHome, 'state', 'dsh-rss-reader', 'reader.log')
   // 自持存储的落点：**不传 dshHome**，交给 storageRoot → resolveDshHome（Task 2 的唯一算法）。
-  // 上面那份手抄的 dshHome 只留给日志；在 $DSH_HOME 为纯空白时它会把路径算到 CWD 上，
-  // 而 resolveDshHome 会把空白视为未设置（src/storage/paths.ts 的注释就是记的这件事）。
+  //
+  // 这里原先还手抄过一份 `process.env.DSH_HOME || join(homedir(), '.dsh')`，只给旧日志路径用
+  // （$DSH_HOME 为纯空白时它会把路径算到 CWD 上，而 resolveDshHome 把空白视为未设置 —— 见
+  // src/storage/paths.ts 的注释）。日志搬进存储根之后它失去唯一用途，随之删掉：路径来源回到一份。
   const storagesRoot = storageRoot()
+  // 刷新日志的落点：默认是**插件自己的存储根**下的按天文件（storages/rss-reader/reader-YYYY-MM-DD.log）。
+  // 旧路径 <DSH_HOME>/state/dsh-rss-reader/reader.log 是「一个文件写到天荒地老」（本机实测 503 KB），
+  // 且与用户数据分居两处，排查时得先知道路径才找得到。搬进存储根之后日志与 config.json / rss.db 同住，
+  // 按天分文件也让「保留多少天」成为一条能真的执行的策略（见下面装载时的 prune）。
+  //
+  // 非空的 config.logFile 是一个**操作者显式指定的固定文件**：人在说话，压过按天的默认值。
+  // 默认路径里的日期一律取 UTC —— 与日志行首 toISOString() 的时间戳同一口径，否则
+  // 「这条日志属于哪一天」会随机器所在时区漂移（本机 CST，差 8 小时），而文件里的行仍写着 UTC。
+  //
+  // ⚠️ 默认落点**推迟到每次写日志时**才算（见下面的 log 函数）：DSH 是长驻进程，一跑就是几天，
+  // 装载时算一次会把之后所有日志都写进「装载那天」的文件里 —— 按天分文件在常见路径上当场落空。
+  const logFile = config.logFile
   // 老域文件的落点：存储域的 base bundle 把 root 设为 <DSH_HOME>/storages，域名 rss_reader
   // ⇒ <storages>/rss_reader.json。从 storageRoot 的父目录推，不另手抄一份 storages 路径 ——
   // 拼错的后果是「读不到老文件 ⇒ 静默走首装」，那在用户眼里就是订阅全没了（Review Focus 1）。
@@ -143,9 +155,18 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
   const log = (message: string): void => {
     const line = '[' + new Date().toISOString() + '] ' + message
     ctx.logger?.info?.(line)
+    // 默认路径按**当天**现算：上面那行的 toISOString() 与本函数同一次取时刻，两者永远同一天。
+    const target = logFile === '' ? dailyLogPath(storagesRoot, new Date()) : logFile
     try {
-      mkdirSync(dirname(logFile), { recursive: true })
-      appendFileSync(logFile, line + '\n')
+      // 存储根（默认落点）必须是 0700：这一行**可能早于 ensureStorageRoot 跑**（「配置未经解析」
+      // 的提示就在装载最前面），而 mkdirSync 的默认权限受 umask 支配（通常 0755）。等
+      // ensureStorageRoot 到时目录已存在，按它自己的规矩「已存在的目录不改权限」——
+      // 存储根的 0700 会从这里被静默放宽，而目录里放的是订阅与已读态。
+      // 显式指定的 config.logFile 保持旧行为（只建目录、不动权限）：那是操作者自己挑的地方。
+      mkdirSync(dirname(target), logFile === ''
+        ? { recursive: true, mode: 0o700 }
+        : { recursive: true })
+      appendFileSync(target, line + '\n')
     } catch (error) {
       // 日志写不进去要可见，但不能因此拖垮插件本身
       ctx.logger?.warn?.('[dsh-rss-reader] 写刷新日志失败：' + String(error))
@@ -315,6 +336,16 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
         // 建目录 → 开库（跑 pragma + 版本闸）→ 建表盖章 → 迁移 → 建 store。
         // 少了 migrateSchema 会被 store 的版本握手当场拒绝（响亮的失败，好过写到一半才发现）。
         ensureStorageRoot(storagesRoot)
+        // 装载时清一次超期日志（保留 14 天）。失败**不许拖垮装载** —— 与 log() 的写失败同一条纪律：
+        // 日志是诊断面，不是数据面，它坏掉要可见，但不能让插件因此起不来。
+        if (config.logFile === '') {
+          try {
+            const pruned = pruneOldLogs(storagesRoot)
+            if (pruned > 0) log('清理超期日志 ' + pruned + ' 个（保留 14 天）')
+          } catch (error) {
+            log('清理超期日志失败（不影响装载）：' + String(error))
+          }
+        }
         const db = openDatabase(join(storagesRoot, 'rss.db'))
         migrateSchema(db)
         const migrated = await migrateFromDomainFile({
