@@ -431,6 +431,26 @@ const MUTATIONS = [
     // 浮窗开着按 Esc → 走「关文章」分支，浮窗留在屏幕上（与上面第三条同一个病象、不同根因）。
     from: '\t\t\t\t\troot,\n\t\t\t\t\tstore,\n\t\t\t\t\thelpOpen',
     to: '\t\t\t\t\troot,\n\t\t\t\t\tstore' },
+  // ── 自持存储骨架（2026-10-11 大规模存储任务 2）─────────────────────────────────
+  // 这三个模块是「下次装载还能不能读到用户数据」的全部承重点，而它们的失效**全都安静**：
+  // 版本闸写错 ⇒ 好库被当成坏库拒掉，界面表现是「重启之后订阅全没了」；
+  // 订阅文件的版本闸失效 ⇒ 认不出的格式被硬按 v1 解释；目录权限放宽 ⇒ 数据目录变成全机可读。
+  // 三条 from 均照**编译产物的真实形状**写（docs/pitfalls.md 一、1.4），并已独立实测 OCCURRENCES=1。
+  { id: 'storage-版本闸把好库一起拒了', file: 'lib/storage/db.js',
+    // 删掉「且不是当前版本」这半边后，闸变成「非 0 即拒」⇒ **已经迁移好的库第二次装载就打不开**。
+    // 判据：tests/storage-skeleton.test.mjs 的「openDatabase 能重开已经建好的库」。
+    from: 'if (onDisk !== 0 && onDisk !== SCHEMA_VERSION) {',
+    to: 'if (onDisk !== 0) {' },
+  { id: 'storage-订阅文件版本闸失效', file: 'lib/storage/config-file.js',
+    // 版本不认时必须响亮失败（未来格式硬按 v1 解释会丢掉本版不认识的字段）。
+    // 判据：tests/storage-skeleton.test.mjs 的「readConfigFile 对损坏/形状不对/版本不认的 config.json 一律抛错」。
+    from: 'if (record.version !== CURRENT_CONFIG_VERSION) {',
+    to: 'if (false) {' },
+  { id: 'storage-目录权限放宽到 0777', file: 'lib/storage/paths.js',
+    // 库里是用户的订阅与已读态；权限放宽后同机其他账户可读，而这一点在界面上完全不可见。
+    // 判据：tests/storage-skeleton.test.mjs 的「ensureStorageRoot 递归建出 0700 目录」。
+    from: 'mkdirSync(root, { recursive: true, mode: 0o700 });',
+    to: 'mkdirSync(root, { recursive: true, mode: 0o777 });' },
 ]
 
 function runSuite() {

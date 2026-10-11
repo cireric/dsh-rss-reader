@@ -181,6 +181,40 @@ test('openDatabase 拒绝更高版本的库：响亮失败、消息带路径、�
   rmSync(base, { recursive: true, force: true })
 })
 
+test('openDatabase 能重开已经建好的库（第二次装载不许把好库当坏库拒绝）', () => {
+  const base = tempDir('reopen')
+  const root = join(base, 'storages', 'rss-reader')
+  ensureStorageRoot(root)
+  const dbPath = join(root, 'rss.db')
+  try {
+    const first = openDatabase(dbPath)
+    try {
+      migrateSchema(first)
+    } finally {
+      first.close()
+    }
+
+    // 插件每次装载都会重开这个库。上面那道「拒绝不认识的版本」的闸一旦写成「非 0 即拒」，
+    // **第一次装好的库第二次就再也打不开** —— 用户看到的是「重启之后订阅全没了」，
+    // 而本机数据其实完好。这条断言就是那次重启。
+    const second = openDatabase(dbPath)
+    try {
+      assert.equal(
+        second.prepare('PRAGMA user_version').get().user_version,
+        SCHEMA_VERSION,
+        '重开已经建好的库必须成功',
+      )
+      migrateSchema(second) // 已建好的库上必须是**无操作**（装载路径每次都会走一遍）
+      assert.equal(second.prepare('PRAGMA user_version').get().user_version, SCHEMA_VERSION)
+      assert.equal(second.prepare('SELECT COUNT(*) AS n FROM items').get().n, 0, '表必须还在')
+    } finally {
+      second.close()
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
+})
+
 test('migrateSchema 物化 items/texts/cursors，recency = COALESCE(published_at, fetched_at)', () => {
   const db = openDatabase(':memory:')
   try {
