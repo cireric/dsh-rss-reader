@@ -18,7 +18,6 @@ import type { DatabaseSync } from 'node:sqlite'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import z from 'schemastery'
-import { readerDomain } from './domain.js'
 import { type ReaderStore } from './store.js'
 import { storageRoot, ensureStorageRoot } from './storage/paths.js'
 import { dailyLogPath, pruneOldLogs } from './storage/log-file.js'
@@ -44,12 +43,20 @@ import { ROUTE_PATH, type Endpoint, type ItemView, type Overview, type RpcResult
 export const name = '@dsh-external/dsh-rss-reader'
 
 /**
- * 硬依赖：存储域 + RPC 通道 + web server。
+ * 硬依赖：RPC 通道 + web server。
  * connection 的 rpc.handle 会把逻辑通道落成一条物理路由，因此它内部要取 ctx.webServer——
  * 自己没声明注入就抛 "cannot get property webServer without inject"（实测，注入器把这条
  * 原本会被吞掉的错误回传后一眼定位）。
+ *
+ * ⚠️ 这里曾声明过 `storageDomain`，Task 8 随自持存储一并摘掉：插件不再打开任何存储域，
+ * 留着会让「切回存储域」看起来只差改一行代码，实际是数据已经搬走了、装回来只会读到空库。
+ *
+ * ⚠️ 但**依赖还在**（`package.json` 的 peerDependency + `build.sh` 的 link_pkg）：
+ * `src/domain.ts` 仍 import `defineDomain`（定义 readerDomain），`src/store.ts` 仍 import type，
+ * 删掉那条 link 会让从零 build 直接 TS2307（实测）。存活的唯一消费者是旧适配器 `createStore`，
+ * 它只被测试当同义性基线用（见 scripts/build.sh 的注释）。**别把这三处的删除当成一步**。
  */
-export const inject = ['storageDomain', 'connection', 'webServer']
+export const inject = ['connection', 'webServer']
 
 function summarize(outcomes: readonly FeedOutcome[]): string {
   if (outcomes.length === 0) return '未配置订阅源（Config.feeds 为空），跳过刷新'
@@ -66,59 +73,6 @@ function summarize(outcomes: readonly FeedOutcome[]): string {
     return notes.length === 0 ? head : head + '（' + notes.join('；') + '）'
   })
   return '刷新完成，共 ' + outcomes.length + ' 源:\n' + lines.join('\n')
-}
-
-const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
-
-/**
- * 打开存储域，对 already-open 退避重试。
- *
- * ⚠️ **已经没有任何调用方了**（Task 4 的切换把入口换成自持存储 + 迁移），保留它是**刻意的**：
- * 计划把它交给 Task 8 与 `inject` / `peerDependencies` / `build.sh` 的三处装配引用一起摘 ——
- * 现在单独删掉，等于在 cutover 这一步顺手拆掉中途回退的把手。**不要**因为「没人调用」就删它。
- *
- * 热重载时上一代 fiber 的 close() 可能还在排空写队列，新 fiber 立刻 open 同名域
- * 会撞 `already-open`——这不是配置错误，等一下就好。超过重试次数仍然失败就把
- * 最后一次错误抛出去（响亮失败），并已逐次写进日志。
- */
-async function openDomainWithRetry(
-  ctx: Context,
-  log: (message: string) => void,
-  isCancelled?: () => boolean,
-): Promise<Awaited<ReturnType<Context['storageDomain']['open']>>> {
-  let lastError: unknown
-  for (let attempt = 1; attempt <= 6; attempt += 1) {
-    if (isCancelled?.()) throw new Error('装载已取消（fiber 已卸载）')
-    try {
-      return await ctx.storageDomain.open(readerDomain)
-    } catch (error) {
-      lastError = error
-      const alreadyOpen = error instanceof Error && error.message.includes('already open')
-      log('打开存储域失败（第 ' + attempt + '/6 次）：' + String(error))
-
-      // 重载器丢弃了上一代 fiber、它的 disposer 又没跑到时，域句柄会变成
-      // 无人可及的孤儿，名字被永久占用。设施把已打开的域作为诊断面暴露
-      // （DomainFacility.get），这是唯一能在进程内收尾的口子。只在前几次
-      // 退避仍失败后动手，且必须响亮记录——它不是正常路径。
-      if (alreadyOpen && attempt === 3) {
-        const orphan = ctx.storageDomain.get(readerDomain.name)
-        if (orphan) {
-          log('上一代 fiber 遗留域句柄（无持有者），接管并关闭：' + readerDomain.name)
-          try {
-            await orphan.close()
-            log('孤儿域句柄已释放')
-          } catch (closeError) {
-            log('释放孤儿域句柄失败：' + String(closeError))
-          }
-        } else {
-          log('设施报告域被占用，但取不到句柄：等待排空')
-        }
-      }
-
-      if (attempt < 6) await delay(200 * attempt)
-    }
-  }
-  throw lastError
 }
 
 export function apply(ctx: Context, rawConfig: ConfigShape): void {

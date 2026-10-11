@@ -20,7 +20,15 @@
 >   `articleRecordSchema.fetchedAt` 是**必填**（`src/domain.ts:58`），且是正文缓存淘汰的排序键
 >   （`src/refresh.ts:118` 的 `record.article?.fetchedAt`）。原参考 schema 无列可放它，会导致
 >   「缓存超限从最旧清起」退化成整表不可判（全部时间戳相同）。实现已加该列，此处同步。
-> **状态**：选型已拍板（§9.1）；先决条件「备份覆盖」已完成（§9.2）；插件实现尚未开始。
+> - 2026-10-11 · 实施收尾（Task 8）：⑦本文 §4.6 提到的「删除 openDomainWithRetry + 孤儿句柄接管」
+>   与 §7 的「开域后全表跑 normalizeLegacyArticles」两条待删项**已执行**；`inject` 里的
+>   `storageDomain` 声明也摘掉。**但 `peerDependencies` 与 `build.sh` 的 `link_pkg` 保留**：
+>   `src/domain.ts` 的 `defineDomain` 是运行期 import、`src/store.ts` 是 import type，
+>   删掉那条 link 后从零 build 直接 TS2307 ×2（实测，隔离副本里复现）。
+>   存活的存储域对象只剩 `src/store.ts` 的 `createStore` 与 `src/domain.ts` 的 `readerDomain`
+>   （测试的「旧实现 ↔ 新实现」同义性基线用，且是变异门槛的判据，不在装载路径上）——
+>   所以本 spec 「100% 自持、不再使用 ctx.storageDomain」的结论仍然成立，无正文改动。
+> **状态**：选型已拍板（§9.1）；先决条件「备份覆盖」已完成（§9.2）；**插件实现已全部落地**（任务 2–8）。
 >
 > 证据等级沿用仓库约定：`实测`（本机真跑）/ `源码核对`（带 file:line）/
 > `外推`（由实测线性推得，写明算式）/ `估算`（无样本兜底）。

@@ -2,12 +2,14 @@
  * 自持存储的落点与目录权限（host 半）。
  *
  * **为什么必须委托 `resolveDshHome` 而不是自己读 `process.env.DSH_HOME`**：
- * `src/index.ts:119` 已经手抄过一份 `process.env.DSH_HOME || join(homedir(), '.dsh')`。
- * 两份的差别不在「谁更对」，而在**留成两份**：官方实现把「空串/纯空白 = 未设置」当未设置
- * （源码核对 packages/util/home-paths/src/index.ts:87-91），手抄版会把它当路径用 ——
- * `DSH_HOME='   '` 时手抄版得到 `'   /storages/rss-reader'` 这种相对路径，数据悄悄落到
- * 进程的 CWD 上；官方实现回落 `~/.dsh`。
- * 本模块是这个落点的**唯一**来源，后续任务（迁移、日志、库）都从这里取，不再各算一份。
+ * `src/index.ts` 曾经手抄过一份 `process.env.DSH_HOME || join(homedir(), '.dsh')`，
+ * Task 7 随「刷新日志搬进存储根」把那一份删了（本注释原先指着它的行号 `src/index.ts:119`，
+ * 那行早已不存在，索引会指向错误的代码）。
+ * 留这份记录是因为**教训还在**：两份的差别不在「谁更对」，而在**留成两份**——官方实现把
+ * 「空串/纯空白 = 未设置」当未设置（源码核对 packages/util/home-paths/src/index.ts:87-91），
+ * 手抄版会把它当路径用 —— `DSH_HOME='   '` 时手抄版得到 `'   /storages/rss-reader'` 这种相对路径，
+ * 数据悄悄落到进程的 CWD 上；官方实现回落 `~/.dsh`。
+ * 本模块是这个落点的**唯一**来源，迁移 / 日志 / 库都从这里取，不再各算一份。
  */
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'

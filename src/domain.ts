@@ -1,11 +1,27 @@
 /**
- * 持久化域声明（host 半）。
+ * 记录 schema 的家（host 半）。
  *
- * 用宿主自带的 ctx.storageDomain：schema 校验 + 落盘后才 resolve + domain/changed，
- * 迁移/并发/落盘语义由设施负责（别自己上 SQLite）。
+ * **本模块现在是「类型与纯函数的归属」，不再是落盘方案的声明。** 插件的真实数据面已
+ * 100% 自持（node:sqlite，落点 $DSH_HOME/storages/rss-reader/，DDL 在 src/storage/db.ts），
+ * `ctx.storageDomain` 不再参与运行（见 docs/superpowers/specs/2026-10-11-large-scale-storage.md）。
+ * 原来的「别自己上 SQLite」那条约定已作废，理由与实测数字记在 docs/pitfalls.md §4.9。
  *
- * 域名与表名必须匹配 UNIT_NAME_RE = /^[a-z][a-z0-9_]*$/（连字符非法，故用下划线）。
- * 记录 schema 用 zod——设施要求；插件 Config 仍用 schemastery——宿主约定。
+ * 为什么这些 zod schema 仍然留着（它们是下游真在用的东西）：
+ *   - `feedRecordSchema` / `itemRecordSchema` / `cursorRecordSchema` 仍被
+ *     src/storage/config-file.ts（写前校验订阅）、src/storage/migrate.ts（读老域文件）、
+ *     src/store-sqlite.ts（行记录与 zod 记录的互转）import —— 库侧把行读成这些 zod 类型，
+ *     保证「同一份形状」两处不漂。
+ *   - `rebuildItem` / `normalizeLegacyArticle` 是纯函数，被 refresh / endpoints /
+ *     identity-repair / migrate 直接调用。
+ *   - 下文的 `readerDomain`（`defineDomain`）目前**仅**由 src/store.ts 的 `createStore`
+ *     使用，而 createStore 是**旧存储域适配器**，只为测试里的「旧实现 ↔ 自持实现」同义性
+ *     断言保留（见 tests/overview-paging.test.mjs，也是 scripts/mutation-test.mjs 的判据）。
+ *     它已不在生产路径上，但**它让本模块仍 import 存储域包**（defineDomain/domainTable 是
+ *     运行期符号，不是类型）⇒ `package.json` 的 peerDependency 与 `build.sh` 的 link_pkg
+ *     **暂时都不能删**（删了从零 build 报 TS2307，Task 8 实测）。删它要连 createStore 一起走。
+ *
+ * 记录 schema 用 zod——与设施的老约定一致，且 z.infer 出的类型是 store/端点/迁移三方
+ * 共享的那一份；插件 Config 用 schemastery——那是宿主约定，别混。
  */
 import { z } from 'zod'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'

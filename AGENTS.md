@@ -12,7 +12,10 @@
 
 DSH 插件的**两半**：host 半 `src/`（Node ESM，tsc → `lib/`）；client 半 `src/client/`
 （React，tsdown 打成单文件 `lib/client.js`）。入口是侧栏图标 → 主栏阅读器；
-数据落宿主存储域（`$DSH_HOME/storages/rss_reader.json`，schema 在 `src/domain.ts`）。
+数据落**插件自持**存储（`$DSH_HOME/storages/rss-reader/`：`rss.db` 是条目库，
+DDL 在 `src/storage/db.ts`；`config.json` 放订阅与视图偏好；`reader-YYYY-MM-DD.log` 是刷新日志）。
+`src/domain.ts` 仍持有 zod 记录 schema（库侧与迁移共用），但**不再**声明落盘方案。
+老存储域文件 `storages/rss_reader.json` 只读不写（迁移的源）。
 
 ## 完成定义
 
@@ -32,8 +35,9 @@ npm run mutation         # 每条变异都必须被抓到，0 幸存（在隔离
 `typecheck / test / mutation` 留到本轮收尾跑一次。
 
 **测试全绿 ≠ 插件能用。** 本仓库有过「全套测试全绿 + 两个构建全过，而插件在 DSH 里是坏的」。
-发布前走真机三步：`dev_reload_package`（前后都应 `[active]`）→ 看
-`$DSH_HOME/state/dsh-rss-reader/reader.log` 无「装载失败」→
+发布前走真机三步：`dev_reload_package`（前后都应 `[active]`）→ 看**今天**的
+`$DSH_HOME/storages/rss-reader/reader-$(date -u +%F).log` 无「装载失败」（按天分文件，
+只保留 14 天；别再看 `state/dsh-rss-reader/reader.log`——自持后那个文件永远不再写）→
 `curl -X POST http://127.0.0.1:3080/rss-reader-api -d '{"endpoint":"overview","payload":{}}'` 得 401（路由活着）。
 
 ## 工作约定

@@ -87,8 +87,15 @@ link_pnpm() {
 link_pnpm fast-xml-parser fast-xml-parser
 link_pnpm zod zod
 # 自持存储的路径解析（resolveDshHome）：$DSH_HOME 的优先级语义（空白视为未设置）只有官方实现里
-# 有，src/index.ts:119 那份手抄版在 DSH_HOME 为纯空白时会把数据落到 CWD 上
+# 有，src/storage/paths.ts 曾手抄过一份，在 DSH_HOME 为纯空白时会把数据落到 CWD 上（Task 7 已删）
 link_pkg @deepseek-ai/dsh-home-paths packages/util/home-paths
+# ⚠️ 存储域这条 link **不再**服务于装载路径（Task 8 起插件一次也不 open 存储域），
+# 但**还不能删**：src/domain.ts:24 是运行期 import（defineDomain/domainTable 定义 readerDomain），
+# src/store.ts:7 是 import type。删了这条，从零 build 直接 TS2307 ×2（实测，隔离副本里验过）。
+# 唯一的消费者是旧适配器 src/store.ts 的 createStore —— 它只被测试当
+# 「旧实现 ↔ 自持实现」的同义性基线驱动（tests/overview-paging.test.mjs，且是变异门槛
+# scripts/mutation-test.mjs:691 的判据）。等那套基线撤掉，这里和 package.json 的
+# peerDependency 才能一起删。
 link_pkg @deepseek-ai/dsh-storage-domain packages/storage/storage-domain
 link_pkg @deepseek-ai/dsh-client-connection packages/client/connection
 link_pkg @deepseek-ai/dsh-host-webserver packages/host/webserver
