@@ -87,7 +87,7 @@ export async function migrateFromDomainFile(options: MigrateOptions): Promise<Mi
   // 闸门二：items 非空、但 config.json 不在 ⇒ 上次迁移「库提交了、配置没写成」就中断了。
   // 条目已经是事实，只补配置；重放条目只会得到重复行（Review Focus 3）。
   const existingItems = countItems(db)
-  if (configPresent(configPath)) {
+  if (configAlreadyMigrated(configPath)) {
     log('迁移跳过：' + configPath + ' 已存在（订阅以它为准，不重放老文件）')
     return SKIP
   }
@@ -137,17 +137,29 @@ export async function migrateFromDomainFile(options: MigrateOptions): Promise<Mi
 }
 
 /**
- * 分得清「没有这个文件」与「有但读不出来」——后者是 Review Focus 1 的缺陷本体：
- * 把一次读取失败当成「还没迁移过」，迁移就会去覆盖一份自己都读不出的文件。
+ * config.json 是不是「已经迁移过」的标志。
+ *
+ * **口径必须与 {@link readLegacy} 逐字相同：只有 ENOENT 算「没有」，其余 errno 一律抛错。**
+ * 第一版把 EACCES / EISDIR 也归成「在」⇒ 直接 `skipped`，等于让「读不出来」冒充「已迁移」：
+ * 一份**尚未迁移**的库会被静默跳过，而错误信息指向「config.json 已存在」——把人引向错误的
+ * 排查方向（将来 ELOOP / EIO 会走进同一个分支）。
+ *
+ * 两类事实不同名也不同路：「已迁移」要求读得动那份文件（它同时是订阅的唯一可备份副本），
+ * 「读不出来」是必须带路径报出去的故障。压成一个布尔的那一刻，判断就已经错了。
+ *
+ * @throws 路径存在但读不出来（EACCES / EISDIR / ELOOP / EIO …）时，消息含路径。
  */
-function configPresent(path: string): boolean {
+function configAlreadyMigrated(path: string): boolean {
   try {
     readFileSync(path, 'utf8')
     return true
   } catch (error) {
     if (errnoOf(error) === 'ENOENT') return false
-    // EISDIR / EACCES：按「已存在」处理，让 store 在读它时响亮失败（它自己的语义就是那样）
-    return true
+    throw new Error(
+      '读取订阅文件 ' + path + ' 失败（它既不可读、也不表示「尚未迁移」，无法判断是否已迁移；' +
+        '已保留原文件，未做任何写入）：' + String(error),
+      { cause: error },
+    )
   }
 }
 

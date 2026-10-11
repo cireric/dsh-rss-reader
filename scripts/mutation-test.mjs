@@ -566,7 +566,7 @@ const MUTATIONS = [
     // 闸门一失效 ⇒ config.json 已经在了还去拿老文件覆盖一遍。判据不是「重复行」（id 是主键，
     // upsert 看不出重复），而是 tests/migrate.test.mjs 的「config.json 写不进去时…」那条：
     // 库里那 3 行、订阅映射都会被一份旧的老文件回退。
-    from: '    if (configPresent(configPath)) {',
+    from: '    if (configAlreadyMigrated(configPath)) {',
     to: '    if (false) {' },
   { id: 'migrate-中断后重放条目', file: 'lib/storage/migrate.js',
     // 闸门二失效 ⇒ 「库提交了、config.json 没写成」的中断被当成首次迁移，整份老文件重放一遍：
@@ -594,6 +594,16 @@ const MUTATIONS = [
     // 判据：tests/migrate.test.mjs 的「域文件不是本插件的（unit.name 不匹配）⇒ 抛错」。
     from: '    if (unit.name !== DOMAIN_NAME) {',
     to: '    if (false) {' },
+  { id: `migrate-读不出来的 config 冒充已迁移`, file: `lib/storage/migrate.js`,
+    // 收窄前的旧口径：路径上有东西就算「已迁移」。EACCES / EISDIR / ELOOP / EIO 于是全部
+    // 冒充成「迁移过了」，一份**尚未迁移**的库被静默跳过，而消息说「config.json 已存在」——
+    // 把人引向错误的排查方向。与 readLegacy 的口径必须一致：只有 ENOENT 算「没有」。
+    // 判据：tests/migrate.test.mjs 的「config.json 路径存在但读不出来（EISDIR）⇒ 抛错」。
+    from: [
+      "        throw new Error('读取订阅文件 ' + path + ' 失败（它既不可读、也不表示「尚未迁移」，无法判断是否已迁移；' +",
+      "            '已保留原文件，未做任何写入）：' + String(error), { cause: error });",
+    ].join(String.fromCharCode(10)),
+    to: '        return true;' },
 ]
 
 function runSuite() {

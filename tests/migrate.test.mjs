@@ -224,6 +224,46 @@ test('config.json 写不进去时：库那份已经落地、老文件未动；�
   } finally { h.cleanup() }
 })
 
+test('config.json 路径存在但读不出来（EISDIR）⇒ 抛错，不许冒充「已迁移」（与 readLegacy 同口径）', async () => {
+  const h = harness('config-unreadable')
+  try {
+    h.writeDomain(domainContent())
+    const before = readFileSync(h.domainPath)
+    // 「路径上有东西」与「那份文件读得动」是两类事实。第一版把 EACCES / EISDIR 也归成「在」
+    // ⇒ 直接 skipped，于是一份**尚未迁移**的库被静默跳过；而消息说「config.json 已存在」，
+    // 把人引向错误的排查方向（将来 ELOOP / EIO 会走进同一个分支）。
+    rmSync(h.configPath, { force: true })
+    mkdirSync(h.configPath)
+
+    await assert.rejects(
+      () => h.migrate(),
+      (error) => {
+        assert.match(error.message, /config\.json/, '消息必须带路径，否则用户不知道去改哪份文件')
+        assert.match(error.message, /读取订阅文件/, '消息必须表明是「读不出来」，不是「已存在」')
+        return true
+      },
+      '读不出来的 config.json 不能被当成「已迁移」：那会让还没迁移的库静默跳过迁移',
+    )
+    // ☆ 不许有任何写入：既不能写库（迁移根本没开始），也不能动老文件
+    assert.equal(h.count('items'), 0, '判据本身失败时不许留下半份导入')
+    assert.equal(h.count('cursors'), 0)
+    assert.equal(h.count('texts'), 0)
+    assert.deepEqual(readFileSync(h.domainPath), before, '拒绝时不许动老文件')
+  } finally { h.cleanup() }
+})
+
+test('config.json 存在且可读 ⇒ 照常 skipped:true（新口径不许把正常路径也抛掉）', async () => {
+  const h = harness('config-readable')
+  try {
+    h.writeDomain(domainContent())
+    // 先正常迁移一次，得到一份「读得动」的 config.json
+    assert.equal((await h.migrate()).skipped, false)
+    // 再跑：这条路必须走 skipped，而不是因为收窄判定就被误抛
+    assert.deepEqual(await h.migrate(), { feeds: 0, items: 0, cursors: 0, skipped: true })
+    assert.equal(h.count('items'), 3, '跳过时不许动库里已有的行')
+  } finally { h.cleanup() }
+})
+
 test('域文件不存在 ⇒ skipped:true，不建空库也不抛错（首次安装路径）', async () => {
   const h = harness('first-install')
   try {
