@@ -147,6 +147,11 @@ export function migrateSchema(db: DatabaseSync): void {
  *   行是按需读的（spec §10.2）。
  * - `texts.revision` / `frameable` / `title` 同为 articleRecordSchema 的字段，
  *   `revision` 是「缓存是否过期」的判据，缺了整张表就退化成不可判（spec §11.2 的注释）。
+ * - **`texts.fetched_at` 是 Task 3 加的一列**（原参考 schema 没有它）：`articleRecordSchema.fetchedAt`
+ *   是**必填**字段，而 `refresh.ts:118` 的 `record.article?.fetchedAt` 是正文缓存淘汰的排序键 ——
+ *   没有它，「正文缓存超限从最旧清起」退化成整表不可判（全部 fetchedAt 相同）。
+ *   与 spec 保留 revision/frameable/title 是同一条理由。改的是建表语句，不是已建库的迁移：
+ *   迁到本版尚未开始，没有需要搬的数据。
  * - `cursors.seen` 存 id 窗口的 JSON 文本：窗口是每源 5000 个 id 的定长列表，
  *   没有按单个 id 查询的需求，拆成行只会换来百万行表（spec §2 的漏项表）。
  */
@@ -172,11 +177,13 @@ const SCHEMA_DDL = `
   CREATE INDEX i2 ON items(recency DESC, id ASC);
 
   CREATE TABLE texts (
-    item_id  TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
-    body     TEXT NOT NULL,
-    revision INTEGER,
-    frameable INTEGER,
-    title    TEXT
+    item_id    TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
+    body       TEXT NOT NULL,
+    revision   INTEGER,
+    frameable  INTEGER,
+    title      TEXT,
+    -- articleRecord.fetchedAt：正文缓存淘汰的排序键（见上方注释）
+    fetched_at TEXT
   );
 
   CREATE TABLE cursors (
