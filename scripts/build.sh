@@ -86,6 +86,9 @@ link_pnpm() {
 
 link_pnpm fast-xml-parser fast-xml-parser
 link_pnpm zod zod
+# 自持存储的路径解析（resolveDshHome）：$DSH_HOME 的优先级语义（空白视为未设置）只有官方实现里
+# 有，src/index.ts:119 那份手抄版在 DSH_HOME 为纯空白时会把数据落到 CWD 上
+link_pkg @deepseek-ai/dsh-home-paths packages/util/home-paths
 link_pkg @deepseek-ai/dsh-storage-domain packages/storage/storage-domain
 link_pkg @deepseek-ai/dsh-client-connection packages/client/connection
 link_pkg @deepseek-ai/dsh-host-webserver packages/host/webserver
