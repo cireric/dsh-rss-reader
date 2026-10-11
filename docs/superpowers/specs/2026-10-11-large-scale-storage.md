@@ -16,6 +16,10 @@
 >   `(recency, id) < (?, ?)` **是错的**（实测会重复并漏条目），必须用 OR 形式；
 >   ⑤§11.2 的 `items`/`texts` 参考 schema 补齐 `summary`、`article_failure` 与正文版本列，
 >   使它与 §10.2「`summary` 留在 items 行内、只有正文进 `texts`」自洽（原 schema 两项都缺）。
+> - 2026-10-11 · 实现期发现（Task 3，`源码核对`）：⑥§11.2 的 `texts` 还缺 **`fetched_at`**——
+>   `articleRecordSchema.fetchedAt` 是**必填**（`src/domain.ts:58`），且是正文缓存淘汰的排序键
+>   （`src/refresh.ts:118` 的 `record.article?.fetchedAt`）。原参考 schema 无列可放它，会导致
+>   「缓存超限从最旧清起」退化成整表不可判（全部时间戳相同）。实现已加该列，此处同步。
 > **状态**：选型已拍板（§9.1）；先决条件「备份覆盖」已完成（§9.2）；插件实现尚未开始。
 >
 > 证据等级沿用仓库约定：`实测`（本机真跑）/ `源码核对`（带 file:line）/
@@ -478,7 +482,8 @@ db.exec('CREATE INDEX i1 ON items(feed_id, recency DESC)');   // 每源未读/�
 db.exec('CREATE INDEX i2 ON items(recency DESC, id ASC)');    // 跨源 top-N 与 keyset 分页（§10 的排序键）
 -- 正文另表。revision 是「缓存是否过期」的判据（refresh.ts 的 CONTENT_REVISION），
 -- 与 frameable / title 同为 articleRecordSchema 的字段，缺了就得整表退化成不可判。
-db.exec('CREATE TABLE texts(item_id TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE, body TEXT NOT NULL, revision INTEGER, frameable INTEGER, title TEXT)');
+-- fetched_at 同理**必填**：它是 refresh.ts:118 正文缓存淘汰的排序键（见「冻结后改动」⑥）。
+db.exec('CREATE TABLE texts(item_id TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE, body TEXT NOT NULL, revision INTEGER, frameable INTEGER, title TEXT, fetched_at TEXT)');
 -- `实测`：node:sqlite 的 PRAGMA foreign_keys 默认就是 **1**（与 sqlite3 CLI 的默认 0 不同），
 -- 上面这条 ON DELETE CASCADE 因此真的生效（删 items 行后 texts 无孤儿）。
 -- 但 deleteItem 仍应**显式**删两表：不把正确性押在 pragma 默认值上，换介质/换版本都不该翻车。
