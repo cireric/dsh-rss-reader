@@ -49,15 +49,23 @@
 
 基线（`实测`，本机 macOS + Node v24.19）：
 
-| 指标 | 现状（域 + single JSON） | spec §9.3 目标 |
-|---|---|---|
-| 行数 / 文件 | 100 000 行 / 29.38 MiB（308 B/行） | — |
-| 打开（parse + zod） | **70.33 ms**（parse 25.53 + zod 44.80） | ≤ 200 ms ✅ 已达标 |
-| 整份重写 | 中位 **8.62 ms** / 峰值 10.50 ms | — |
-| 一源 500 条全标已读 | **4312 ms**（外推 500 × 8.62） | ≤ 1 s ❌ **差 4.3×** |
-| 常驻堆 | **38.97 MiB** | ≤ 300 MB ✅ 已达标 |
+| 指标 | ① 现状（域 + single JSON，Task 1 基线） | ② 自持（SQLite，Task 5 之后） | spec §9.3 目标 | ② 数字的来源 |
+|---|---|---|---|---|
+| 行数 / 文件 | 100 000 行 / 29.38 MiB（308 B/行） | 100 000 行 / `rss.db`（bench 不量其体积） | — | `npm run bench` |
+| 打开（parse + zod） | **70.33 ms**（parse 25.53 + zod 44.80） | 66.96 ms（parse 26.11 + zod 40.85）——**仍是 JSON 那条路**，自持侧对应的成本是「建库+建索引 1.19 ms」 | ≤ 200 ms ✅ | `npm run bench` |
+| 整份重写 | 中位 **8.62 ms** / 峰值 10.50 ms | 不适用（自持侧是逐行 UPDATE，没有「整份重写」这个概念） | — | `npm run bench` |
+| **打开面板（overview，10 万行）** | **215–238 ms** | **16.6–17.7 ms**（约 13×） | —（§3.1 的扫描族归零） | ⚠️ **临时探针 + `tests/overview-scale.test.mjs` 的 `< 100 ms` 断言**，**不是** `npm run bench`（bench 没有 overview 这条路径，见下方注意） |
+| 一源 500 条全标已读 | **4312 ms**（外推 500 × 8.62） | **20.76 ms**（实测） | ≤ 1 s ✅ | `npm run bench` |
+| 单条标已读 | —（同一路径的 1/500，即一次整份重写） | 0.04 ms（中位，含读改写与事务） | ≤ 20 ms ✅ | `npm run bench` |
+| 插入 10 万行 | 10 万次整份重写 | 307.69 ms（单事务） | — | `npm run bench` |
+| 每源列表 500 条 | 全表遍历 | 0.77 ms / 500 行（`WHERE feed_id = ?`） | — | `npm run bench` |
+| 常驻堆 | **38.97 MiB** | 45.4 MiB（本次 bench 进程内） | ≤ 300 MB ✅ | `npm run bench` |
 
-⇒ **只有「一源全标已读」这一条真的不达标**，它就是本次改造的核心判据。Task 3 完成后必须复测同一张表。
+⇒ **只有「一源全标已读」这一条真的不达标**，它就是本次改造的核心判据。Task 5 复测的结论：**四条 §9.3 验收线全部达标**（打开 ≤200 ms / 单条标已读 ≤20 ms / 一源全标已读 ≤1 s / 常驻 ≤300 MB）；一源全标已读 4312 ms → 20.76 ms（约 208×，Task 3 时是 22.5 ms，Task 5 未动写路径）。
+
+**⚠️ 关于「打开面板」那一行**：这一行**不是 `npm run bench` 量的**。bench 只量 JSON 路径与「每源列表」，没有 overview 这条路径（按 Task 5 的 brief，禁止重构该脚本结构）。它来自 10 万行真实库上的临时探针（改造前后各跑一次，脚本跑完即删）与 `tests/overview-scale.test.mjs` 里那条 `< 100 ms` 的断言。**不要把这一行当成 bench 的输出**——若日后要把它并进 bench，得另开一个任务（那是改脚本结构）。
+
+**关于改造前后列的口径**：② 列里「打开（parse + zod）」仍= JSON 路径的数（bench 的 A 段原样跑），因为自持路径没有「整份读入 + zod 全表校验」这一环；它列在这里只是为了与 §9.3 的 ≤200 ms 对齐，不代表自持侧的启动成本（自持侧是 1.19 ms 建库建索引）。
 
 ---
 
@@ -228,6 +236,15 @@ test('域文件不是本插件的（unit.name 不匹配）⇒ 抛错，不误导
 > 修法：清理的候选集用**一条 SQL**选出来（`read_at IS NOT NULL AND starred = 0 AND kept_unread = 0
 > AND recency < ?`），别再让 JS 侧物化全表；`selectCleanup` 的判据保留为**唯一口径**
 > （`src/retention.ts`），SQL 只负责把候选喂给它或与之等价。
+>
+> **⚠️ 上面这句「唯一口径」的措辞已被 Task 5 的评审更正（2026-10-11，引文保留原样不改写）**：
+> 事实是**这条判据有两份实现** —— `retention.ts` 的 `selectCleanup` 是**判据之家**，
+> `store-sqlite.ts` 的 `SELECT_CLEANUP_IDS` 是**被钉住的第二实现**，它照抄前三项
+> （`read_at IS NOT NULL` / `starred = 0` / `recency < ?`）而**更窄**一条（`kept_unread = 0`）。
+> 最终删除集 = SQL 谓词 ∩ `selectCleanup`，一致性由 `tests/store-sqlite.test.mjs` 的对账用例
+> 与 SQL 文本正则断言钉住。四处代码注释已按此更正：`src/retention.ts` 的 `selectCleanup`、
+> `src/store-sqlite.ts` 的 `SELECT_CLEANUP_IDS`、`src/endpoints.ts` 的 `cleanup`、
+> `src/store.ts` 的 `listCleanupCandidates` 契约。**改判据时两处都要改。**
 
 > **⚠️ `countUnreadPerFeed` 的键域 = `feeds` 表，不是 `GROUP BY` 的结果键（定稿加固）**：
 > `buildOverview` 现在先按 `listFeeds()` 铺、再补 `allItems()` 里出现的源
@@ -237,15 +254,22 @@ test('域文件不是本插件的（unit.name 不匹配）⇒ 抛错，不误导
 > **但键仍在**（键域 = feeds 表）」）：**零未读的源必须以 0 出现，不能缺键**。
 > ⇒ 传进去的 `feedIds` 是 **`listFeeds()` 的全量键**，SQL 的结果按它补齐 0，不是反过来。
 
-- [ ] **Step 1: 写失败测试**：10 万行合成数据下 `buildOverview` 的耗时断言 + 「左栏各源之和 === 顶栏总未读」不变量（既有断言保留）
-- [ ] **Step 2: 跑测试确认失败**
-- [ ] **Step 3: 在 `store-sqlite.ts` 加两个方法**（`GROUP BY feed_id` / `LIMIT ?`），**同时给内存桩补上**（否则既有测试全红）。
+- [x] **Step 1: 写失败测试**：10 万行合成数据下 `buildOverview` 的耗时断言 + 「左栏各源之和 === 顶栏总未读」不变量（既有断言保留）
+      （落在新文件 `tests/overview-scale.test.mjs`；三条用例各自钉「`allItems()` 调用次数 = 0」+ 耗时预算 + 账目/键域/释放量）
+- [x] **Step 2: 跑测试确认失败**（`allItems()` 实测被调 1/1/2 次，三条新方法 `TypeError`）
+- [x] **Step 3: 在 `store-sqlite.ts` 加**（`GROUP BY feed_id` / `LIMIT ?`），**同时给内存桩补上**（否则既有测试全红）。
+      ⚠️ 实际是**三个**方法而不是计划原文的两个：第三个 `listCleanupCandidates(cutoffIso)` 是定稿加固里那条
+      「`cleanup` 自己还有一句 `allItems()`」的修法产物；另按 Ruling P-6，未读记账那个方法叫
+      `unreadPerFeed(feedIds)`（不叫 `countUnreadPerFeed` —— 那个名字属于 `src/shared.ts` 的唯一口径）。
       `实测`（2026-10-11）带 `listItems`+`allItems` 的内存桩共 **6 个文件**，都要补：
       `tests/article-markread-race`、`endpoints-perfeed-unread`、`identity`、`nav-persistence`、
       `refresh`、`unread-accounting`（各 `.test.mjs`）。接口加在 `src/store.ts` 上 ⇒ 漏补的文件是
       **编译期**报错（桩对象缺属性），比运行时更早暴露，但仍要逐个改完。
-- [ ] **Step 4: 改 `buildOverview`/`accountOf` 用新方法**；`countUnreadPerFeed` 与 `isUnread` 仍是**唯一口径**（`src/shared.ts:62-87`，不许另写一份）
-- [ ] **Step 5: build + 跑测试 + `npm run bench`**，把「一源全标已读」与打开耗时填进 Task 1 的基线表做对照
+- [x] **Step 4: 改 `buildOverview`/`accountOf` 用新方法**（+ `cleanup`）；`countUnreadPerFeed` 与 `isUnread` 仍是**唯一口径**（`src/shared.ts:62-87`，不许另写一份）
+      —— 未读判据在自持实现里写作 `read_at IS NULL`，它与 `isUnread` 的等价由 `tests/store-sqlite.test.mjs` 的逐键对账用例钉住
+- [x] **Step 5: build + 跑测试 + `npm run bench`**，把「一源全标已读」与打开耗时填进 Task 1 的基线表做对照
+      （已填：见 Task 1 的基线表「② 自持（SQLite，Task 5 之后）」列。逐条标了数字的来源 ——
+      「打开面板」来自临时探针 + `tests/overview-scale.test.mjs` 的耗时断言，**不是** bench，表里已显式标注）
 - [ ] **Step 6: commit**
 
 ---

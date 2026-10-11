@@ -150,12 +150,23 @@ const SELECT_UNREAD_PER_FEED = 'SELECT feed_id AS feed_id, COUNT(*) AS unread FR
 const SELECT_ITEM_CHARS = 'SELECT i.recency AS recency, i.summary AS summary, t.body AS body FROM items i LEFT JOIN texts t ON t.item_id = i.id WHERE i.id = ?'
 
 /**
- * 清理候选（Task 5）：一条 SQL 选完，谓词 = retention.ts 的 selectCleanup（已读 + 未星标 +
- * 早于阈值）**另加「保持未读」的不删保护**（用户说过「别动它」，与星标同级，见 store.ts 的契约）。
+ * 清理候选（Task 5）：一条 SQL 选完。
+ *
+ * ⚠️ **这是 `retention.ts` 的 `selectCleanup`（判据的定义处）的第二实现，不是第二口径**。
+ * 四项都在这里重述：前三项（已读 `read_at IS NOT NULL`、未星标 `starred = 0`、早于阈值
+ * `recency < ?`）逐条照抄 `selectCleanup`；**第四项 `kept_unread = 0` 比它更窄** ——
+ * 用户对「保持未读」说的是「别动它」，与星标同级，而 `selectCleanup` 是纯判据、不含这条
+ * （所以它写在 store.ts 的 listCleanupCandidates 契约里）。
+ * 于是最终删除集 = 本谓词 ∩ `selectCleanup`（`endpoints.ts` 的 `cleanup` 把候选喂回判据复跑）。
  *
  * 谓词里的每一列都直接对应记录的字段（readAt→read_at、starred、keptUnread→kept_unread、
- * recencyOf(record)→生成列 recency），所以它与 selectCleanup 是同一个判据的两种写法；
- * 两边在同一夹具上对账的测试在 tests/store-sqlite.test.mjs。
+ * recencyOf(record)→生成列 recency），所以它确实与 selectCleanup 是同一件事的两种写法 ——
+ * 而「两份实现没有被改分家」由 `tests/store-sqlite.test.mjs` 的两条钉住：
+ *   · 「listCleanupCandidates：候选集由 SQL 选出，且与 selectCleanup 的判据对得上（唯一口径不漂）」
+ *     在同一夹具上断言集合关系（候选集 == selectCleanup 的集合，除 kept 那一条外逐字相等）；
+ *   · 「…排序、聚合与筛选真的写在 SQL 里」用正则断言 `read_at IS NOT NULL` / `starred = 0` /
+ *     `kept_unread = 0` / `recency < ?` 真的出现在这条 SQL 文本里。
+ * **改判据时两处都要改，改完重跑这两条。**
  *
  * 三条保护列**照 items 行直接读**（不 JOIN texts）：texts 的读列只用于释放量，
  * 而清理的候选往往几千条，正文是不该在这一步就搬进内存的那部分（那是「按需读行」的全部意义）。

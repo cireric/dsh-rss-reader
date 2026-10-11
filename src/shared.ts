@@ -57,7 +57,15 @@ export interface ItemView {
  * 抽成函数不是为了复用代码，是为了让「未读怎么算」**只有一处**：本计划已经两次栽在
  * 「同一条不变式在两个地方各算一遍」上（任务 1 的键域、任务 5 的 unread 口径），每次都表现为
  * 两个数各自自洽、合起来对不上，且只在特定截断/漂移截面才显形。
- * 宿主侧任何算未读的地方（buildOverview 的全表遍历、markRead/unmarkRead 的回包）都必须走它。
+ *
+ * **本函数是这条判据的定义处**；JS 侧任何算未读的地方都必须走它（唯一现役调用方是下面的
+ * countUnreadPerFeed，createStore 的 unreadPerFeed 经它实现）。
+ *
+ * ⚠️ Task 5 之后宿主侧**不再有 JS 侧的全表记账**：buildOverview / accountOf 都改走存储侧的
+ * unreadPerFeed，而自持实现为了不物化 10 万行，在 SQL 里写作 `read_at IS NULL` ——
+ * 那是**同一判据的第二实现**，不是第二口径；「两者确实等价」由 tests/store-sqlite.test.mjs 的
+ * 逐键对账用例钉住（「unreadPerFeed：与 shared.ts 的唯一口径在同一夹具上逐键相等」）。
+ * 改本条判据时，那处 SQL 与它的对账用例必须一起改。
  */
 export const isUnread = (item: Pick<ItemView, 'readAt'>): boolean => item.readAt === undefined
 

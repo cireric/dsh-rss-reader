@@ -61,9 +61,11 @@ export interface ReaderStore {
    * JS 再数一遍 —— 10 万行下「点一次星标」就是一次全表遍历。存储侧聚合（自持实现是
    * `GROUP BY feed_id`）把它降到毫秒级。
    *
-   * **未读判据就是 shared.ts 的 isUnread**（存储侧的 `read_at IS NULL` ↔ 记录侧的
-   * `readAt === undefined`）：唯一口径不许因为下了 SQL 就另立一份，所以自持实现有一条
-   * 「与 countUnreadPerFeed 在同一夹具上逐键对账」的测试钉着。
+   * **未读判据的定义处是 shared.ts 的 isUnread**（记录侧 `readAt === undefined`）。自持实现为了
+   * 不物化 10 万行，在 SQL 里写作 `read_at IS NULL` —— 那是**同一判据的第二实现，不是第二口径**；
+   * 「两者确实等价」由 `tests/store-sqlite.test.mjs` 的对账用例钉住
+   * （「unreadPerFeed：与 shared.ts 的唯一口径在同一夹具上逐键相等」，同一夹具上逐键比对
+   * SQL 结果与 countUnreadPerFeed）。**改判据时两处都要改。**
    *
    * **只保证「传进来的键都有值」，不保证「只有传进来的键」**：自持实现的 SQL 按全表聚合，
    * 已退订源的残留条目也会被数进去（只有拿到 feeds 表的人才做得准键域判定）。调用方一律
@@ -82,9 +84,17 @@ export interface ReaderStore {
   /**
    * 显式清理的候选行（Task 5；原先由调用方 allItems() 全表物化后再筛）。
    *
-   * 判据 = retention.ts 的 selectCleanup（已读 + 未星标 + 早于阈值）**另加「保持未读」的不删保护**：
-   * 用户对 kept-unread 说的是「别动它」，与星标同级（selectCleanup 是纯判据、不含这条，
-   * 所以把它写进候选的契约里，自持实现才能一条 SQL 选完 —— 见 endpoints.ts 的 cleanup）。
+   * 判据的定义处是 `retention.ts` 的 `selectCleanup`（已读 + 未星标 + 早于阈值）。本方法的契约是
+   * **它的第二实现**（自持实现里是一条 SQL，见 `store-sqlite.ts` 的 `SELECT_CLEANUP_IDS`），
+   * 四项都要在存储侧重述 —— 前三项照抄判据，**第四项比判据更窄**：
+   *   · `readAt !== undefined`（已读）
+   *   · `starred === false`（未星标）
+   *   · `recencyOf(record) < cutoffIso`（早于阈值）
+   *   · `keptUnread !== true`（**不被**「保持未读」保护）—— 用户对 kept-unread 说的是「别动它」，
+   *     与星标同级；`selectCleanup` 是纯判据、不含这条，所以它只写在候选的契约里。
+   * 于是调用方的最终删除集 = **候选集 ∩ `selectCleanup`(候选)**（`endpoints.ts` 的 `cleanup` 就是
+   * 这么做的）。两份实现必须同步改，一致性由 `tests/store-sqlite.test.mjs` 的对账用例钉住
+   * （「候选集必须与 selectCleanup 的集合逐字相等（除 kept 之外）」）。
    */
   listCleanupCandidates(cutoffIso: string): CleanupCandidate[]
   /** 全部订阅源（key 即归一化后的 URL）——订阅源以存储域为准，Config 只是种子 */

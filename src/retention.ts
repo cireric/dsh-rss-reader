@@ -97,6 +97,17 @@ export interface CleanupRow extends RetentionRow {
  *
  * 三个条件缺一不可：未读的可能是还没看的（删了就没了），星标的是用户明确要留的，
  * 晚于阈值的是近期历史（用户可能还要回看）。删除是**不可逆**的，所以判据刻意保守。
+ *
+ * ⚠️ **这条判据有两份实现，本函数是它的定义处（口径之家）**。Task 5 之后，自持存储为了不把整张
+ * items 表物化到 JS，必须在 **SQL 里预先筛一遍**（`src/store-sqlite.ts` 的 `SELECT_CLEANUP_IDS`）；
+ * 那一份是**第二实现，不是第二口径**，改判定时两处都要改：
+ *   · 它把本函数的三项（`read_at IS NOT NULL` / `starred = 0` / `recency < ?`）**逐条照抄**，
+ *     另外**更窄**一条 —— `kept_unread = 0`（用户对「保持未读」说的是「别动它」，与星标同级）；
+ *   · 因此最终删除集 = **SQL 谓词 ∩ 本函数**，而「两份实现仍然是同一个判据」这件事由
+ *     `tests/store-sqlite.test.mjs` 的对账用例钉住（「候选集必须与 selectCleanup 的集合逐字相等
+ *     （除 kept 之外）」）；同文件另有断言把这三项真的出现在 SQL 文本里
+ *     （「listRecent / unreadPerFeed / listCleanupCandidates 的排序、聚合与筛选真的写在 SQL 里」）。
+ * 改完任何一处都必须重跑那两条 —— 它们才是「判据没分家」的判据。
  */
 export function selectCleanup(rows: readonly CleanupRow[], cutoffIso: string): string[] {
   return rows
