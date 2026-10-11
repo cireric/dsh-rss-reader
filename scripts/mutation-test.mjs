@@ -451,6 +451,82 @@ const MUTATIONS = [
     // 判据：tests/storage-skeleton.test.mjs 的「ensureStorageRoot 递归建出 0700 目录」。
     from: 'mkdirSync(root, { recursive: true, mode: 0o700 });',
     to: 'mkdirSync(root, { recursive: true, mode: 0o777 });' },
+  // ── SQLite 版 ReaderStore（2026-10-11 大规模存储任务 3）───────────────────────────
+  // 这一族是「换实现之后，旧实现的每一条承诺是否还在」的承重点，而它们的失效大半**安静**：
+  // 列表顺序变了、并发已读被抹掉、正文被级联删掉 —— 界面上都只是「好像少了点什么」。
+  // 每条 from 均照**编译产物**的真实形状写（docs/pitfalls.md 一、1.4），
+  // 并已独立实测 OCCURRENCES=1（在 /tmp 隔离副本里跑过一轮：11/11 全部被抓到）。
+  { id: 'store-listItems 退回 JS 全表过滤', file: 'lib/store-sqlite.js',
+    // 这是**扫描族的结构性修复**（spec §3.1）：退回「读全表再在 JS 里过滤」后行为完全一样，
+    // 只有 SQL 的形状变了 —— 所以判据是 tests/store-sqlite.test.mjs 里录 prepared SQL 的那条。
+    from: 'listItems: (feedId) => sql(SELECT_ITEM_BY_FEED).all(feedId).map((row) => {',
+    to: 'listItems: (feedId) => sql(SELECT_ALL_ITEMS).all().map((row) => {' },
+  { id: 'store-排序退回 published_at', file: 'lib/store-sqlite.js',
+    // publishedAt 是可选字段：直接对它排序会让缺发布时间的条目落进 SQL 的 NULL 段
+    // （SQLite 中 NULL 最小），列表顺序与迁移前不一致（Review Focus 2）。
+    // 判据：tests/store-sqlite.test.mjs 的「缺 publishedAt 的行按 fetchedAt 归位」。
+    from: "const ITEM_ORDER = ' ORDER BY i.recency DESC, i.id ASC';",
+    to: "const ITEM_ORDER = ' ORDER BY i.published_at DESC, i.id ASC';" },
+  { id: 'store-updateItem 抹掉并发已读态', file: 'lib/store-sqlite.js',
+    // 这条守的是**接口存在的理由**（src/store.ts:21-31）：fn 算出的记录被原地覆盖时若丢了
+    // 窗口期内并发写进去的 readAt，表现就是 2026-10-10 用户实测的「详情页逐篇读，已读状态丢失」。
+    // 判据：tests/store-sqlite.test.mjs 的「原子读改写」那条。
+    from: 'const next = itemRecordSchema.parse(fn(toItemRecord(row)));',
+    to: 'const next = itemRecordSchema.parse({ ...fn(toItemRecord(row)), readAt: undefined });' },
+  { id: 'store-updateItem 缺失键顺手创建', file: 'lib/store-sqlite.js',
+    // 「写一次就等于创建」会让调用方失去「这条还在不在」的信号（src/store.ts:29）。
+    // 判据：tests/store-sqlite.test.mjs 的「对缺失键拒绝」那条。
+    from: "throw new Error('updateItem 拒绝：条目 ' + itemId + ' 不在库里。",
+    to: "sql(UPSERT_ITEM).run(itemId, itemId, '', '', null, '2026-10-11T00:00:00.000Z', null, null, 0, 0, null); return; throw new Error('updateItem 拒绝：条目 ' + itemId + ' 不在库里。" },
+  // ⚠️ **两条「本该有」的变异实测是等价变异，按 AGENTS.md 不入门槛**（2026-10-11 差分实测）：
+  //
+  // ① 「写条目改用 INSERT OR REPLACE」：REPLACE 会先删旧行、触发 texts 的 ON DELETE CASCADE，
+  //    看着必然丢正文 —— 但 `writeItem` 在同一事务里紧接着调 `writeArticle`，正文当场写回。
+  // ② 「deleteItem 只删 items、不删 texts」：`PRAGMA foreign_keys` 实测为 1，级联已代劳。
+  //
+  // 判据是**差分实验**：9 步操作序列（写带正文 → 覆写不带 → 再写带 → 两次 update → 两次 delete
+  // → 另一条 save+update），逐条比对可观测状态（store 读回的记录 + items/texts 行数），
+  // 三种实现（ON CONFLICT / INSERT OR REPLACE / 只删 items）的输出**逐字节相同**。
+  // 它们幸存不是测试缺口 —— 与「正文容器收窄」那条同一个判定方法（见本文件顶部注释）。
+  // 判据测试仍在（tests/store-sqlite.test.mjs 的正文级联与孤儿两条），只是它们无法区分这三种写法。
+  { id: 'store-版本握手失效', file: 'lib/store-sqlite.js',
+    // 顺序颠倒（先建 store、后 migrateSchema）若不在构造时拦下，症状是「插件装载成功、
+    // 第一次刷新才失败」——那时用户已经白等了一轮网络。
+    // 判据：tests/store-sqlite.test.mjs 的「没盖章的库当场响亮失败」。
+    from: 'if (onDisk !== SCHEMA_VERSION) {',
+    to: 'if (false) {' },
+  { id: 'store-读偏好不校验形状', file: 'lib/store-sqlite.js',
+    // src/store.ts:41-45 的承诺是「返回的保证是可信形状」；不校验就把媒介里的垃圾透给调用方去兜。
+    // 判据：tests/store-sqlite.test.mjs 的「坏值逐字段回落」。
+    from: 'viewPreferences: () => sanitizeViewPreferences(readConfigFile(configPath).viewPreferences, isKnownFeed),',
+    to: 'viewPreferences: () => readConfigFile(configPath).viewPreferences,' },
+  { id: 'store-写偏好覆盖掉订阅映射', file: 'lib/store-sqlite.js',
+    // config.json 是用户订阅的**唯一**可备份副本：写偏好时若不先把旧文件读出来，
+    // 一次「切了个 filter」就会把订阅列表清空 —— 且不抛错、不留痕。
+    // 判据：tests/store-sqlite.test.mjs 的「写偏好不许动订阅映射」。
+    from: 'const current = readConfigFile(configPath);\n            writeConfigFile(configPath, { ...current, viewPreferences: safe });',
+    to: 'writeConfigFile(configPath, { feeds: {}, version: 1, viewPreferences: safe });' },
+  { id: 'store-缺席字段写成 undefined 键', file: 'lib/store-sqlite.js',
+    // readAt === undefined 是本仓库对「未读」的定义（src/shared.ts:62）。多一个 undefined 值
+    // 的键会让 .strict() 的读侧校验与 isUnread 同时失准 —— 「所有条目看起来都没读过」。
+    // 判据：tests/store-sqlite.test.mjs 的「可选字段缺席时不留 null / undefined 键」。
+    // ⚠️ from 必须**连 if 一起**纳入：只改 `record.readAt = readAt;` 那一行的话，替换出来的是
+    // `if (x) if (x) a; else b;` —— 内层 else 永远轮不到执行，等于什么都没改（第一版就是这么写的，
+    // 它「幸存」是**变异没生效**，不是测试缺口；docs/pitfalls.md 二、2.7 记的正是这类坑）。
+    from: 'if (readAt !== undefined)\n        record.readAt = readAt;',
+    to: 'record.readAt = readAt;' },
+  { id: 'store-老形态正文静默丢正文', file: 'lib/store-sqlite.js',
+    // 库里没有存 paragraphs 的列。放开这道闸后，一条「只有 paragraphs、没有 blocks」的老记录会被
+    // **当成长度为零的新记录**写下去：items 行落库、正文行被删掉，用户在详情页看到正文凭空消失，
+    // 而测试若只断言「写入没抛错」就全绿。转换口径只有 domain.ts 的 normalizeLegacyArticle 一处。
+    // 判据：tests/store-sqlite.test.mjs 的「拒绝写入老形态正文」。
+    from: 'if (article !== undefined && article.blocks === undefined && article.paragraphs !== undefined) {\n            throw new Error(',
+    to: 'if (false) {\n            throw new Error(' },
+  { id: 'store-正文 fetchedAt 不落列', file: 'lib/store-sqlite.js',
+    // article.fetchedAt 是 refresh.ts:118 的正文缓存淘汰排序键，缺了整表退化成不可判。
+    // 判据：tests/store-sqlite.test.mjs 的「item 把 texts 的正文按 blocks 还原」。
+    from: 'article.title ?? null, article.fetchedAt);',
+    to: 'article.title ?? null, null);' },
 ]
 
 function runSuite() {
