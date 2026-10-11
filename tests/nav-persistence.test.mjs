@@ -15,7 +15,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, existsSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { readFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { tmpdir } from 'node:os'
@@ -24,6 +24,8 @@ import { createDispatch } from '../lib/endpoints.js'
 import { Config } from '../lib/config.js'
 import { readerDomain } from '../lib/domain.js'
 import { createStore } from '../lib/store.js'
+import { openDatabase, migrateSchema } from '../lib/storage/db.js'
+import { createSqliteStore } from '../lib/store-sqlite.js'
 import { sanitizeViewPreferences, DEFAULT_VIEW_PREFERENCES } from '../lib/shared.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -131,6 +133,49 @@ test('真实 createStore：读侧校验坏值、写侧归一后才落库（生�
       writeGlobal({ navSelection: { kind: 'feed', feedId: 'A' }, filter: 'starred', navVisible: false })
       assert.deepEqual(store.viewPreferences(), { navSelection: { kind: 'feed', feedId: 'A' }, filter: 'starred', navVisible: false })
     })
+})
+
+/**
+ * 同一组契约，换到**生产路径**的自持存储上再钉一遍（Task 4 的 cutover）。
+ *
+ * 为什么两条都要留着，而不是把上面的 fakeDomain 换成它：那条同时是 `lib/store.js` 两个变异
+ * 的判据（scripts/mutation-test.mjs 的 'persist-宿主读侧不校验' 与 'persist-宿主写侧不归一'）。
+ * 删掉它、只留 SQLite 版，那两条变异就**幸存**了 —— 而门槛上「幸存」等于测试缺口。
+ * 反过来只留旧那条也不够：Task 4 之后生产路径是 createSqliteStore，它一次都没被这组契约测过。
+ *
+ * 两条路径的共同判据（读侧归一、写侧归一再落库、未知源回落）在这里逐条重复，是刻意的：
+ * 存储换介质时最容易发生的事，就是「旧实现的那条承诺没跟过来」。
+ */
+test('真实 createSqliteStore：读侧校验坏值、写侧归一后才落库（cutover 后的生产路径）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rss-nav-sqlite-'))
+  const configPath = join(dir, 'config.json')
+  const db = openDatabase(':memory:')
+  try {
+    migrateSchema(db)
+    const store = createSqliteStore(db, configPath)
+    await store.saveFeed('A', { url: 'A' })
+
+    assert.deepEqual(store.viewPreferences(), DEFAULT_VIEW_PREFERENCES, 'config.json 还没有 ⇒ 回落默认')
+
+    // 写侧：未知源先归一再落库 —— 认不出的原值绝不许进文件
+    const saved = await store.saveViewPreferences({ navSelection: { kind: 'feed', feedId: 'gone' }, filter: 'unread', navVisible: false })
+    assert.deepEqual(saved, { navSelection: { kind: 'virtual' }, filter: 'unread', navVisible: false })
+    assert.deepEqual(JSON.parse(readFileSync(configPath, 'utf8')).viewPreferences, saved, '落盘的必须是归一后的值')
+    assert.deepEqual(store.viewPreferences(), saved, '读回来一致')
+
+    // 读侧：文件里被塞了坏值时也不许透出去（这是读侧校验唯一能生效的位置）
+    const onDisk = JSON.parse(readFileSync(configPath, 'utf8'))
+    onDisk.viewPreferences = { navSelection: { kind: 'feed', feedId: 'gone' }, filter: 'bogus', navVisible: 1 }
+    writeFileSync(configPath, JSON.stringify(onDisk))
+    assert.deepEqual(store.viewPreferences(), DEFAULT_VIEW_PREFERENCES, '坏值诚实回落，不编造也不透传')
+
+    // 在订的源必须保住（回落不能把正常记忆也吃掉）
+    await store.saveViewPreferences({ navSelection: { kind: 'feed', feedId: 'A' }, filter: 'starred', navVisible: false })
+    assert.deepEqual(store.viewPreferences(), { navSelection: { kind: 'feed', feedId: 'A' }, filter: 'starred', navVisible: false })
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 /* ============================ ② 宿主端点层 ============================ */

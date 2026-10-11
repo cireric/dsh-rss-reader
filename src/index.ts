@@ -14,12 +14,17 @@ import type { Context } from 'cordis'
 import { recencyOf } from './shared.js'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-host-webserver'
+import type { DatabaseSync } from 'node:sqlite'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import z from 'schemastery'
-import { normalizeLegacyArticle, readerDomain, rebuildItem } from './domain.js'
-import { createStore, type ReaderStore } from './store.js'
+import { readerDomain } from './domain.js'
+import { type ReaderStore } from './store.js'
+import { storageRoot, ensureStorageRoot } from './storage/paths.js'
+import { openDatabase, migrateSchema } from './storage/db.js'
+import { migrateFromDomainFile } from './storage/migrate.js'
+import { createSqliteStore } from './store-sqlite.js'
 import { normalizeFeedUrl, refreshFeeds, type FeedOutcome } from './refresh.js'
 import { repairIdentities } from './identity-repair.js'
 import { blocksToText, fetchArticle } from './article.js'
@@ -68,6 +73,10 @@ const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 /**
  * 打开存储域，对 already-open 退避重试。
  *
+ * ⚠️ **已经没有任何调用方了**（Task 4 的切换把入口换成自持存储 + 迁移），保留它是**刻意的**：
+ * 计划把它交给 Task 8 与 `inject` / `peerDependencies` / `build.sh` 的三处装配引用一起摘 ——
+ * 现在单独删掉，等于在 cutover 这一步顺手拆掉中途回退的把手。**不要**因为「没人调用」就删它。
+ *
  * 热重载时上一代 fiber 的 close() 可能还在排空写队列，新 fiber 立刻 open 同名域
  * 会撞 `already-open`——这不是配置错误，等一下就好。超过重试次数仍然失败就把
  * 最后一次错误抛出去（响亮失败），并已逐次写进日志。
@@ -112,12 +121,21 @@ async function openDomainWithRetry(
   throw lastError
 }
 
-
 export function apply(ctx: Context, rawConfig: ConfigShape): void {
   // 先解析配置：下面 logFile 那一行就要用 config，所以它必须是 apply 的第一件事
   const config = Config(rawConfig ?? {} as ConfigShape)
   const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
   const logFile = config.logFile || join(dshHome, 'state', 'dsh-rss-reader', 'reader.log')
+  // 自持存储的落点：**不传 dshHome**，交给 storageRoot → resolveDshHome（Task 2 的唯一算法）。
+  // 上面那份手抄的 dshHome 只留给日志；在 $DSH_HOME 为纯空白时它会把路径算到 CWD 上，
+  // 而 resolveDshHome 会把空白视为未设置（src/storage/paths.ts 的注释就是记的这件事）。
+  const storagesRoot = storageRoot()
+  // 老域文件的落点：存储域的 base bundle 把 root 设为 <DSH_HOME>/storages，域名 rss_reader
+  // ⇒ <storages>/rss_reader.json。从 storageRoot 的父目录推，不另手抄一份 storages 路径 ——
+  // 拼错的后果是「读不到老文件 ⇒ 静默走首装」，那在用户眼里就是订阅全没了（Review Focus 1）。
+  const legacyDomainFile = join(dirname(storagesRoot), 'rss_reader.json')
+  // 订阅映射与视图偏好的落点（Task 2 的 config.json）：宿主半只在装配处用它，其余读写全在 store 里
+  const configFile = join(storagesRoot, 'config.json')
 
   /** 同一篇文章的抓取时间（内存态即可：重启后允许再抓一次）。 */
   const articleAttempts = new Map<string, number>()
@@ -137,9 +155,8 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
   // ⚠️ apply 必须是**同步**的，且所有 ctx.effect 都要在同步段登记完。
   // 一旦在里面 await 过，fiber 可能已被 reload/dispose，随后的 ctx.effect 会抛
   // "cannot create effect on inactive context"（实测栈：Fiber._reload → apply → ctx.effect）。
-  // 因此存储域的打开放进 effect 的异步体，只在同步段注册资源。
-  type OpenedDomain = Awaited<ReturnType<Context['storageDomain']['open']>>
-  let domain: OpenedDomain | undefined
+  // 因此订阅库的打开放进 effect 的异步体，只在同步段注册资源。
+  let database: DatabaseSync | undefined
   let store: ReaderStore | undefined
   let cancelled = false
   let lastRefreshCompletedAt: number | undefined
@@ -164,19 +181,7 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
 
   const ready = (): ReaderStore | undefined => (cancelled ? undefined : store)
 
-  /** 把 Config.feeds 里还没落库的源幂等写进存储域（订阅源的真相在域里）。 */
-  /** 把全表的老正文缓存规范化成结构化块。返回改动条数（0 表示本来就没有老数据）。 */
-  const normalizeLegacyArticles = async (target: ReaderStore): Promise<number> => {
-    let changed = 0
-    for (const [itemId, record] of target.allItems()) {
-      const next = normalizeLegacyArticle(record)
-      if (next === record) continue
-      await target.saveItem(itemId, next)
-      changed += 1
-    }
-    return changed
-  }
-
+  /** 把 Config.feeds 里还没落库的源幂等写进新存储（订阅源的真相在 config.json 里）。 */
   const seedConfiguredFeeds = async (target: ReaderStore): Promise<number> => {
     // 配置已在 apply 入口按 schema 解析过，所以 config.feeds 必然是 string[] —— 这里不需要再兜底。
     let seeded = 0
@@ -301,27 +306,41 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
   }, 'dsh-rss-reader: http route')
 
 
-  // 存储域与启动刷新：异步部分全在这个 effect 体内
+  // 自持存储与启动刷新：异步部分全在这个 effect 体内
   ctx.effect(() => {
     const controller = new AbortController()
     void (async () => {
       try {
-        const opened = await openDomainWithRetry(ctx, log, () => cancelled)
+        // 打开序列的顺序**不能换**（src/storage/db.ts 与 store-sqlite.ts 各有一个握手）：
+        // 建目录 → 开库（跑 pragma + 版本闸）→ 建表盖章 → 迁移 → 建 store。
+        // 少了 migrateSchema 会被 store 的版本握手当场拒绝（响亮的失败，好过写到一半才发现）。
+        ensureStorageRoot(storagesRoot)
+        const db = openDatabase(join(storagesRoot, 'rss.db'))
+        migrateSchema(db)
+        const migrated = await migrateFromDomainFile({
+          domainPath: legacyDomainFile,
+          db,
+          configPath: configFile,
+          log,
+        })
+        if (!migrated.skipped) {
+          log('迁移完成：订阅 ' + migrated.feeds + ' 个、条目 ' + migrated.items + ' 条、去重窗口 ' + migrated.cursors + ' 个')
+        }
         if (cancelled) {
-          // 取消途中才开出来的域必须立刻关掉：关失败会留下一个无人可及的句柄，名字被占住后
-          // 下一代 fiber 会一直撞 already-open（docs/pitfalls.md §4.6 记过这个坑）。所以这里不能像原先
-          // 那样把错误吞掉——要和下面的正常关闭一样留下证据。
-          await opened.close().catch((error: unknown) => {
-            log('取消途中关闭存储域失败：' + String(error))
-          })
+          // 取消途中才建出来的库必须立刻关掉：句柄留着会让下一次装载撞 SQLITE_BUSY /
+          // 上一代写队列未排空（docs/pitfalls.md §4.6 同类的坑）。关失败必须留痕，不许吞。
+          try {
+            db.close()
+          } catch (error) {
+            log('取消途中关闭订阅库失败：' + String(error))
+          }
           return
         }
-        domain = opened
-        store = createStore(opened)
-        // 老正文缓存规范化（域版本 1 → 2，见 domain.ts 的说明）：跑一次之后老数据不再带 paragraphs，
-        // 下一版本才可能把那个字段删掉。幂等，所以每次打开都跑也不亏。
-        const normalized = await normalizeLegacyArticles(store)
-        if (normalized > 0) log('规范化老正文缓存 ' + normalized + ' 条（段落文本 → 结构化块）')
+        database = db
+        store = createSqliteStore(db, configFile)
+        // 老正文缓存的规范化**搬进了迁移**（src/storage/migrate.ts 的 normalizeLegacyArticle）：
+        // 库那边没有存 paragraphs 的列，所以必须在写入之前折成 blocks。这里不再全表跑一遍 ——
+        // 那在 10 万行下就是一次全表扫描，而迁移之后库里已经不可能有老形态。
         const seeded = await seedConfiguredFeeds(store)
         if (seeded > 0) log('新增订阅源种子 ' + seeded + ' 个')
         // 身份修复：把历史上因「源换 id 形态」分叉出的重复条目合并回一条（幂等，跑过一次就无事可做）。
@@ -339,12 +358,15 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
     return async () => {
       cancelled = true
       controller.abort()
-      if (domain) {
-        // 返回并等待 close：域名字释放前不能让下一代 fiber 撞 already-open
-        await domain.close().catch((error: unknown) => {
-          log('关闭存储域失败：' + String(error))
-        })
+      if (database) {
+        // 同步 close：node:sqlite 的关闭是同步的，而「句柄已释放」必须在本次 teardown 返回前成立
+        // （资源由 ctx.effect 负责回收，返回后再去摸它就越界了）。失败要留痕，不许吞。
+        try {
+          database.close()
+        } catch (error) {
+          log('关闭订阅库失败：' + String(error))
+        }
       }
     }
-  }, 'dsh-rss-reader: storage domain + start refresh')
+  }, 'dsh-rss-reader: sqlite storage + start refresh')
 }
