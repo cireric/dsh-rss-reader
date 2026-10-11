@@ -335,7 +335,8 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
         const seeded = await seedConfiguredFeeds(store)
         if (seeded > 0) log('新增订阅源种子 ' + seeded + ' 个')
         // 身份修复：把历史上因「源换 id 形态」分叉出的重复条目合并回一条（幂等，跑过一次就无事可做）。
-        // 放在每次打开域之后，是因为它不依赖网络——而分叉可能发生在任何一次抓取里。
+        // 放在每次建好 store 之后，是因为它不依赖网络——而分叉可能发生在任何一次抓取里。
+        // ⚠️ 这行原先写「每次打开域之后」，自持存储后已经不再打开任何域（Task 8 更正）。
         const repaired = await repairIdentities(store)
         if (repaired.merged > 0) {
           log('身份修复：合并 ' + repaired.groups + ' 组重复条目（共 ' + repaired.merged + ' 条并入幸存者，用户状态已保留）')

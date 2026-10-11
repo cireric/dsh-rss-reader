@@ -90,8 +90,10 @@ link_pnpm zod zod
 # 有，src/storage/paths.ts 曾手抄过一份，在 DSH_HOME 为纯空白时会把数据落到 CWD 上（Task 7 已删）
 link_pkg @deepseek-ai/dsh-home-paths packages/util/home-paths
 # ⚠️ 存储域这条 link **不再**服务于装载路径（Task 8 起插件一次也不 open 存储域），
-# 但**还不能删**：src/domain.ts:24 是运行期 import（defineDomain/domainTable 定义 readerDomain），
-# src/store.ts:7 是 import type。删了这条，从零 build 直接 TS2307 ×2（实测，隔离副本里验过）。
+# 但**还不能删**：src/domain.ts 里那行 import { defineDomain, domainTable }（定义 readerDomain 的）是**运行期**
+# import，src/store.ts 里那行 import type { Domain } 是类型 import。删了这条，从零 build 直接 TS2307 ×2
+# （实测，隔离副本里验过）。**这里刻意不写行号**：本文件的注释会随上面每次编辑漂移，
+# 而「死行号」正是本轮在 paths.ts:5 与本行同时修掉的那类错误（源码核对：符号名不会漂）。
 # 唯一的消费者是旧适配器 src/store.ts 的 createStore —— 它只被测试当
 # 「旧实现 ↔ 自持实现」的同义性基线驱动（tests/overview-paging.test.mjs，且是变异门槛
 # scripts/mutation-test.mjs:691 的判据）。等那套基线撤掉，这里和 package.json 的

@@ -63,7 +63,7 @@ npm run mutation         # 变异门槛：每条都必须被抓到
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `feeds` | `[]` | 订阅源**种子**，仅首次落库（幂等）。订阅的真相在存储域里 |
+| `feeds` | `[]` | 订阅源**种子**，仅首次落库（幂等）。订阅的真相在 `config.json` 里 |
 | `refreshOnStart` | true | 装载时刷新一次 |
 | `maxItemsPerFeed` | 500 | 每源保留条目数 |
 | `cleanupAfterDays` | 30 | 「清理旧条目」的天数阈值 |
