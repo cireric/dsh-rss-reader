@@ -397,3 +397,17 @@ npm run bench            # 与 Task 1 的基线表对照
 ```
 
 **真机三步**（本仓库有过「全套测试全绿而插件在 DSH 里是坏的」）：`dev_reload_package`（前后都应 `[active]`）→ 看日志无「装载失败」→ `curl -X POST http://127.0.0.1:3080/rss-reader-api -d '{"endpoint":"overview","payload":{}}'` 得 401。
+
+**真机第 0 步（2026-10-11 定稿加固，Task 4 评审提出）——先量老文件的哈希**：
+
+```bash
+shasum -a 256 ~/.dsh/storages/rss_reader.json   # 装载前
+# …跑上面的真机三步…
+shasum -a 256 ~/.dsh/storages/rss_reader.json   # 必须与装载前逐字节相同
+```
+
+为什么必须有这一步：Global Constraints 写死「不许改 `storages/rss_reader.json`，迁移只读它、原样留存」，
+而这条约束**只有在真实 `$DSH_HOME` 上跑过一次装载**才算被验证过。评审时它无法从 diff 证伪：
+迁移本身只读该文件，且切换之后本插件不再打开那个域，所以「谁会改写它」在代码里没有答案 ——
+要么真机量一次，要么这条硬约束一直只是推断。**任何差异都要当场停下来查**：让备份脚本拿到
+半截或过期的订阅列表，比迁移本身失败更糟。
