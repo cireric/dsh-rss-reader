@@ -725,13 +725,35 @@ const MUTATIONS = [
   // 不会报错。所以文件名判据与保留窗口边界各钉一条，两条 from 均照**编译产物**
   // lib/storage/log-file.js 的真实形状逐字抄，并已独立核对 OCCURRENCES=1（docs/pitfalls.md 一、1.4）。
   { id: 'log-文件名判据放宽成前缀匹配', file: 'lib/storage/log-file.js',
-    // 这是本任务最危险的一处：`/^reader-/` 下 reader-backup.log、reader-2026-13-99.log 全都
-    // 「认得出」（dayMsOf 返回 undefined 那条已在正则层被绕开），凡是名字以 reader- 开头的
-    // 邻居都会被当成日志删掉；再松一点（把日志放进数据目录却用 `*.log`）就是删别的日志。
-    // 判据：tests/log-file.test.mjs 的「对认不出的文件名既不删也不崩」与「只删超期 reader-*.log」。
+    // 正则放宽成 `/^reader-/` 后，捕获组 matched[1..3] 全是 undefined ⇒ Date.UTC(NaN,…) 是 NaN ⇒
+    // dayMsOf 对**每一个**名字都返回 undefined ⇒ 判据里的 day === undefined 把全部条目跳过。
+    // ⚠️ 所以它的真实失效**不是**「删掉 reader- 前缀的邻居」（那需要 dayMsOf 返回一个数字才会走到
+    // unlinkSync），而是**保留策略被静默废掉**：从此一份日志都不会被清理，日志目录无限增长，
+    // 而 pruner 每次都很「成功」地返回 0 —— 没有任何报错、没有任何日志线索。
+    // 判据：tests/log-file.test.mjs 的「只删超期 reader-*.log（含超期邻居必须活着）」
+    // 与「保留窗口是闭区间」——两份超期日志必须被删掉，放宽后它们全都留下。
     // lib/storage/log-file.js:29，独立实测 OCCURRENCES=1。
     from: 'const LOG_NAME = /^reader-(\\d{4})-(\\d{2})-(\\d{2})\\.log$/;',
     to: 'const LOG_NAME = /^reader-/;' },
+  { id: 'log-认不出的名字被当成可删', file: 'lib/storage/log-file.js',
+    // ⚠️ 本条曾被我按「等价变异」错误地排除过一轮，推导方向是反的：少了 `day === undefined ||` 之后，
+    // 判据只剩 `if (day >= cutoff) continue`，而 undefined >= 数字 **恒为 false** ⇒ continue 不执行
+    // ⇒ 直接落到 unlinkSync。凡是**认不出的名字**（config.json / rss.db / rss.db-wal / rss.db-shm /
+    // notes.txt / reader-backup.log …）都会被当成超期日志删掉 —— 这正是整个模块存在的理由所在：
+    // 用户的订阅真相与已读态，不可逆，且界面上只表现为「订阅少了一批」。
+    // 判据：tests/log-file.test.mjs 的「只删超期 reader-*.log」与「认不出的名字既不删也不崩」
+    // （两条各有一条 deepEqual 名字集合的断言，删掉邻居当场翻红）。
+    // lib/storage/log-file.js:102，独立实测 OCCURRENCES=1。
+    from: 'if (day === undefined || day >= cutoff)',
+    to: 'if (day >= cutoff)' },
+  { id: 'log-同名目录不再跳过（EISDIR 抬升为整次失败）', file: 'lib/storage/log-file.js',
+    // 去掉「只删普通文件」这道闸后，一个名字恰好合形、且超期的**目录**会直接进 unlinkSync ⇒
+    // EISDIR ⇒ 整次 prune 抛错。危害不是「删错东西」，而是**清理从此每次都失败**：
+    // 用户会看到反复的清理告警，而真正该删的超期日志一个都删不掉（紧随其后的 unlinkSync 被跳过）。
+    // 判据：tests/log-file.test.mjs 的「匹配到同名目录时跳过（EISDIR 不许升级成整次清理失败）」。
+    // lib/storage/log-file.js，独立实测 OCCURRENCES=1。
+    from: 'if (entry === undefined || !entry.isFile())',
+    to: 'if (false)' },
   { id: 'log-保留窗口多留一天（边界偏移）', file: 'lib/storage/log-file.js',
     // keepDays 少减一天 ⇒ 窗口变成「今天 + 前 14 天」= 15 份。这类错**没有症状**：日志多留一份
     // 看起来永远是对的，只有钉在两侧的边界用例能抓到它（只断言「有老文件被删」的用例放走它）。
@@ -740,13 +762,18 @@ const MUTATIONS = [
     // lib/storage/log-file.js:96，独立实测 OCCURRENCES=1。
     from: 'const cutoff = today - (keepDays - 1) * DAY_MS;',
     to: 'const cutoff = today - keepDays * DAY_MS;' },
-  // ⚠️ 本轮**刻意没加**的两条，都是实测（或推导即知）的**等价变异**，按 AGENTS.md 不入门槛：
-  // ① 「删掉 day === undefined 这半边」（只留 day >= cutoff）：dayMsOf 认不出时返回 undefined 而非
-  //    任何数字，undefined >= cutoff 恒 false ⇒ 与 day === undefined 同样是 continue，**没有输入**
-  //    能区分两者。真正守着「认不出就跳过」的是上面那条正则变异。
-  // ② 「prune 改成看 mtime」：mtime 判定需要 statSync，改动已经不止一处（要换掉整个循环体），
-  //    而它表达的行为差异（文件名 vs 修改时间）已由「对认不出的文件名…且判据只看文件名不看 mtime」
-  //    那条用例钉住（6 个认不出的名字 mtime 全设成 2000 年，混进 mtime 就会被一起删掉）。
+  // ⚠️ 本轮**刻意没加**的一条（实测判定为**等价变异**，按 AGENTS.md 不入门槛）：
+  // 「prune 改成看 mtime」：mtime 判定需要 statSync，改动已经不止一处（要换掉整个循环体），
+  // 而它表达的行为差异（文件名 vs 修改时间）已由「对认不出的文件名…且判据只看文件名不看 mtime」
+  // 那条用例钉住（6 个认不出的名字 mtime 全设成 2000 年，混进 mtime 就会被一起删掉）。
+  //
+  // 📌 教训（修复轮 1/5）：本区块原先还排除过一条「删掉 day === undefined 这半边」，理由写的是
+  // 「undefined >= cutoff 恒 false ⇒ 同样是 continue」。**这个推导是反的**：`continue` 的语义是
+  // 「跳过」，条件为 false 恰恰意味着**不跳过**、继续往下走到 unlinkSync。我把「条件为假」
+  // 错读成了「结果为跳过」。本条现已作为 'log-认不出的名字被当成可删' 正式入门槛。
+  // 教训的教训：写下「这是等价变异」之前必须按**执行路径**推一遍（哪个分支被走到、走到哪里），
+  // 而不是只看表达式的值像不像。docs/pitfalls.md 二、2.7 记的「未应用比幸存更隐蔽」是同一族错误
+  // 的另一种形态 —— 两者都源于对「这条变异到底改变了哪次执行」没有真的验证。
 ]
 
 function runSuite() {

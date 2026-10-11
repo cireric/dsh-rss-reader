@@ -105,16 +105,21 @@ test('pruneOldLogs 对认不出的文件名既不删也不崩，且判据只看�
   const root = tempDir('malformed')
   try {
     const now = new Date('2026-10-11T12:00:00Z')
+    // ⚠️ 三个「后缀不对」的夹具必须带一个**超期**日期：若用「今天」的日期，它们在两种正则下
+    // 都落在窗口内 ⇒ 删不删都看不出来 ⇒ 尾锚 `$` 其实没人守着（修复轮 1/5 的 F4：
+    // 去掉 `$` 的变异曾整轮幸存）。带超期日期才能问出真问题：「reader-2026-09-01.log.bak
+    // 是不是一条该删的日志？」正确答案不是 —— 它不是 `reader-YYYY-MM-DD.log` 这个名字。
     const malformed = [
-      'reader-backup.log',         // 前缀对、没有日期
-      'reader-2026-13-99.log',     // 形状对、不是真日期
-      'reader-20260911.log',       // 日期没分隔符
-      'reader-2026-10-11.log.bak', // 日期对、后缀不对
-      'reader-2026-10-11.log.gz',  // 同上
+      'reader-backup.log',             // 前缀对、没有日期
+      'reader-2026-13-99.log',         // 形状对、不是真日期
+      'reader-20260911.log',           // 日期没分隔符
+      'reader-2026-09-01.log.bak',     // 日期**超期**、后缀不对（尾锚的判别式）
+      'reader-2026-09-01.log.gz',      // 同上
+      'reader-2026-09-01.log.1',       // 轮转编号后缀，同样不许被当成日志
       'reader-.log',
     ]
     for (const name of malformed) writeFileSync(join(root, name), 'x')
-    // 把它们全改成「很久以前」：若 prune 的判据里混进 mtime，这 6 个会一起被误删。
+    // 把它们全改成「很久以前」：若 prune 的判据里混进 mtime，这些会一起被误删。
     const longAgo = new Date('2000-01-01T00:00:00Z')
     for (const name of malformed) utimesSync(join(root, name), longAgo, longAgo)
 
@@ -124,7 +129,26 @@ test('pruneOldLogs 对认不出的文件名既不删也不崩，且判据只看�
 
     assert.equal(pruneOldLogs(root, 14, now), 1)
     assert.equal(names(root).includes(basename(stale)), false, '超期的那份该删')
-    assert.deepEqual(names(root), [...malformed].sort(), '认不出的 6 个名字必须原样留着')
+    assert.deepEqual(names(root), [...malformed].sort(), '认不出的 ' + malformed.length + ' 个名字必须原样留着')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('pruneOldLogs 匹配到同名目录时跳过（EISDIR 不许升级成整次清理失败）', () => {
+  const root = tempDir('isdir')
+  try {
+    const now = new Date('2026-10-11T12:00:00Z')
+    // 一个**超期**的、名字恰好合形的目录：它匹配 LOG_NAME，若直接 unlinkSync 会抛 EISDIR ⇒
+    // 整次 prune 抛错（用户看到一条无谓的清理告警），而目录本身也删不掉。
+    // 目录不是日志，跳过它才是对的。
+    mkdirSync(join(root, 'reader-2026-09-01.log'))
+    writeFileSync(join(root, 'reader-2026-09-01.log', 'inner.txt'), 'x')
+    writeFileSync(dailyLogPath(root, daysBefore(now, 30)), 'line\n')
+
+    assert.equal(pruneOldLogs(root, 14, now), 1, '只该删掉那份真日志，撞名的目录不参与计数')
+    // 整个集合比对：目录还在，且它是这里唯一的条目（那份超期真日志已被删）
+    assert.deepEqual(names(root), ['reader-2026-09-01.log'])
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

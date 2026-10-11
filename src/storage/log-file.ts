@@ -18,7 +18,7 @@
  * **日期一律用 UTC**：日志行首的时间戳由 `toISOString()` 写死为 UTC，文件名必须跟着它走，
  * 否则「同一条日志属于哪一天」取决于在哪台机器上看（本机是 CST，差 8 小时）。
  */
-import { readdirSync, unlinkSync } from 'node:fs'
+import { readdirSync, statSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 
 /** 一天的毫秒数。日志按整天划分，不引入日历库（跨时区的偏移不存在：一切按 UTC）。 */
@@ -104,9 +104,21 @@ export function pruneOldLogs(root: string, keepDays = 14, now: Date = new Date()
   const failures: string[] = []
   for (const name of entries) {
     const day = dayMsOf(name)
-    // 认不出的名字（reader-backup.log / reader-2026-13-99.log / 目录 …）一律跳过
+    // 认不出的名字（reader-backup.log / reader-2026-13-99.log / reader-.log …）一律跳过。
+    // ⚠️ 这半边 `day === undefined` **不是**可有可无的等价写法：少了它，判据就只剩
+    // `if (day >= cutoff) continue`，而 undefined >= 数字 恒为 false ⇒ 认不出的名字会**直接落到
+    // 下面的 unlinkSync**，把同目录的 config.json / rss.db 及其边车一起删掉（不可逆）。
+    // 它同时守着「认不出就跳过」这条契约的两端，所以两条都要在。
     if (day === undefined || day >= cutoff) continue
     try {
+      // 只删**普通文件**。同名**目录**同样匹配 LOG_NAME，而 unlinkSync 删目录会抛 EISDIR ——
+      // 那会把「目录撞名」这条正常路径升级成一次整次的清理失败（用户看到一条无谓的告警），
+      // 而目录本身也没被删掉。`throwIfNoEntry: false` 另挡「readdir 之后条目消失」的竞态。
+      // 两者都是「跳过」，与上面「认不出就跳过」同一条纪律。
+      // statSync 的其余错误（EACCES / ELOOP …）与 unlinkSync 的失败一起收进 failures ——
+      // 一并响亮地抛出，绝不退化成「静默停更」。
+      const entry = statSync(join(root, name), { throwIfNoEntry: false })
+      if (entry === undefined || !entry.isFile()) continue
       unlinkSync(join(root, name))
       removed += 1
     } catch (error) {

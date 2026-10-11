@@ -153,10 +153,15 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
   const articleAttempts = new Map<string, number>()
 
   const log = (message: string): void => {
-    const line = '[' + new Date().toISOString() + '] ' + message
+    // ⚠️ 时钟只取**一次**，行首时间戳与文件名必须来自同一个时刻：这里若各取一次 new Date()，
+    // 中间还隔着一次 ctx.logger.info（同步但可能触发宿主的同步副作用，窗口远不止亚毫秒），
+    // 跨过 UTC 零点时就会出现「2026-10-11T23:59:59.999Z 这一行落在 reader-2026-10-12.log 里」——
+    // 排障时按日期找日志会找不到那一行，而它明明在。一次取值就从根上排除这种跨界。
+    const at = new Date()
+    const line = '[' + at.toISOString() + '] ' + message
     ctx.logger?.info?.(line)
-    // 默认路径按**当天**现算：上面那行的 toISOString() 与本函数同一次取时刻，两者永远同一天。
-    const target = logFile === '' ? dailyLogPath(storagesRoot, new Date()) : logFile
+    // 默认落点按**当天**现算（长驻进程不能只算一次，见上面的注释）
+    const target = logFile === '' ? dailyLogPath(storagesRoot, at) : logFile
     try {
       // 存储根（默认落点）必须是 0700：这一行**可能早于 ensureStorageRoot 跑**（「配置未经解析」
       // 的提示就在装载最前面），而 mkdirSync 的默认权限受 umask 支配（通常 0755）。等
