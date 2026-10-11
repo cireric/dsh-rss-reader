@@ -19,6 +19,7 @@ import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
+import { READER_KEY_HELP } from '../lib/keys.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const BUNDLE = join(ROOT, 'lib', 'client.js')
@@ -998,6 +999,17 @@ test('左栏折叠时 shift+n/p/o 不生效：不许改一个看不见的导航'
   assert.equal(h.press('N', true), true, '展开后 shift+n 恢复可用')
 })
 
+/**
+ * 从**指定元素**上派发按键（模拟真实浏览器：target 就是当前焦点）。
+ * harness 的 press 只能打在 document 上，而「焦点在浮窗里 / 在输入框里」这两种守卫行为
+ * 只有指定 target 才表达得出来 —— 它们恰恰是键盘流最容易静默失效的两处。
+ */
+function pressFrom(h, element, key, shiftKey = false) {
+  const event = new h.win.KeyboardEvent('keydown', { key, shiftKey, bubbles: true, cancelable: true })
+  element.dispatchEvent(event)
+  return event.defaultPrevented
+}
+
 /** 左栏导航键可改动的状态面：这几个字段任一被悄悄改了，都是「看不见的导航被动了」。 */
 function snapshotState(h) {
   const state = h.store.get()
@@ -1009,3 +1021,132 @@ function snapshotState(h) {
     selectedId: state.selectedId,
   }
 }
+
+/**
+ * 帮助浮窗（2026-10-10）。用户拍板：非模态（后台键继续生效）、三个关闭出口（Esc / ? / ✕）、
+ * 头部只留最右端一个 ? 入口、内容逐行来自 keys.ts 的 READER_KEY_HELP。
+ *
+ * 这一组的每一环都能失败成「按了没反应」：键位没接上、开合状态没进 keydown effect 的依赖数组
+ * （闭包捕获）、浮窗被自己的守卫吃掉（焦点在浮窗里时）、提示行删了而浮窗没画出来。
+ * 只断言 resolveReaderKey 或 store 的测试对这些一律看不见。
+ */
+test('? 开合帮助浮窗：浮窗逐行画出来自 keys.ts 的帮助表', skip, async () => {
+  const h = await mountReader({ items: [item({ id: 'a' })] })
+  await h.store.load('overview')
+  await sleep(30)
+  const help = () => h.win.document.querySelector('[data-rss-help]')
+  assert.equal(help(), null, '前置条件：默认不该有浮窗')
+
+  assert.equal(h.press('?'), true, '? 应当被接管（不被宿主或浏览器抢走）')
+  await sleep(30)
+  assert.notEqual(help(), null, '按 ? 之后应当出现帮助浮窗')
+
+  // 内容逐行核对而不是抽查两个词：少的正是「表里有一行、浮窗没画」这类脱节
+  const text = help().textContent ?? ''
+  for (const section of READER_KEY_HELP) {
+    for (const entry of section.entries) {
+      assert.ok(text.includes(entry.label), '浮窗里缺了这一行的键位写法：' + entry.label)
+    }
+  }
+
+  assert.equal(h.press('?'), true, '再按一次 ? 仍应被接管')
+  await sleep(30)
+  assert.equal(help(), null, '再按 ? 应当关闭浮窗（开合同一个键）')
+})
+
+test('头部只留最右端一个 ? 入口：那行塞满键位的提示行必须真的没了', skip, async () => {
+  const h = await mountReader({ items: [item({ id: 'a' })] })
+  await h.store.load('overview')
+  await sleep(30)
+
+  // 提示行的指纹：删掉之后这两个词不该再出现在面板里（浮窗里的写法是「j / k」与「n / p」，不会误命中）
+  const body = h.win.document.body.textContent ?? ''
+  assert.equal(body.includes('j/k 移动'), false, '头部那行键位提示又被写回来了')
+  assert.equal(body.includes('n/p 扫视'), false, '头部那行键位提示又被写回来了')
+
+  const entry = h.win.document.querySelector('button[aria-label="快捷键帮助"]')
+  assert.notEqual(entry, null, '头部应当有 ? 帮助入口')
+  assert.equal(entry.getAttribute('aria-expanded'), 'false', '收起态应当反映到 aria-expanded')
+  entry.dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
+  await sleep(30)
+  assert.notEqual(h.win.document.querySelector('[data-rss-help]'), null, '点击 ? 入口应当打开浮窗')
+  assert.equal(entry.getAttribute('aria-expanded'), 'true', '展开态应当反映到 aria-expanded')
+})
+
+test('Esc 关浮窗且不穿透：正文页里只收浮窗，不把文章一起关掉', skip, async () => {
+  const h = await mountReader({ items: [item({ id: 'a' }), item({ id: 'b' })] })
+  await h.store.load('overview')
+  await sleep(30)
+  h.press('V', true)
+  for (let i = 0; i < 40 && h.store.get().view !== 'article'; i += 1) await sleep(20)
+  await sleep(60)
+  assert.equal(h.store.get().view, 'article', '前置条件：已进正文页')
+
+  assert.equal(h.press('?'), true, '正文页里 ? 也该能用（帮助不随视图分流）')
+  await sleep(30)
+  assert.notEqual(h.win.document.querySelector('[data-rss-help]'), null, '前置条件：浮窗已开')
+
+  assert.equal(h.press('Escape'), true, 'Esc 应当被接管')
+  await sleep(30)
+  assert.equal(h.win.document.querySelector('[data-rss-help]'), null, 'Esc 应当关掉浮窗')
+  assert.equal(h.store.get().view, 'article', '第一次 Esc 只关浮窗 —— 不许顺手把文章也关了')
+
+  h.press('Escape')
+  await sleep(30)
+  assert.equal(h.store.get().view, 'list', '浮窗已关，第二次 Esc 回到原来的语义（正文 → 列表）')
+})
+
+test('✕ 关闭；焦点落在浮窗里之后 ? 与 Esc 仍然有效（非模态不许被自己的守卫吃掉）', skip, async () => {
+  const h = await mountReader({ items: [item({ id: 'a' })] })
+  await h.store.load('overview')
+  await sleep(30)
+  h.press('?'); await sleep(30)
+
+  const close = h.win.document.querySelector('button[aria-label="关闭快捷键帮助"]')
+  assert.notEqual(close, null, '浮窗应当有一个 ✕ 关闭按钮')
+  // 真实浏览器里点按钮会把焦点给它 —— 这里也把焦点放过去，再**从它身上**派发按键。
+  // 这是本用例的全部要点：浮窗若用了 role="dialog" / aria-modal，isTypingTarget 会把从浮窗内
+  // 发出的按键全部吞掉（含 Esc），? 与 Esc 当场变哑。
+  close.focus()
+  assert.equal(h.win.document.activeElement, close, '前置条件：焦点在 ✕ 上')
+  assert.equal(pressFrom(h, close, '?'), true, '焦点在浮窗里时 ? 仍应被接管')
+  await sleep(30)
+  assert.equal(h.win.document.querySelector('[data-rss-help]'), null, '再按 ? 应当关掉浮窗')
+
+  h.press('?'); await sleep(30)
+  const close2 = h.win.document.querySelector('button[aria-label="关闭快捷键帮助"]')
+  close2.focus()
+  assert.equal(pressFrom(h, close2, 'Escape'), true, '焦点在浮窗里时 Esc 仍应被接管')
+  await sleep(30)
+  assert.equal(h.win.document.querySelector('[data-rss-help]'), null, 'Esc 应当关掉浮窗')
+
+  h.press('?'); await sleep(30)
+  h.win.document.querySelector('button[aria-label="关闭快捷键帮助"]')
+    .dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
+  await sleep(30)
+  assert.equal(h.win.document.querySelector('[data-rss-help]'), null, '点 ✕ 应当关掉浮窗')
+})
+
+test('非模态：浮窗开着时 j 仍然作用于背后的列表（这是拍板结论，不是默认行为）', skip, async () => {
+  const h = await mountReader({ items: [item({ id: 'a' }), item({ id: 'b' })] })
+  await h.store.load('overview')
+  await sleep(30)
+  const before = h.store.get().selectedId
+  h.press('?'); await sleep(30)
+  assert.notEqual(h.win.document.querySelector('[data-rss-help]'), null, '前置条件：浮窗已开')
+  assert.equal(h.press('j'), true, '浮窗开着时 j 仍应被接管')
+  await sleep(30)
+  assert.notEqual(h.store.get().selectedId, before, '浮窗开着时 j 必须照旧移动背后的选中项（非模态）')
+})
+
+test('输入框里的 ? 不触发帮助（别抢正在打字的人的键）', skip, async () => {
+  const h = await mountReader({ items: [item({ id: 'a' })] })
+  await h.store.load('overview')
+  await sleep(30)
+  // 头部那个「显示未读计数」复选框是面板里真实存在的 input（左栏角标用例也在用它定位）
+  const checkbox = [...h.win.document.querySelectorAll('input[type="checkbox"]')][0]
+  assert.notEqual(checkbox, undefined, '前置条件：头部有复选框')
+  assert.equal(pressFrom(h, checkbox, '?'), false, '从输入框发出的 ? 不该被接管')
+  await sleep(30)
+  assert.equal(h.win.document.querySelector('[data-rss-help]'), null, '输入框里的 ? 不该弹出帮助')
+})

@@ -4,7 +4,8 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { resolveReaderKey } from '../lib/keys.js'
+import { readFileSync } from 'node:fs'
+import { resolveReaderKey, READER_KEY_HELP } from '../lib/keys.js'
 
 test('键位：r 刷新计数；w/W 已空出且不得被偷偷接管（2026-10-08）', () => {
   // 2026-10-08 改键：r 归还给「刷新未读计数」（规格 §5 不变量 8），视图切换移到 w/W。
@@ -116,4 +117,60 @@ test('小写 n/p/o 仍是原语义，不被导航键抢占', () => {
   assert.equal(resolveReaderKey('o'), 'expand')
   // p 同理：小写必须是扫视（brief 只列了 n/o，这里补 p，否则「不被抢占」在 p 上无判据）
   assert.equal(resolveReaderKey('p'), 'scanPrev')
+})
+
+/**
+ * 帮助浮窗（2026-10-10）：`?` = 快捷键帮助（GR spec §3.8 第 255 行）。
+ *
+ * 这一组守的不是「浮窗画得对不对」，而是**浮窗里的文案与实现不许各说各话**。
+ * 搬到浮窗之前，键位提示是一行手写字符串，它与 resolveReaderKey 之间没有任何机制保证一致；
+ * 本仓库为这类脱节付过两次学费（按钮写「（R）」而实现只认 shift+R；界面写「F」而实现只认大写）。
+ * 现在文案从这张表渲染，表与实现由下面三条测试互锁。
+ */
+test('? 是快捷键帮助（GR §3.8 第 255 行）', () => {
+  assert.equal(resolveReaderKey('?'), 'help')
+  // 浏览器在 shift+/ 时给的就是字面 '?'；某些布局/CapsLock 下 shiftKey 可能为真，两种都该认
+  assert.equal(resolveReaderKey('?', true), 'help')
+})
+
+test('帮助表逐条反查：每一行声明的动作都必须与实现解析出来的完全一致', () => {
+  const rows = READER_KEY_HELP.flatMap((section) => section.entries.map((entry) => ({ section, entry })))
+  assert.ok(rows.length >= 15, '帮助表不该只剩几行（实际 ' + rows.length + '）')
+  for (const { section, entry } of rows) {
+    assert.ok(entry.bindings.length > 0, section.title + ' / ' + entry.label + ' 没有任何绑定')
+    for (const binding of entry.bindings) {
+      assert.equal(
+        resolveReaderKey(binding.key, binding.shift === true),
+        binding.action,
+        section.title + ' / ' + entry.label + '：键 ' + JSON.stringify(binding.key) + ' 的解析结果与帮助表声明不一致',
+      )
+    }
+  }
+})
+
+test('帮助行必须写出它自己的每一条绑定（防止改了绑定忘了改文案）', () => {
+  // 键在帮助行里的写法：字面值或小写形式；空格与 Escape 读不出字面值，用界面惯用的写法
+  const shownAs = (key) => key === ' ' ? ['空格'] : key === 'Escape' ? ['Esc'] : [key, key.toLowerCase()]
+  for (const section of READER_KEY_HELP) {
+    for (const entry of section.entries) {
+      for (const binding of entry.bindings) {
+        assert.ok(
+          shownAs(binding.key).some((shown) => entry.label.includes(shown)),
+          '帮助行「' + entry.label + '」没写出它的绑定键 ' + JSON.stringify(binding.key),
+        )
+      }
+    }
+  }
+})
+
+test('帮助表反向覆盖：实现里能返回的动作，都必须出现在帮助表里', () => {
+  // 动作全集从**编译产物**里取，而不是在测试里再抄一份清单 —— 抄一份的话，
+  // 「实现加了新键、忘了写帮助」这条恰恰漏掉（两份清单都不含它，测试照样绿）。
+  const source = readFileSync(new URL('../lib/keys.js', import.meta.url), 'utf8')
+  const returned = new Set([...source.matchAll(/return\s+'([A-Za-z]+)'/g)].map((match) => match[1]))
+  returned.delete('none')
+  assert.ok(returned.size >= 20, '动作全集没解析出来（只拿到 ' + returned.size + ' 个），先修这条测试的取值方式')
+  const covered = new Set(READER_KEY_HELP.flatMap((s) => s.entries.flatMap((e) => e.bindings.map((b) => b.action))))
+  const missing = [...returned].filter((action) => !covered.has(action))
+  assert.deepEqual(missing, [], '这些动作在实现里可达，却没写进帮助表：' + missing.join('、'))
 })

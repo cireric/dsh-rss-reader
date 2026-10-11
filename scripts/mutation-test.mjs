@@ -395,6 +395,42 @@ const MUTATIONS = [
   { id: 'refresh-正文回填用旧快照覆盖并发写入', file: 'lib/refresh.js',
     from: "await store.updateItem(itemId, (current) => ({ ...current, summary }));",
     to: "await store.saveItem(itemId, { ...store.item(itemId), summary });" },
+  // ── 快捷键帮助浮窗（2026-10-10）──────────────────────────────────────────────
+  // 病象：头部一行塞满键位（读者记不住、界面也挤），而它必须与 keys.ts 逐字同步，
+  // 同步只靠人记 —— 本仓库为「标签与实现各说各话」付过两次学费。
+  // 修法：提示行收进「?」浮窗，浮窗内容逐行渲染 src/keys.ts 的 READER_KEY_HELP（唯一来源）。
+  // 这五条各守一个**独立**的失效面，缺一条就退回某种「按了没反应」：
+  //   ① 键位层：? 解析成 help（否则浮窗再无键盘入口）
+  //   ② 接线层：解析对了但 client 没接 —— 本仓库反复踩到的形态
+  //   ③ 优先级：帮助开着时 Esc 必须先关浮窗（否则正文页按 Esc 会「浮窗与文章一起消失」）
+  //   ④ 角色：浮窗若标成 dialog，面板自己的按键守卫会把从浮窗内发出的键全吞掉（含 Esc）
+  //   ⑤ 依赖数组：helpOpen 不进依赖 ⇒ 闭包读到注册那一刻的 false ⇒ 症状同 ③ 但根因不同
+  // 判据：tests/keys.test.mjs 的「? 是快捷键帮助」「帮助表逐条反查」「帮助表反向覆盖」；
+  // tests/scroll-dom.test.mjs 的「? 开合帮助浮窗」「Esc 关浮窗且不穿透」「✕ 关闭；焦点落在浮窗里…」。
+  // 每条 from 均照**编译产物的真实形状**写（docs/pitfalls.md 一、1.4），并已独立核对出现次数。
+  { id: 'keys-? 不认帮助键', file: 'lib/keys.js',
+    // lib/keys.js:65，产物里唯一一处。
+    from: "case '?': return 'help';",
+    to: "case '?': return 'none';" },
+  { id: 'client-? 不接浮窗', file: 'lib/client.js',
+    // lib/client.js:2470-2471。删掉 run(...) 之后 ? 既不 preventDefault 也不开浮窗 ——
+    // 「被吞掉」与「毫无反应」是两种不同的病，都由这条变异造出来。
+    from: 'run(() => setHelpOpen((open) => !open));',
+    to: 'run(() => {});' },
+  { id: 'client-Esc 不先关浮窗', file: 'lib/client.js',
+    // lib/client.js:2491，唯一一处。改坏后：开着浮窗按 Esc 会去关文章，浮窗留在屏幕上。
+    from: 'if (helpOpen) {',
+    to: 'if (false) {' },
+  { id: 'client-浮窗标成 dialog 角色', file: 'lib/client.js',
+    // lib/client.js:2269，唯一一处。isTypingTarget 会把 [role=dialog] 内的按键全吞掉（含 Esc）——
+    // 鼠标点过一次 ✕ 之后，? 与 Esc 双双失效。判据是「✕ 关闭；焦点落在浮窗里之后…」那条用例。
+    from: 'role: "region",',
+    to: 'role: "dialog",' },
+  { id: 'client-helpOpen 不进依赖数组', file: 'lib/client.js',
+    // lib/client.js:2534-2538。少了 helpOpen，按键处理器读到的永远是注册那一刻的 false：
+    // 浮窗开着按 Esc → 走「关文章」分支，浮窗留在屏幕上（与上面第三条同一个病象、不同根因）。
+    from: '\t\t\t\t\troot,\n\t\t\t\t\tstore,\n\t\t\t\t\thelpOpen',
+    to: '\t\t\t\t\troot,\n\t\t\t\t\tstore' },
 ]
 
 function runSuite() {

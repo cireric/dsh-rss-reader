@@ -34,7 +34,7 @@ import { FeedNav } from './feed-nav.js'
 import { ArticleView } from './article-pane.js'
 import { MIN_CONTENT_CHARS, recencyOf, ROUTE_PATH, type ArticlePayload, type CleanupResult, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult } from '../shared.js'
 import { htmlToText } from '../html-text.js'
-import { resolveReaderKey } from '../keys.js'
+import { READER_KEY_HELP, READER_HELP_SCOPE_LABEL, resolveReaderKey } from '../keys.js'
 import { nextScrollTop, scanTop, pageTop, halfPageTop, scanStepFor, scrollSelectorFor, lineStepFrom, isElementNode, SCROLL_ATTR } from '../list-scroll.js'
 
 export const inject = ['slots']
@@ -43,6 +43,9 @@ export const inject = ['slots']
 const PANEL_ID = 'dsh-rss-reader'
 /** 阅读器根节点的标记：快捷键用它判断焦点是否在本面板内。 */
 const ROOT_ATTR = 'data-dsh-rss-reader'
+/** 帮助浮窗的标记：与 data-rss-row / data-rss-scroll 同一约定 —— 测试按标记属性现取节点，
+ *  不靠序号或文案定位（改文案不该让测试红，改语义才该）。 */
+const HELP_ATTR = 'data-rss-help'
 
 
 /**
@@ -68,6 +71,24 @@ const STYLE = `
 .dsh-rss-bar::after { content:''; position:absolute; top:0; bottom:0; width:35%;
   background:currentColor; opacity:.45; animation: dsh-rss-slide 1s ease-in-out infinite; }
 @keyframes dsh-rss-slide { 0% { left:-35%; } 100% { left:100%; } }
+.dsh-rss-help { position:absolute; inset:0; z-index:6; display:flex; justify-content:center;
+  align-items:flex-start; padding:20px; pointer-events:none; }
+.dsh-rss-help-card { pointer-events:auto; display:flex; flex-direction:column; gap:2px;
+  width:100%; max-width:660px; max-height:100%; overflow-y:auto; padding:12px 16px 14px;
+  border-radius:10px; font-size:13px;
+  background:Canvas; color:CanvasText;
+  border:1px solid color-mix(in srgb, CanvasText 20%, transparent);
+  box-shadow:0 14px 40px color-mix(in srgb, CanvasText 24%, transparent); }
+.dsh-rss-help-head { display:flex; align-items:center; gap:10px; padding-bottom:4px; }
+.dsh-rss-help-title { font-size:14px; font-weight:600; }
+.dsh-rss-help-legend { font-size:11px; opacity:.6; }
+.dsh-rss-help-group { font-size:11px; font-weight:600; opacity:.55; letter-spacing:.06em;
+  margin:8px 0 2px; }
+.dsh-rss-help-row { display:flex; align-items:baseline; gap:10px; padding:2.5px 0; }
+.dsh-rss-help-key { flex:0 0 132px; font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:12px; }
+.dsh-rss-help-sum { flex:1; min-width:0; }
+.dsh-rss-help-scope { flex:0 0 auto; font-size:11px; opacity:.5; }
 `
 
 /** 刷新图标：加载时整圈旋转，省掉额外的 spinner 元素。 */
@@ -158,6 +179,45 @@ function ReaderIcon({ size = 16, active = false }: { size?: number; active?: boo
  * 「可见性守卫恒真」「干脆不注册监听器」三条变异分别注入构建产物，只断言 store 的测试
  * 103 条全绿——说明按键接线那一层此前零覆盖。
  */
+/**
+ * 快捷键帮助浮窗（GR spec §3.8 第 255 行：`?` = 快捷键帮助）。
+ *
+ * 为什么**不**用 role="dialog" / aria-modal：面板的按键守卫（isTypingTarget）会把焦点位于
+ * dialog 内的按键全部吞掉（含 Esc）—— 鼠标点过一次浮窗里的 ✕，焦点就落在浮窗内，再按 ? 或 Esc
+ * 会全哑。用户拍板要的是「非模态：查键位时后台的键仍生效」，所以这里用 role="region"：
+ * 与那条守卫天然不冲突，语义上也不再假装自己是个模态框。
+ *
+ * 内容逐行来自 keys.ts 的 READER_KEY_HELP（唯一来源）—— 本组件不写任何键位文案，
+ * 免得又出现「界面写一套、实现认一套」那类既有故障。
+ */
+function HelpPanel({ onClose }: { onClose: () => void }): ReactNode {
+  return (
+    <div className="dsh-rss-help" {...{ [HELP_ATTR]: '' }}>
+      <div className="dsh-rss-help-card" role="region" aria-label="快捷键列表">
+        <div className="dsh-rss-help-head">
+          <span className="dsh-rss-help-title">快捷键帮助</span>
+          <span className="dsh-rss-help-legend">未标注适用范围的键，在任何视图都生效</span>
+          <span style={{ flex: 1 }} />
+          <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
+            aria-label="关闭快捷键帮助" onClick={onClose}>✕</button>
+        </div>
+        {READER_KEY_HELP.map((section) => (
+          <div key={section.title}>
+            <div className="dsh-rss-help-group">{section.title}</div>
+            {section.entries.map((entry) => (
+              <div key={entry.label} className="dsh-rss-help-row">
+                <span className="dsh-rss-help-key">{entry.label}</span>
+                <span className="dsh-rss-help-sum">{entry.summary}</span>
+                <span className="dsh-rss-help-scope">{READER_HELP_SCOPE_LABEL[entry.scope]}</span>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export function createReader(store: ReaderStore): () => ReactNode {
   return function Reader(): ReactNode {
     const state = useReaderStore(store)
@@ -171,6 +231,8 @@ export function createReader(store: ReaderStore): () => ReactNode {
     const listBox = useRef<HTMLDivElement | null>(null)
     const articleBox = useRef<HTMLDivElement | null>(null)
     const [expanded, setExpanded] = useState<string | undefined>(undefined)
+    /** 帮助浮窗开合。它进 keydown effect 的依赖数组（见那条 effect 的收尾注释）。 */
+    const [helpOpen, setHelpOpen] = useState(false)
     // 慢加载：只有超过 180ms 还在加载时才把「刷新中」画出来，避免毫秒级请求闪一下
     const [slowLoading, setSlowLoading] = useState(false)
     useEffect(() => {
@@ -359,6 +421,11 @@ export function createReader(store: ReaderStore): () => ReactNode {
             if (!store.get().navVisible) return
             run(() => store.openNavCursor())
             break
+          // ? = 打开/关闭帮助浮窗（GR spec §3.8 第 255 行）。它不随视图分流：帮助在任何视图下
+          // 都该看得到，而它解释的恰恰是「别的视图里还能按什么」。
+          case 'help':
+            run(() => setHelpOpen((open) => !open))
+            break
           case 'openExternal': run(() => store.openSelected()); break
           case 'openArticle': if (view !== 'list') return; run(() => { void store.openArticle() }); break
           // r：刷新未读计数（只重取本地视图，不抓取 —— 规格不变量 1）
@@ -367,6 +434,9 @@ export function createReader(store: ReaderStore): () => ReactNode {
           // Esc：从正文回到列表；列表态下不拦截（不抢弹层的 Esc）
           // Esc：正文 → 列表；订阅管理 → 列表。列表态不拦截（不抢弹层的 Esc）
           case 'back':
+            // 帮助浮窗优先：开着帮助时 Esc **只**关帮助 —— 否则在正文页按 Esc 会「浮窗与文章一起
+            // 消失」，而读者只是想收掉那张挡住视线的卡片（用户拍板的三个关闭出口之一）。
+            if (helpOpen) { run(() => setHelpOpen(false)); break }
             if (view === 'article') { event.preventDefault(); store.closeArticle(); break }
             if (view === 'feeds') { event.preventDefault(); store.toggleFeeds(); break }
             return
@@ -381,7 +451,10 @@ export function createReader(store: ReaderStore): () => ReactNode {
       }
       document.addEventListener('keydown', onKeyDown)
       return () => { document.removeEventListener('keydown', onKeyDown) }
-    }, [root, store])
+      // helpOpen 必须进依赖数组：处理器要**读**它（Esc 得判断「先关帮助还是先回列表」）。
+      // 漏了它就会重犯本文件记过的那类闭包捕获缺陷 —— 读到的是注册那一刻的值，
+      // 于是「开着浮窗按 Esc」会直接去关文章（同形态事故：容器被闭包捕获后空格静默失效）。
+    }, [root, store, helpOpen])
 
     const items = store.visible()
     const failing = state.feeds.filter((feed) => feed.lastFailure)
@@ -390,7 +463,9 @@ export function createReader(store: ReaderStore): () => ReactNode {
 
     return (
       <div ref={setRoot} tabIndex={0} {...{ [ROOT_ATTR]: '' }}
-        style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, fontSize: 14, lineHeight: 1.55, outline: 'none' }}>
+        // position:relative 是必需的：帮助浮窗用 absolute 定位挂在根内，根没有定位时会挂到
+        // 最近的定位祖先（或页面）上，浮窗跑出面板。与列表容器那条同一条理由（见下面 setListBox）。
+        style={{ position: 'relative', display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, fontSize: 14, lineHeight: 1.55, outline: 'none' }}>
         <style>{STYLE}</style>
         {/* 横向 flex 由这一层承担：左栏常驻导航，右栏沿用原来的纵向结构（内部一律不动）。
             折叠时**不渲染左栏**而不是给它 width:0 —— width:0 会留下一条边框的缝，
@@ -445,11 +520,9 @@ export function createReader(store: ReaderStore): () => ReactNode {
             </span>
           )}
           <span style={{ flex: 1 }} />
-          {/* 键位帮助行必须与 keys.ts 的映射逐字一致：界面标签与实现各说各话是本仓库的既有故障
-              （按钮写「（R）」而实现只认 shift+R），所以 2026-10-10 改键时这里一并改。
-              半页键写「d / shift+d」而不是「d/u」：u 已改归左栏显隐，再写 d/u 半页就是假标签。
-              修饰键一律写 shift+ 而不是 ⇧ —— 同一行里 ⇧d 与 shift+o 两种写法并存，读者会以为是两种键。 */}
-          <span style={{ fontSize: 11, opacity: 0.55 }}>j/k 移动 · n/p 扫视 · 空格翻页 · d/shift+d 半页 · u 左栏 · shift+n/p 导航 · shift+o 打开 · o 展开并已读 · V 读正文 · v 开原站 · s 星标 · m 已读 · A 全部 · F 订阅</span>
+          {/* 那行塞满键位的提示行于 2026-10-10 收进「?」帮助浮窗：它既挤，又必须与 keys.ts 逐字
+              同步（本仓库为「标签与实现各说各话」付过两次学费）。浮窗现在逐行渲染 keys.ts 的
+              READER_KEY_HELP —— 界面文案不再有第二份，同步这件事从「靠人记」变成「靠测试」。 */}
           <button type="button" className="dsh-rss-btn"
             title="订阅管理：导入/导出 OPML、加源、退订（F 键）"
             onClick={() => store.toggleFeeds()}>订阅</button>
@@ -466,6 +539,11 @@ export function createReader(store: ReaderStore): () => ReactNode {
             <RefreshIcon spinning={slowLoading} />
             {slowLoading ? '刷新中…' : '刷新'}
           </button>
+          {/* 帮助入口放最右端：它是「说明书」，与左边那三个动作按钮不是一类东西。
+              点击与按 ? 键走同一个开关，不写第二份逻辑。 */}
+          <button type="button" className="dsh-rss-btn" style={{ fontWeight: 600 }}
+            title="快捷键帮助（?）" aria-label="快捷键帮助" aria-expanded={helpOpen}
+            onClick={() => setHelpOpen((open) => !open)}>?</button>
         </div>
         {slowLoading && <div className="dsh-rss-bar" aria-hidden="true" />}
 
@@ -596,6 +674,9 @@ export function createReader(store: ReaderStore): () => ReactNode {
           </div>
         </div>
         </div>
+        {/* 浮窗挂在面板根内：这样「面板不可见即不响应」与「卸载即清理」两条既有约束自动覆盖它，
+            不必为浮窗单开一套生命周期。 */}
+        {helpOpen && <HelpPanel onClose={() => setHelpOpen(false)} />}
       </div>
     )
   }
