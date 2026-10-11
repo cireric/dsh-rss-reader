@@ -17,7 +17,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { openDatabase, migrateSchema, SCHEMA_VERSION } from '../lib/storage/db.js'
@@ -375,6 +375,50 @@ test('listFeeds / feed / saveFeed / deleteFeed 与旧实现同形（条件请求
     assert.equal(store.cursor('https://a.example/feed.xml'), undefined)
     assert.notEqual(store.item('i-1'), undefined, '条目不在 deleteFeed 的职责里（旧实现同样不删，改它会变成静默删数据）')
     assert.deepEqual(store.listFeeds().map(([id]) => id), ['https://b.example/feed.xml'])
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('deleteFeed 先写 config、后删游标：config 写不进去时游标必须还在（跨介质顺序）', async () => {
+  const { store, db, configPath, dir } = freshStore('deletefeed-order')
+  try {
+    const feedId = 'https://a.example/feed.xml'
+    await store.saveFeed(feedId, { url: feedId })
+    await store.saveCursor(feedId, { seen: ['i-1'], cursorAt: '2026-10-11T09:00:00.000Z' })
+    const before = readFileSync(configPath, 'utf8')
+
+    // 让 config.json 变成一个**目录**：readConfigFile 会 EISDIR，写入更不可能成功。
+    // 于是 writeFeeds 一定抛错 —— 而它**在什么时候**抛，正是本条的判据。
+    rmSync(configPath)
+    mkdirSync(configPath)
+
+    await assert.rejects(
+      () => store.deleteFeed(feedId),
+      'config.json 写不进去时必须抛错，不许静默当成「退订成功」（用户以为退订了，源其实还在）',
+    )
+
+    // ★ 顺序判据：config 那一步失败了，那么**排在它后面**的删游标就绝不能已经发生。
+    // 两者落在不同介质上（文件 vs 库），中间失败没有共同回滚 —— 所以顺序本身就是正确性。
+    // 反过来的话这里会读到 undefined，用户看到的是「源还在订阅列表里、游标却没了」：
+    // 下一轮刷新会把整份 feed 当新内容重新导入成未读。
+    assert.notEqual(
+      store.cursor(feedId),
+      undefined,
+      '跨介质写入的失败必须停在 config 这一步：游标还在，这次退订是一次干净的 no-op，重试即可',
+    )
+
+    // 源记录同理：配置是订阅的唯一副本，一次失败的退订不许让它少一个源
+    rmSync(configPath, { recursive: true, force: true })
+    writeFileSync(configPath, before)
+    assert.notEqual(store.feed(feedId), undefined, '失败的退订不许动订阅映射')
+    assert.deepEqual(store.listFeeds().map(([id]) => id), [feedId])
+
+    // 正常路径不受影响：config 恢复成可写文件后，退订照样成功
+    await store.deleteFeed(feedId)
+    assert.equal(store.feed(feedId), undefined)
+    assert.equal(store.cursor(feedId), undefined)
   } finally {
     db.close()
     rmSync(dir, { recursive: true, force: true })

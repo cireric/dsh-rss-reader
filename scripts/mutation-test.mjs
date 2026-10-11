@@ -515,6 +515,35 @@ const MUTATIONS = [
     // 它「幸存」是**变异没生效**，不是测试缺口；docs/pitfalls.md 二、2.7 记的正是这类坑）。
     from: 'if (readAt !== undefined)\n        record.readAt = readAt;',
     to: 'record.readAt = readAt;' },
+  { id: 'store-deleteFeed 先删游标后写 config', file: 'lib/store-sqlite.js',
+    // 退订要动**两处介质**：config.json（文件）与 cursors（库）。它们没有共同事务，
+    // 中间失败无法一起回滚 —— 所以「先做哪一步」本身就是正确性，不是风格。
+    // 反过来（先删游标）时，config 写不进去（文件损坏 / 磁盘满）会留下「源还在订阅列表里、
+    // 游标却没了」：下一轮刷新把整份 feed 当新内容重新导入，用户看到的是已读条目**集体变未读**。
+    // 这个顺序最坏只是一条孤儿游标，无害。
+    // 判据：tests/store-sqlite.test.mjs 的「deleteFeed 先写 config、后删游标」——
+    // 它把 configPath 指成一个目录让写入必失败，再断言**游标仍在**；顺序调换后那条当场翻红。
+    // from 照**编译产物**逐字抄，已独立核对 OCCURRENCES=1（docs/pitfalls.md 一、1.4）。
+    from: [
+      '            writeFeeds(configPath, (feeds) => {',
+      '                const next = { ...feeds };',
+      '                delete next[feedId];',
+      '                return next;',
+      '            });',
+      '            runInTransaction(() => {',
+      '                sql(DELETE_CURSOR).run(feedId);',
+      '            });',
+    ].join('\n'),
+    to: [
+      '            runInTransaction(() => {',
+      '                sql(DELETE_CURSOR).run(feedId);',
+      '            });',
+      '            writeFeeds(configPath, (feeds) => {',
+      '                const next = { ...feeds };',
+      '                delete next[feedId];',
+      '                return next;',
+      '            });',
+    ].join('\n') },
   { id: 'store-老形态正文静默丢正文', file: 'lib/store-sqlite.js',
     // 库里没有存 paragraphs 的列。放开这道闸后，一条「只有 paragraphs、没有 blocks」的老记录会被
     // **当成长度为零的新记录**写下去：items 行落库、正文行被删掉，用户在详情页看到正文凭空消失，
