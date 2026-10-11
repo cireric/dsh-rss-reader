@@ -21,6 +21,9 @@
 - 注释与 commit message 写中文、写「为什么」；commit 结构：病象 → 根因 → 修法 → 证据。
 - **不许改** `storages/rss_reader.json`：迁移只读它，原样留存。
 - 排序键恒为 `recency = COALESCE(published_at, fetched_at)`，顺序 = recency 降序 + id 升序（本 spec §10）。
+- **两个「config」不许混**：`src/config.ts` 的 `Config` 是**插件配置面**（Schemastery，注入器写死 `{ }`、
+  只吃 schema 默认值）；`storages/rss-reader/config.json` 是**订阅真相的落点**。§4.1 只挪后者。
+  `Config.feeds` 仅作首次种子（`src/index.ts:181-192` 已按幂等处理），**不做**「把跑起来的配置写回 Config」。
 
 ## Review Focus
 
@@ -71,8 +74,17 @@
   - `ensureStorageRoot(root: string): void`（`mkdirSync` `recursive` + `mode 0o700`）
   - `openDatabase(path: string): DatabaseSync`（父目录 0700、文件 `wx`/0600、`journal_mode=WAL`、`busy_timeout=5000`、`user_version` 校验）
   - `SCHEMA_VERSION = 1`、`migrateSchema(db): void`
-  - `readConfigFile(path: string): { feeds: string[]; viewPreferences?: unknown }`、`writeConfigFile(path: string, value: unknown): void`（原子写 + 0600）
-- Consumes: `@deepseek-ai/dsh-home-paths` 的 `resolveDshHome()`
+  - `readConfigFile(path: string): ReaderConfigFile`、`writeConfigFile(path: string, value: ReaderConfigFile): void`（原子写 + 0600）
+  - `interface ReaderConfigFile { feeds: Record<string, FeedRecord>; viewPreferences?: unknown; version: 1 }`
+- Consumes: `@deepseek-ai/dsh-home-paths` 的 `resolveDshHome()`、`FeedRecord`（`src/domain.ts`）
+
+> **⚠️ feeds 不是 `string[]`（定稿加固 2026-10-11，`源码核对`）**：`FeedRecord` 上挂着
+> **条件请求与内容版本**——`etag` / `lastModified`（`src/refresh.ts:173`）、`contentRevision`
+> （`:170` 决定是否绕开 304 回填摘要）、`lastFetchedAt`（Task 10 的陈旧度调度要按它排序）、
+> `lastFailure`（`src/endpoints.ts:48` 回给界面）。只存 URL 列表会让这几项在迁移那一刻**静默归零**：
+> 表现是「迁移后第一轮全量重抓 + 摘要回填逻辑空转」，而没有任何断言会翻红。
+> ⇒ `feeds` 必须是 **`feedId → FeedRecord` 的映射**，逐字段与 `feeds` 表同形。
+> 备份脚本读的就是这个位置（`jq -S '.tables.feeds // {}'` 取出的正是这种映射），形状天然一致。
 
 - [ ] **Step 1: 写失败测试** `tests/storage-skeleton.test.mjs`
 
@@ -167,7 +179,23 @@ test('域文件不是本插件的（unit.name 不匹配）⇒ 抛错，不误导
 - [ ] **Step 2: 跑测试确认失败** → `node --test tests/migrate.test.mjs`
 - [ ] **Step 3: 实现 `migrateFromDomainFile`**
 
-要点：整份读 `rss_reader.json` → 校验 `unit.name === 'rss_reader'` → 单事务写入；`feeds` 表 → `config.json` 的 `feeds`；`global` → `config.json` 的 `viewPreferences`；**老文件只读、绝不改写或删除**。先写库后写 config，任一失败即整体回滚（`BEGIN`/`ROLLBACK`）。
+要点：整份读 `rss_reader.json` → 校验 `unit.name === 'rss_reader'` → 单事务写入；`feeds` 表 → `config.json` 的 `feeds`（**逐字段整体拷贝**，见 Task 2 的字段清单）；`global` → `config.json` 的 `viewPreferences`；**老文件只读、绝不改写或删除**。先写库后写 config，任一失败即整体回滚（`BEGIN`/`ROLLBACK`）。
+
+**另两件必须在这里做掉的事（定稿加固 2026-10-11）：**
+
+① **迁移时套一遍 `normalizeLegacyArticle`**（`src/domain.ts` 的纯函数，目前由 `src/index.ts:169-178`
+   的 `normalizeLegacyArticles` 在开域后全表跑）。它的作用是把老正文缓存（`article.paragraphs`
+   纯段落形态）折成 `blocks`。若迁移直接把 `article` 原样搬进 `texts`，老形态会被**原样冻进库里**，
+   而 Task 8 又删掉了那个开域规范化 —— 客户端将拿到它渲染不了的形状。
+   `实测`（2026-10-11，真实库）：当前 115 条中 57 条带正文、`paragraphs` 出现 **0 次**，
+   即**本机数据已无老形态**，但**不能因此省掉这一步**——别的安装（或更老的备份）仍有。
+   判据：迁移后库里不存在 `paragraphs` 形态的正文。
+
+② **`inject` 必须同步减项**（`src/index.ts:47`）。自持之后插件不再需要存储域，
+   留着 `export const inject = ['storageDomain', 'connection', 'webServer']` 会变成
+   「自己不落盘、却仍声明依赖它」——DSH 会照常为你装配存储域，迁移的收益被抵消一半。
+   同步项：`package.json` 的 `peerDependencies.@deepseek-ai/dsh-storage-domain`、
+   `scripts/build.sh:89` 的 `link_pkg`。**三者必须一起改**，漏一处就是一条悬空依赖。
 
 - [ ] **Step 4: build + 跑测试**，预期全绿
 - [ ] **Step 5: 切换 `src/index.ts`**：删除 `openDomainWithRetry` 的调用，改为「`ensureStorageRoot` → `openDatabase` → `migrateSchema` → `migrateFromDomainFile` → `createSqliteStore`」。**本步不删 `openDomainWithRetry` 函数本身**（Task 8 才删），以免中途不可回退。
@@ -191,11 +219,31 @@ test('域文件不是本插件的（unit.name 不匹配）⇒ 抛错，不误导
 - Produces（**本任务新增，加在 `src/store.ts` 的接口与两个实现上**）：
   - `countUnreadPerFeed(feedIds: readonly string[]): Record<string, number>`
   - `listRecent(limit: number): Array<[string, ItemRecord]>`（按 `recency DESC, id ASC`）
-  - `buildOverview` 与 `accountOf` 不再调用 `allItems()`
+  - `buildOverview`、`accountOf` 与 **`cleanup`** 不再调用 `allItems()`
+
+> **⚠️ `cleanup` 漏在原文覆盖率之外（定稿加固 2026-10-11，`源码核对`）**：
+> `src/endpoints.ts:337` 的 `cleanup` 自己就有一句 `target.allItems()`，而 spec §3.1 只把清理
+> 记在 `accountOf` 名下。**spec 与计划都漏了它**——不修的话，「点一次清理 = 一次 10 万行全表
+> 遍历」原样留下，而这正是 §3.1「扫描族归零」要消灭的东西。
+> 修法：清理的候选集用**一条 SQL**选出来（`read_at IS NOT NULL AND starred = 0 AND kept_unread = 0
+> AND recency < ?`），别再让 JS 侧物化全表；`selectCleanup` 的判据保留为**唯一口径**
+> （`src/retention.ts`），SQL 只负责把候选喂给它或与之等价。
+
+> **⚠️ `countUnreadPerFeed` 的键域 = `feeds` 表，不是 `GROUP BY` 的结果键（定稿加固）**：
+> `buildOverview` 现在先按 `listFeeds()` 铺、再补 `allItems()` 里出现的源
+> （`src/endpoints.ts:44-54` 的注释：「只收所属源还在的条目」）。而 `GROUP BY feed_id`
+> **只会返回有未读的源**——直接拿它当账目，未读为 0 的源会从回包里消失。
+> 界面已实测过这类缺陷（`tests/unread-accounting.test.mjs` 的「某源全部标已读后：角标归 0
+> **但键仍在**（键域 = feeds 表）」）：**零未读的源必须以 0 出现，不能缺键**。
+> ⇒ 传进去的 `feedIds` 是 **`listFeeds()` 的全量键**，SQL 的结果按它补齐 0，不是反过来。
 
 - [ ] **Step 1: 写失败测试**：10 万行合成数据下 `buildOverview` 的耗时断言 + 「左栏各源之和 === 顶栏总未读」不变量（既有断言保留）
 - [ ] **Step 2: 跑测试确认失败**
-- [ ] **Step 3: 在 `store-sqlite.ts` 加两个方法**（`GROUP BY feed_id` / `LIMIT ?`），**同时给内存桩补上**（否则既有测试全红）
+- [ ] **Step 3: 在 `store-sqlite.ts` 加两个方法**（`GROUP BY feed_id` / `LIMIT ?`），**同时给内存桩补上**（否则既有测试全红）。
+      `实测`（2026-10-11）带 `listItems`+`allItems` 的内存桩共 **6 个文件**，都要补：
+      `tests/article-markread-race`、`endpoints-perfeed-unread`、`identity`、`nav-persistence`、
+      `refresh`、`unread-accounting`（各 `.test.mjs`）。接口加在 `src/store.ts` 上 ⇒ 漏补的文件是
+      **编译期**报错（桩对象缺属性），比运行时更早暴露，但仍要逐个改完。
 - [ ] **Step 4: 改 `buildOverview`/`accountOf` 用新方法**；`countUnreadPerFeed` 与 `isUnread` 仍是**唯一口径**（`src/shared.ts:62-87`，不许另写一份）
 - [ ] **Step 5: build + 跑测试 + `npm run bench`**，把「一源全标已读」与打开耗时填进 Task 1 的基线表做对照
 - [ ] **Step 6: commit**
@@ -212,9 +260,18 @@ test('域文件不是本插件的（unit.name 不匹配）⇒ 抛错，不误导
 - Consumes: `listRecent`（Task 5）
 - Produces: `Overview.nextCursor?: string`（`"<recency>|<id>"`）；`overview` 接受 `{ cursor?: string }`
 
+> **⚠️ 谓词不许用行值比较（定稿加固 2026-10-11，`实测`；完整推导见 spec §10.3）**：
+> `(recency, id) < (?, ?)` 按字典序展开成 `recency < r0 OR (recency = r0 AND id < id0)`，
+> 而同 `recency` 内我们需要的是 `id > id0`（id 升序）——**方向反了**。
+> 实测 6 行每页 2 条：行值形式返回 `a d e f`（`a` 重复、`c` 漏掉），OR 形式返回 `c d e f`（正确）。
+> 且 `recency` 打平是**常态**：同一轮抓取的条目共享 `fetchedAt`。
+> ⇒ 必须写成 `WHERE recency < ? OR (recency = ? AND id > ?)`（`实测` 10 万行翻底 334 页
+> 共 493 ms、零重复零遗漏、走 `COVERING INDEX i2`）。
+
 - [ ] **Step 1: 写失败测试**：跨页不重不漏（第 300 与第 301 条边界）；`nextCursor` 缺省表示到底
 - [ ] **Step 2: 跑测试确认失败**
-- [ ] **Step 3: 实现 keyset**（`WHERE (recency, id) < (?, ?) ORDER BY recency DESC, id ASC LIMIT ?`）
+- [ ] **Step 3: 实现 keyset**（`WHERE recency < ? OR (recency = ? AND id > ?) ORDER BY recency DESC, id ASC LIMIT ?`，
+        **不是**行值比较；理由见上方告示与 spec §10.3）
 - [ ] **Step 4: 客户端接分页**：`applyAccount` 的整体覆盖语义**每一页都要保持**（`src/client/store.ts:387-399`）
 - [ ] **Step 5: build + build:client + 跑测试**
 - [ ] **Step 6: commit**
@@ -253,14 +310,17 @@ test('pruneOldLogs 在 keepDays 边界上不删当天的日志', () => { /* ... 
 
 **Files:**
 - Modify: `src/index.ts`（删 `openDomainWithRetry` `:75-113`、`normalizeLegacyArticles` `:169-178`）、`src/domain.ts`（头部注释）、`src/identity-repair.ts`、`docs/pitfalls.md`（§4.9 状态行）
+- Modify: `src/index.ts:47` 的 `inject`、`package.json` 的 `peerDependencies`、`scripts/build.sh:89` 的 `link_pkg`（存储域三处引用一起摘）
+- Modify: `AGENTS.md`、`README.md`（两处的落盘路径已过期：`storages/rss_reader.json` → `storages/rss-reader/`，日志 `state/dsh-rss-reader/reader.log` → `storages/rss-reader/reader-YYYY-MM-DD.log`；AGENTS.md 的真机三步读的就是这个日志路径）
 - Test: 既有套件（删代码后必须仍全绿）
 
 **Interfaces:** 无新增。
 
 - [ ] **Step 1: 确认前置**：Task 4/5 已稳定，且 `npm test` 全绿
-- [ ] **Step 2: 删除失效机制**（`openDomainWithRetry`、孤儿句柄接管、`normalizeLegacyArticles`；`repairIdentities` 保留但改走新 store）
+- [ ] **Step 2: 删除失效机制**（`openDomainWithRetry`、孤儿句柄接管、`normalizeLegacyArticles`；`repairIdentities` 保留但改走新 store），并摘掉存储域的三处装配引用（`inject` / `peerDependencies` / `build.sh` 的 `link_pkg`）
 - [ ] **Step 3: build + 全量测试**，预期全绿
-- [ ] **Step 4: 更新 `docs/pitfalls.md` §4.9 的状态行**：从「实现尚未开始」改为「已落地」，并把 §4.6 的 `already-open` 条目标为历史
+- [ ] **Step 4: 更新 `docs/pitfalls.md` §4.9 的状态行**：从「实现尚未开始」改为「已落地」，并把 §4.6 `already-open`、§4.7（`config: {}` ⇒ `config.json`）、§4.8（域名约束）三条标为历史
+- [ ] **Step 4b: 同步 `AGENTS.md` 与 `README.md` 的落盘/日志路径**（过期路径会让下一个 agent 去错地方找日志，正是「真机三步」里那一步）
 - [ ] **Step 5: 更新本 spec 的「冻结后改动」**（记一行：日期 + 改了什么 + 依据）
 - [ ] **Step 6: commit**
 
@@ -302,6 +362,7 @@ test('selectGlobalArticleEvictions 在 maxChars<=0 时返回空（不整份清�
 - Test: `tests/refresh.test.mjs`（既有，扩充）
 
 **Interfaces:**
+- Consumes: `config.json` 里 `feeds` 映射的 `lastFetchedAt`（**Task 2 必须逐字段保住它**，否则按陈旧度取源无从谈起）
 - Produces: `selectStalestFeeds(feeds: ReadonlyArray<[string, FeedRecord]>, limit: number): string[]`
   （纯函数，放 `src/refresh.ts`；按 `lastFetchedAt` 升序取最旧的 `limit` 个，缺 `lastFetchedAt` 的排最前）
 

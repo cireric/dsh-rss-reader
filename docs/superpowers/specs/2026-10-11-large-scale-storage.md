@@ -12,6 +12,10 @@
 >   依据 = `npm run bench` 复测）；②§10.2 与 §2 漏项表：**`summary` 不再需要外置**（取 ③ 后它留在
 >   items 行内，只有正文进 `texts` 表），旧推论「只做 ①② 需 100–170 MB」随之修正为 65–80 MB；
 >   ③§11.2 的 `§6.3` 引用改为 `§10`（章节已重编号）。
+> - 2026-10-11 · 定稿加固（实施前复核）：④§10 新增 **§10.3「keyset 谓词」**——原计划的
+>   `(recency, id) < (?, ?)` **是错的**（实测会重复并漏条目），必须用 OR 形式；
+>   ⑤§11.2 的 `items`/`texts` 参考 schema 补齐 `summary`、`article_failure` 与正文版本列，
+>   使它与 §10.2「`summary` 留在 items 行内、只有正文进 `texts`」自洽（原 schema 两项都缺）。
 > **状态**：选型已拍板（§9.1）；先决条件「备份覆盖」已完成（§9.2）；插件实现尚未开始。
 >
 > 证据等级沿用仓库约定：`实测`（本机真跑）/ `源码核对`（带 file:line）/
@@ -328,6 +332,14 @@ LMDB / RocksDB 能力不差，但需要原生依赖；本仓库 host 侧依赖�
 而不是按 `fetchedAt` 归位 ⇒ 列表顺序与分页边界都和现状不一致。
 **必须存一列 `recency` 并建 `(recency DESC, id ASC)` 索引。**
 
+**排序等价性已核实**（2026-10-11 加固，`实测`）：宿主用的是 `localeCompare`
+（src/endpoints.ts:81），SQLite 的 `ORDER BY` 默认是 **BINARY** 校对；两者若不等价，
+「迁移前后列表顺序逐条一致」（Review Focus 2）就是空话。实测对**本插件的真实取值域**——
+40 组各 40 个 32 位小写十六进制 id、以及同规模的 ISO-8601 时间戳——两种排序**逐位相同**
+（差异位置数 0 / 0）。⇒ 可以在 SQL 侧直接 `ORDER BY recency DESC, id ASC`。
+⚠️ 边界：这条结论只覆盖「小写十六进制 id + ISO-8601 时间戳」。若日后 id 形态变成混合大小写，
+BINARY 会把大写排在小写之前、而 `localeCompare` 不会——那时必须重新验一次。
+
 ### 10.1 步骤 ① 的修正（2026-10-11，`源码核对`）
 
 初版把「减字节」列为一整步，但那是**「留在设施里」时代的补救措施**。取 ③ 之后逐项复核：
@@ -353,6 +365,51 @@ LMDB / RocksDB 能力不差，但需要原生依赖；本仓库 host 侧依赖�
 ⇒ 由此产生的唯一真问题是**库体积**：当前 `maxContentChars` 默认 50 000 字符/条，
 若真实摘要均值接近实测的 8.8 KB，10 万条即约 880 MB。这是 `maxContentChars` 的取值问题，
 不是外置问题；取值依据要等真实负载测量（§8 的样本偏差仍然成立）。
+
+### 10.3 keyset 谓词：**不许用行值比较**（2026-10-11 定稿加固，`实测`）
+
+分页的边界条件是「`recency` 降序、同 `recency` 内 `id` 升序」，于是一页的**下一页**是
+「比边界行更靠后」的那批。直觉写法是行值比较 `(recency, id) < (?, ?)`——**它是错的**。
+
+SQLite 的行值比较按**字典序**展开：`(recency,id) < (r0,id0)` 等价于
+`recency < r0 OR (recency = r0 AND id < id0)`，而我们需要的是 `id > id0`
+（同 `recency` 内 `id` 是**升序**）。方向反了，后果不是「少几条」而是**重复 + 漏**：
+
+`实测`（本机 Node v24.19，带 `(recency DESC, id ASC)` 索引，同批抓取共享 `fetchedAt`
+⇒ `recency` 大量打平——这正是真实形状）。6 行、每页 2 条，第一页边界 = `b`：
+
+| 写法 | 第二页返回 | 判定 |
+|---|---|---|
+| 全序（期望） | `c d e f` | —— |
+| `(recency, id) < (?, ?)` | `a d e f` | ❌ **`a` 重复出现、`c` 被漏掉** |
+| `recency < ? OR (recency = ? AND id > ?)` | `c d e f` | ✅ 与全序逐条相同 |
+
+⇒ **必须用 OR 形式**：
+
+```sql
+WHERE recency < ? OR (recency = ? AND id > ?)
+ORDER BY recency DESC, id ASC LIMIT ?
+```
+
+（参数是**边界行的 `recency` 与 `id`**，即游标解出的那两个值。）
+
+**代价已实测**（10 万行 = 200 源 × 500 条、`recency` 大量打平，每页 300 条）：
+
+- 翻完全部 100 000 行 = 334 页，累计 **493 ms**，334 页**零重复、零遗漏**（集合恰好 100 000 且互异）；
+- 首屏（首页 300 条）100 次 = **6.5 ms**；
+- 单页成本随页深增长，但常数极小（取下一页 50 次的中位）：第 1 页 0.10 ms、第 50 页 0.52 ms、
+  第 150 页 1.91 ms、第 300 页 2.78 ms、末页 2.95 ms。
+
+⚠️ **查询计划是 `SCAN items USING COVERING INDEX i2`，不是 `SEARCH`**（本表初稿写错过一次，
+2026-10-11 复查更正）：`OR` 形式让 SQLite 放弃了索引定位，退化为**沿覆盖索引顺序扫描 + `LIMIT`
+提前终止**。所以这条查询是 **O(页深)** 而不是 O(log N)——代价被「覆盖索引、无需回表、取满
+300 条即停」压到上表的毫秒级。首屏走的是同一索引的定位（`SEARCH … (recency<?)`），成本与人眼
+无关。**这不改变结论**（分页不是瓶颈），但它意味着：日后若把页大小从 300 调到 3000，
+末页成本会按比例放大，届时要重新测。
+
+⇒ 分页不构成瓶颈，「冷开 + 首屏 ≤ 200 ms」（§9.3）不受影响。
+**注意**：这条判据只有在 `id` 与 `recency` **同时**进边界时才成立——只带 `recency` 会在
+打平点上死循环或跳页，而「同批抓取的条目 `recency` 相同」是常态而非边角。
 
 ## 11. 复现方法
 
@@ -415,10 +472,16 @@ node <<'EOF'
 const {DatabaseSync}=require('node:sqlite');
 const db=new DatabaseSync('/tmp/scale.db');       // 用完即删
 db.exec('PRAGMA journal_mode=WAL');
-db.exec('CREATE TABLE items(id TEXT PRIMARY KEY, feed_id TEXT NOT NULL, title TEXT NOT NULL, link TEXT NOT NULL, published_at TEXT, fetched_at TEXT NOT NULL, read_at TEXT, starred INTEGER NOT NULL DEFAULT 0, kept_unread INTEGER NOT NULL DEFAULT 0, recency TEXT NOT NULL GENERATED ALWAYS AS (COALESCE(published_at, fetched_at)) VIRTUAL)');
+-- summary 留在行内（§10.2）；article_failure 与 texts 互斥（domain.ts 的 itemRecordSchema）
+db.exec('CREATE TABLE items(id TEXT PRIMARY KEY, feed_id TEXT NOT NULL, title TEXT NOT NULL, link TEXT NOT NULL, published_at TEXT, fetched_at TEXT NOT NULL, summary TEXT, read_at TEXT, starred INTEGER NOT NULL DEFAULT 0, kept_unread INTEGER NOT NULL DEFAULT 0, article_failure TEXT, recency TEXT NOT NULL GENERATED ALWAYS AS (COALESCE(published_at, fetched_at)) VIRTUAL)');
 db.exec('CREATE INDEX i1 ON items(feed_id, recency DESC)');   // 每源未读/列表
 db.exec('CREATE INDEX i2 ON items(recency DESC, id ASC)');    // 跨源 top-N 与 keyset 分页（§10 的排序键）
-db.exec('CREATE TABLE texts(item_id TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE, body TEXT NOT NULL)');
+-- 正文另表。revision 是「缓存是否过期」的判据（refresh.ts 的 CONTENT_REVISION），
+-- 与 frameable / title 同为 articleRecordSchema 的字段，缺了就得整表退化成不可判。
+db.exec('CREATE TABLE texts(item_id TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE, body TEXT NOT NULL, revision INTEGER, frameable INTEGER, title TEXT)');
+-- `实测`：node:sqlite 的 PRAGMA foreign_keys 默认就是 **1**（与 sqlite3 CLI 的默认 0 不同），
+-- 上面这条 ON DELETE CASCADE 因此真的生效（删 items 行后 texts 无孤儿）。
+-- 但 deleteItem 仍应**显式**删两表：不把正确性押在 pragma 默认值上，换介质/换版本都不该翻车。
 // 10 万行 = 200 源 × 500 条，单事务插入，再计时：单条 UPDATE / GROUP BY 计数 / LIMIT 300 分页 / 冷开
 EOF
 ```

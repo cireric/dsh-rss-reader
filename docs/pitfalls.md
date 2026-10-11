@@ -293,9 +293,11 @@ JSON 后端每次写整份原子重写。在 200 源 × 500 条（10 万条目�
 
 **处置**：改为 **100% 自持**（插件自己拥有全部落盘，不再使用 `ctx.storageDomain`），
 落点 `$DSH_HOME/storages/rss-reader/`，介质 `node:sqlite`。先例是 `dsh-cost-meter`（同样自持）。
-方案与落地顺序见 `docs/specs/large-scale-storage-spec.md` 的 §4 与 §10。
+方案见 `docs/superpowers/specs/2026-10-11-large-scale-storage.md` 的 §4 与 §10，
+实施步骤见 `docs/superpowers/plans/2026-10-11-large-scale-storage.md`。
 
 **⚠️ 状态**：截至本条落盘，**实现尚未开始**（`src/domain.ts` 仍在用存储域）。
+方案已定稿加固（含分页谓词的关键更正，见 spec §10.3），提交为 `c2742b7`。
 所以本条现在记的是**决策**，不是既成事实——迁移落地后 `domain.ts` 的头部注释与本条 §4.6 / §4.8
 会一并失效（§4.6 的 `already-open` 接管、§4.8 的域名约束都只服务于存储域）。
 **不要**在迁移完成前把 §4.6 / §4.8 当成「已废弃」而忽略它们。
