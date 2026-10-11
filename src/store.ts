@@ -7,7 +7,7 @@
 import type { Domain } from '@deepseek-ai/dsh-storage-domain'
 import { readerDomain, type CursorRecord, type FeedRecord, type ItemRecord } from './domain.js'
 import { articleCharsOf, selectCleanup, type CleanupRow } from './retention.js'
-import { countUnreadPerFeed, recencyOf, sanitizeViewPreferences, type ViewPreferences } from './shared.js'
+import { countUnreadPerFeed, recencyOf, sanitizeViewPreferences, type Cursor, type ViewPreferences } from './shared.js'
 
 /**
  * 清理候选行：**判据字段**（供 selectCleanup 复跑）与**释放量原料**一次带齐。
@@ -79,8 +79,15 @@ export interface ReaderStore {
    * **为什么不是「取回全表再 slice」**：10 万行下「取 300 条」的代价是物化 10 万条。
    * 自持实现把排序键与上限都交给 SQL（走 i2 索引），limit ≤ 0 一律空列表
    * （**不能下传 -1**：SQLite 把 LIMIT -1 当「无上限」，那等于把整表读回来）。
+   *
+   * **可选游标 = keyset 分页**（Ruling P-7：扩展本方法而不是另立一个并列方法）。给了 `cursor`
+   * 就只返回**严格排在它之后**的那批（`recency < ? OR (recency = ? AND id > ?)`）。
+   *
+   * ⚠️ 谓词**不许**写成行值比较 `(recency, id) < (?, ?)`：它按字典序展开成
+   * `recency < r0 OR (recency = r0 AND id < id0)`，而同 recency 内我们要的是 `id > id0`
+   * —— 方向反了（spec §10.3 `实测`：6 行每页 2 条时返回 `a d e f`，正确是 `c d e f`）。
    */
-  listRecent(limit: number): Array<[string, ItemRecord]>
+  listRecent(limit: number, cursor?: Cursor): Array<[string, ItemRecord]>
   /**
    * 显式清理的候选行（Task 5；原先由调用方 allItems() 全表物化后再筛）。
    *
@@ -155,9 +162,14 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
      * 旧路径同样行为不变：全表按 recency 降序 + id 升序排完取前缀。
      * limit ≤ 0 短路成空列表（`slice(0, -1)` 会返回到倒数第二项，那是静默的错答案）。
      */
-    listRecent: (limit) => {
-      const rows = [...items.entries()]
+    listRecent: (limit, cursor) => {
       if (limit <= 0) return []
+      const rows = [...items.entries()].filter(([itemId, record]) => {
+        if (cursor === undefined) return true
+        const recency = recencyOf(record)
+        // 与自持实现的谓词逐字同义（recency 降序、同 recency 内 id 升序的「之后」）
+        return recency < cursor.recency || (recency === cursor.recency && itemId > cursor.id)
+      })
       rows.sort(([idA, a], [idB, b]) => {
         const byTime = recencyOf(b).localeCompare(recencyOf(a))
         return byTime !== 0 ? byTime : idA.localeCompare(idB)

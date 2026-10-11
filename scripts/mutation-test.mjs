@@ -644,9 +644,78 @@ const MUTATIONS = [
   // 判据：tests/endpoints-perfeed-unread.test.mjs 的「已退订源的残留条目…不许把列表的截断窗口占掉」。
   { id: 'overview-列表窗口不再放大重取', file: 'lib/endpoints.js',
     // 首轮取回的 5 条里 4 条是残留行 ⇒ 列表只剩 1 条，而用户看不出少在哪（原实现是先滤后截，不会少）。
-    from: 'if (items.length >= config.maxItemsShown || rows.length < window)',
-    to: 'if (true)',
+    // ⚠️ 2026-10-11 任务 6：取数循环重写（多取一行以判断「后面还有没有」），原锚串消失 ⇒ 本条
+    // 改锚到新产物的同一处判定（window 不再放大 = 残留行会被当成「已到底」）。
+    from: 'exhausted = rows.length <= window;',
+    to: 'exhausted = true;',
   },
+  // ── 列表分页 keyset + 客户端契约（2026-10-11 大规模存储任务 6）────────────────────
+  // 病象：overview 一次只回 maxItemsShown（默认 300）条且没有续页入口 ⇒ 10 万行下第 301 条之后
+  // 在界面上**永远到不了**。这一族各守一个独立的失效面，且失效大半**安静**（少一条、重复一页、
+  // 翻不完的循环、幽灵未读）——都不报错，只是数字/列表看着不对。
+  // 每条 from 均照**编译产物**的真实形状逐字抄，并已独立核对 OCCURRENCES=1（docs/pitfalls.md 一、1.4）。
+  { id: 'paging-续页谓词的 id 方向写反', file: 'lib/store-sqlite.js',
+    // **缺陷本体**（spec §10.3 的实测）：分页的边界条件是「recency 降序、同 recency 内 id 升序」，
+    // 于是下一页的第二个条件是 id **>** id0。方向写反（id < id0）在 recency 打平点上会**重复 + 漏**：
+    // 实测 6 行每页 2 条返回 `a d e f`（a 重复、c 漏掉），正确是 `c d e f`。
+    // 而 recency 打平是**常态**（同一轮抓取的条目共享 fetchedAt），所以这不是边角。
+    //
+    // ⚠️ 这里刻意不用行值比较 `(recency, id) < (?, ?)` 当变异体 —— 它的字典序展开**就是**这个方向
+    // 错误（spec §10.3），但占位符只剩 2 个而调用方绑 4 个实参，node:sqlite 会抛
+    // 「Too many parameter values」⇒ 那条变异会「因为绑定参数不匹配」被抓到，而不是因为断言看见了
+    // 重复与漏（那是一条更弱的守卫）。本条把方向单独翻过来，绑定参数个数不变，于是**只有断言**能抓它。
+    // 判据：tests/overview-paging.test.mjs 的「页边界正好压在 recency 打平组上」。
+    from: "' WHERE i.recency < ? OR (i.recency = ? AND i.id > ?)'",
+    to: "' WHERE i.recency < ? OR (i.recency = ? AND i.id < ?)'" },
+  { id: 'paging-游标不校验形状（垃圾当第一页）', file: 'lib/shared.js',
+    // 认不出的游标若被解出一个值，调用方就不再失败 —— 客户端回带的垃圾游标会被当成正常续页。
+    // 判据：tests/overview-paging.test.mjs 的「游标认不出时响亮拒绝」与「游标编解码」两条。
+    from: "if (!ISO_INSTANT.test(recency) || Number.isNaN(Date.parse(recency)))",
+    to: 'if (false)' },
+  { id: 'paging-端点不拒绝坏游标', file: 'lib/endpoints.js',
+    // 「解不出就从第一页开始」会让翻页永远翻不完：每页都回同一批条目，界面无限追加重复行，
+    // 而用户看到的是一份「永远滚不到底」的列表，不是一句报错。
+    // 判据：tests/overview-paging.test.mjs 的「游标认不出时响亮拒绝（bad-request）」。
+    from: `                    if (cursor === undefined) {
+                        return fail('bad-request', '未知的续页游标（格式应为 "<recency>|<id>"）：' + raw);
+                    }`,
+    to: '                    if (cursor === undefined) return ok(buildOverview(false));' },
+  { id: 'paging-到底也硬给续页游标', file: 'lib/endpoints.js',
+    // 到底时还给游标 ⇒ 客户端一直显示「加载更多」，点下去得到空页（界面上的死按钮）。
+    // 判据：tests/overview-paging.test.mjs 的「末页没有 nextCursor」。
+    from: 'const nextCursor = lastDelivered >= 0 && (lastDelivered + 1 < rows.length || !exhausted)',
+    to: 'const nextCursor = lastDelivered >= 0' },
+  { id: 'paging-旧实现谓词的 id 方向写反', file: 'lib/store.js',
+    // 与自持实现那条同一个失效面（P-7 把游标加在**接口**上 ⇒ 两份实现都得守）。只钉 SQL 一侧的话，
+    // 两份谓词哪天分家不会有断言翻红 —— 而生产早已是 createSqliteStore，这份「不用的实现」会悄悄坏掉。
+    // 判据：tests/overview-paging.test.mjs 的「旧实现（createStore）：listRecent 的游标谓词…」。
+    from: 'return recency < cursor.recency || (recency === cursor.recency && itemId > cursor.id);',
+    to: 'return recency < cursor.recency || (recency === cursor.recency && itemId < cursor.id);' },
+  { id: 'paging-续页不追加而是替换', file: 'lib/client.js',
+    // 替换 ⇒ 翻到第二页时第一页整个消失（用户找不到刚读的那条）。
+    // 判据：tests/nav-selection.test.mjs 的「续页是追加到列表尾部，不是替换」。
+    from: 'items: [...state.items, ...overview.items],',
+    to: 'items: overview.items,' },
+  { id: 'paging-续页改按本地 items 派生账目', file: 'lib/client.js',
+    // 缺陷本体在翻页处的复现：第二页开始又拿截断视图当真相 ⇒ 左栏各源之和 ≠ 顶栏总未读。
+    // 判据：tests/nav-selection.test.mjs 的「每一页都以宿主回包为准整体覆盖账目」。
+    from: 'applyAccount(overview);',
+    to: 'set({ unread: overview.items.filter((i) => i.readAt === void 0).length, perFeedUnread: state.perFeedUnread });' },
+  { id: 'paging-首屏游标不落 state', file: 'lib/client.js',
+    // 首屏不记游标 ⇒ 界面上永远不出现「加载更多」，第 301 条之后仍然到不了（本任务的缺陷原样留下）。
+    // 判据：tests/client-bundle.test.mjs 的「分页接线」+ tests/nav-selection.test.mjs 的分页族。
+    from: 'nextCursor: overview.nextCursor,',
+    to: 'nextCursor: void 0,' },
+  { id: 'paging-客户端不回带游标', file: 'lib/client.js',
+    // 回了 undefined ⇒ 宿主当成第一页，列表原地重复同一批 300 条（用户看到重复而不是报错）。
+    // 判据：tests/nav-selection.test.mjs 的「续页是追加…」里的 pageCalls 断言。
+    from: 'const overview = await callRpc("overview", { cursor });',
+    to: 'const overview = await callRpc("overview", {});' },
+  { id: 'paging-在途不挡重复请求', file: 'lib/client.js',
+    // 连点堆请求：每次都要过一次 SQL + 一次 feeds 文件读，且会把同一页追加两遍。
+    // 判据：tests/nav-selection.test.mjs 的「在途时忽略重复的 loadMore」。
+    from: 'if (cursor === void 0 || state.loadingMore)',
+    to: 'if (cursor === void 0)' },
 ]
 
 function runSuite() {

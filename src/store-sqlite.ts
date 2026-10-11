@@ -35,7 +35,7 @@ import {
 } from './domain.js'
 import { readConfigFile, writeConfigFile, type ReaderConfigFile } from './storage/config-file.js'
 import { SCHEMA_VERSION } from './storage/db.js'
-import { sanitizeViewPreferences } from './shared.js'
+import { sanitizeViewPreferences, type Cursor } from './shared.js'
 import type { CleanupCandidate, ReaderStore } from './store.js'
 
 /** 事务里的保存点名。写成常量即可：db 是单连接，嵌套只发生在同一个连接上。 */
@@ -133,6 +133,23 @@ const SELECT_ALL_ITEMS = ITEM_SELECT + ITEM_ORDER
  * 绝不能下传 —— SQLite 把 `LIMIT -1` 当「无上限」，那正好把整表读回来。
  */
 const SELECT_RECENT = ITEM_SELECT + ITEM_ORDER + ' LIMIT ?'
+
+/**
+ * 续页（keyset 分页，Task 6）：**严格排在游标之后**的那批。
+ *
+ * ⚠️ 谓词**必须**写成 `recency < ? OR (recency = ? AND id > ?)`，**不许**用行值比较
+ * `(i.recency, i.id) < (?, ?)`：SQLite 把行值比较按字典序展开成
+ * `recency < r0 OR (recency = r0 AND id < id0)`，而同 recency 内我们需要的是 `id > id0`
+ * —— 方向反了。`实测`（spec §10.3）：6 行每页 2 条时行值形式返回 `a d e f`
+ * （`a` 重复、`c` 漏掉），OR 形式返回 `c d e f`（正确）。而 recency 打平是**常态**：
+ * 同一轮抓取的条目共享 fetchedAt。
+ *
+ * 计划是 `SCAN items USING COVERING INDEX i2`（**不是** SEARCH）：OR 让 SQLite 放弃索引定位，
+ * 退化为沿覆盖索引顺序扫描 + LIMIT 提前终止 ⇒ O(页深)。代价被「覆盖索引、无需回表、
+ * 取满即停」压到毫秒级（`实测`：10 万行翻底 334 页共 493 ms，零重复零遗漏）。若日后把页大小
+ * 从 300 调到 3000，末页成本按比例放大，届时要重测（spec §10.3）。
+ */
+const SELECT_RECENT_AFTER = ITEM_SELECT + ' WHERE i.recency < ? OR (i.recency = ? AND i.id > ?)' + ITEM_ORDER + ' LIMIT ?'
 
 /**
  * 每源未读（Task 5）：`GROUP BY feed_id` + `COUNT(*)`，未读判据 `read_at IS NULL`。
@@ -615,9 +632,12 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
      * 那是静默的性能悬崖（结果看着还挺对）。非整数上限交给 SQLite 响亮报
      * 「datatype mismatch」，不在这里悄悄取整。
      */
-    listRecent: (limit) => {
+    listRecent: (limit, cursor) => {
       if (limit <= 0) return []
-      return sql(SELECT_RECENT).all(limit).map((row) => {
+      const rows = cursor === undefined
+        ? sql(SELECT_RECENT).all(limit)
+        : sql(SELECT_RECENT_AFTER).all(cursor.recency, cursor.recency, cursor.id, limit)
+      return rows.map((row) => {
         const itemId = requiredText(row.id, 'items.id')
         return [itemId, toItemRecord(row)] as [string, ItemRecord]
       })

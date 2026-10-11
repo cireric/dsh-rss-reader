@@ -55,6 +55,8 @@ function overviewOf(items) {
  * 沙箱里必须备好 HTMLElement / setTimeout 这些全局：按键与消抖会碰到它们，
  * 缺一个的表现是「整组测试报错」而不是断言失败（client-bundle.test.mjs 顶部实测记着）。
  * fetch 是**装好沙箱后再覆盖**的：这样每个用例各拿到自己的 overview，互不串味。
+ *
+ * @param overview 第一页的桩回包（或 `{ first, next }`：见下）
  */
 function loadExports(overview) {
   const source = readFileSync(BUNDLE, 'utf8')
@@ -73,12 +75,25 @@ function loadExports(overview) {
   vm.createContext(sandbox)
   vm.runInContext(source, sandbox)
   assert.ok(captured !== null, 'client bundle 没有调用 window.__ModuleLoader__.load')
+  // pages：overview 被调用时按 payload.cursor 分派。默认只有第一页（不带 cursor 时回 overview 本身），
+  // 带 cursor 的请求一律按 pages[cursor] 取 —— 分页的断言必须能看见「客户端回带了哪个游标」。
+  const pages = overview !== null && typeof overview === 'object' && overview.pages !== undefined ? overview.pages : {}
+  const pageCalls = []
+  const base = pages.base ?? overview
   sandbox.fetch = async (_url, init) => {
     const body = JSON.parse(init.body)
     const ok = (value) => ({ ok: true, status: 200, json: async () => ({ ok: true, value }) })
-    if (body.endpoint === 'overview') return ok(overview)
+    if (body.endpoint === 'overview') {
+      const cursor = body.payload?.cursor
+      pageCalls.push(cursor)
+      if (cursor === undefined) return ok(base)
+      const page = pages[cursor]
+      if (page === undefined) throw new Error('测试桩没有为游标 ' + cursor + ' 准备回包')
+      return ok(page)
+    }
     return ok({ changed: 1, unread: 0 })
   }
+  sandbox.pageCalls = pageCalls
   // 本文件只驱动 store（不渲染组件），hook 桩给到「能跑通模块定义」即可；
   // useState 真的存值是「渲染多遍」那类用例才需要的，这里用不上。
   const require = (specifier) => {
@@ -91,7 +106,10 @@ function loadExports(overview) {
     }
     throw new Error('未预期的外部依赖：' + specifier)
   }
-  return captured.factory(require)
+  const exports = captured.factory(require)
+  // pageCalls 挂在沙箱上（fetch 是闭包，测试拿不到它）
+  exports.__pageCalls = () => sandbox.pageCalls
+  return exports
 }
 
 /** 喂一份 overview 给真实 store，返回 store 本体。 */
@@ -102,6 +120,27 @@ async function storeWith(items) {
   return store
 }
 
+/**
+ * 喂一份**多页**的 overview 给真实 store。
+ *
+ * @param first  第一页的 items
+ * @param cursor 宿主给第一页的续页游标（undefined = 只有一页）
+ * @param next   带该游标时回的那一页 items；undefined 表示「已到底」（回包不带 nextCursor）
+ */
+async function storeWithPages(first, cursor, next) {
+  const pages = { base: overviewOf(first) }
+  if (cursor !== undefined) pages.base = { ...pages.base, nextCursor: cursor }
+  // 续页回包刻意**不带** nextCursor：那正是「到底了」的 wire 形状（见 src/shared.ts 的 Overview）
+  if (cursor !== undefined) pages[cursor] = overviewOf(next ?? [])
+  const exports = loadExports({ pages })
+  const store = exports.createReaderStore()
+  await store.load('overview')
+  // 清掉首屏那次（不带游标）调用：下面断言的是「续页回带了哪个游标」
+  const pageCalls = exports.__pageCalls()
+  pageCalls.length = 0
+  return { store, pageCalls }
+}
+
 /** 两个源各若干条：这组用例的共同前置。 */
 function twoFeeds() {
   return [
@@ -110,7 +149,15 @@ function twoFeeds() {
   ]
 }
 
-const ids = (list) => list.map((entry) => entry.id)
+/**
+ * 取一组 id，并**在测试 realm 里重建数组**。
+ *
+ * ⚠️ 这不是多余的拷贝：store 跑在 vm 沙箱里，翻页那一步的 `[...state.items, ...overview.items]`
+ * 是沙箱代码执行的 ⇒ 结果数组是**沙箱 realm** 的。assert.deepEqual 对两个 realm 的数组会说
+ * 「Values have same structure but are not reference-equal」——那是夹具假象，不是被测行为
+ * （docs/pitfalls.md 二、2.1 记的是同类坑：夹具的形状骗过断言）。
+ */
+const ids = (list) => [...list].map((entry) => entry.id)
 
 test('选源后 visible() 只含该源条目', async () => {
   const store = await storeWith(twoFeeds())
@@ -298,6 +345,79 @@ test('「源 × filter 叠加」下打开虚拟视图行：filter 生效，而�
   assert.deepEqual({ ...store.get().navSelection }, beforeNavSelection,
     '源作用域仍在 —— 与鼠标点顶栏「未读」是同一条路（规格 §2.1 的源 × filter 叠加）')
   assert.deepEqual(ids(store.visible()), ['b1'], '未读且属于源 B 的只剩 b1（叠加，不是二选一）')
+})
+
+/**
+ * 列表分页（keyset）的**客户端**契约（2026-10-11 大规模存储任务 6）。
+ *
+ * 这一层的重点不是「翻页算法」（那在宿主侧，由 tests/overview-paging.test.mjs 用真实 SQLite 钉），
+ * 而是**分页不许把不变量弄破**：
+ *  ① 续页是**追加**，不是替换（替换会让用户翻到第二页时第一页消失）；
+ *  ② 每一页都以宿主回包为准整体覆盖账目 —— 绝不能在第二页开始「按本地看得见的条目派生」
+ *     （那正是任务 9 的幽灵未读，只是发作得晚一点、更难查）；
+ *  ③ 游标原样回带；缺省 = 到底，不再发请求（发了会让列表原地重复一批）。
+ */
+test('分页：续页是追加到列表尾部，不是替换（第一页必须还在）', async () => {
+  const { store, pageCalls } = await storeWithPages(
+    [item('a1'), item('a2')], 'CURSOR-1', [item('a3'), item('a4')],
+  )
+  assert.deepEqual(ids(store.get().items), ['a1', 'a2'], '前置条件：第一页两条')
+  assert.equal(store.get().nextCursor, 'CURSOR-1', '宿主给的游标必须落到 state')
+
+  await store.loadMore()
+
+  assert.deepEqual(ids(store.get().items), ['a1', 'a2', 'a3', 'a4'],
+    '续页必须**追加**：替换会让翻到第二页时第一页整个消失')
+  assert.deepEqual(pageCalls, ['CURSOR-1'], '客户端必须把宿主给的游标**原样**回带')
+  assert.equal(store.get().nextCursor, undefined, '第二页没有 nextCursor ⇒ 到底，state 必须跟着清空')
+})
+
+test('分页：每一页都以宿主回包为准整体覆盖账目，绝不在第二页开始派生', async () => {
+  // 关键构造：第二页的 items 里**一条未读都没有**，而宿主回包说 unread = 3。
+  // 任何「按追加后的本地 items 重算账」的实现都会把 3 算成 0（或把第一页不可见的账抹掉）
+  // —— 那正是幽灵未读（左栏各源之和 ≠ 顶栏总未读）在翻页处的复现形态。
+  const first = [item('a1'), item('a2')]
+  const second = [item('a3', { readAt: '2026-10-01T00:00:00.000Z' })]
+  const exports = loadExports({
+    pages: {
+      base: { ...overviewOf(first), nextCursor: 'C2' },
+      C2: {
+        feeds: [{ id: 'feedA', title: '源 A' }],
+        items: second,
+        // 宿主按**全量表**记账：本地只看得见 3 条，账目却是 5
+        unread: 5,
+        perFeedUnread: { feedA: 5 },
+        refreshed: false,
+      },
+    },
+  })
+  const store = exports.createReaderStore()
+  await store.load('overview')
+  assert.deepEqual(store.get().perFeedUnread, { feedA: 2 }, '前置条件：第一页的账来自宿主回包')
+
+  await store.loadMore()
+
+  assert.equal(store.get().unread, 5, '总未读必须取第二页回包的值（本地派生会算成本地看得见的条数）')
+  assert.deepEqual(store.get().perFeedUnread, { feedA: 5 },
+    '每源账目必须整体覆盖第二页回包 —— 翻页不是「换一套算法」的理由')
+})
+
+test('分页：没有续页游标时 loadMore 不发请求（到底了就别再问）', async () => {
+  const { store, pageCalls } = await storeWithPages([item('a1')], undefined, undefined)
+  assert.equal(store.get().nextCursor, undefined, '前置条件：宿主说这就到底了')
+  await store.loadMore()
+  assert.deepEqual(pageCalls, [], '到底之后再取一次会让宿主把缺省游标当第一页 ⇒ 列表原地重复一批')
+  assert.deepEqual(ids(store.get().items), ['a1'], '列表不该被一次多余的请求改写')
+})
+
+test('分页：在途时忽略重复的 loadMore（防连点堆请求）', async () => {
+  const { store, pageCalls } = await storeWithPages([item('a1')], 'C1', [item('a2')])
+  // 不 await 第一次：此刻 loadingMore 必须为真，第二次当场被挡回
+  const pending = store.loadMore()
+  const second = store.loadMore()
+  await Promise.all([pending, second])
+  assert.deepEqual(pageCalls, ['C1'], '连点只该发一次请求，实际发了 ' + pageCalls.length + ' 次')
+  assert.deepEqual(ids(store.get().items), ['a1', 'a2'], '重复请求不该把同一页追加两遍')
 })
 
 test('toggleNav 翻转左栏显隐（供任务 6 的 u 键接线，本任务不改键位）', async () => {

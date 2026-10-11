@@ -732,6 +732,68 @@ test('r 刷新未读计数：只重取本地视图，不触发抓取（规格不
   assert.ok(!endpoints.includes('refresh'), 'r 不该触发抓取 —— 那是 refresh 端点的事')
 })
 
+test('分页接线：续页游标在时渲染「加载更多」，点它真的取下一页（并追加到当前列表）', async () => {
+  // 接线判据（不是算法判据）：按钮必须**真的**接上 store.loadMore，且它走的端点是 overview。
+  // 本仓库多次踩到「解析对了但没接线」（键位、动作、副作用各一次），所以这一层不能省。
+  const { exports, sandbox, beginRender } = loadClientBundle()
+  const first = [item({ id: 'a1' }), item({ id: 'a2' })]
+  const second = [item({ id: 'a3' })]
+  const endpoints = []
+  sandbox.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body)
+    endpoints.push(body.endpoint)
+    const ok = (value) => ({ ok: true, status: 200, json: async () => ({ ok: true, value }) })
+    if (body.endpoint === 'overview' || body.endpoint === 'refresh') {
+      if (body.payload?.cursor === 'C1') return ok(overviewStub(second))
+      return ok({ ...overviewStub(first), nextCursor: 'C1' })
+    }
+    return ok({ changed: 1, unread: 0 })
+  }
+  const store = exports.createReaderStore()
+  const Reader = exports.createReader(store)
+  // 假 React：渲染两遍（第一遍 ref 还是 null，见文件顶部的说明），并在两遍之间挂上假节点
+  const box = {
+    scrollTop: 0, scrollHeight: 3000, clientHeight: 300,
+    querySelector: () => ({ offsetHeight: 40 }), getClientRects: () => [{}],
+    focus: () => {}, contains: () => true,
+  }
+  const renderOnce = () => { beginRender(); return Reader() }
+  /**
+   * 从渲染树里收集所有 button 元素桩。
+   *
+   * 为什么用**文案**定位这一个按钮（与本文件其它用例按 aria-label 定位的惯例不同）：
+   * 「加载更多」这个入口的语义就是它的文案（它没有独立的无障碍标签，也不该为测试单独加一个），
+   * 而它同时是本任务新增的唯一入口 —— 找不到它，第 301 条之后就又到不了了。
+   */
+  const buttons = []
+  const walk = (node) => {
+    if (node === null || node === undefined || typeof node !== 'object') return
+    if (Array.isArray(node)) { for (const child of node) walk(child); return }
+    if (node.type === 'button' && node.props !== undefined) buttons.push(node)
+    for (const value of Object.values(node.props ?? {})) {
+      if (value !== null && typeof value === 'object') walk(value)
+    }
+  }
+  // 假 React 不会因为 store 变化自动重渲染（useEffect 里那次订阅只改 hooks 槽位，不触发渲染），
+  // 所以顺序是：先渲染一遍挂上假节点 → 拉数据 → **再渲染一遍**读取当前 state 的树。
+  // 这不是绕开接线判据：第二遍渲染出来的 onClick 正是组件在 nextCursor 到位后给出的那一个。
+  for (const props of collectRefs(renderOnce())) props.ref(box)
+
+  await store.load('overview')
+  assert.equal(store.get().nextCursor, 'C1', '前置条件：宿主给了续页游标')
+  walk(renderOnce())
+  const more = buttons.find((entry) => typeof entry.props.children === 'string' && entry.props.children.includes('加载更多'))
+  assert.ok(more !== undefined, 'state.nextCursor 存在时必须渲染「加载更多」入口；否则第 301 条之后又永远到不了')
+
+  more.props.onClick()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+
+  assert.ok(endpoints.includes('overview'), '「加载更多」必须走 overview 端点')
+  assert.deepEqual([...store.get().items].map((entry) => entry.id), ['a1', 'a2', 'a3'],
+    '续页必须追加到当前列表尾部（接线判据：点击真的驱动了 loadMore）')
+  assert.equal(store.get().nextCursor, undefined, '到底之后按钮要从界面上消失（游标缺省）')
+})
+
 test('未读计数可隐藏（规格不变量 8）：默认显示，隐藏只动呈现不动数据', async () => {
   const { store } = await driveStore({ items: [item()] })
   assert.equal(store.get().showUnread, true, '默认必须显示 —— 否则就是悄悄改了既有行为')

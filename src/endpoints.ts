@@ -7,7 +7,7 @@
  */
 import type { Config } from './config.js'
 import { EXTRACTOR_REVISION, fetchArticle, blocksToText } from './article.js'
-import { rebuildItem } from './domain.js'
+import { rebuildItem, type ItemRecord } from './domain.js'
 import { selectCleanup } from './retention.js'
 import { buildOpml, parseOpml } from './opml.js'
 import { validateSubscriptions } from './subscribe.js'
@@ -15,7 +15,7 @@ import type { ReaderStore } from './store.js'
 // 未读判据（isUnread / countUnreadPerFeed）不再由本文件在 JS 侧实现：Task 5 把它交给了存储侧，
 // 自持实现里的 SQL `read_at IS NULL` 与 shared.ts 的 isUnread 是同一件事，两者的等价由
 // tests/store-sqlite.test.mjs 的「同一夹具上逐键对账」钉住。shared.ts 仍是那条规则的定义处。
-import { fail, ok, recencyOf, sanitizeViewPreferences, type Endpoint, type ItemView, type Overview, type RpcResult, type UnreadAccount } from './shared.js'
+import { decodeCursor, encodeCursor, fail, ok, recencyOf, sanitizeViewPreferences, type Cursor, type Endpoint, type ItemView, type Overview, type RpcResult, type UnreadAccount } from './shared.js'
 
 /** 端点需要的运行时依赖（显式传入，不靠闭包）。 */
 export interface EndpointDeps {
@@ -39,7 +39,14 @@ export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: 
  * 已缓存的文章继续显示站点头像与二维码）。**不要再在这里写死数字**——那正是它上次漂移的方式。
  */
 const ARTICLE_REVISION = EXTRACTOR_REVISION
-  const buildOverview = (refreshed: boolean): Overview => {
+  /**
+   * 一页列表 + 续页游标。
+   *
+   * @param refreshed 本次调用是否真的发起了抓取（refresh 端点用；overview 恒 false）
+   * @param cursor    续页边界（keyset）；缺省 = 第一页。游标由 overview 端点解码后传入，
+   *                  这里**不再判形状** —— 认不出的游标在那一层就被响亮拒了（见 dispatch 的 overview 分支）
+   */
+  const buildOverview = (refreshed: boolean, cursor?: Cursor): Overview => {
     const refreshedAtMs = lastRefreshCompletedAt()
     const target = ready()
     if (!target) return { feeds: [], items: [], unread: 0, perFeedUnread: {}, refreshed }
@@ -64,22 +71,36 @@ const ARTICLE_REVISION = EXTRACTOR_REVISION
     // 从回包里消失（左栏那一行角标变空白，界面上无从分辨）。
     const perFeedUnread = target.unreadPerFeed(feeds.map((feed) => feed.id))
 
-    // 列表取数同样交给存储侧：**只取最近的 maxItemsShown 条**（SQL 里是 i2 索引上的 LIMIT），
+    // 列表取数同样交给存储侧：**只取一页**（SQL 里是 i2 索引上的 LIMIT + keyset 谓词），
     // 而不是「把 10 万行建成 ItemView、排序、再 slice 掉 99700 条」。取数顺序与原先逐字相同
     // （recency 降序 + id 升序），所以截断点上的结果没有区别 —— 只有成本不同。
     //
     // ⚠️ 窗口要**放大重取**：上面那句「只收所属源还在的条目」会把残留行（退订后没清干净 /
     // 手工改库）挡掉，而挡掉的那些**已经占掉了窗口**。不重取的话列表会少几条，而用户看不出原因
     // —— 原先的写法是先按 feeds 表滤完全部、再截断，所以这里必须保住同一条语义。
-    // 终止条件：取满 maxItemsShown，或存储侧已给不出更多行（`rows.length < window` ⇒ 没有可越过的孤儿）。
-    let window = config.maxItemsShown
+    //
+    // ⚠️ 多取一行（window + 1）**只用于判断「后面还有没有」**：nextCursor 必须来自「存储侧确实
+    // 还有行」这个事实，不能拿「items 短于 maxItemsShown」反推 —— 孤儿行占窗口时取不满的那一页
+    // 未必是最后一页（上面那条放大的理由同此）。少给一页 = 用户翻不到底（本任务要修的缺陷又回来了）；
+    // 多给一页 = 白白多一次往返，且末页空页会让界面上的「加载更多」闪一下。
+    const pageSize = config.maxItemsShown
+    let window = pageSize
+    let rows: Array<[string, ItemRecord]> = []
     let items: ItemView[] = []
+    // 最后一条**真正下发**的条目在 rows 里的下标（-1 = 这一页一条都没下）
+    let lastDelivered = -1
+    // 存储侧是否已给不出更多行（请求 window + 1 行却只拿到 ≤ window 行）
+    let exhausted = false
     while (true) {
-      const rows = target.listRecent(window)
+      rows = target.listRecent(window + 1, cursor)
       items = []
-      for (const [itemId, item] of rows) {
+      lastDelivered = -1
+      for (let index = 0; index < rows.length; index += 1) {
+        const [itemId, item] = rows[index]
         const feedTitle = titles.get(item.feedId)
         if (feedTitle === undefined) continue
+        // 这一页取满就停：后面的行只用来判断「还有没有下一行」，不再建 ItemView
+        if (items.length >= pageSize) break
         items.push({
           id: itemId,
           feedId: item.feedId,
@@ -93,15 +114,24 @@ const ARTICLE_REVISION = EXTRACTOR_REVISION
           keptUnread: item.keptUnread,
           summary: item.summary,
         })
+        lastDelivered = index
       }
-      if (items.length >= config.maxItemsShown || rows.length < window) break
+      exhausted = rows.length <= window
+      if (items.length >= pageSize || exhausted) break
       window *= 2
     }
-    items = items.slice(0, config.maxItemsShown)
+
+    // 续页游标 = 下发批次的**最后一行**（recency + id 一对值）。判据是「它后面还有行」：
+    // 要么同一批里还有（lastDelivered 不是最后一个下标），要么存储侧还没给完（!exhausted）。
+    // 两者都不成立 ⇒ 到底，nextCursor 缺省 —— 客户端据此停止翻页（Overview 契约）。
+    const nextCursor = lastDelivered >= 0 && (lastDelivered + 1 < rows.length || !exhausted)
+      ? encodeCursor({ recency: recencyOf(items[items.length - 1]), id: items[items.length - 1].id })
+      : undefined
 
     return {
       feeds,
       items,
+      ...(nextCursor === undefined ? {} : { nextCursor }),
       // 总数由每源账目**求和派生**，不再单独数一遍：两处各算一次时，截断/漂移截面下迟早对不上，
       // 而「左栏各源之和 === 顶栏总未读」正是 spec §4 不变量 1。
       unread: sumOf(perFeedUnread),
@@ -137,8 +167,19 @@ const ARTICLE_REVISION = EXTRACTOR_REVISION
       if (!target) return fail('not-ready', '存储域尚未就绪，稍后重试')
 
       switch (endpoint as Endpoint) {
-        case 'overview':
-          return ok(buildOverview(false))
+        case 'overview': {
+          // 续页游标**必须解码成功**才继续（Overview 的契约）。认不出时**响亮拒绝**：
+          // 「解不出就从第一页开始」会让翻页永远翻不完 —— 每页都回同一批条目，界面无限追加重复行，
+          // 而用户看到的是一份「永远滚不到底」的列表，不是一句报错。
+          const raw = (payload as { cursor?: unknown } | null)?.cursor
+          if (raw === undefined || raw === null) return ok(buildOverview(false))
+          if (typeof raw !== 'string') return fail('bad-request', 'overview 的 cursor 必须是字符串')
+          const cursor = decodeCursor(raw)
+          if (cursor === undefined) {
+            return fail('bad-request', '未知的续页游标（格式应为 "<recency>|<id>"）：' + raw)
+          }
+          return ok(buildOverview(false, cursor))
+        }
 
         case 'refresh': {
           const refreshed = await refreshNow()

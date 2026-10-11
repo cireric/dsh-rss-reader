@@ -127,6 +127,15 @@ export interface ReaderState {
   perFeedUnread: Record<string, number>
   /** 左栏显隐（任务 6 的 u 键接线用；默认显示，避免改动既有布局）。 */
   navVisible: boolean
+  /**
+   * 续页游标（Overview.nextCursor，keyset）：**原样**回带给下一次 overview 调用。
+   *
+   * 客户端不解释它的内容（格式 `"<recency>|<id>"` 由宿主定义，见 src/shared.ts 的 decodeCursor）——
+   * 它只是一张「我读到哪儿了」的票据。缺省 = 已经到底，界面不再给「加载更多」的入口。
+   */
+  nextCursor: string | undefined
+  /** 续页在途（防连点堆请求：每次请求都要过一次 SQL + 一次 feeds 文件读）。 */
+  loadingMore: boolean
 }
 
 /** 调一个端点并解信封；失败抛出 `code: message`，由面板渲染。 */
@@ -172,6 +181,7 @@ export function createReaderStore() {
     view: 'list', layout: 'list', markAllRange: 'all', showUnread: true, article: undefined, notice: undefined,
     importReport: undefined, feedsBusy: false,
     navSelection: { kind: 'virtual' }, perFeedUnread: {}, navVisible: true,
+    nextCursor: undefined, loadingMore: false,
     // 光标初值 = 与初始 filter 一致的那一行（初始 filter 是 'all'，故就是「全部」那一行）：
     // 「我停在哪」与「此刻生效的是哪」在开局是同一行，之后才由 shift+n/p 与 shift+o 分开。
     navCursor: { kind: 'filter', filter: 'all' },
@@ -263,6 +273,9 @@ export function createReaderStore() {
       feeds: overview.feeds,
       unread: overview.unread,
       perFeedUnread: overview.perFeedUnread,
+      // 第一页的游标由宿主给（缺省 = 这一页就是全部）。整份重取时它必须**跟着换掉**：
+      // 沿用旧游标会让下一页从旧快照的边界开始，追加出一段不连续的历史。
+      nextCursor: overview.nextCursor,
       loading: false,
       error: undefined,
       selectedId: stillThere ? selected : undefined,
@@ -400,6 +413,33 @@ export function createReaderStore() {
   const applyAccount = (account: UnreadAccount): void => {
     set({ unread: account.unread, perFeedUnread: account.perFeedUnread })
   }
+  /**
+   * 取下一页（keyset 续页）。**不是**「重新拉一次」：它是把宿主给的下一批**追加**到列表尾部。
+   *
+   * ⚠️ 这一页同样**只接收回包、不从 items 派生账目**（与 applyOverview / applyAccount 同一条不变量）：
+   * 账目以宿主回包为准整体覆盖。若在这里改成「按追加后的 items 重算 perFeedUnread」，客户端又一次
+   * 拿截断视图当真相 —— 那是任务 9 实测的幽灵未读（左栏各源之和 ≠ 顶栏总未读），只是换到第二页才
+   * 发作，反而更难查（上面 applyAccount 记的就是这条路）。第一页与第 N 页走**同一个** applyAccount，
+   * 不变量才不会在翻页处破掉。
+   *
+   * 缺游标 = 已经到底：直接返回，不发请求（宿主会把缺省 cursor 当成第一页，那会让列表原地重复 300 条）。
+   */
+  const loadMore = async (): Promise<void> => {
+    const cursor = state.nextCursor
+    if (cursor === undefined || state.loadingMore) return
+    set({ loadingMore: true })
+    try {
+      const overview = await callRpc<Overview>('overview', { cursor })
+      // 追加拼在**当前** state 上（不是闭包里那份快照）：请求在途时用户可能已经标读/加星，
+      // 用发请求前的 items 覆盖会把那些本地动作抹掉。
+      set({ items: [...state.items, ...overview.items], nextCursor: overview.nextCursor })
+      applyAccount(overview)
+      set({ loadingMore: false, error: undefined })
+    } catch (failure) {
+      set({ loadingMore: false, error: failure instanceof Error ? failure.message : String(failure) })
+    }
+  }
+
   /**
    * **仅供乐观更新**：按本批「本地看得见、且确实被标掉」的条目增量调整本地镜像，让角标从按下那一刻
    * 就动起来。它**不是**账目的真相来源 —— 真相只在宿主回包里（见 applyAccount）。
@@ -815,7 +855,7 @@ export function createReaderStore() {
 
   return {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
-    get, visible, load, markRead, selectRelative, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllRead, undoMarkAll,
+    get, visible, load, loadMore, markRead, selectRelative, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllRead, undoMarkAll,
     setLayout, setMarkAllRange, setShowUnread, refreshCount,
     openArticle, closeArticle, cleanup, stepArticle, canStepArticle,
     toggleFeeds, exportOpml, importOpml, addFeed, removeFeed,

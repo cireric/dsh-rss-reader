@@ -671,6 +671,18 @@ export function createReader(store: ReaderStore): () => ReactNode {
               </div>
             )
           })}
+          {/* 续页入口（keyset 分页）：只在宿主明确给出续页游标时出现 —— 缺省即到底。
+              刻意**不做无限滚动**：那要引入滚动事件 + 阈值判定（常驻监听器），而本插件的验收项里
+              有一条是「卸载不留残余资源」；一个显式按钮同样把第 301 条之后送达，代价却小得多。
+              在途时禁用（loadingMore）：连点会堆出多个请求，每次都要过一次 SQL 与一次 feeds 文件读。 */}
+          {state.nextCursor !== undefined && (
+            <div style={{ padding: '10px 20px', textAlign: 'center' }}>
+              <button type="button" className="dsh-rss-btn" disabled={state.loadingMore}
+                onClick={() => { void store.loadMore() }}>
+                {state.loadingMore ? '加载中…' : '加载更多'}
+              </button>
+            </div>
+          )}
           </div>
         </div>
         </div>
