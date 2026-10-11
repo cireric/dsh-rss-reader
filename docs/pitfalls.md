@@ -270,17 +270,35 @@ handler 里调 `ctx.connection.requestRejection(req)` 套用**同一套** Host/O
   `dev_clear_routes {prefix:'/rss-reader-api'}` → `dev_inject_plugin`（或重启 DSH）。
 - **存储域会撞 `already-open`**：已有有界接管（`openDomainWithRetry` + 孤儿句柄回收），
   日志写「上一代 fiber 遗留域句柄（无持有者），接管并关闭」。
+  （⚠️ 自持迁移后本坑连同接管机制一起消失，见 §4.9。）
 
 ### 4.7 注入器写死 `config: {}`
 
-`dsh-super-injector` 的 `loader.create` 永远拿 schema 默认值 ⇒ 订阅源不能只靠 Config，
-**必须以存储域为准**。
+`dsh-super-injector` 的 `loader.create` 永远拿 schema 默认值 ⇒ 订阅源不能只靠 Config。
+**真相在持久化层，不在 Config**：自持迁移前是存储域（`rss_reader.json` 的 feeds 表），
+迁移后是 `storages/rss-reader/config.json`（见 §4.9）。
 
 ### 4.8 `storageDomain` 域名/表名约束
 
 必须匹配 `^[a-z][a-z0-9_]*$`（连字符非法，故用 `rss_reader`）。
 **域 disposer 必须返回 `close()` 的 promise**：写成 `void domain.close()` 会让「卸载完成」
 跑在域真正释放之前。
+
+### 4.9 「别自己上 SQLite」这条约定已作废（2026-10-11 拍板）
+
+`src/domain.ts:5` 写着「迁移/并发/落盘语义由设施负责（**别自己上 SQLite**）」。
+**这条约定的前提是「域小到能整份进内存、整份写盘」**——`storageDomain` 是打开时全量载入的 KV，
+JSON 后端每次写整份原子重写。在 200 源 × 500 条（10 万条目）下这个前提不成立：
+一源 500 条批量标已读要 4.1 s，且每轮刷新有 `3 × 源数` 次全表扫描。
+
+**处置**：改为 **100% 自持**（插件自己拥有全部落盘，不再使用 `ctx.storageDomain`），
+落点 `$DSH_HOME/storages/rss-reader/`，介质 `node:sqlite`。先例是 `dsh-cost-meter`（同样自持）。
+方案与落地顺序见 `docs/specs/large-scale-storage-spec.md` 的 §4 与 §10。
+
+**⚠️ 状态**：截至本条落盘，**实现尚未开始**（`src/domain.ts` 仍在用存储域）。
+所以本条现在记的是**决策**，不是既成事实——迁移落地后 `domain.ts` 的头部注释与本条 §4.6 / §4.8
+会一并失效（§4.6 的 `already-open` 接管、§4.8 的域名约束都只服务于存储域）。
+**不要**在迁移完成前把 §4.6 / §4.8 当成「已废弃」而忽略它们。
 
 ---
 

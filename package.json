@@ -31,7 +31,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json",
     "build:client": "tsdown",
     "test": "node --test tests/*.test.mjs",
-    "mutation": "node scripts/mutation-test.mjs"
+    "mutation": "node scripts/mutation-test.mjs",
+    "bench": "node --expose-gc scripts/scale-bench.mjs"
   },
   "exports": {
     ".": {
