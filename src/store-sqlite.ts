@@ -36,7 +36,7 @@ import {
 import { readConfigFile, writeConfigFile, type ReaderConfigFile } from './storage/config-file.js'
 import { SCHEMA_VERSION } from './storage/db.js'
 import { sanitizeViewPreferences } from './shared.js'
-import type { ReaderStore } from './store.js'
+import type { CleanupCandidate, ReaderStore } from './store.js'
 
 /** 事务里的保存点名。写成常量即可：db 是单连接，嵌套只发生在同一个连接上。 */
 const SAVEPOINT = 'rss_store_write'
@@ -124,6 +124,46 @@ const ITEM_ORDER = ' ORDER BY i.recency DESC, i.id ASC'
 const SELECT_ITEM = ITEM_SELECT + ' WHERE i.id = ?'
 const SELECT_ITEM_BY_FEED = ITEM_SELECT + ' WHERE i.feed_id = ?' + ITEM_ORDER
 const SELECT_ALL_ITEMS = ITEM_SELECT + ITEM_ORDER
+
+/**
+ * 跨源最近 N 条（Task 5）。排序键与 ITEM_ORDER 逐字相同（recency 降序 + id 升序），
+ * 所以执行计划是 i2 索引上的有界扫描 —— 而不是「读回 10 万行再 slice(0, 300)」。
+ *
+ * LIMIT 走绑定参数：调用方传负数时**在 JS 侧短路成空列表**（store.ts 的契约），
+ * 绝不能下传 —— SQLite 把 `LIMIT -1` 当「无上限」，那正好把整表读回来。
+ */
+const SELECT_RECENT = ITEM_SELECT + ITEM_ORDER + ' LIMIT ?'
+
+/**
+ * 每源未读（Task 5）：`GROUP BY feed_id` + `COUNT(*)`，未读判据 `read_at IS NULL`。
+ *
+ * `read_at IS NULL` 就是 JS 侧 `readAt === undefined`（shared.ts 的 isUnread）在 SQL 里的说法：
+ * 写路径把可选字段一律写成 NULL（见 writeItem），所以这两者是同一件事的两种写法。
+ * 只保证「传进来的键都有值」——已退订源的残留条目也会被数进来，键域判定由拿到 feeds 表的
+ * 调用方做（见 store.ts 的 unreadPerFeed 契约）。
+ *
+ * `COUNT(*)` 在 node:sqlite 下返回 number（实测；本仓库用不到 2^53 以上的计数）。
+ */
+const SELECT_UNREAD_PER_FEED = 'SELECT feed_id AS feed_id, COUNT(*) AS unread FROM items WHERE read_at IS NULL GROUP BY feed_id'
+
+/** 释放量原料：候选的 id 逐条取摘要与正文，**不带** items 行的其余列（几千条候选下差别可观）。 */
+const SELECT_ITEM_CHARS = 'SELECT i.recency AS recency, i.summary AS summary, t.body AS body FROM items i LEFT JOIN texts t ON t.item_id = i.id WHERE i.id = ?'
+
+/**
+ * 清理候选（Task 5）：一条 SQL 选完，谓词 = retention.ts 的 selectCleanup（已读 + 未星标 +
+ * 早于阈值）**另加「保持未读」的不删保护**（用户说过「别动它」，与星标同级，见 store.ts 的契约）。
+ *
+ * 谓词里的每一列都直接对应记录的字段（readAt→read_at、starred、keptUnread→kept_unread、
+ * recencyOf(record)→生成列 recency），所以它与 selectCleanup 是同一个判据的两种写法；
+ * 两边在同一夹具上对账的测试在 tests/store-sqlite.test.mjs。
+ *
+ * 三条保护列**照 items 行直接读**（不 JOIN texts）：texts 的读列只用于释放量，
+ * 而清理的候选往往几千条，正文是不该在这一步就搬进内存的那部分（那是「按需读行」的全部意义）。
+ */
+const SELECT_CLEANUP_IDS = [
+  'SELECT i.id AS id FROM items i',
+  ' WHERE i.read_at IS NOT NULL AND i.starred = 0 AND i.kept_unread = 0 AND i.recency < ?',
+].join('')
 
 /**
  * 写 items 行。用 ON CONFLICT DO UPDATE 而不是 INSERT OR REPLACE。
@@ -231,6 +271,41 @@ function toItemRecord(row: Record<string, SQLOutputValue>): ItemRecord {
   // 就是 ItemRecord」。不用 as any（本仓库硬约束），而 shape 与 itemRecordSchema 的同名性
   // 由 tests/store-sqlite.test.mjs 的 safeParse 逐条把守。
   return record as ItemRecord
+}
+
+/**
+ * 正文缓存的字符数 —— 与 src/retention.ts 的 articleCharsOf 同口径（blocks 里 text / items 的
+ * 字符数之和）。
+ *
+ * 为什么不 import articleCharsOf 再套一层：它的入参是**解析后的** articleRecord，而这里手上是
+ * texts.body 的 JSON 文本。为了复用它得先解出整份 article（含 blocks 数组）再调它 —— 那正是
+ * 「按需读行」要避免的搬运。两处的口径由 tests/store-sqlite.test.mjs 的对账测试钉住
+ * （带正文的候选：SQL 侧算出的 articleChars 必须等于 articleCharsOf(记录里的 article)）。
+ *
+ * body 解析失败**响亮抛错**，不编造 0：那会让「释放了 0 字符」这个数字变成谎话。
+ */
+function articleCharsFromBody(body: string): number {
+  const blocks: unknown = JSON.parse(body)
+  if (!Array.isArray(blocks)) {
+    throw new Error('订阅库里 texts.body 不是数组：库被外部改动过？值 = ' + describe(blocks))
+  }
+  let sum = 0
+  for (const block of blocks) {
+    if (typeof block !== 'object' || block === null) continue
+    const fields = block as Record<string, unknown>
+    if (typeof fields['text'] === 'string') { sum += fields['text'].length; continue }
+    if (Array.isArray(fields['items'])) {
+      for (const item of fields['items']) sum += String(item).length
+    }
+  }
+  return sum
+}
+
+/** 候选行 → 释放量原料（正文列缺席即「没有缓存」，与 articleCharsOf(undefined) === 0 同义）。 */
+function articleCharsFromRow(row: Record<string, SQLOutputValue>): number {
+  const body = row.body
+  if (body === null) return 0
+  return articleCharsFromBody(requiredText(body, 'texts.body'))
 }
 
 /** cursors 行 → CursorRecord。seen 列是 id 窗口的 JSON 文本（spec §2 的漏项表）。 */
@@ -502,6 +577,68 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
         const itemId = requiredText(row.id, 'items.id')
         return [itemId, toItemRecord(row)] as [string, ItemRecord]
       }),
+
+    /**
+     * 每源未读（Task 5）：**SQL 侧聚合**，不再把整张 items 表物化到 JS 再数一遍。
+     *
+     * 传进来的键先铺 0，再把 SQL 数出来的覆盖上去 —— 顺序不能反。调用方按 feeds 表铺 0，
+     * 而 `GROUP BY feed_id` 只返回**有未读行的**源：直接拿它当账目，未读为 0 的源会从回包里
+     * 消失（界面上表现为左栏那一行的角标变成空白）。
+     */
+    unreadPerFeed: (feedIds) => {
+      const unread: Record<string, number> = {}
+      for (const feedId of feedIds) unread[feedId] = 0
+      for (const row of sql(SELECT_UNREAD_PER_FEED).all()) {
+        const feedId = requiredText(row.feed_id, 'items.feed_id')
+        // 只认传进来的键：已退订源的残留条目照样被 SQL 数出来，但账目上没有它的位置
+        if (unread[feedId] === undefined) continue
+        unread[feedId] = optionalNumber(row.unread, 'COUNT(*)') ?? 0
+      }
+      return unread
+    },
+
+    /**
+     * 跨源最近 limit 条（Task 5）：排序键与上限都交给 SQL，走 i2 索引。
+     *
+     * limit ≤ 0 **在 JS 侧短路**：SQLite 把 `LIMIT -1` 当「无上限」，下传等于把整表读回来 ——
+     * 那是静默的性能悬崖（结果看着还挺对）。非整数上限交给 SQLite 响亮报
+     * 「datatype mismatch」，不在这里悄悄取整。
+     */
+    listRecent: (limit) => {
+      if (limit <= 0) return []
+      return sql(SELECT_RECENT).all(limit).map((row) => {
+        const itemId = requiredText(row.id, 'items.id')
+        return [itemId, toItemRecord(row)] as [string, ItemRecord]
+      })
+    },
+
+    /**
+     * 清理候选（Task 5）：一条 SQL 按判据选出 id，再用**一条**点读把每条的释放量原料补齐。
+     *
+     * 为什么补齐只读一列：候选常常几千条，而释放量只需要 articleChars + summaryChars。
+     * 逐条走 item()（把正文块一起读出来）会在这一步把正文搬进内存 —— 与「按需读行」相反。
+     * 正文缓存的字符数与 articleCharsOf **同口径**（blocks 里 text/items 的字符数之和；
+     * 库里只存 blocks 形态，parse 失败会被 SQLite/json 响亮抛出，不编造 0）。
+     */
+    listCleanupCandidates: (cutoffIso) => {
+      const ids = sql(SELECT_CLEANUP_IDS).all(cutoffIso).map((row) => requiredText(row.id, 'items.id'))
+      return ids.map((id) => {
+        const row = sql(SELECT_ITEM_CHARS).get(id)
+        if (row === undefined) {
+          throw new Error('清理候选 ' + id + ' 在补齐释放量时消失了：候选集与库里不一致（另一写者并发删了它？）')
+        }
+        return {
+          id,
+          // 谓词已经保证这三项（保持未读那条是本实现比 selectCleanup 多守的），照实回填即可
+          starred: false,
+          kept: false,
+          read: true,
+          recency: requiredText(row.recency, 'items.recency'),
+          articleChars: articleCharsFromRow(row),
+          summaryChars: optionalText(row.summary, 'items.summary')?.length ?? 0,
+        }
+      })
+    },
 
     /**
      * 全部订阅源。顺序 = config.json 里 feeds 映射的键序（新订阅追加在末尾）：

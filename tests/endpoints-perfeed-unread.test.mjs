@@ -13,6 +13,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { articleCharsOf } from '../lib/retention.js'
 import { createDispatch } from '../lib/endpoints.js'
 import { Config } from '../lib/config.js'
 
@@ -36,6 +37,50 @@ function memoryStore() {
     listItems: (feedId) => [...items.entries()].filter(([, record]) => record.feedId === feedId),
     allItems: () => [...items.entries()],
     listFeeds: () => [...feeds.entries()],
+    /**
+     * 与自持实现同形（Task 5 的三条 SQL 取数方法）。
+     *
+     * 桩也必须守**同一条契约**：unreadPerFeed 先按传进来的键铺 0（0 未读的源留键）、
+    listCleanupCandidates 把 SQL 谓词多守的「保持未读不删」一并实现 —— 桩与实现各写一套
+    语义，测出来的就只是桩的理解（docs/pitfalls.md 二、2.5 / 2.6）。
+     */
+    unreadPerFeed: (feedIds) => {
+      const unread = {}
+      for (const feedId of feedIds) unread[feedId] = 0
+      for (const record of items.values()) {
+        if (unread[record.feedId] === undefined || record.readAt !== undefined) continue
+        unread[record.feedId] += 1
+      }
+      return unread
+    },
+    listRecent: (limit) => {
+      if (limit <= 0) return []
+      const rows = [...items.entries()]
+      rows.sort(([idA, a], [idB, b]) => {
+        const byTime = (b.publishedAt ?? b.fetchedAt).localeCompare(a.publishedAt ?? a.fetchedAt)
+        return byTime !== 0 ? byTime : idA.localeCompare(idB)
+      })
+      return rows.slice(0, limit)
+    },
+    listCleanupCandidates: (cutoffIso) => {
+      const rows = []
+      for (const [id, record] of items.entries()) {
+        const recency = record.publishedAt ?? record.fetchedAt
+        // 判据 = retention.ts 的 selectCleanup（已读 + 未星标 + 早于阈值）另加「保持未读」保护
+        if (record.readAt === undefined || record.starred || record.keptUnread === true) continue
+        if (recency >= cutoffIso) continue
+        rows.push({
+          id,
+          starred: false,
+          kept: false,
+          read: true,
+          recency,
+          articleChars: articleCharsOf(record.article),
+          summaryChars: record.summary?.length ?? 0,
+        })
+      }
+      return rows
+    },
   }
 }
 
@@ -116,6 +161,26 @@ test('perFeedUnread：条目数超过 maxItemsShown 时仍按全量统计（不�
   assert.equal(view.items.length, 5, 'items 应被 maxItemsShown 截断')
   assert.equal(view.perFeedUnread['https://a.example/feed'], TOTAL, '每源未读必须按全量统计')
   assert.equal(view.unread, TOTAL)
+})
+
+test('已退订源的残留条目：既不进账目，也不许把列表的截断窗口占掉（退订后没清干净 / 手工改库）', async () => {
+  const store = memoryStore()
+  store.feeds.set('https://a.example/feed', { url: 'https://a.example/feed', title: 'A' })
+  // 残留条目刻意排在**最前面**（recency 最新）：它们会先被取回来，再因为「所属源已退订」被挡掉。
+  // 不把窗口放大重取的话，右栏就会少几条 —— 而用户完全看不出原因（原实现是先滤后截，不会少）。
+  for (let i = 0; i < 4; i += 1) {
+    store.items.set('x' + i, item('https://x.example/feed', { publishedAt: '2026-12-0' + (i + 1) + 'T00:00:00.000Z' }))
+  }
+  for (let i = 0; i < 6; i += 1) {
+    store.items.set('a' + i, item('https://a.example/feed', { publishedAt: '2026-01-0' + (i + 1) + 'T00:00:00.000Z' }))
+  }
+
+  const view = await overview(store, Config({ maxItemsShown: 5 }))
+
+  assert.equal(view.items.length, 5, '残留行占掉的窗口必须被补回来（否则右栏静默少几条）')
+  assert.equal(view.items.every((entry) => entry.feedId === 'https://a.example/feed'), true,
+    '残留条目一条都不许出现在列表里')
+  assert.equal(view.unread, 6, '账目同样只算在订源')
 })
 
 test('perFeedUnread：已退订源（items 里还剩条目）不出现在 map 里', async () => {

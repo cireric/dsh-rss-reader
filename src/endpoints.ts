@@ -8,11 +8,14 @@
 import type { Config } from './config.js'
 import { EXTRACTOR_REVISION, fetchArticle, blocksToText } from './article.js'
 import { rebuildItem } from './domain.js'
-import { articleCharsOf, selectCleanup, type CleanupRow } from './retention.js'
+import { selectCleanup } from './retention.js'
 import { buildOpml, parseOpml } from './opml.js'
 import { validateSubscriptions } from './subscribe.js'
 import type { ReaderStore } from './store.js'
-import { countUnreadPerFeed, fail, isUnread, ok, recencyOf, sanitizeViewPreferences, type Endpoint, type ItemView, type Overview, type RpcResult, type UnreadAccount } from './shared.js'
+// 未读判据（isUnread / countUnreadPerFeed）不再由本文件在 JS 侧实现：Task 5 把它交给了存储侧，
+// 自持实现里的 SQL `read_at IS NULL` 与 shared.ts 的 isUnread 是同一件事，两者的等价由
+// tests/store-sqlite.test.mjs 的「同一夹具上逐键对账」钉住。shared.ts 仍是那条规则的定义处。
+import { fail, ok, recencyOf, sanitizeViewPreferences, type Endpoint, type ItemView, type Overview, type RpcResult, type UnreadAccount } from './shared.js'
 
 /** 端点需要的运行时依赖（显式传入，不靠闭包）。 */
 export interface EndpointDeps {
@@ -48,48 +51,57 @@ const ARTICLE_REVISION = EXTRACTOR_REVISION
       lastFailure: record.lastFailure,
     }))
 
-    // **一次遍历全部条目**。原先是对每个源各调一次 listItems(feedId)，而那个实现每次都要遍历
-    // 全表 ⇒ O(源数 × 条目数)：实测 100 源 × 400 条时遍历 400 万次、耗时 35ms（2026-10-07 实测）。
-    // 只收「所属源还在」的条目，与原先由 listFeeds 驱动的语义保持一致。
-    // 「源 id → 标题」与「每源未读数」都以 feeds 表为键域，所以合在一次遍历里建：
-    // 让「键域 = feeds 表」这个约定只有一处来源 —— 分居两处时改了一处就漂移。
-    // 铺 0 而不是留空：在订但当前 0 未读的源也要有键，左栏按 feeds 表逐行渲染时无条件命中，
-    // 不必区分「缺键」与「0」。
+    // 「源 id → 标题」以 feeds 表为键域：只收「所属源还在」的条目，与原先由 listFeeds 驱动的
+    // 语义保持一致（退订时条目本该连删除掉，见 removeFeed；这里挡的是残留/手工改库的情形）。
     const titles = new Map<string, string>()
     for (const feed of feeds) titles.set(feed.id, feed.title)
-    const items: ItemView[] = []
-    // **一次遍历**：累加每源未读与收条目同在这一个全表循环内 —— 下面 items 会被 slice 截断，
-    // 截断之后再统计就会漏掉尾部那批条目（账目之所以必须由宿主下发，正因如此）。
-    for (const [itemId, item] of target.allItems()) {
-      const feedTitle = titles.get(item.feedId)
-      if (feedTitle === undefined) continue
-      items.push({
-        id: itemId,
-        feedId: item.feedId,
-        feedTitle,
-        title: item.title,
-        link: item.link,
-        publishedAt: item.publishedAt,
-        fetchedAt: item.fetchedAt,
-        readAt: item.readAt,
-        starred: item.starred,
-        keptUnread: item.keptUnread,
-        summary: item.summary,
-      })
-    }
-    items.sort((a, b) => {
-      const byTime = recencyOf(b).localeCompare(recencyOf(a))
-      return byTime !== 0 ? byTime : a.id.localeCompare(b.id)
-    })
 
-    // 每源账目走**与标读回包同一份**算法（shared.ts 的 countUnreadPerFeed + isUnread）：
-    // 键域 = feeds 表、判据 = readAt === undefined，两处复制口径必然漂移（任务 1 / 任务 5 的教训）。
-    // 传 items 而不是原始记录：这一步的「只算在订源」已由上面的 feedTitle 判定做掉，而 ItemView
-    // 的 readAt 是原样带过来的。
-    const perFeedUnread = countUnreadPerFeed(feeds.map((feed) => feed.id), items)
+    // 每源账目走**与标读回包同一份**实现（store 的 unreadPerFeed，见 accountOf）：
+    // 键域 = feeds 表、判据 = isUnread（自持实现里就是 `read_at IS NULL`）。
+    // **重点在「不再物化全表」**（Task 5，spec §3.1）：原先这里对 allItems() 遍历 10 万行来
+    // 同时建列表与记账 —— 每次打开面板/刷新一次全表遍历，而 SQL 侧聚合只需 3–12 ms（§3 的账）。
+    // 先按 listFeeds() 铺 0、再用结果覆盖：GROUP BY 只返回有未读的源，反过来会让 0 未读的源
+    // 从回包里消失（左栏那一行角标变空白，界面上无从分辨）。
+    const perFeedUnread = target.unreadPerFeed(feeds.map((feed) => feed.id))
+
+    // 列表取数同样交给存储侧：**只取最近的 maxItemsShown 条**（SQL 里是 i2 索引上的 LIMIT），
+    // 而不是「把 10 万行建成 ItemView、排序、再 slice 掉 99700 条」。取数顺序与原先逐字相同
+    // （recency 降序 + id 升序），所以截断点上的结果没有区别 —— 只有成本不同。
+    //
+    // ⚠️ 窗口要**放大重取**：上面那句「只收所属源还在的条目」会把残留行（退订后没清干净 /
+    // 手工改库）挡掉，而挡掉的那些**已经占掉了窗口**。不重取的话列表会少几条，而用户看不出原因
+    // —— 原先的写法是先按 feeds 表滤完全部、再截断，所以这里必须保住同一条语义。
+    // 终止条件：取满 maxItemsShown，或存储侧已给不出更多行（`rows.length < window` ⇒ 没有可越过的孤儿）。
+    let window = config.maxItemsShown
+    let items: ItemView[] = []
+    while (true) {
+      const rows = target.listRecent(window)
+      items = []
+      for (const [itemId, item] of rows) {
+        const feedTitle = titles.get(item.feedId)
+        if (feedTitle === undefined) continue
+        items.push({
+          id: itemId,
+          feedId: item.feedId,
+          feedTitle,
+          title: item.title,
+          link: item.link,
+          publishedAt: item.publishedAt,
+          fetchedAt: item.fetchedAt,
+          readAt: item.readAt,
+          starred: item.starred,
+          keptUnread: item.keptUnread,
+          summary: item.summary,
+        })
+      }
+      if (items.length >= config.maxItemsShown || rows.length < window) break
+      window *= 2
+    }
+    items = items.slice(0, config.maxItemsShown)
+
     return {
       feeds,
-      items: items.slice(0, config.maxItemsShown),
+      items,
       // 总数由每源账目**求和派生**，不再单独数一遍：两处各算一次时，截断/漂移截面下迟早对不上，
       // 而「左栏各源之和 === 顶栏总未读」正是 spec §4 不变量 1。
       unread: sumOf(perFeedUnread),
@@ -106,12 +118,14 @@ const ARTICLE_REVISION = EXTRACTOR_REVISION
 
   /** 读一次完整的未读账（总数 + 每源）。只读，不改任何条目。 */
   const accountOf = (target: ReaderStore): UnreadAccount => {
-    // 键域与判据都走 shared.ts 那**一份**（countUnreadPerFeed + isUnread）：这里若再写一遍
-    // listItems 过滤，就又变成两处口径 —— 任务 1 的键域、任务 5 的 unread 都是这么漂的。
-    const perFeedUnread = countUnreadPerFeed(
-      target.listFeeds().map(([feedId]) => feedId),
-      target.allItems().map(([, record]) => record),
-    )
+    // 键域与判据都走**存储侧那一份**实现：未读判据就是 shared.ts 的 isUnread（自持实现里写作
+    // `read_at IS NULL`，两者是同一件事的两种写法，有测试在同一夹具上逐键对账），键域 =
+    // listFeeds() 的全量键（0 未读的源也留 0）。
+    //
+    // 为什么不再在这里对 allItems() 跑 countUnreadPerFeed：① 口径会分家 —— 这里算一遍、SQL 里
+    // 再算一遍，正是任务 1 的键域与任务 5 的 unread 漂过两次的那条路；② 10 万行下每次标读/撤销/
+    // 星标/保持未读/清理都拖着一次全表物化（spec §3.1 列的五处调用点）。
+    const perFeedUnread = target.unreadPerFeed(target.listFeeds().map(([feedId]) => feedId))
     return { unread: sumOf(perFeedUnread), perFeedUnread }
   }
 
@@ -333,23 +347,25 @@ const ARTICLE_REVISION = EXTRACTOR_REVISION
         case 'cleanup': {
           // 显式清理（用户点按钮触发，**不设定时器**——验收项之一就是不残留定时器）。
           // 判据刻意保守：已读 + 未星标 + 早于阈值，三个条件缺一不可（见 retention.ts 注释）。
+          //
+          // **候选集由存储侧一条 SQL 选出**（Task 5）：原先这里 `allItems()` 把整张 items 表
+          // （10 万行）物化到 JS 再筛 —— 「点一次清理 = 一次全表遍历」，而 spec §3.1 只把清理记在
+          // accountOf 名下，漏了这一处（计划的定稿加固已记账）。
+          // 判据仍是 retention.ts 的 selectCleanup（**唯一口径**）：候选行自带判据字段与释放量原料，
+          // 这里再复跑一次它 —— SQL 侧只负责把候选喂给判据，不另立一份规则（两者的集合关系由
+          // tests/store-sqlite.test.mjs 的「候选集必须与 selectCleanup 的集合逐字相等」对账）。
           const cutoff = new Date(Date.now() - config.cleanupAfterDays * 24 * 3600 * 1000).toISOString()
-          const all = target.allItems()
-          const rows: CleanupRow[] = all.map(([itemId, record]) => ({
-            id: itemId,
-            starred: record.starred,
-            kept: record.keptUnread === true,
-            read: record.readAt !== undefined,
-            recency: recencyOf(record),
-            articleChars: articleCharsOf(record.article),
-          }))
-          const doomed = selectCleanup(rows, cutoff)
-          const freedChars = rows.filter((row) => doomed.includes(row.id))
-            .reduce((sum, row) => sum + row.articleChars + (target.item(row.id)?.summary?.length ?? 0), 0)
+          const candidates = target.listCleanupCandidates(cutoff)
+          const doomed = new Set(selectCleanup(candidates, cutoff))
+          // 释放量直接读候选行自带的原料（正文 + 摘要）：原先按 id 逐条 `target.item()` 点读，
+          // 几千条候选就是几千次点读（还把正文一起搬进内存）。摘要同样占字节，一并计入。
+          const freedChars = candidates
+            .filter((row) => doomed.has(row.id))
+            .reduce((sum, row) => sum + row.articleChars + row.summaryChars, 0)
           for (const itemId of doomed) await target.deleteItem(itemId)
-          log('清理：删除 ' + doomed.length + ' 条已读旧条目（阈值 ' + config.cleanupAfterDays + ' 天，释放约 ' +
+          log('清理：删除 ' + doomed.size + ' 条已读旧条目（阈值 ' + config.cleanupAfterDays + ' 天，释放约 ' +
             freedChars + ' 字符）')
-          return ok({ deleted: doomed.length, freedChars, cutoff, ...accountOf(target) })
+          return ok({ deleted: doomed.size, freedChars, cutoff, ...accountOf(target) })
         }
 
         case 'toggleKeepUnread': {

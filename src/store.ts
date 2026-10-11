@@ -6,7 +6,24 @@
  */
 import type { Domain } from '@deepseek-ai/dsh-storage-domain'
 import { readerDomain, type CursorRecord, type FeedRecord, type ItemRecord } from './domain.js'
-import { sanitizeViewPreferences, type ViewPreferences } from './shared.js'
+import { articleCharsOf, selectCleanup, type CleanupRow } from './retention.js'
+import { countUnreadPerFeed, recencyOf, sanitizeViewPreferences, type ViewPreferences } from './shared.js'
+
+/**
+ * 清理候选行：**判据字段**（供 selectCleanup 复跑）与**释放量原料**一次带齐。
+ *
+ * 为什么把释放量的原料也放进候选：调用方拿 id 逐条 `item(id)` 回读，在几千条候选下就是几千次
+ * 点读 —— 与「扫描族归零」（spec §3.1）是同一件事的另一种形状。
+ */
+export interface CleanupCandidate extends CleanupRow {
+  /** 正文缓存的字符数（articleCharsOf 的口径 —— 与 client 看到的「释放约 X KB」同源）。 */
+  readonly articleChars: number
+  /**
+   * 摘要字符数。原先 freedChars 只算正文、漏了摘要，而摘要同样是这条条目占的字节；
+   * 释放量是**如实汇报**（客户端直接显示它），所以两头都要算。
+   */
+  readonly summaryChars: number
+}
 
 export interface ReaderStore {
   feed(feedId: string): FeedRecord | undefined
@@ -32,8 +49,44 @@ export interface ReaderStore {
   updateItem(itemId: string, fn: (current: ItemRecord) => ItemRecord): Promise<void>
   deleteItem(itemId: string): Promise<void>
   listItems(feedId: string): Array<[string, ItemRecord]>
-  /** 全部条目（显式清理要跨源统计已读旧条目） */
+  /**
+   * 全部条目。**只留给「确实需要整表」的调用方**：Task 5 之后 buildOverview / accountOf /
+   * cleanup 三条热路径都不再走它（它们各有 SQL 侧的取数方法，见下三条）。
+   */
   allItems(): Array<[string, ItemRecord]>
+  /**
+   * 每源未读账目（键域 = 调用方传进来的 feeds 表）。
+   *
+   * **为什么要有它**（Task 5，spec §3.1 的扫描族归零）：未读账原先由调用方把整张 items 表物化到
+   * JS 再数一遍 —— 10 万行下「点一次星标」就是一次全表遍历。存储侧聚合（自持实现是
+   * `GROUP BY feed_id`）把它降到毫秒级。
+   *
+   * **未读判据就是 shared.ts 的 isUnread**（存储侧的 `read_at IS NULL` ↔ 记录侧的
+   * `readAt === undefined`）：唯一口径不许因为下了 SQL 就另立一份，所以自持实现有一条
+   * 「与 countUnreadPerFeed 在同一夹具上逐键对账」的测试钉着。
+   *
+   * **只保证「传进来的键都有值」，不保证「只有传进来的键」**：自持实现的 SQL 按全表聚合，
+   * 已退订源的残留条目也会被数进去（只有拿到 feeds 表的人才做得准键域判定）。调用方一律
+   * 「先按 feeds 表铺 0、再用有值的覆盖」—— shared.ts 的 countUnreadPerFeed 同此约定。
+   */
+  unreadPerFeed(feedIds: readonly string[]): Record<string, number>
+  /**
+   * 跨源最近的 limit 条（`recency` 降序 + id 升序 —— 与 allItems 同一套排序键，见 shared.ts 的
+   * recencyOf；缺发布时间的条目按抓取时间归位）。
+   *
+   * **为什么不是「取回全表再 slice」**：10 万行下「取 300 条」的代价是物化 10 万条。
+   * 自持实现把排序键与上限都交给 SQL（走 i2 索引），limit ≤ 0 一律空列表
+   * （**不能下传 -1**：SQLite 把 LIMIT -1 当「无上限」，那等于把整表读回来）。
+   */
+  listRecent(limit: number): Array<[string, ItemRecord]>
+  /**
+   * 显式清理的候选行（Task 5；原先由调用方 allItems() 全表物化后再筛）。
+   *
+   * 判据 = retention.ts 的 selectCleanup（已读 + 未星标 + 早于阈值）**另加「保持未读」的不删保护**：
+   * 用户对 kept-unread 说的是「别动它」，与星标同级（selectCleanup 是纯判据、不含这条，
+   * 所以把它写进候选的契约里，自持实现才能一条 SQL 选完 —— 见 endpoints.ts 的 cleanup）。
+   */
+  listCleanupCandidates(cutoffIso: string): CleanupCandidate[]
   /** 全部订阅源（key 即归一化后的 URL）——订阅源以存储域为准，Config 只是种子 */
   listFeeds(): Array<[string, FeedRecord]>
   /**
@@ -78,6 +131,50 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
       return found
     },
     allItems: () => [...items.entries()],
+    /**
+     * 旧路径**行为不变**（Task 5 的接口扩展）：先按传进来的键铺 0，再把全表里的未读累加上去。
+     * 键域判据（`unread[feedId] === undefined` 就跳过）与 shared.ts 的 countUnreadPerFeed
+     * 逐字一致 —— 已退订源的残留条目因此不进账。代价是全表遍历，但这条是历史路径
+     * （生产早已是 createSqliteStore），不拿性能目标去重写它。
+     */
+    unreadPerFeed: (feedIds) => countUnreadPerFeed(
+      feedIds,
+      [...items.entries()].map(([, record]) => record),
+    ),
+    /**
+     * 旧路径同样行为不变：全表按 recency 降序 + id 升序排完取前缀。
+     * limit ≤ 0 短路成空列表（`slice(0, -1)` 会返回到倒数第二项，那是静默的错答案）。
+     */
+    listRecent: (limit) => {
+      const rows = [...items.entries()]
+      if (limit <= 0) return []
+      rows.sort(([idA, a], [idB, b]) => {
+        const byTime = recencyOf(b).localeCompare(recencyOf(a))
+        return byTime !== 0 ? byTime : idA.localeCompare(idB)
+      })
+      return rows.slice(0, limit)
+    },
+    /** 旧路径：全表筛一遍（判据通过 retention.ts 的 selectCleanup 复跑，与端点侧同口径）。 */
+    listCleanupCandidates: (cutoffIso) => {
+      const rows: CleanupCandidate[] = []
+      for (const [itemId, record] of items.entries()) {
+        const row: CleanupCandidate = {
+          id: itemId,
+          starred: record.starred,
+          kept: record.keptUnread === true,
+          read: record.readAt !== undefined,
+          recency: recencyOf(record),
+          articleChars: articleCharsOf(record.article),
+          summaryChars: record.summary?.length ?? 0,
+        }
+        rows.push(row)
+      }
+      const doomed = new Set(selectCleanup(
+        rows.filter((row) => !row.kept),
+        cutoffIso,
+      ))
+      return rows.filter((row) => doomed.has(row.id))
+    },
     listFeeds: () => [...feeds.entries()],
     viewPreferences: () => sanitizeViewPreferences(global.get(), (feedId) => feeds.get(feedId) !== undefined),
     saveViewPreferences: async (preferences) => {

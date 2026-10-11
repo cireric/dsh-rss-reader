@@ -24,6 +24,8 @@ import { openDatabase, migrateSchema, SCHEMA_VERSION } from '../lib/storage/db.j
 import { writeConfigFile } from '../lib/storage/config-file.js'
 import { createSqliteStore } from '../lib/store-sqlite.js'
 import { feedRecordSchema, itemRecordSchema } from '../lib/domain.js'
+import { articleCharsOf, selectCleanup } from '../lib/retention.js'
+import { countUnreadPerFeed, recencyOf } from '../lib/shared.js'
 
 const tempDir = (tag) => mkdtempSync(join(tmpdir(), 'rss-store-' + tag + '-'))
 
@@ -134,6 +136,171 @@ test('allItems / listItems 按 recency 降序 + id 升序；缺 publishedAt 的�
       '排序必须是 recency = publishedAt ?? fetchedAt 降序、同 recency 内 id 升序（src/endpoints.ts:80-83）',
     )
     assert.deepEqual(store.listItems('f2').map(([id]) => id), ['tie-a', 'tie-b', 'old'], '每源列表走同一套排序键')
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('unreadPerFeed：与 shared.ts 的唯一口径在同一夹具上逐键相等，且键域 = 传入的 feeds 表（Ruling P-6）', async () => {
+  const { store, db, dir } = freshStore('unread-per-feed')
+  try {
+    // A：2 未读 / 1 已读；B 全部已读（0 未读 ⇒ 键必须在、值为 0）；
+    // X 是**已退订**的残留源（不传进 feedIds ⇒ 不许出现在账目里）
+    await store.saveItem('a-1', item('feed-a'))
+    await store.saveItem('a-2', item('feed-a'))
+    await store.saveItem('a-3', item('feed-a', { readAt: '2026-10-11T12:00:00.000Z' }))
+    await store.saveItem('b-1', item('feed-b', { readAt: '2026-10-11T12:00:00.000Z' }))
+    await store.saveItem('x-1', item('feed-x'))
+
+    const feedIds = ['feed-a', 'feed-b']
+    const fromSql = store.unreadPerFeed(feedIds)
+    // ★ 唯一口径对账：SQL 里的 read_at IS NULL 必须与 shared.ts 的 isUnread 得出同一个答案。
+    // 这条不变式在本仓库漂过两次（键域、unread 口径各一次），且每次都表现为「两个数各自自洽、
+    // 合起来对不上」——只有在同一夹具上逐键对账才看得见。
+    assert.deepEqual(
+      fromSql,
+      countUnreadPerFeed(feedIds, store.allItems().map(([, record]) => record)),
+      'SQL 账目必须与 shared.ts 的 countUnreadPerFeed 逐键相等（不许另立一份口径）',
+    )
+    assert.deepEqual(fromSql, { 'feed-a': 2, 'feed-b': 0 },
+      '0 未读的源必须留键（值为 0）——缺键在左栏表现为「角标空白」而不是「角标 0」')
+    assert.equal(Object.prototype.hasOwnProperty.call(fromSql, 'feed-x'), false,
+      '已退订源的残留条目不许进账（键域严格 = 传进来的 feeds 表）')
+    assert.deepEqual(store.unreadPerFeed([]), {}, '空键域 ⇒ 空账目，而不是「全表所有源」')
+    assert.deepEqual(store.unreadPerFeed(['feed-b']), { 'feed-b': 0 }, '只传一个全已读的源，键也必须在')
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('listRecent：按 recency 降序 + id 升序取前 N 条，与 allItems 的前缀逐字相等（语义不变）', async () => {
+  const { store, db, dir } = freshStore('list-recent')
+  try {
+    // 与 allItems 那条同样的纠缠夹具：缺 publishedAt 的行必须按 fetchedAt 归位（Review Focus 2）
+    await store.saveItem('mid', item('f1', { publishedAt: '2026-10-01T00:00:00.000Z' }))
+    await store.saveItem('no-pub', item('f1', { fetchedAt: '2026-10-05T00:00:00.000Z' }))
+    await store.saveItem('new', item('f1', { publishedAt: '2026-10-09T00:00:00.000Z' }))
+    await store.saveItem('tie-b', item('f2', { publishedAt: '2026-10-09T00:00:00.000Z' }))
+    await store.saveItem('tie-a', item('f2', { publishedAt: '2026-10-09T00:00:00.000Z' }))
+    await store.saveItem('old', item('f2', { publishedAt: '2026-09-01T00:00:00.000Z' }))
+
+    const all = store.allItems()
+    assert.deepEqual(store.listRecent(3).map(([id]) => id), ['new', 'tie-a', 'tie-b'],
+      '新的列表取数必须与「全表排序后截断」逐条相同（改的是取数方式，不是语义）')
+    assert.deepEqual(store.listRecent(2).map(([id]) => id), all.slice(0, 2).map(([id]) => id),
+      'limit 取的是**前缀**：不许因为走了索引就换了相对顺序')
+    assert.deepEqual(store.listRecent(100).map(([id]) => id), all.map(([id]) => id), 'limit 超过总量 ⇒ 与 allItems 全等')
+    assert.deepEqual(store.listRecent(0), [], 'limit 0 ⇒ 空列表')
+    assert.deepEqual(store.listRecent(-1), [], '负数上限 ⇒ 空列表，而不是 SQLite 的「无上限」（那等于把整表读回来）')
+    assertItem(store.listRecent(1)[0][1], 'listRecent 的记录')
+    assert.deepEqual(store.listRecent(1)[0][1], store.item('new'), '同一套读路径：记录形状必须与 item() 逐字段相同')
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('listCleanupCandidates：候选集由 SQL 选出，且与 selectCleanup 的判据对得上（唯一口径不漂）', async () => {
+  const { store, db, dir } = freshStore('cleanup-candidates')
+  try {
+    const read = '2026-10-11T12:00:00.000Z'
+    await store.saveItem('old-read', item('f1', { publishedAt: '2026-01-01T00:00:00.000Z', readAt: read }))
+    await store.saveItem('old-unread', item('f1', { publishedAt: '2026-01-01T00:00:00.000Z' }))
+    await store.saveItem('old-starred', item('f1', { publishedAt: '2026-01-01T00:00:00.000Z', readAt: read, starred: true }))
+    await store.saveItem('old-kept', item('f1', { publishedAt: '2026-01-01T00:00:00.000Z', readAt: read, keptUnread: true }))
+    await store.saveItem('recent-read', item('f1', { publishedAt: '2026-10-11T00:00:00.000Z', readAt: read }))
+    const cutoff = '2026-06-01T00:00:00.000Z'
+
+    const candidates = store.listCleanupCandidates(cutoff)
+    assert.deepEqual(candidates.map((row) => row.id), ['old-read'],
+      '候选 = 已读 + 未星标 + 未保持未读 + 早于阈值（read_at IS NOT NULL AND starred = 0 AND kept_unread = 0 AND recency < ?）')
+    // 候选行必须自带判据字段（供调用方复跑 selectCleanup）与释放量原料（免得为每条候选再点读一次）
+    assert.deepEqual(
+      Object.keys(candidates[0]).sort(),
+      ['articleChars', 'id', 'kept', 'read', 'recency', 'starred', 'summaryChars'],
+      '候选行要把判据字段与释放量原料一次带齐',
+    )
+    assert.deepEqual(store.listCleanupCandidates('1970-01-01T00:00:00.000Z'), [],
+      '阈值之前没有候选 ⇒ 空集（不是「全表」）')
+
+    // 释放量原料里的 articleChars 是**第二处**实现（库里存的是 texts.body 的 JSON 文本，
+    // 而 retention.ts 的 articleCharsOf 吃的是解析后的 articleRecord），两处口径必须对账 ——
+    // 不对账的话「释放约 X KB」会悄悄与实际不符（客户端直接显示这个数）。
+    await store.saveItem('old-with-body', item('f1', {
+      publishedAt: '2026-01-01T00:00:00.000Z',
+      readAt: read,
+      summary: '摘要摘',
+      article: {
+        fetchedAt: read,
+        blocks: [{ kind: 'p', text: '正文正文正' }, { kind: 'list', items: ['一', '二二'] }],
+      },
+    }))
+    const withBody = store.listCleanupCandidates(cutoff).find((row) => row.id === 'old-with-body')
+    assert.equal(withBody.articleChars, articleCharsOf(store.item('old-with-body').article),
+      '正文缓存的字符数必须与 retention.ts 的 articleCharsOf 同口径（两处实现要对得上）')
+    assert.equal(withBody.articleChars, 5 + 3, 'blocks 里 text 与 items 的字符数都要算进去')
+    assert.equal(withBody.summaryChars, 3, '摘要同样占字节，释放量要如实算进去')
+
+    // 与唯一口径对账：候选集是 selectCleanup 判据的**子集**（宁可保守，不许比判据更宽），
+    // 且被它排除的那批并回来正好等于判据的集合（不许比判据更窄）。
+    const rows = store.allItems().map(([id, record]) => ({
+      id,
+      starred: record.starred,
+      kept: record.keptUnread === true,
+      read: record.readAt !== undefined,
+      recency: recencyOf(record),
+      articleChars: 0,
+    }))
+    const doomed = selectCleanup(rows, cutoff).sort()
+    assert.deepEqual(
+      doomed.filter((id) => id !== 'old-kept'),
+      store.listCleanupCandidates(cutoff).map((row) => row.id).sort(),
+      '除「保持未读」外，候选集必须与 selectCleanup 的集合逐字相等',
+    )
+    assert.ok(doomed.includes('old-kept'),
+      'selectCleanup 单独算会把「已读 + 保持未读」也算进去 —— SQL 谓词多守的一条正是这里（见谓词的 kept_unread = 0）')
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('listRecent / unreadPerFeed / listCleanupCandidates 的排序、聚合与筛选真的写在 SQL 里（扫描族归零）', async () => {
+  const { store, db, dir } = freshStore('scan-removal')
+  try {
+    await store.saveItem('a-1', item('feed-a', { publishedAt: '2026-10-01T00:00:00.000Z' }))
+    await store.saveItem('b-1', item('feed-b'))
+
+    // 语句是**首次使用时**才 prepare 的（刻意懒编译），所以包一层就能录到这三条读路径的真实 SQL。
+    // 行为层看不出「排序/聚合/筛选到底在哪一侧做」——只有 SQL 形状能钉住（spec §3.1 的扫描族归零）。
+    const captured = []
+    const realPrepare = db.prepare.bind(db)
+    db.prepare = (text) => { captured.push(text); return realPrepare(text) }
+    let reads
+    try {
+      store.listRecent(1)
+      store.unreadPerFeed(['feed-a', 'feed-b'])
+      store.listCleanupCandidates('2026-06-01T00:00:00.000Z')
+      reads = captured.filter((text) => /FROM items/i.test(text))
+    } finally {
+      delete db.prepare
+    }
+
+    assert.ok(
+      reads.some((text) => /ORDER BY[\s\S]*recency DESC[\s\S]*id ASC/.test(text) && /LIMIT \?/.test(text)),
+      'listRecent 必须把排序键与上限交给 SQL：' + JSON.stringify(reads),
+    )
+    assert.ok(
+      reads.some((text) => /GROUP BY\s+i?\.?feed_id/.test(text) && /read_at IS NULL/.test(text)),
+      'unreadPerFeed 必须是 SQL 侧聚合，且未读判据是 read_at IS NULL（与 isUnread 同口径）：' + JSON.stringify(reads),
+    )
+    assert.ok(
+      reads.some((text) => /read_at IS NOT NULL/.test(text) && /starred = 0/.test(text)
+        && /kept_unread = 0/.test(text) && /recency < \?/.test(text)),
+      '清理候选必须是 SQL 侧筛选（否则「点一次清理 = 一次全表遍历」原样留下）：' + JSON.stringify(reads),
+    )
   } finally {
     db.close()
     rmSync(dir, { recursive: true, force: true })

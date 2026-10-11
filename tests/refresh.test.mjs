@@ -27,6 +27,47 @@ function memoryStore() {
     updateItem: async (id, fn) => { items.set(id, fn(items.get(id))) },
     deleteItem: async (id) => { items.delete(id) },
     listItems: (feedId) => [...items.entries()].filter(([, record]) => record.feedId === feedId),
+    allItems: () => [...items.entries()],
+    listFeeds: () => [...feeds.entries()],
+    /**
+     * 与自持实现同形（Task 5 的三条 SQL 取数方法）。
+     *
+     * 桩也必须守**同一条契约**：unreadPerFeed 先按传进来的键铺 0（0 未读的源留键）、
+     * listCleanupCandidates 把 SQL 谓词多守的「保持未读不删」一并实现 —— 桩与实现各写一套
+     * 语义，测出来的就只是桩的理解（docs/pitfalls.md 二、2.5 / 2.6）。
+     */
+    unreadPerFeed: (feedIds) => {
+      const unread = {}
+      for (const feedId of feedIds) unread[feedId] = 0
+      for (const record of items.values()) {
+        if (unread[record.feedId] === undefined || record.readAt !== undefined) continue
+        unread[record.feedId] += 1
+      }
+      return unread
+    },
+    listRecent: (limit) => {
+      if (limit <= 0) return []
+      const rows = [...items.entries()]
+      rows.sort(([idA, a], [idB, b]) => {
+        const byTime = (b.publishedAt ?? b.fetchedAt).localeCompare(a.publishedAt ?? a.fetchedAt)
+        return byTime !== 0 ? byTime : idA.localeCompare(idB)
+      })
+      return rows.slice(0, limit)
+    },
+    listCleanupCandidates: (cutoffIso) => {
+      const rows = []
+      for (const [id, record] of items.entries()) {
+        const recency = record.publishedAt ?? record.fetchedAt
+        // 判据 = retention.ts 的 selectCleanup（已读 + 未星标 + 早于阈值）另加「保持未读」保护
+        if (record.readAt === undefined || record.starred || record.keptUnread === true) continue
+        if (recency >= cutoffIso) continue
+        rows.push({
+          id, starred: false, kept: false, read: true, recency,
+          articleChars: 0, summaryChars: record.summary?.length ?? 0,
+        })
+      }
+      return rows
+    },
   }
 }
 

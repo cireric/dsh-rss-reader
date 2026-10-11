@@ -604,6 +604,49 @@ const MUTATIONS = [
       "            '已保留原文件，未做任何写入）：' + String(error), { cause: error });",
     ].join(String.fromCharCode(10)),
     to: '        return true;' },
+  // ── 未读记账与列表取数改 SQL（2026-10-11 大规模存储任务 5）────────────────────────
+  // 这一族的失效大半**安静**：账目少算一个源、0 未读的源丢键、清理多删了用户说「别动它」的条目
+  // —— 界面上分别是「角标空白」「星标/保持未读的条目凭空消失」，都不报错。
+  // 每条 from 均照**编译产物** lib/store-sqlite.js 的真实形状逐字抄，并已独立核对
+  // OCCURRENCES=1（docs/pitfalls.md 一、1.4）。
+  { id: 'unreadPerFeed-SQL 判据反过来', file: 'lib/store-sqlite.js',
+    // 未读判据一旦写反（read_at IS NOT NULL），账目就变成「已读数」——而它与「各源之和 === 总未读」
+    // 的关系看着仍然自洽（两边一起错），所以只有那条**与 shared.ts 逐键对账**的用例能抓到它。
+    // 判据：tests/store-sqlite.test.mjs 的「unreadPerFeed：与 shared.ts 的唯一口径…逐键相等」。
+    from: "const SELECT_UNREAD_PER_FEED = 'SELECT feed_id AS feed_id, COUNT(*) AS unread FROM items WHERE read_at IS NULL GROUP BY feed_id';",
+    to: "const SELECT_UNREAD_PER_FEED = 'SELECT feed_id AS feed_id, COUNT(*) AS unread FROM items WHERE read_at IS NOT NULL GROUP BY feed_id';" },
+  { id: 'unreadPerFeed-丢键域（0 未读的源不留键）', file: 'lib/store-sqlite.js',
+    // 这是本仓库栽过两次的那条（任务 1 的键域、任务 5 的口径）：删掉「先按传进来的键铺 0」之后，
+    // 只有**有未读的源**才留键，左栏那一行渲染出来是「角标空白」而不是「角标 0」——
+    // 与「角标 0」在界面上无从分辨，是最贵的那类沉默失败。判据是 tests/unread-accounting.test.mjs
+    // 的「标空之后 A 的键必须还在」与 tests/overview-scale.test.mjs 的键集断言。
+    from: 'unread[feedId] = 0;',
+    to: ';' },
+  { id: 'cleanup-保持未读不再受保护', file: 'lib/store-sqlite.js',
+    // 用户对 kept-unread 说的是「别动它」，与星标同级（store.ts 的 listCleanupCandidates 契约）。
+    // 谓词里少了它，清理会**静默删掉**用户明确标了「保持未读」的条目 —— 不可逆的数据丢失。
+    // 判据：tests/overview-scale.test.mjs 的「old-0-1 必须活下来」+ tests/store-sqlite.test.mjs 的候选集对账。
+    from: 'AND i.kept_unread = 0',
+    to: 'AND i.kept_unread >= 0' },
+  { id: 'cleanup-星标不再受保护', file: 'lib/store-sqlite.js',
+    // 星标是用户明确要留的东西（retention.ts 的 selectCleanup 也钉着它）。谓词里少了它，
+    // 一次「清理」会把星标旧条目一起删掉，且**没有任何断言会翻红**（除非有这条）。
+    from: 'AND i.starred = 0',
+    to: 'AND i.starred >= 0' },
+  { id: 'listRecent-负数上限下传给 SQLite', file: 'lib/store-sqlite.js',
+    // SQLite 把 LIMIT -1 当「无上限」。删掉 JS 侧短路后，「取 300 条」在一处算错成负数时
+    // 会静默变成「读回整表」——结果看着还挺对，只有耗时爆炸。
+    // 判据：tests/store-sqlite.test.mjs 的「listRecent：… 负数上限 ⇒ 空列表」。
+    from: 'if (limit <= 0)\n                return [];',
+    to: 'if (false)\n                return [];' },
+  // 列表窗口的「放大重取」（Task 5 自审发现）：残留行（退订后没清干净 / 手工改库）会先被取回来、
+  // 再因为「所属源已退订」被挡掉，而它们**已经占掉了窗口**。少了这一步，右栏会静默少几条。
+  // 判据：tests/endpoints-perfeed-unread.test.mjs 的「已退订源的残留条目…不许把列表的截断窗口占掉」。
+  { id: 'overview-列表窗口不再放大重取', file: 'lib/endpoints.js',
+    // 首轮取回的 5 条里 4 条是残留行 ⇒ 列表只剩 1 条，而用户看不出少在哪（原实现是先滤后截，不会少）。
+    from: 'if (items.length >= config.maxItemsShown || rows.length < window)',
+    to: 'if (true)',
+  },
 ]
 
 function runSuite() {
