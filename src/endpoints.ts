@@ -336,6 +336,9 @@ const ARTICLE_REVISION = EXTRACTOR_REVISION
               etag: previous?.etag,
               lastModified: previous?.lastModified,
               lastFetchedAt: previous?.lastFetchedAt,
+              // 这里也是**显式白名单**：不逐字段搬，「源刚试过一次」这个事实会被导入 OPML 抹掉，
+              // 该源下一轮又被当「没试过」排到最前（调度键见 refresh.ts 的 stalenessKey）。
+              lastAttemptedAt: previous?.lastAttemptedAt,
             })
             accepted.push({ url: result.url, title: result.title ?? subscription?.title, folder: previous?.folder ?? subscription?.folder })
           }
@@ -363,6 +366,8 @@ const ARTICLE_REVISION = EXTRACTOR_REVISION
             etag: previous?.etag,
             lastModified: previous?.lastModified,
             lastFetchedAt: previous?.lastFetchedAt,
+            // 同 OPML 导入：显式白名单，别把「刚试过」的痕迹抹掉
+            lastAttemptedAt: previous?.lastAttemptedAt,
           })
           return ok({
             added: previous === undefined ? 1 : 0,

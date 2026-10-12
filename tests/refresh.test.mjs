@@ -729,9 +729,13 @@ test('selectStalestFeeds：上限 <= 0 视为「未配置」⇒ 返回全部，�
     ['a', { url: 'a' }],
     ['b', { url: 'b', lastFetchedAt: '2026-10-01T00:00:00.000Z' }],
   ]
-  assert.equal(selectStalestFeeds(feeds, 0).length, 2, '0 不许解释成「这一轮一个都不抓」')
-  assert.equal(selectStalestFeeds(feeds, -1).length, 2, '负上限同理')
-  assert.equal(selectStalestFeeds(feeds, Number.NaN).length, 2, 'NaN 上限同样回落到安全侧')
+  // 断言**具体是哪些 id**（不只是长度）：这条守卫内部一旦换了顺序（比如把「非法上限」那半
+  // 挪到别的分支里），只断言长度的版本照样绿 —— 它看不见「谁被返回了」。
+  const all = ['a', 'b']
+  assert.deepEqual(selectStalestFeeds(feeds, 0), all, '0 不许解释成「这一轮一个都不抓」')
+  assert.deepEqual(selectStalestFeeds(feeds, -1), all, '负上限同理')
+  assert.deepEqual(selectStalestFeeds(feeds, Number.NaN), all, 'NaN 上限同样回落到安全侧')
+  assert.deepEqual(selectStalestFeeds(feeds, Number.POSITIVE_INFINITY), all, '无穷大上限同理')
 })
 
 test('陈旧度调度的饥饿不变式：源数 > K 时，连续轮次内每个源都会被选中（旋转覆盖全部）', () => {
@@ -908,3 +912,106 @@ test('refreshFeedsPerRound 的默认值必须是个具体条数（0 / Infinity =
   // 让「默认调度有多宽」这件事在 diff 里看得见，而不是藏在一个 schema 字面量里。
   assert.equal(parsed.refreshFeedsPerRound, 20, '默认每轮 20 源；要改就带着实测证据一起改')
 })
+
+/**
+ * ── 失败源不得饿死健康源（2026-10-11 修复轮 1，评审实测抓出的真缺陷）─────────────────
+ *
+ * 病象：调度若只看「上次成功抓取」（lastFetchedAt），**永久失败**的源永远拿不到那个时间戳，
+ * 于是永远钉在「无限陈旧」那一端。这类源一旦 ≥ 每轮上限 K，每一轮选中的就是同一批失败源，
+ * 所有健康源从此再也抓不到 —— 连 force 也救不回来（force 只绕节流、不绕轮转）。
+ *
+ * 下面第一条是纯函数层的复刻（含每轮的写规则）：它把 S ≥ K 这个形状直接钉死；
+ * 第二条走真装配（真 sqlite + 真 config.json + 真 HTTP 路由 + 3 台真源，其中 1 台恒 500），
+ * 证明「修法真的接在失败分支上」—— 纯函数层怎么改都测不到这一点。
+ */
+test('永久失败的源不得饿死健康源：S ≥ K 时每一轮都还能抓到新的健康源（复刻真实写规则）', () => {
+  /**
+   * 复刻 refreshOne 的写规则：选中的源**无论成败都盖 lastAttemptedAt**，只有成功才盖 lastFetchedAt。
+   * 键一律照 selectStalestFeeds 的口径取，不另写一套 —— 否则测的只是这份复刻自己的理解。
+   */
+  const drive = (total, failing, limit, rounds) => {
+    const ids = Array.from({ length: total }, (_, index) => 'f' + index)
+    const broken = new Set(ids.slice(0, failing))
+    let feeds = ids.map((id) => [id, { url: id }])
+    const covered = new Set()
+    for (let round = 0; round < rounds; round += 1) {
+      const picked = selectStalestFeeds(feeds, limit)
+      assert.ok(picked.length <= limit, '第 ' + round + ' 轮不得超过上限 K=' + limit)
+      const stamp = '2026-10-12T00:' + String(round).padStart(2, '0') + ':00.000Z'
+      feeds = feeds.map(([id, record]) => {
+        if (!picked.includes(id)) return [id, record]
+        if (broken.has(id)) return [id, { ...record, lastAttemptedAt: stamp }]
+        covered.add(id)
+        return [id, { ...record, lastFetchedAt: stamp, lastAttemptedAt: stamp }]
+      })
+    }
+    return covered.size
+  }
+
+  // 形状一：S ≥ K（20 个永久失败 / K=20）。这正是旧排序键下「每一轮选中同一批失败源」的形状。
+  assert.equal(drive(200, 20, 20, 60), 180,
+    '20 个永久失败 + K=20：60 轮内 180 个健康源必须全部被抓到（旧实现是 0/180 的永久停摆）')
+  // 形状二：源数刚好 3、1 个永久失败、K=1 —— 真装配用例用的就是这个形状
+  assert.equal(drive(3, 1, 1, 10), 2,
+    '3 源 / 1 个永久失败 / K=1：10 轮内另外 2 个健康源必须都被抓到（旧实现是 0/2）')
+  // 形状三：失败源少于 K ⇒ 旧实现也能过（防这条新判据把「本来就行」的情形测反）
+  assert.equal(drive(200, 5, 20, 60), 195, '5 个永久失败 / K=20：健康源同样要全覆盖')
+  // 形状四：0 个失败 ⇒ 健康路径回归（与恢复全绿那条用例同形）
+  assert.equal(drive(200, 0, 20, 20), 200, '没有失败源时，20 轮覆盖全部 200 个')
+})
+
+test('真装配：1 个源恒 500 时，K=1 的轮转仍能摸到另外两个健康源（失败分支必须盖尝试时间）', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'rss-refresh-broken-'))
+  const savedHome = process.env.DSH_HOME
+  const savedUserProfile = process.env.USERPROFILE
+  process.env.DSH_HOME = home
+  process.env.USERPROFILE = home
+  const hits = []
+  const disposers = []
+  let handler
+  let broken /** 第一台服务器恒 500 */
+  let healthy = [] /** ⚠️ 必须自己关：startFeedServers 只负责起（关是调用方的事，见 withRealRefresh） */
+  try {
+    broken = createServer((_req, res) => { hits.push('broken'); res.writeHead(500); res.end('boom') })
+    await new Promise((resolve) => broken.listen(0, '127.0.0.1', resolve))
+    const brokenUrl = 'http://127.0.0.1:' + broken.address().port + '/feed.xml'
+    healthy = await startFeedServers(2, hits)
+    const ctx = {
+      logger: { info: () => {}, warn: () => {} },
+      effect: (callback) => { const dispose = callback(); if (typeof dispose === 'function') disposers.push(dispose); return dispose },
+      webServer: { register: (route) => { handler = route.handler; return () => { handler = undefined } } },
+      connection: { requestRejection: () => undefined },
+    }
+    // 失败源**放在最前**：它因此是「从未尝试过」那批里最靠前的，第一轮必然被选中并失败。
+    // 若失败分支不盖尝试时间，它之后每一轮都还是最旧的 ⇒ 永久霸占 K=1 的窗口。
+    apply(ctx, {
+      feeds: [brokenUrl, ...healthy.map((entry) => entry.url)],
+      minRefreshIntervalMs: 0,
+      refreshOnStart: true,
+      timeoutMs: 5000,
+      refreshFeedsPerRound: 1,
+    })
+    await waitForCompletedRounds(home, 1)
+    assert.deepEqual(hits, ['broken'], '第一轮：失败源最旧，先抓它（且它失败了）')
+
+    await requestRefresh(handler)
+    assert.deepEqual(hits, ['broken', 1],
+      '第二轮必须换人：失败的尝试也要盖尝试时间，否则它会永远霸占 K=1 的窗口')
+    await requestRefresh(handler)
+    assert.deepEqual(hits, ['broken', 1, 2], '第三轮抓到第二个健康源 —— 两个健康源 3 轮内全覆盖')
+    await requestRefresh(handler)
+    assert.equal(hits[3], 'broken', '第四轮回到失败源（它是这三个里最久没试过的）—— 失败源同样不被饿死')
+  } finally {
+    for (const dispose of disposers) {
+      try { await dispose() } catch (error) { console.error('清理装配失败（不影响断言）：', error) }
+    }
+    if (broken !== undefined) await new Promise((resolve) => broken.close(resolve))
+    for (const entry of healthy) await new Promise((resolve) => entry.server.close(resolve))
+    rmSync(home, { recursive: true, force: true })
+    if (savedHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = savedHome
+    if (savedUserProfile === undefined) delete process.env.USERPROFILE
+    else process.env.USERPROFILE = savedUserProfile
+  }
+})
+

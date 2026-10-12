@@ -203,7 +203,8 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
       return false
     }
     // 取源：不是全量，而是**最旧的 K 个**（纯函数，见 refresh.ts）。一轮的时长因此与源数脱钩
-    // （200 源 × 15s ÷ 5 = 600s 是一轮全抓的情形），而「没被选中的下一轮最旧」保证谁都不饿死。
+    // （200 源 × 15s ÷ 5 = 600s 是一轮全抓的情形），而「没被选中的下一轮最旧」（按**上次尝试**
+    // 排序，失败的尝试也算，见 refresh.ts 的 stalenessKey）保证谁都不饿死。
     // 未抓过（缺 lastFetchedAt）的源排最前；K ≥ 源数或 K ≤ 0（未配置）都退回全量，一个不丢。
     //
     // ⚠️ 与**节流/强制**各是什么关系（别把下面两段当成待修的 bug）：
@@ -227,6 +228,10 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
     })()
     try {
       await inFlight
+      // ⚠️ 只要这一轮**真的发起了抓取**就打上完成时间 —— 包括 K 个源全部失败的轮次。
+      // 这不与「失败源不得饿死健康源」冲突：轮转仍在推进（失败的尝试也盖 lastAttemptedAt，
+      // 见 refresh.ts），只是下一轮要等满 minRefreshIntervalMs。节流的目的是「别捶网络」，
+      // 而这一轮确实捶了 K 次；反过来「全失败就不节流」会让一个坏源被连续快节奏重试。
       lastRefreshCompletedAt = Date.now()
       return true
     } finally {

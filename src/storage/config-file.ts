@@ -7,8 +7,9 @@
  * 「返回空 feeds」在用户眼里就是「我的订阅全没了」，而它其实只是一次解析失败。
  *
  * `feeds` 的取值是 **feedId → FeedRecord 的完整映射**，不是 URL 列表：`etag` / `lastModified`
- * 决定条件请求、`contentRevision` 决定要不要绕开 304 回填摘要、`lastFetchedAt` 是陈旧度调度的
- * 排序键、`lastFailure` 要回给界面。只存 URL 会让这几项在迁移那一刻静默归零 ——
+ * 决定条件请求、`contentRevision` 决定要不要绕开 304 回填摘要、`lastAttemptedAt` 是陈旧度调度的
+ * 排序键（回落 `lastFetchedAt`）、`lastFetchedAt` 是「上次成功」要回给界面、`lastFailure` 也要回给
+ * 界面。只存 URL 会让这几项在迁移那一刻静默归零 ——
  * 表现是「迁移后第一轮全量重抓 + 摘要回填空转」，而不会有任何断言翻红（spec 的定稿加固）。
  * 每个记录都过 `feedRecordSchema`（`strict`）就是为了让这个「逐字段同形」由机器来保证。
  */

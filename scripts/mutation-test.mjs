@@ -140,6 +140,34 @@ const MUTATIONS = [
   //   ② 上限守卫 ⇒ 0 / NaN 被当成「必须为空」，即**每一轮一个源都不抓**，全量静默停摆
   //   ③ 接线 ⇒ 挑对了子集却没交给 refreshFeeds，200 源照样一轮全抓（本任务最可能的失效形态）
   // from 一律照**编译产物的实际形状**写（docs/pitfalls.md 一、1.4），OCCURRENCES 均独立实测 = 1。
+  // ── 失败源不得饿死健康源（2026-10-11 任务 10 修复轮 1，评审实测抓出的真缺陷）─────────────
+  // 这一族守的是**排序键的取值口径**。from 照编译产物形状写、OCCURRENCES 均独立实测 = 1
+  // （lib/refresh.js:40 的回落链、:201 的失败分支写入）。
+  { id: 'refresh-调度键退回只看成功', file: 'lib/refresh.js',
+    // lib/refresh.js:40。这就是**修复前的那份代码**：键退回 lastFetchedAt（= 上次成功）。
+    // 永久失败的源永远拿不到它 ⇒ 永远最旧 ⇒ 这类源 ≥ K 个时每轮选中同一批，健康源全停更。
+    // 实测 2 条翻红（纯函数复刻 200/20/K=20 与真装配 3 源 / 1 个 500 / K=1），RefErr 0 次。
+    from: "    return record.lastAttemptedAt ?? record.lastFetchedAt ?? '';",
+    to: "    return record.lastFetchedAt ?? '';" },
+  { id: 'refresh-失败的尝试不盖时间', file: 'lib/refresh.js',
+    // lib/refresh.js:201（失败分支）。键的口径对了、但失败分支忘了盖时间 —— 两者必须同时成立。
+    // ⚠️ 实测**只有 1 条**翻红：真装配那条。纯函数复刻层怎么改都测不到「失败分支有没有盖」，
+    // 所以这条变异证明的正是「纯函数层断言不够、必须走真装配」这件事。谁想删掉那条真装配用例，
+    // 先看这条变异会不会幸存。
+    from: '            lastAttemptedAt: stamp,\n            lastFailure: result.reason,',
+    to: '            lastFailure: result.reason,' },
+  { id: 'refresh-陈旧度不再回落', file: 'lib/refresh.js',
+    // lib/refresh.js:40 的另一半：去掉对 lastFetchedAt 的回落。已有库（Task 2 迁移过来的记录）
+    // 只有 lastFetchedAt、没有 lastAttemptedAt ⇒ 去掉回落后它们全被当成「从未尝试过」，
+    // 旧订阅会在装载后一次性涌到最前面。非等价变异（老记录与新记录的排序结果不同）。
+    // 实测 2 条翻红（陈旧度排序、饥饿不变式），RefErr 0 次。
+    from: "    return record.lastAttemptedAt ?? record.lastFetchedAt ?? '';",
+    to: "    return record.lastAttemptedAt ?? '';" },
+  // ⚠️ 刻意**没有**给 304 分支（:221）与 200 分支（:303）的 lastAttemptedAt 写入各加一条变异：
+  // 那两条是**等价变异**。两个成功分支里 lastFetchedAt 与 lastAttemptedAt 盖的是**同一个 stamp**，
+  // 删掉 lastAttemptedAt 之后排序键回落到 lastFetchedAt ⇒ 取值逐字相同 ⇒ 没有任何输入会改变结果。
+  // 它们幸存不是测试缺口（判定方法见本文件「正文容器收窄」那条的完整推导）。反过来说：
+  // **只有失败分支那条写入是不可回落的**（它没有 lastFetchedAt 可回落）—— 判据就在上面。
   { id: 'refresh-陈旧度排序倒退', file: 'lib/refresh.js',
     // lib/refresh.js:71，独立实测 OCCURRENCES=1。排序倒退后取到的是**最新**的 K 个，
     // 而未抓过的源（staleness key = ''，码位最小）从「最前」翻到「最后」⇒ 新建的源再也排不上

@@ -78,9 +78,28 @@ export function normalizeFeedUrl(url: string): string {
   return new URL(url.trim()).toString()
 }
 
-/** 陈旧度排序键：没抓过 = 空串（码位最小的字符串），与「无限陈旧」同义。 */
+/**
+ * 陈旧度排序键 = 上次**尝试**时间（成功 / 304 / 失败都算），回落到上次成功，再回落到空串。
+ *
+ * 为什么不直接用 lastFetchedAt（= 上次成功）：**永久失败**的源永远拿不到那个时间戳，
+ * 于是永远钉在「无限陈旧」那一端。这类源一旦 ≥ 每轮上限 K，每一轮选中的就是同一批失败源，
+ * 所有健康源再也抓不到（实测：200 源 / 20 个永久失败 / K=20 ⇒ 60 轮覆盖 0/180）——
+ * 而「按陈旧度旋转」这条安全性论证对它们完全不成立。取「上次尝试」之后，失败的尝试同样
+ * 把该源排到后面，旋转对失败源一样生效。见 docs/pitfalls.md §5.8。
+ *
+ * 回落到空串仍保留了「从未尝试过 = 无限陈旧」这一层，它对已有库（还没有 lastAttemptedAt 的
+ * 记录）也成立，所以这个字段不需要任何迁移。
+ *
+ * ⚠️ **这两个时间戳一律假定是本插件自己写的 UTC ISO**（`now().toISOString()`，形如
+ * `2026-10-11T09:00:00.000Z`）—— 只有这个形状下「按码位比较」才等于「按时间比较」。
+ * 手工编辑 config.json 塞进带时区偏移的写法（`+08:00`）会按字面排序，即偏序。
+ * 之所以不做归一化（例如 Date.parse 成数字再比）：写侧永远是 toISOString，所以这种偏差
+ * **一次尝试之后就自愈**（下一次写入把它换成 UTC 形状），影响仅限那一轮谁先谁后；
+ * 而为此在比较器里加一次解析（排序里 O(n log n) 次）是为一个未实测的输入扩规则。
+ * 这条假定与「不为未经实测的样本扩规则」同一条纪律（见 docs/pitfalls.md §八）。
+ */
 function stalenessKey(record: FeedRecord): string {
-  return record.lastFetchedAt ?? ''
+  return record.lastAttemptedAt ?? record.lastFetchedAt ?? ''
 }
 
 /**
@@ -90,16 +109,21 @@ function stalenessKey(record: FeedRecord): string {
  * 200 × 15 ÷ 5 = **600s**（spec §3、§6），而这一轮的时长直接就是用户点「刷新」后的等待。
  *
  * **为什么有界是安全的 —— 全部安全性都来自这一条排序**：
- * 这一轮没被选中的源，其 `lastFetchedAt` 一个都没变，而本轮抓过的那些全部变新了，
- * 所以**下一轮它们一定排在最前面**，一定会在有限轮次内被选中。换句话说：
- * 「少抓」不是「漏抓」，只是把这一轮的工作挪到下一轮 —— 没有任何源会被永久跳过。
+ * 这一轮没被选中的源，其排序键（`lastAttemptedAt`，见 stalenessKey）一个都没变，**而本轮被
+ * 选中的那些全部变新了 —— 无论成败**。所以下一轮它们一定排在最前面，一定会在有限轮次内被选中。
+ * 换句话说：「少抓」不是「漏抓」，只是把这一轮的工作挪到下一轮 —— 没有任何源会被永久跳过。
+ *
+ * ⚠️ 「无论成败」这四个字是承重的，漏掉它这条论证就是假的：只盖成功时间的话，**永久失败**的源
+ * 永远排最前，≥ K 个这类源就能永久霸占每一轮的窗口（评审实测复现，见 domain.ts 的 `lastAttemptedAt`
+ * 与 docs/pitfalls.md §5.8）。判据是 tests/refresh.test.mjs 的「永久失败的源不得饿死健康源」
+ * 两条（纯函数 200/20/K=20 与真装配 3 源 / 1 个 500 / K=1）。
  *
  * ⇒ 也因此这条排序必须是**确定**的：等值（同一时间戳 / 都没抓过）时按传入顺序
  * （= `listFeeds()` 的键序 = config.json 的键序）稳定排列。tie-break 一旦是随机的，
  * 同一批等值的源可能反复被挑中，排在后面的源就饿死了 —— 那是本条唯一的失效模式。
  * 判据是 tests/refresh.test.mjs 的「陈旧度调度的饥饿不变式」（5 源 / K=2 ⇒ 3 轮覆盖全部）。
  *
- * 未抓过的源（缺 `lastFetchedAt`）排**最前**：没抓过 = 无限陈旧，它比任何抓过的都该先抓
+ * **从未尝试过**的源（两个时间戳都缺）排**最前**：没试过 = 无限陈旧，它比任何试过的都该先抓
  * （Task 2 的逐字段搬运必须保住 `lastFetchedAt`，否则整条调度退化成按 config 键序轮流）。
  *
  * `limit <= 0` / NaN 一律返回**全部**：这是「上限没配上」而不是「这一轮一个都不抓」——
@@ -253,9 +277,14 @@ async function refreshOne(
   const stamp = now().toISOString()
 
   if (result.kind === 'failed') {
+    // ⚠️ 失败也要盖 lastAttemptedAt（调度排序键），但**不**盖 lastFetchedAt（那是「上次成功」）。
+    // 少了这一行，永久失败的源在调度里永远最旧，≥ K 个就能永久霸占每一轮的窗口 —— 健康源
+    // 全军覆没（评审实测：200 源 / 20 个永久失败 / K=20 ⇒ 60 轮覆盖 0/180）。
+    // 这条分支同时是「失败源不会被饿死」的唯一承重点，判据在 tests/refresh.test.mjs。
     await store.saveFeed(feedId, {
       ...(previous ?? {}),
       url: feedId,
+      lastAttemptedAt: stamp,
       lastFailure: result.reason,
     })
     return { feedId, url: feedId, status: 'failed', added: 0, reason: result.reason }
@@ -275,6 +304,8 @@ async function refreshOne(
       etag: previous?.etag,
       lastModified: previous?.lastModified,
       lastFetchedAt: stamp,
+      // 调度排序键同样要盖：304 是一次**成功的尝试**（源说内容没变）
+      lastAttemptedAt: stamp,
       contentRevision: CONTENT_REVISION,
     })
     return upgradeSkipped
@@ -361,6 +392,7 @@ async function refreshOne(
     etag: result.etag,
     lastModified: result.lastModified,
     lastFetchedAt: stamp,
+    lastAttemptedAt: stamp,
     contentRevision: CONTENT_REVISION,
   })
   await prune(store, feedId, options.maxItemsPerFeed)
