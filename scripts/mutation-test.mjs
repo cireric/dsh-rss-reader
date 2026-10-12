@@ -84,6 +84,16 @@ const MUTATIONS = [
   { id: 'refresh-缓存闸门认 blocks', file: 'lib/refresh.js',
     from: 'chars: articleCharsOf(record.article),',
     to: 'chars: (record.article?.paragraphs ?? []).reduce((sum, paragraph) => sum + paragraph.length, 0),' },
+  // 全局预算的承重点（2026-10-11 任务 9）：这份名单必须覆盖**全库**。
+  // 退回成「只看一个源」（等价于把它改回 2026-10-11 之前的逐源闸门）⇒ 200 源各有 8M 字符的名额，
+  // 上限形同虚设；而每个源单独看又都没超自己的份额，连「哪一源超了」都判不出来。
+  // 判据由 tests/refresh.test.mjs 的「全局预算：每源都没超上限，但合计超了 ⇒ 必须跨源清」看着
+  // （实测：三个源各 1000 字符、上限 1500，旧实现三条全留 = 3 ≠ 1）。
+  // ⚠️ from 照**编译产物**的实际形状写（docs/pitfalls.md 一、1.4）：lib/refresh.js:72 的
+  // `const entries = store.allItems()` 独立实测 OCCURRENCES=1。
+  { id: 'refresh-正文闸门退回单源', file: 'lib/refresh.js',
+    from: 'const entries = store.allItems()',
+    to: "const entries = store.listItems(store.listFeeds().map(([feedId]) => feedId)[0] ?? '')" },
   { id: 'domain-rebuildItem 的 omit', file: 'lib/domain.js',
     from: 'if (change.omit?.includes(field) === true)',
     to: 'if (false)' },

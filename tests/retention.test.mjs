@@ -103,3 +103,71 @@ test('裁剪：全被星标/保持占满时，宁可超上限也不删', () => {
   ]
   assert.deepEqual(selectPrunable(rows, 1), ['c'], '只剩一条可删，不该动被保护的')
 })
+
+
+/* ── 全局预算：maxArticleCacheChars 的上限跨全部源共摊（2026-10-11 任务 9） ──
+ *
+ * 病象：上限原是**每源**一份，调用方逐源调用它，200 源即 200 份 8M 字符 ≈ 16 亿字符。
+ * 纯函数本身一直是「吃进所有条目」的口径 —— 分家的责任在调用方（src/refresh.ts），
+ * 所以这几条钉的是**跨源语义**：淘汰名单里必须出现别的源的条目。
+ * 为什么两层都要钉（这里 + refresh.test.mjs）：全仓只有这一处「从最旧开始清」的判据，
+ * 两层分开测才能分清「规则变了」与「接线错了」。
+ */
+
+test('全局正文预算：上限只装得下 1 条 ⇒ 清掉跨源最旧的两条', () => {
+  // 3 个源各 1 条，各 300 字符（合计 900），上限 350 ⇒ 装不下两条，清到剩一条即停
+  const entries = [
+    { id: 'feed-a/old', chars: 300, fetchedAt: '2026-01-01T00:00:00.000Z' },
+    { id: 'feed-b/mid', chars: 300, fetchedAt: '2026-02-01T00:00:00.000Z' },
+    { id: 'feed-c/new', chars: 300, fetchedAt: '2026-03-01T00:00:00.000Z' },
+  ]
+  const picked = selectArticleEvictions(entries, 350)
+  assert.deepEqual(picked, ['feed-a/old', 'feed-b/mid'],
+    '淘汰必须跨源按抓取时间从最旧清起 —— 只清调用方「当下这个源」就不是全局预算')
+  assert.ok(!picked.includes('feed-c/new'), '最新那条必须留下')
+})
+
+test('全局正文预算：每个源单独看都没超限，合计超了照样要清', () => {
+  // 每源 400 < 500（单看任一源都不超），但三源合计 1200 > 500 ⇒ 必须清。
+  // 这条是「每源预算」与「全局预算」的分水岭：按源清算的实现对它完全无感。
+  const entries = [
+    { id: 'a/1', chars: 400, fetchedAt: '2026-01-01T00:00:00.000Z' },
+    { id: 'b/1', chars: 400, fetchedAt: '2026-01-02T00:00:00.000Z' },
+    { id: 'c/1', chars: 400, fetchedAt: '2026-01-03T00:00:00.000Z' },
+  ]
+  assert.deepEqual(selectArticleEvictions(entries, 500), ['a/1', 'b/1'],
+    '单源都没超限不代表总量没超限：闸门必须看合计')
+})
+
+test('全局正文预算：合计未超限时一条都不清（哪怕按每源分摊都超）', () => {
+  // 反面：上限 1200 ≥ 合计 900 ⇒ 不动。反过来按源分摊（900/3 = 300 < 400）会误清三条。
+  const entries = [
+    { id: 'a/1', chars: 300, fetchedAt: '2026-01-01T00:00:00.000Z' },
+    { id: 'b/1', chars: 300, fetchedAt: '2026-02-01T00:00:00.000Z' },
+    { id: 'c/1', chars: 300, fetchedAt: '2026-03-01T00:00:00.000Z' },
+  ]
+  assert.deepEqual(selectArticleEvictions(entries, 1200), [],
+    '总量在预算内就一条都不许清 —— 清缓存是降级，不该在没必要时发生')
+})
+
+test('全局正文预算：上限 <= 0 返回空（未配置 ≠ 整份清空）', () => {
+  const entries = [
+    { id: 'a/1', chars: 900, fetchedAt: '2026-01-01T00:00:00.000Z' },
+    { id: 'b/1', chars: 900, fetchedAt: '2026-01-02T00:00:00.000Z' },
+  ]
+  assert.deepEqual(selectArticleEvictions(entries, 0), [],
+    '上限 0 视为未配置：把缓存整份清空是静默丢数据，不是限流')
+  assert.deepEqual(selectArticleEvictions(entries, -1), [], '负上限同理')
+})
+
+test('全局正文预算：抓取时间打平时按 id 定序（同一轮抓取的条目共享时间戳是常态）', () => {
+  // 跨源清算把各源的条目混进一张名单，id 来自不同源的前缀 ⇒ 必须有确定的 tie-break，
+  // 否则同一份库每次刷新的淘汰对象可能不同，行为不可复现。
+  const entries = [
+    { id: 'z/1', chars: 300, fetchedAt: '2026-01-01T00:00:00.000Z' },
+    { id: 'a/1', chars: 300, fetchedAt: '2026-01-01T00:00:00.000Z' },
+    { id: 'm/1', chars: 300, fetchedAt: '2026-01-01T00:00:00.000Z' },
+  ]
+  assert.deepEqual(selectArticleEvictions(entries, 350), ['a/1', 'm/1'],
+    '同 fetchedAt 时按 id 升序清，淘汰对象必须可复现')
+})

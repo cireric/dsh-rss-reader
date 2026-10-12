@@ -5,7 +5,7 @@
  *
  * 三条规则（2026-10-06 用户确认）：
  *   ① 按源保留 maxItemsPerFeed 条：先删未读，再删已读，**星标永不自动删**；
- *   ② 按需正文缓存有字符上限，超限时从最旧的开始清缓存（条目本身保留）；
+ *   ② 按需正文缓存有**全局**字符上限（全部源共摊），超限时从最旧的开始清缓存（条目本身保留）；
  *   ③ 显式清理：只删「已读 + 未星标 + 早于阈值」的条目（按钮触发，不设定时器）。
  */
 
@@ -50,6 +50,12 @@ export interface ArticleEntry {
  *
  * 从最旧的抓取记录开始清，直到总量降到上限之内。清掉之后用户再打开该条会重新抓一次，
  * 语义上是「降级」而不是「丢失」——这是可以接受的代价，所以不需要额外确认。
+ *
+ * ⚠️ **本函数的口径一直是「喂进来的全部条目」＝全局预算**（2026-10-11 核实）：
+ * 清单里有几条、属于几个源，它都照单全收；「跨源」这件事由**调用方**保证（refresh.ts 的
+ * capArticleCache 每轮按全库喂一次）。所以这里**不另开** selectGlobalArticleEvictions ——
+ * 全仓已经有两对「同一判据两份实现」的教训（selectCleanup 的 SQL 副本、articleCharsOf 的
+ * refresh 侧副本），再加一个同义的函数只会把分家的风险引回来。
  */
 export function selectArticleEvictions(entries: readonly ArticleEntry[], maxChars: number): string[] {
   const total = entries.reduce((sum, entry) => sum + entry.chars, 0)

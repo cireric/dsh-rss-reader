@@ -572,3 +572,89 @@ test('正文缓存淘汰期间并发标已读：不得用旧快照整体写回�
       '淘汰缓存只能去掉 article，不得抹掉窗口期内写入的已读态（丢失更新）')
   })
 })
+
+
+/* ================= 正文缓存闸门：全局预算（2026-10-11 任务 9） ================= */
+
+/**
+ * 起三个源各一条，各自挂 1000 字符的正文缓存，抓取时间**逐源递进**（源 1 最旧）。
+ * 返回 [[feedUrl, itemId] × 3]。
+ *
+ * 为什么用三个**独立**的 HTTP 源而不是一个源里三条：分家的缺陷正落在「跨源」这一层 ——
+ * 单源的用例在按源清算的旧实现下全绿，只有真的让三个源各背一份预算才抓得到。
+ */
+async function seedThreeFeedsWithArticle(store) {
+  const seeded = []
+  for (const n of [1, 2, 3]) {
+    const item = { title: 't' + n, link: 'https://ex.test/g' + n, guid: 'g' + n, date: 'Mon, 0' + n + ' Jan 2024 00:00:00 GMT' }
+    const pair = await withServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/rss+xml' })
+      res.end(rss([item]))
+    }, async (base) => {
+      const feedUrl = base + '/feed.xml'
+      const [outcome] = await refreshFeeds([feedUrl], store, BASE_OPTIONS)
+      assert.equal(outcome.added, 1, '前置条件：每个源各抓到一条')
+      const itemId = [...store.items.entries()].find(([, record]) => record.feedId === feedUrl)[0]
+      seeded.push([feedUrl, itemId])
+      return [feedUrl, itemId]
+    })
+    void pair
+  }
+  for (const [index, [, itemId]] of seeded.entries()) {
+    await store.saveItem(itemId, {
+      ...store.items.get(itemId),
+      article: { fetchedAt: '2024-0' + (index + 1) + '-01T00:00:00.000Z', paragraphs: ['x'.repeat(1000)] },
+    })
+  }
+  return seeded
+}
+
+const cachedIds = (store) =>
+  [...store.items.entries()].filter(([, record]) => record.article !== undefined).map(([id]) => id)
+
+test('全局预算：每源都没超上限，但合计超了 ⇒ 必须跨源清（按源清算的漏网形态）', async () => {
+  const store = memoryStore()
+  const feeds = await seedThreeFeedsWithArticle(store)
+  assert.equal(cachedIds(store).length, 3, '前置条件：三个源各有一条正文缓存')
+
+  // 每源 1000 字符，上限 1500：按**每源**算，任一源都没超（1000 < 1500）⇒ 逐源清算一条都不清。
+  // 全局预算下合计 3000 > 1500 ⇒ 清到只剩一条。
+  await refreshFeeds(feeds.map(([url]) => url), store, { ...BASE_OPTIONS, maxArticleCacheChars: 1500 })
+
+  assert.equal(cachedIds(store).length, 1,
+    '合计超上限就得清：按源清算会让三个源各留一份，合计是上限的两倍')
+  assert.equal(store.items.size, 3, '清缓存不得删条目')
+})
+
+test('全局预算：清掉的是跨源最旧的那条，不能只盯着清单里的某一个源', async () => {
+  const store = memoryStore()
+  const feeds = await seedThreeFeedsWithArticle(store)
+  const [oldestUrl, oldestId] = feeds[0]
+  const [, newestId] = feeds[2]
+
+  await refreshFeeds(feeds.map(([url]) => url), store, { ...BASE_OPTIONS, maxArticleCacheChars: 1500 })
+
+  const survivors = cachedIds(store)
+  assert.equal(survivors.length, 1)
+  assert.ok(!survivors.includes(oldestId),
+    '源 ' + oldestUrl + ' 的缓存抓取时间最旧 ⇒ 第一个被清，跨源清算必须看得见别的源')
+  assert.ok(survivors.includes(newestId), '最新的那条必须留下')
+})
+
+test('全局预算：合计在预算内时一条都不清（清缓存是降级，不该在没必要时发生）', async () => {
+  const store = memoryStore()
+  const feeds = await seedThreeFeedsWithArticle(store)
+  await refreshFeeds(feeds.map(([url]) => url), store, { ...BASE_OPTIONS, maxArticleCacheChars: 5000 })
+  assert.equal(cachedIds(store).length, 3, '合计 3000 ≤ 预算 5000 ⇒ 不动任何一条')
+  assert.equal(store.items.size, 3)
+})
+
+test('全局预算：上限 <= 0 表示未配置，一条都不清（不是「整份清空」）', async () => {
+  const store = memoryStore()
+  const feeds = await seedThreeFeedsWithArticle(store)
+  await refreshFeeds(feeds.map(([url]) => url), store, { ...BASE_OPTIONS, maxArticleCacheChars: 0 })
+  assert.equal(cachedIds(store).length, 3,
+    '上限 0 视为未配置：把用户的正文缓存整份清空是静默丢数据，不是限流')
+  await refreshFeeds(feeds.map(([url]) => url), store, { ...BASE_OPTIONS, maxArticleCacheChars: -1 })
+  assert.equal(cachedIds(store).length, 3, '负上限同理')
+})

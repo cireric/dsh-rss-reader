@@ -34,7 +34,13 @@ export interface RefreshOptions {
    * 而存储域是「打开时全量载入内存」的 KV——不设上限会把 JSON 与内存一起撑爆。
    */
   maxContentChars: number
-  /** 每个源的按需正文缓存总量上限（字符）；超限从最旧的缓存开始清，见 capArticleCache */
+  /**
+   * **全局**按需正文缓存总量上限（字符，全部源共摊）；超限从最旧的缓存开始清，见 capArticleCache。
+   *
+   * ⚠️ 2026-10-11：**语义由「每源」改为「全局」**，默认值仍是 8 000 000，但它的含义变了。
+   * 显式配过这个值的用户，实际生效的上限会**缩小到原来的 1/源数**（50 个源 ⇒ 缩到 1/50）。
+   * 嫌紧就把值按源数调大（例如 50 源配 400 000 000）。
+   */
   maxArticleCacheChars: number
   /**
    * 同时在飞的抓取数上限。逐源串行是 N x RTT 的线性等待（实测每源 100ms 时 10 源 1056ms、
@@ -101,16 +107,23 @@ async function prune(store: ReaderStore, feedId: string, maxItems: number): Prom
 }
 
 /**
- * 按需正文缓存的总量闸门：超限时**从最旧的开始清缓存**（只清 `article`，条目本身保留）。
+ * 按需正文缓存的**全局**闸门：超限时**跨全部源**从最旧的开始清缓存（只清 `article`，条目本身保留）。
  *
  * 清掉后用户再打开该条会重新抓一次——是「降级」而非「丢失」，所以不需要逐条确认。
- * 上限按**源**统计：缓存是挂在条目上的，而条目按源裁剪，故同源的缓存自然同源清算。
+ *
+ * ⚠️ **为什么是全局、且必须在一轮抓取之后才清算**（2026-10-11 修）：
+ * 上限原是**每源**一份、在刷新循环里逐源调用，于是 200 源的上限是 200 × 8M ≈ 16 亿字符 ——
+ * 名义上的「上限」根本不成立（spec §10.1）。改成全局后，逐源清算同样不成立：每个源只
+ * 看自己那一份，合计照样是上限的「源数倍」（earlier feeds 还会先占满、后面的源一条清不掉）。
+ * 唯一的正确形状是：**一轮抓取全部落库之后，按全库合计清算一次**。
+ * 判据是 tests/refresh.test.mjs 的「全局预算：每源都没超上限，但合计超了 ⇒ 必须跨源清」。
  *
  * 字符数一律走 retention.articleCharsOf。2026-10-07 修：这里原先只统计 paragraphs，
- * 而现行缓存只写 blocks ⇒ 每源字符数恒为 0，闸门永不触发、上限形同虚设。
+ * 而现行缓存只写 blocks ⇒ 字符数恒为 0，闸门永不触发、上限形同虚设。
  */
-async function capArticleCache(store: ReaderStore, feedId: string, maxChars: number): Promise<number> {
-  const entries = store.listItems(feedId)
+async function capArticleCache(store: ReaderStore, maxChars: number): Promise<number> {
+  // 全库合计：跨源清算是本条的**全部**意义所在，喂单个源的名单等于没改（见上）。
+  const entries = store.allItems()
     .filter(([, record]) => record.article !== undefined)
     .map(([itemId, record]) => ({
       id: itemId,
@@ -145,8 +158,14 @@ export async function refreshFeeds(
    * （storage-domain/src/domain.ts：「every write queues on the chain」），而每次调度的
    * feedId 都不同（调用方传的是 listFeeds() 的键，天然唯一），所以写之间没有共享状态。
    */
-  return mapConcurrent(urls, options.refreshConcurrency, (rawUrl) =>
+  const outcomes = await mapConcurrent(urls, options.refreshConcurrency, (rawUrl) =>
     refreshOne(rawUrl, store, options, now, doFetch, signal))
+  // 正文缓存闸门在这一轮**全部落库之后**才清算，且只清算一次（2026-10-11 任务 9）：
+  //   · 放循环里逐源清算 = 每源一份上限，200 源即 200 份（病象，见 capArticleCache 的注释）；
+  //   · 放循环里逐源清算即便改成全局也错：每个源只看得见自己那一份，合计仍是上限的「源数倍」。
+  // 早退路径（304 / 抓取失败）不经过这里，但它们本来也不新增正文缓存；闸门只管**清**缓存。
+  await capArticleCache(store, options.maxArticleCacheChars)
+  return outcomes
 }
 
 /** 抓取并落库单个源；结果由调用方按输入下标放回数组。 */
@@ -288,7 +307,6 @@ async function refreshOne(
     contentRevision: CONTENT_REVISION,
   })
   await prune(store, feedId, options.maxItemsPerFeed)
-  await capArticleCache(store, feedId, options.maxArticleCacheChars)
 
   return {
     feedId,
