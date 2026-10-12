@@ -88,7 +88,9 @@
 
 > **⚠️ feeds 不是 `string[]`（定稿加固 2026-10-11，`源码核对`）**：`FeedRecord` 上挂着
 > **条件请求与内容版本**——`etag` / `lastModified`（`src/refresh.ts:173`）、`contentRevision`
-> （`:170` 决定是否绕开 304 回填摘要）、`lastFetchedAt`（Task 10 的陈旧度调度要按它排序）、
+> （`:170` 决定是否绕开 304 回填摘要）、`lastFetchedAt`（「上次**成功**」，界面回给用户）、
+> `lastAttemptedAt`（「上次**尝试**」，Task 10 的陈旧度调度按它排序 —— 修复轮 1 新增，
+> 见下面的冻结后记录）、
 > `lastFailure`（`src/endpoints.ts:48` 回给界面）。只存 URL 列表会让这几项在迁移那一刻**静默归零**：
 > 表现是「迁移后第一轮全量重抓 + 摘要回填逻辑空转」，而没有任何断言会翻红。
 > ⇒ `feeds` 必须是 **`feedId → FeedRecord` 的映射**，逐字段与 `feeds` 表同形。
@@ -396,9 +398,20 @@ test('selectArticleEvictions 在 maxChars<=0 时返回空（不整份清空）',
 - Test: `tests/refresh.test.mjs`（既有，扩充）
 
 **Interfaces:**
-- Consumes: `config.json` 里 `feeds` 映射的 `lastFetchedAt`（**Task 2 必须逐字段保住它**，否则按陈旧度取源无从谈起）
+- Consumes: `config.json` 里 `feeds` 映射的 `lastFetchedAt` / `lastAttemptedAt`（**Task 2 必须逐字段保住它们**，
+  否则按陈旧度取源无从谈起）
 - Produces: `selectStalestFeeds(feeds: ReadonlyArray<[string, FeedRecord]>, limit: number): string[]`
-  （纯函数，放 `src/refresh.ts`；按 `lastFetchedAt` 升序取最旧的 `limit` 个，缺 `lastFetchedAt` 的排最前）
+  （纯函数，放 `src/refresh.ts`；按 **`lastAttemptedAt ?? lastFetchedAt`** 升序取最旧的 `limit` 个，
+  两个都缺的排最前）
+
+> **⚠️ 冻结后改动（2026-10-11 修复轮 1，评审实测抓出）**：上面这行原文写的是「按 `lastFetchedAt` 升序」——
+> **那是错的**，照那样实现会有一个永久停摆的角：按「上次成功」排序时，**持续失败**的源永远拿不到那个
+> 时间戳 ⇒ 永远最旧 ⇒ 这类源 ≥ K 个时每轮都选中同一批，健康源从第一轮之后再无机会（`实测`：
+> 200 源 / 20 个永久失败 / K=20 ⇒ 60 轮覆盖 **0/180**；3 源 / 1 个永久失败 / K=1 ⇒ **0/2**）。
+> 落地的是 **`lastAttemptedAt`**（成功/304/失败都盖）+ 回落 `lastFetchedAt`，另有本轮新增的配置字段
+> **`refreshFeedsPerRound`（默认 20，见 Ruling P-16）**——brief 只说 `selectStalestFeeds(feeds, limit)`，
+> 没说 `limit` 从哪来。细节与判据：`docs/pitfalls.md` §5.8，测试在 `tests/refresh.test.mjs` 的
+> 「永久失败的源不得饿死健康源」两条（纯函数 + 真装配）。
 
 - [ ] **Step 1: 写失败测试**
 
