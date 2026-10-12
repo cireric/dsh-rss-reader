@@ -110,9 +110,21 @@ const MUTATIONS = [
   // `const entries = store.listArticleCacheEntries();` 独立实测 OCCURRENCES=1。
   // ⚠️ 2026-10-11 修复轮 1 改写锚点：闸门已改走 store 的清算原料方法（原锚 `store.allItems()`
   // 随那轮改动从产物里消失 ⇒ 原锚会变「未应用」，比幸存更隐蔽）。语义不变，仍是**退回单源**。
+  //
+  // ⚠️⚠️ **修复轮 2：这一行曾经是假通过（2026-10-11，评审抓出）**
+  //   当时的 `to` 写了 `urls[0]` —— 而 `urls` 是 `refreshFeeds` 的参数，**不在 `capArticleCache`
+  //   的作用域里**（实测 lib/refresh.js：该函数签名是 `async function capArticleCache(store, maxChars)`）。
+  //   于是变异抛 `ReferenceError: urls is not defined`：门槛照样报「应用」+「被抓到」、幸存者仍是 0，
+  //   **但没有一条断言真的看见了「按源名单」**（实测：7 条翻红里 7 条都是同一个 ReferenceError）。
+  //   ⇒ **崩溃式失败不是被抓住**：它把缺陷复现换成了「模块起不来」，门槛分辨不出来。
+  //   修法：只用 `capArticleCache` 作用域内**确实存在**的东西重造「按源名单」——`store` 在参数里，
+  //   所以 `store.listFeeds()[0]?.[0]` 取第一个源再按 feedId 过滤。
+  //   实测：`ℹ fail 2`（恰是那两条跨源用例）、`ReferenceError` 出现 0 次。
+  //   **给下一个改这一行的人**：改完必须在隔离副本里跑，并**逐条看翻红的是哪几条**；
+  //   只要输出里出现 ReferenceError / SyntaxError，一律不算抓住（docs/pitfalls.md 二、2.7b）。
   { id: 'refresh-正文闸门退回单源', file: 'lib/refresh.js',
     from: 'const entries = store.listArticleCacheEntries();',
-    to: "const entries = store.listArticleCacheEntries().filter((entry) => store.item(entry.id)?.feedId === urls[0])" },
+    to: "const entries = store.listArticleCacheEntries().filter((entry) => store.item(entry.id)?.feedId === store.listFeeds()[0]?.[0])" },
   // 同一处代码的第二条承重点：**必须走只交出 { id, chars, fetchedAt } 的那条取数路径**。
   // 退回「把整表读出来再挑出带正文的」会把每份正文都解出来留在堆里 —— 实测 10 万条 × 8.8 KB
   // 时堆峰值 1865 MB，而 spec §9.3 的验收线是 ≤ 300 MB（超 6.2 倍）。这条守的是**内存契约**：
@@ -851,6 +863,36 @@ for (const m of MUTATIONS) {
   let res
   try { res = runSuite() } finally { writeFileSync(path, original) }
   const fails = res.out.split('\n').filter((l) => /^\s*✖/.test(l)).map((l) => l.trim().replace(/\s*\(\d.*$/, ''))
+  // ⚠️ **第四态：变异代码自己崩了**（2026-10-11 任务 9 修复轮 2，评审抓出）。
+  // `to` 里若引用作用域外的名字、或产物里没有的符号，套件当然红 —— 但红的是 ReferenceError /
+  // SyntaxError，**没有一条断言真的观察到这条变异想制造的缺陷**。
+  // 旧版把它记成「被抓到」，于是汇总里「幸存 0 条」看起来一切正常，而判据其实**完全没被保护**。
+  // 任务 9 真踩过两次（先产物没 import 的函数名 ⇒ SyntaxError，再作用域外的 urls ⇒ ReferenceError），
+  // 两次都是「红，但不是被抓住」；docs/pitfalls.md 二、2.7b 记了这件事。
+  // ⇒ 把「崩了」单列成一类并**计入失败清单**：它必须像幸存者一样逼人去修 `to`。
+  //
+  // ⚠️ **判据必须把「本条变异改过的那个文件」和「这两种错误名」关联起来**
+  //   （实测踩到两次，两次的错法不同，都记在这儿）：
+  //   ① 对整段输出做全文匹配 ⇒ **每一条**都判成「崩了」—— 真崩的那条会让整个套件里的所有
+  //      文件都红，别的条目只要输出里出现 ReferenceError 就被误伤；
+  //   ② 只在**错误那一行**里找文件名 ⇒ 一条都找不到 —— node 的 TAP 输出把
+  //      「ReferenceError: ...」放在一行、**栈帧放在下一行**（实测：行 37 是错误、38 行才是
+  //      `at file:///…/lib/refresh.js:79:104`）。
+  //   ⇒ 判据是：**错误行往后 5 行内**出现被改过的那个文件名，才算「崩的是变异写入的代码」。
+  const mutatedFile = m.file.split('/').pop()
+  const outLines = res.out.split('\n')
+  const errorAt = outLines.findIndex((line) => /\b(ReferenceError|SyntaxError)\b/.test(line))
+  const stackMentionsMutatedFile = errorAt >= 0 && outLines
+    .slice(errorAt, errorAt + 6)
+    .some((line) => line.includes(mutatedFile))
+  const crashed = errorAt >= 0 && stackMentionsMutatedFile
+    ? outLines[errorAt].match(/\b(ReferenceError|SyntaxError)\b/)
+    : null
+  if (crashed) {
+    console.log('  !  ' + m.id.padEnd(26) + ' 崩了（' + crashed[1] + '：变异 `to` 自己写错了，不算被抓住 —— 请改 `to`）')
+    survivors.push(m.id + '（崩了：' + crashed[1] + '）')
+    continue
+  }
   if (res.ok) {
     console.log('  x  ' + m.id.padEnd(26) + ' 幸存（套件仍然全绿）')
     survivors.push(m.id)
@@ -864,7 +906,8 @@ console.log('')
 console.log('应用 ' + applied + '/' + MUTATIONS.length + ' 条 · 幸存 ' + survivors.length + ' 条 · 恢复后基线 ' + (after.ok ? '仍然绿' : '没恢复干净！'))
 if (survivors.length > 0) {
   console.error('幸存清单：' + survivors.join('、'))
-  console.error('-> 这些都是测试没覆盖到的判定：补一条会翻红的断言，或确认它是等价变异。')
+  console.error('-> 标「幸存」的是测试没覆盖到的判定（补一条会翻红的断言，或确认它是等价变异）；')
+  console.error('   标「崩了」的：变异 `to` 自己写错了（ReferenceError / SyntaxError），那种红不算被抓住（docs/pitfalls.md 二、2.7b）。')
   process.exit(1)
 }
 console.log('全部被抓到。')
