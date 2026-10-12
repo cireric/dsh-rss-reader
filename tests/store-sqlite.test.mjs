@@ -743,3 +743,52 @@ test('saveViewPreferences 写前校验并落 config.json，且不碰订阅映射
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('listArticleCacheEntries：只交出 { id, chars, fetchedAt }，且 chars 与 articleCharsOf 同口径', async () => {
+  const { store, db, dir } = freshStore('article-cache-entries')
+  try {
+    const at = '2026-10-11T10:00:00.000Z'
+    await store.saveItem('no-body', item('feed-a'))
+    await store.saveItem('b-1', item('feed-a', {
+      fetchedAt: '2026-10-01T00:00:00.000Z',
+      article: { fetchedAt: '2026-09-01T00:00:00.000Z', blocks: [{ kind: 'p', text: '五个字符' }] },
+    }))
+    await store.saveItem('b-2', item('feed-b', {
+      fetchedAt: '2026-10-02T00:00:00.000Z',
+      article: {
+        fetchedAt: '2026-09-02T00:00:00.000Z',
+        blocks: [{ kind: 'p', text: '一二三' }, { kind: 'list', items: ['四个字', 'x'] }],
+      },
+    }))
+
+    const entries = store.listArticleCacheEntries()
+    assert.deepEqual(entries.map((e) => e.id).sort(), ['b-1', 'b-2'],
+      '只有真有缓存的行进名单（没有正文的条目不进），且跨源都在')
+
+    // ⚠️ **字段集就是内存契约**：闸门每轮跑一次，而 allItems() 会把每份正文都留在堆里
+    // （实测 10 万条 × 8.8 KB ⇒ 堆峰值 1865 MB，超 spec §9.3 的 300 MB 验收线 6.2 倍）。
+    // 任何多出来的字段（尤其是 article / summary）都会把那份峰值带回来，所以这条钉死形状。
+    for (const entry of entries) {
+      assert.deepEqual(Object.keys(entry).sort(), ['chars', 'fetchedAt', 'id'],
+        '清算原料只允许这三个字段：多带一个就可能把正文搬回堆里')
+    }
+
+    // chars 是**第二处**实现（库里是 texts.body 的 JSON 文本，articleCharsOf 吃的是解析后的
+    // articleRecord）—— 与唯一口径对账，判据同 listCleanupCandidates 的 articleChars。
+    for (const entry of entries) {
+      assert.equal(entry.chars, articleCharsOf(store.item(entry.id).article),
+        entry.id + '：chars 必须与 retention.ts 的 articleCharsOf 同口径')
+    }
+    assert.equal(entries.find((e) => e.id === 'b-1').chars, 4)
+    assert.equal(entries.find((e) => e.id === 'b-2').chars, 3 + 3 + 1, 'blocks 里 text 与 items 都要算')
+    assert.equal(entries.find((e) => e.id === 'b-1').fetchedAt, '2026-09-01T00:00:00.000Z',
+      '排序键必须是正文的抓取时间（texts.fetched_at），不是条目的 fetched_at')
+
+    // 清掉一条缓存后它必须立刻退出名单（闸门不能对着已经清掉的条目反复点名）
+    await store.updateItem('b-1', (cur) => ({ ...cur, article: undefined }))
+    assert.deepEqual(store.listArticleCacheEntries().map((e) => e.id), ['b-2'])
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

@@ -357,17 +357,27 @@ test('pruneOldLogs 在 keepDays 边界上不删当天的日志', () => { /* ... 
 - Test: `tests/retention.test.mjs`、`tests/refresh.test.mjs`（既有，扩充）
 
 **Interfaces:**
-- Produces: `selectGlobalArticleEvictions(entries: readonly ArticleEntry[], maxChars: number): string[]`（`src/retention.ts`，纯函数）
+- ~~Produces: `selectGlobalArticleEvictions(entries: readonly ArticleEntry[], maxChars: number): string[]`（`src/retention.ts`，纯函数）~~
+  **⚠️ 实现时未新增该函数（2026-10-11，controller 授权的偏离）**：既有
+  `selectArticleEvictions` 的口径**本来就是全局** —— 它对 `entries` 求全量、按 `fetchedAt` 全局排序，
+  从来没有「按源」参数（`实测`：只写这一层的测试、在未改任何源码时就 16/16 全绿）。
+  缺陷全在调用方（`refresh.ts` 喂了 `listItems(feedId)` 单源名单）。再加一个同义函数只会
+  成为**同一判据的第三份实现**——本仓库已经吃过两次这种亏（`selectCleanup` 的 SQL 副本、
+  `articleCharsOf` 的 refresh 侧副本）。下面的 Step 1 用例因此改钉既有函数。
 
 - [ ] **Step 1: 写失败测试**
 
 ```js
-test('selectGlobalArticleEvictions 跨源超限时从最旧清起', () => {
+test('selectArticleEvictions 跨源超限时从最旧清起', () => {
   // 3 源各 1 条，上限只装得下 1 条 ⇒ 清掉最旧的两条（跨源，不只清单源）
 })
-test('selectGlobalArticleEvictions 在总量未超限时返回空', () => { /* ... */ })
-test('selectGlobalArticleEvictions 在 maxChars<=0 时返回空（不整份清空）', () => { /* ... */ })
+test('selectArticleEvictions 在总量未超限时返回空', () => { /* ... */ })
+test('selectArticleEvictions 在 maxChars<=0 时返回空（不整份清空）', () => { /* ... */ })
 ```
+
+⚠️ **上面这三条不足以证明修复**：它们打的是纯函数，而纯函数本来就是对的（见上面的 Interfaces 注）。
+真正的判别力在 `tests/refresh.test.mjs` 的三源用例（「每源都没超上限，但合计超了 ⇒ 必须跨源清」，
+修前实测 `3 !== 1` 翻红）—— 缺陷在接线，必须由穿过 `refreshFeeds` 的用例来看。
 - [ ] **Step 2: 跑测试确认失败**
 - [ ] **Step 3: 实现纯函数 + 改 `capArticleCache` 调用点**（现在是**每源** 8M 字符 × 200 源 ≈ 16 亿字符，本 spec §10.1）
 - [ ] **Step 4: build + 跑测试**

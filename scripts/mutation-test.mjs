@@ -57,9 +57,20 @@ const MUTATIONS = [
   { id: 'retention-清理的星标保护', file: 'lib/retention.js',
     from: '.filter((row) => row.read && !row.starred && row.recency < cutoffIso)',
     to: '.filter((row) => row.read && row.recency < cutoffIso)' },
+  // 上限守卫（2026-10-11 修复轮 1 重写）：守卫已从 `maxChars <= 0` 改成 `!(maxChars > 0)`，
+  // 为的是把 NaN 一起挡在外面 —— 挡住「整个清单」的那条与挡 NaN 的那条是同一处代码，分成两条变异。
+  // ① 去掉「上限非法」这半 ⇒ 上限 0 / 负数会被当成「必须清到 0 字符」，把全部缓存清空。
   { id: 'retention-非法上限保护', file: 'lib/retention.js',
-    from: 'if (maxChars <= 0 || total <= maxChars)',
+    // from 照**编译产物**的实际形状写（docs/pitfalls.md 一、1.4）：lib/retention.js:47，独立实测 OCCURRENCES=1。
+    from: 'if (!(maxChars > 0) || total <= maxChars)',
     to: 'if (total <= maxChars)' },
+  // ② 把 `!(maxChars > 0)` 退回成 `maxChars <= 0` ⇒ NaN 穿过守卫（NaN <= 0 为 false），
+  //   而 `total <= NaN` 同样是 false ⇒ 判定一路走进淘汰循环，**清空全部条目**。
+  //   Task 9 把闸门从单源改成全库之后，同一个洞的爆炸半径从一个源变成了整库。
+  //   非等价变异：NaN 下旧守卫返回整份淘汰名单，新守卫返回空。
+  { id: 'retention-NaN 上限不得清空', file: 'lib/retention.js',
+    from: 'if (!(maxChars > 0) || total <= maxChars)',
+    to: 'if (maxChars <= 0 || total <= maxChars)' },
   { id: 'list-scroll-视口内判定', file: 'lib/list-scroll.js',
     from: 'if (rowTop >= currentTop && rowTop + rowHeight <= currentTop + containerHeight)',
     to: 'if (rowTop > currentTop && rowTop + rowHeight <= currentTop + containerHeight)' },
@@ -89,11 +100,22 @@ const MUTATIONS = [
   // 上限形同虚设；而每个源单独看又都没超自己的份额，连「哪一源超了」都判不出来。
   // 判据由 tests/refresh.test.mjs 的「全局预算：每源都没超上限，但合计超了 ⇒ 必须跨源清」看着
   // （实测：三个源各 1000 字符、上限 1500，旧实现三条全留 = 3 ≠ 1）。
-  // ⚠️ from 照**编译产物**的实际形状写（docs/pitfalls.md 一、1.4）：lib/refresh.js:72 的
-  // `const entries = store.allItems()` 独立实测 OCCURRENCES=1。
+  // ⚠️ from 照**编译产物**的实际形状写（docs/pitfalls.md 一、1.4）：lib/refresh.js:79 的
+  // `const entries = store.listArticleCacheEntries();` 独立实测 OCCURRENCES=1。
+  // ⚠️ 2026-10-11 修复轮 1 改写锚点：闸门已改走 store 的清算原料方法（原锚 `store.allItems()`
+  // 随那轮改动从产物里消失 ⇒ 原锚会变「未应用」，比幸存更隐蔽）。语义不变，仍是**退回单源**。
   { id: 'refresh-正文闸门退回单源', file: 'lib/refresh.js',
-    from: 'const entries = store.allItems()',
-    to: "const entries = store.listItems(store.listFeeds().map(([feedId]) => feedId)[0] ?? '')" },
+    from: 'const entries = store.listArticleCacheEntries();',
+    to: "const entries = store.listArticleCacheEntries().filter((entry) => store.item(entry.id)?.feedId === urls[0])" },
+  // 同一处代码的第二条承重点：**必须走只交出 { id, chars, fetchedAt } 的那条取数路径**。
+  // 退回「把整表读出来再挑出带正文的」会把每份正文都解出来留在堆里 —— 实测 10 万条 × 8.8 KB
+  // 时堆峰值 1865 MB，而 spec §9.3 的验收线是 ≤ 300 MB（超 6.2 倍）。这条守的是**内存契约**：
+  // 淘汰名单两条路径算出来一样，所以纯行为断言看不见它，得从取数方式上钉。
+  // ⚠️ `to` 里只用产物**已经 import 过**的 articleCharsOf —— 照源码写一个产物里没有的名字，
+  // 变异的失败模式会从「缺陷复现」退化成「加载失败」，那不是被抓住（docs/pitfalls.md 二、2.7）。
+  { id: 'refresh-正文闸门改走整表', file: 'lib/refresh.js',
+    from: 'const entries = store.listArticleCacheEntries();',
+    to: 'const entries = store.allItems().filter(([, record]) => record.article !== undefined).map(([id, record]) => ({ id, chars: record.article.paragraphs?.reduce((sum, paragraph) => sum + paragraph.length, 0) ?? 0, fetchedAt: record.article?.fetchedAt ?? \'\' }));' },
   { id: 'domain-rebuildItem 的 omit', file: 'lib/domain.js',
     from: 'if (change.omit?.includes(field) === true)',
     to: 'if (false)' },

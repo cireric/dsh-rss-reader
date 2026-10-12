@@ -36,6 +36,27 @@ function memoryStore() {
     updateItem: async (id, fn) => { items.set(id, fn(items.get(id))) },
     deleteItem: async (id) => { items.delete(id) },
     listItems: (feedId) => [...items.entries()].filter(([, record]) => record.feedId === feedId),
+    /**
+     * 清算原料（src/store.ts 的契约）：只交出 { id, chars, fetchedAt }，正文不进清单。
+     * 桩必须守同一条契约（docs/pitfalls.md 二、2.6）：否则测的是「桩把正文摊开了」，
+     * 而生产实现单列这条方法正是为了不让正文进堆（实测堆峰值 1865 MB vs 验收线 300 MB）。
+     */
+    listArticleCacheEntries: () => {
+      const entries = []
+      for (const [itemId, record] of items.entries()) {
+        if (record.article === undefined) continue
+        const chars = (record.article.paragraphs ?? []).reduce((sum, paragraph) => sum + paragraph.length, 0)
+          + (record.article.blocks ?? []).reduce((sum, block) => {
+            const text = block.text
+            if (typeof text === 'string') return sum + text.length
+            const listItems = block.items
+            if (Array.isArray(listItems)) return sum + listItems.reduce((inner, i) => inner + String(i).length, 0)
+            return sum
+          }, 0)
+        entries.push({ id: itemId, chars, fetchedAt: record.article.fetchedAt ?? '' })
+      }
+      return entries
+    },
     listFeeds: () => [...feeds.entries()],
     allItems: () => [...items.entries()],
     /**

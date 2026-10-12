@@ -59,7 +59,12 @@ export interface ArticleEntry {
  */
 export function selectArticleEvictions(entries: readonly ArticleEntry[], maxChars: number): string[] {
   const total = entries.reduce((sum, entry) => sum + entry.chars, 0)
-  if (maxChars <= 0 || total <= maxChars) return []
+  // 守卫写成 !(maxChars > 0) 而不是 maxChars <= 0（2026-10-11 评审轮 1 修）：
+  // NaN <= 0 是 false ⇒ 垃圾上限会**穿过**这个守卫；而 total <= NaN 同样是 false ⇒
+  // 判定一路走进淘汰循环，把**全部**条目清空。改成「不是正数就当未配置」之后 NaN 被一并挡住。
+  // 这不是新引入的洞（一直存在），但 Task 9 把闸门从「单源」改成「全库」之后，
+  // 同一个洞的爆炸半径从一个源变成了**整库**——所以必须在这里堵死。
+  if (!(maxChars > 0) || total <= maxChars) return []
   const byOldest = [...entries].sort((a, b) => a.fetchedAt.localeCompare(b.fetchedAt) || a.id.localeCompare(b.id))
   const evicted: string[] = []
   let remaining = total

@@ -6,7 +6,7 @@
  */
 import type { Domain } from '@deepseek-ai/dsh-storage-domain'
 import { readerDomain, type CursorRecord, type FeedRecord, type ItemRecord } from './domain.js'
-import { articleCharsOf, selectCleanup, type CleanupRow } from './retention.js'
+import { articleCharsOf, selectCleanup, type ArticleEntry, type CleanupRow } from './retention.js'
 import { countUnreadPerFeed, recencyOf, sanitizeViewPreferences, type Cursor, type ViewPreferences } from './shared.js'
 
 /**
@@ -52,8 +52,25 @@ export interface ReaderStore {
   /**
    * 全部条目。**只留给「确实需要整表」的调用方**：Task 5 之后 buildOverview / accountOf /
    * cleanup 三条热路径都不再走它（它们各有 SQL 侧的取数方法，见下三条）。
+   *
+   * ⚠️ 它会把**每份正文都解出来**留在内存里（实测 10 万条 × 8.8 KB ⇒ 堆峰值 1865 MB），
+   * 所以常驻路径一律不许走它；见下面 listArticleCacheEntries 的同类替代。
    */
   allItems(): Array<[string, ItemRecord]>
+  /**
+   * 全库正文缓存的**清算原料**：每条带缓存的条目给 `{ id, chars, fetchedAt }`。
+   *
+   * 为什么单独一条而不是让调用方走 allItems()（2026-10-11 任务 9 的实测）：
+   * `实测` 10 万条、每条 8.8 KB 正文时，`allItems()` 把每份正文都解出来留在内存里 ——
+   * 堆峰值 **1865 MB**、RSS 峰值 **3173 MB**，而 spec §9.3 的验收线是常驻内存 ≤ 300 MB（超 6.2 倍）。
+   * 而全局预算这条判定**只需要 id + 字符数 + 抓取时间**，正文一个字节都用不上：
+   * 本方法只把这三样读出来，让「按需读行」在每轮闸门上继续成立。
+   *
+   * `chars` 与 `retention.articleCharsOf` **同口径**（blocks 里 text / items 的字符数之和；
+   * 库里只存 blocks 形态），是该口径的第二处实现 —— 对账用例在 tests/store-sqlite.test.mjs
+   * （与 listCleanupCandidates 的 articleChars 在同一夹具上逐条相等）。
+   */
+  listArticleCacheEntries(): ArticleEntry[]
   /**
    * 每源未读账目（键域 = 调用方传进来的 feeds 表）。
    *
@@ -148,6 +165,26 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
       return found
     },
     allItems: () => [...items.entries()],
+    /**
+     * 旧路径：全表筛出带正文的条目，按 src/store.ts 的契约只交出 { id, chars, fetchedAt }。
+     *
+     * 为什么值得单独实现而不是复用 allItems() 再过滤：闸门每轮都要过一遍全库，
+     * 而它只需要这三样 —— 让调用方先拿整表就会把每份正文都搬进 JS 堆（自持实现下
+     * 实测堆峰值 1865 MB，spec §9.3 的验收线是 300 MB）。字符数仍走共享的
+     * retention.articleCharsOf，所以两处 store 的口径不可能分家。
+     */
+    listArticleCacheEntries: () => {
+      const entries: ArticleEntry[] = []
+      for (const [itemId, record] of items.entries()) {
+        if (record.article === undefined) continue
+        entries.push({
+          id: itemId,
+          chars: articleCharsOf(record.article),
+          fetchedAt: record.article.fetchedAt ?? '',
+        })
+      }
+      return entries
+    },
     /**
      * 旧路径**行为不变**（Task 5 的接口扩展）：先按传进来的键铺 0，再把全表里的未读累加上去。
      * 键域判据（`unread[feedId] === undefined` 就跳过）与 shared.ts 的 countUnreadPerFeed

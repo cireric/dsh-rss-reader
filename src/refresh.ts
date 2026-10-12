@@ -12,7 +12,7 @@ import { recencyOf } from './shared.js'
 import { rebuildItem } from './domain.js'
 import { resolveItemIds, type KnownIdentities } from './feed/item-id.js'
 import { fetchFeed, type FetchLimits } from './feed/fetch.js'
-import { articleCharsOf, selectPrunable, selectArticleEvictions, type RetentionRow } from './retention.js'
+import { selectPrunable, selectArticleEvictions, type RetentionRow } from './retention.js'
 import { parseFeed } from './feed/parse.js'
 import type { ReaderStore } from './store.js'
 
@@ -38,8 +38,8 @@ export interface RefreshOptions {
    * **全局**按需正文缓存总量上限（字符，全部源共摊）；超限从最旧的缓存开始清，见 capArticleCache。
    *
    * ⚠️ 2026-10-11：**语义由「每源」改为「全局」**，默认值仍是 8 000 000，但它的含义变了。
-   * 显式配过这个值的用户，实际生效的上限会**缩小到原来的 1/源数**（50 个源 ⇒ 缩到 1/50）。
-   * 嫌紧就把值按源数调大（例如 50 源配 400 000 000）。
+   * 受影响的是**所有源数 > 1 的用户（含默认配置的用户）**：旧代码逐源调用闸门，50 源实际
+   * 拿到的额度是 50 × 8M；现在塌成合计 8M，即缩小约 50 倍。嫌紧就按源数调大（50 源 ⇒ 400 000 000）。
    */
   maxArticleCacheChars: number
   /**
@@ -118,18 +118,19 @@ async function prune(store: ReaderStore, feedId: string, maxItems: number): Prom
  * 唯一的正确形状是：**一轮抓取全部落库之后，按全库合计清算一次**。
  * 判据是 tests/refresh.test.mjs 的「全局预算：每源都没超上限，但合计超了 ⇒ 必须跨源清」。
  *
- * 字符数一律走 retention.articleCharsOf。2026-10-07 修：这里原先只统计 paragraphs，
- * 而现行缓存只写 blocks ⇒ 字符数恒为 0，闸门永不触发、上限形同虚设。
+ * 字符数一律走 store 的 `listArticleCacheEntries`（内部与 retention.articleCharsOf 同口径）。
+ * 2026-10-07 修：这一段原先只统计 paragraphs，而现行缓存只写 blocks ⇒ 字符数恒为 0，
+ * 闸门永不触发、上限形同虚设。
+ *
+ * ⚠️ **为什么向 store 要「清算原料」而不是 allItems()**（Task 9 评审实测）：
+ * 这条判定只需要 { id, chars, fetchedAt }，正文一个字节都用不上；而 `allItems()` 会把
+ * 每份正文都解出来留在堆里 —— `实测` 10 万条 × 8.8 KB 时**堆峰值 1865 MB / RSS 3173 MB**，
+ * 超 spec §9.3 的「常驻内存 ≤ 300 MB」验收线 6.2 倍。改走 `listArticleCacheEntries` 之后，
+ * body 逐行 parse 完即弃，堆峰值降到 **60.4 MB**（`实测` 同夹具 ⇒ 回到验收线内）。
  */
 async function capArticleCache(store: ReaderStore, maxChars: number): Promise<number> {
   // 全库合计：跨源清算是本条的**全部**意义所在，喂单个源的名单等于没改（见上）。
-  const entries = store.allItems()
-    .filter(([, record]) => record.article !== undefined)
-    .map(([itemId, record]) => ({
-      id: itemId,
-      chars: articleCharsOf(record.article),
-      fetchedAt: record.article?.fetchedAt ?? '',
-    }))
+  const entries = store.listArticleCacheEntries()
   const evicted = selectArticleEvictions(entries, maxChars)
   for (const itemId of evicted) {
     // 条目可能在算完名单之后就不在了（退订/重建）—— 原子改写对缺失键会拒绝，所以先确认它在
@@ -163,7 +164,9 @@ export async function refreshFeeds(
   // 正文缓存闸门在这一轮**全部落库之后**才清算，且只清算一次（2026-10-11 任务 9）：
   //   · 放循环里逐源清算 = 每源一份上限，200 源即 200 份（病象，见 capArticleCache 的注释）；
   //   · 放循环里逐源清算即便改成全局也错：每个源只看得见自己那一份，合计仍是上限的「源数倍」。
-  // 早退路径（304 / 抓取失败）不经过这里，但它们本来也不新增正文缓存；闸门只管**清**缓存。
+  // 这一句在 mapConcurrent **之后**无条件执行，所以 304 / 抓取失败那些早退的源同样被这条闸门
+  // 覆盖到（早退发生在 refreshOne 内部，并不会跳过它）。这是对的：闸门只管**清**缓存，
+  // 304 只是这一轮没往库里加新正文，库里已有的那份照样该被算进预算。
   await capArticleCache(store, options.maxArticleCacheChars)
   return outcomes
 }

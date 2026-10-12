@@ -108,10 +108,14 @@ test('裁剪：全被星标/保持占满时，宁可超上限也不删', () => {
 /* ── 全局预算：maxArticleCacheChars 的上限跨全部源共摊（2026-10-11 任务 9） ──
  *
  * 病象：上限原是**每源**一份，调用方逐源调用它，200 源即 200 份 8M 字符 ≈ 16 亿字符。
- * 纯函数本身一直是「吃进所有条目」的口径 —— 分家的责任在调用方（src/refresh.ts），
- * 所以这几条钉的是**跨源语义**：淘汰名单里必须出现别的源的条目。
- * 为什么两层都要钉（这里 + refresh.test.mjs）：全仓只有这一处「从最旧开始清」的判据，
- * 两层分开测才能分清「规则变了」与「接线错了」。
+ * 纯函数本身一直是「吃进所有条目」的口径 —— 分家的责任在调用方（src/refresh.ts）。
+ *
+ * ⚠️ **下面这组用例对「修复前的代码」是绿的，这不是它们的判别力所在。**
+ * 任务 9 修的是接线（调用方喂了单源名单），纯函数一个字没改 —— 所以别拿这一组当
+ * 「修复被这些测试证明」的证据。真正的判别力在 `tests/refresh.test.mjs` 的
+ * 「全局预算：每源都没超上限，但合计超了 ⇒ 必须跨源清」（实测：修前 3 ≠ 1 翻红）。
+ * 这一组的价值是**把纯函数的口径钉死**：它一旦被改成按源分摊（例如按 entries.length 均分），
+ * 下面第 2、3 条会当场翻红 —— 那是同一判据在别的形状下分家的信号。
  */
 
 test('全局正文预算：上限只装得下 1 条 ⇒ 清掉跨源最旧的两条', () => {
@@ -170,4 +174,21 @@ test('全局正文预算：抓取时间打平时按 id 定序（同一轮抓取�
   ]
   assert.deepEqual(selectArticleEvictions(entries, 350), ['a/1', 'm/1'],
     '同 fetchedAt 时按 id 升序清，淘汰对象必须可复现')
+})
+
+
+test('全局正文预算：上限是 NaN 时一条都不清（垃圾上限不得变成「清空整库」）', () => {
+  // 守卫曾经写成 maxChars <= 0：NaN <= 0 是 false ⇒ 守卫不生效；而 total <= NaN 也是 false
+  // ⇒ 判定一路走进淘汰循环，**把全部条目清空**。Task 9 把闸门从单源改成全库之后，
+  // 同一个洞的爆炸半径从一个源变成了整库，所以必须钉住。
+  const entries = [
+    { id: 'a/1', chars: 900, fetchedAt: '2026-01-01T00:00:00.000Z' },
+    { id: 'b/1', chars: 900, fetchedAt: '2026-01-02T00:00:00.000Z' },
+  ]
+  assert.deepEqual(selectArticleEvictions(entries, Number.NaN), [],
+    'NaN 上限 = 未配置：清空整库是静默丢数据，不是限流')
+  assert.deepEqual(selectArticleEvictions(entries, undefined), [],
+    'undefined 同理（配置没解析时的形状，见 src/index.ts 的 Config 兜底注释）')
+  assert.deepEqual(selectArticleEvictions(entries, Infinity), [],
+    'Infinity 是有效上限且装得下全部 ⇒ 不清')
 })

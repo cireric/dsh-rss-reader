@@ -28,6 +28,27 @@ function memoryStore() {
     deleteItem: async (id) => { items.delete(id) },
     listItems: (feedId) => [...items.entries()].filter(([, record]) => record.feedId === feedId),
     allItems: () => [...items.entries()],
+    /**
+     * 清算原料（src/store.ts 的契约）：**只交出这三样，正文不许跟着出来**。
+     * 桩也必须守这条 —— 否则测的其实是「桩自己把正文摊开了」，
+     * 而生产实现恰恰是为了不让正文进堆才单列这条方法（docs/pitfalls.md 二、2.6）。
+     */
+    listArticleCacheEntries: () => {
+      const entries = []
+      for (const [itemId, record] of items.entries()) {
+        if (record.article === undefined) continue
+        const chars = (record.article.paragraphs ?? []).reduce((sum, paragraph) => sum + paragraph.length, 0)
+          + (record.article.blocks ?? []).reduce((sum, block) => {
+            const text = block.text
+            if (typeof text === 'string') return sum + text.length
+            const listItems = block.items
+            if (Array.isArray(listItems)) return sum + listItems.reduce((inner, i) => inner + String(i).length, 0)
+            return sum
+          }, 0)
+        entries.push({ id: itemId, chars, fetchedAt: record.article.fetchedAt ?? '' })
+      }
+      return entries
+    },
     listFeeds: () => [...feeds.entries()],
     /**
      * 与自持实现同形（Task 5 的三条 SQL 取数方法）。
@@ -587,7 +608,7 @@ async function seedThreeFeedsWithArticle(store) {
   const seeded = []
   for (const n of [1, 2, 3]) {
     const item = { title: 't' + n, link: 'https://ex.test/g' + n, guid: 'g' + n, date: 'Mon, 0' + n + ' Jan 2024 00:00:00 GMT' }
-    const pair = await withServer((_req, res) => {
+    await withServer((_req, res) => {
       res.writeHead(200, { 'content-type': 'application/rss+xml' })
       res.end(rss([item]))
     }, async (base) => {
@@ -596,9 +617,7 @@ async function seedThreeFeedsWithArticle(store) {
       assert.equal(outcome.added, 1, '前置条件：每个源各抓到一条')
       const itemId = [...store.items.entries()].find(([, record]) => record.feedId === feedUrl)[0]
       seeded.push([feedUrl, itemId])
-      return [feedUrl, itemId]
     })
-    void pair
   }
   for (const [index, [, itemId]] of seeded.entries()) {
     await store.saveItem(itemId, {

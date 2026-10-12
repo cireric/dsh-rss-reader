@@ -37,6 +37,7 @@ import { readConfigFile, writeConfigFile, type ReaderConfigFile } from './storag
 import { SCHEMA_VERSION } from './storage/db.js'
 import { sanitizeViewPreferences, type Cursor } from './shared.js'
 import type { CleanupCandidate, ReaderStore } from './store.js'
+import type { ArticleEntry } from './retention.js'
 
 /** 事务里的保存点名。写成常量即可：db 是单连接，嵌套只发生在同一个连接上。 */
 const SAVEPOINT = 'rss_store_write'
@@ -165,6 +166,20 @@ const SELECT_UNREAD_PER_FEED = 'SELECT feed_id AS feed_id, COUNT(*) AS unread FR
 
 /** 释放量原料：候选的 id 逐条取摘要与正文，**不带** items 行的其余列（几千条候选下差别可观）。 */
 const SELECT_ITEM_CHARS = 'SELECT i.recency AS recency, i.summary AS summary, t.body AS body FROM items i LEFT JOIN texts t ON t.item_id = i.id WHERE i.id = ?'
+
+/**
+ * 正文缓存闸门的**清算原料**（Task 9）：只取 id、正文行是否存在、以及排序键 fetched_at。
+ *
+ * ⚠️ **绝不能改用 allItems()**：那条会把每份 body 都解出来留在 JS 堆里 ——
+ * `实测` 10 万条 × 8.8 KB 时堆峰值 **1865 MB**，而 spec §9.3 的验收线是 ≤ 300 MB。
+ * 这里 body 只在 `articleCharsFromBody` 里逐条 parse 一次、用完即弃，堆上不留副本。
+ *
+ * 用**内连接**（`JOIN texts`）而不是 LEFT JOIN + IS NOT NULL：效果一样（只有真有正文的行进名单，
+ * 与调用方「只把带 article 的条目喂给 selectArticleEvictions」逐字同义），但少一层过滤谓词。
+ */
+const SELECT_ARTICLE_CACHE_ENTRIES =
+  'SELECT i.id AS id, t.body AS body, t.fetched_at AS article_fetched_at'
+  + ' FROM items i JOIN texts t ON t.item_id = i.id'
 
 /**
  * 清理候选（Task 5）：一条 SQL 选完。
@@ -599,12 +614,38 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
      * 全表读取。**保留无条件读整表是有意的**：accountOf / cleanup / buildOverview 现在都靠它
      * （spec §3.1 的另外三处扫描），Task 5 才把它们换成 SQL 聚合 —— 换掉之前若在这里顺手
      * 「优化」，只会让那三处的口径与 SQL 分家。
+     *
+     * ⚠️ 常驻/每轮路径不许用它代替 listArticleCacheEntries：它会把每份正文都解出来留在堆里
+     * （`实测` 10 万条 × 8.8 KB ⇒ 堆峰值 1865 MB，超 spec §9.3 的 300 MB 验收线 6.2 倍）。
      */
     allItems: () =>
       sql(SELECT_ALL_ITEMS).all().map((row) => {
         const itemId = requiredText(row.id, 'items.id')
         return [itemId, toItemRecord(row)] as [string, ItemRecord]
       }),
+
+    /**
+     * 正文缓存闸门的清算原料（Task 9）：每条带缓存的条目只给 { id, chars, fetchedAt }。
+     *
+     * `chars` 走 articleCharsFromRow —— 与 listCleanupCandidates 的 articleChars、也与
+     * retention.ts 的 articleCharsOf **同口径**，三处一致由 tests/store-sqlite.test.mjs 的
+     * 对账用例钉住。parse 失败响亮抛出，不编造 0。
+     */
+    listArticleCacheEntries: () => {
+      const entries: ArticleEntry[] = []
+      // ⚠️ **必须 iterate()，不许 all()**：`all()` 会把 10 万行正文一次性物化成
+      // `实测` 堆峰值 1865 MB（allItems 路径）/ 922 MB（只取 body 这条）——
+      // 而 spec §9.3 的验收线是常驻内存 ≤ 300 MB。iterate() 逐行给，堆上同时只有一份 body。
+      // `实测` 同夹具（200 源 × 500 条 × 8.8 KB）：堆峰值 **60.4 MB**、耗时 458 ms（验收线 300 MB 内）。
+      for (const row of sql(SELECT_ARTICLE_CACHE_ENTRIES).iterate()) {
+        entries.push({
+          id: requiredText(row.id, 'items.id'),
+          chars: articleCharsFromRow(row),
+          fetchedAt: requiredText(row.article_fetched_at, 'texts.fetched_at'),
+        })
+      }
+      return entries
+    },
 
     /**
      * 每源未读（Task 5）：**SQL 侧聚合**，不再把整张 items 表物化到 JS 再数一遍。
