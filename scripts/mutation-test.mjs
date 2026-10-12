@@ -134,6 +134,41 @@ const MUTATIONS = [
   { id: 'refresh-正文闸门改走整表', file: 'lib/refresh.js',
     from: 'const entries = store.listArticleCacheEntries();',
     to: 'const entries = store.allItems().filter(([, record]) => record.article !== undefined).map(([id, record]) => ({ id, chars: record.article.paragraphs?.reduce((sum, paragraph) => sum + paragraph.length, 0) ?? 0, fetchedAt: record.article?.fetchedAt ?? \'\' }));' },
+  // ── 陈旧度调度（2026-10-11 任务 10）───────────────────────────────────────────
+  // 三条各守一处**承重**判定，判据都在 tests/refresh.test.mjs 的新用例里（逐条实测见下）：
+  //   ① 排序方向 ⇒ 调度会去抓「最新的那几个」（本任务要修的病象原封不动）
+  //   ② 上限守卫 ⇒ 0 / NaN 被当成「必须为空」，即**每一轮一个源都不抓**，全量静默停摆
+  //   ③ 接线 ⇒ 挑对了子集却没交给 refreshFeeds，200 源照样一轮全抓（本任务最可能的失效形态）
+  // from 一律照**编译产物的实际形状**写（docs/pitfalls.md 一、1.4），OCCURRENCES 均独立实测 = 1。
+  { id: 'refresh-陈旧度排序倒退', file: 'lib/refresh.js',
+    // lib/refresh.js:71，独立实测 OCCURRENCES=1。排序倒退后取到的是**最新**的 K 个，
+    // 而未抓过的源（staleness key = ''，码位最小）从「最前」翻到「最后」⇒ 新建的源再也排不上
+    // 第一轮。实测 3 条翻红：陈旧度排序、饥饿不变式、接线（refreshNow 用例）。
+    from: 'if (a < b)', to: 'if (a > b)' },
+  { id: 'refresh-每轮上限失效', file: 'lib/refresh.js',
+    // lib/refresh.js:55，独立实测 OCCURRENCES=1。整条守卫失效后 limit=0/负数/NaN 会一路走进
+    // slice(0, 0) ⇒ 返回空列表 ⇒ **每一轮一个源都不抓**（所有源永久停更的那个静默失效）。
+    // 实测 1 条翻红（「上限 <= 0 视为未配置」），正是守卫那一条。
+    //
+    // ⚠️ 刻意**没有**「limit ≥ 源数时返回全部」那条变异：它与本守卫的另一半同处一行，但
+    //   是**等价变异**——把这一半去掉后仍走 .slice(0, limit)，而 limit ≥ length 时 slice 本来就
+    //   返回全部，没有任何输入会改变结果。它幸存的不是测试缺口（判定先例：本文件
+    //   「正文容器收窄」那条的完整推导）。它是快路径，不是行为分支。
+    from: 'if (!(limit > 0) || limit >= feeds.length)', to: 'if (false)' },
+  { id: 'refresh-取源退回全量', file: 'lib/index.js',
+    // lib/index.js:178，独立实测 OCCURRENCES=1。退回「全量交出去」= 本任务要修的病象原样保留
+    // （200 源 × 15s ÷ 并发 = 600s 一轮），而 selectStalestFeeds 自身的单测**全绿** ——
+    // 这条证明「接线」那一层必须有独立断言看着（挑选对了却没生效是本仓库反复踩到的形态）。
+    // 实测 1 条翻红（refreshNow 每轮只抓 K 个）。
+    from: 'const subscriptions = selectStalestFeeds(target.listFeeds(), config.refreshFeedsPerRound);',
+    to: 'const subscriptions = target.listFeeds().map(([feedId]) => feedId);' },
+  { id: 'config-每轮取源默认无界', file: 'lib/config.js',
+    // lib/config.js:20，独立实测 OCCURRENCES=1。把默认值改成 0 之后**别的用例全绿** —— 因为
+    // selectStalestFeeds 把 0 解读成「未配置 ⇒ 抓全部」（那是安全侧），于是「一轮 600s」这条
+    // 缺陷就借默认值回来了，而且没有任何断言会喊。这正是本任务最容易被回退的形态，所以
+    // 单独拿 tests/refresh.test.mjs 的「默认值必须是个具体条数」看着它。
+    from: 'refreshFeedsPerRound: z.number().default(20)',
+    to: 'refreshFeedsPerRound: z.number().default(0)' },
   { id: 'domain-rebuildItem 的 omit', file: 'lib/domain.js',
     from: 'if (change.omit?.includes(field) === true)',
     to: 'if (false)' },

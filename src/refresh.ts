@@ -9,7 +9,7 @@
  */
 import { mapConcurrent } from './concurrency.js'
 import { recencyOf } from './shared.js'
-import { rebuildItem } from './domain.js'
+import { rebuildItem, type FeedRecord } from './domain.js'
 import { resolveItemIds, type KnownIdentities } from './feed/item-id.js'
 import { fetchFeed, type FetchLimits } from './feed/fetch.js'
 import { selectPrunable, selectArticleEvictions, type RetentionRow } from './retention.js'
@@ -76,6 +76,60 @@ export interface FeedOutcome {
 /** 源标识即归一化后的 URL：稳定、可读、便于在存储里直接排查。 */
 export function normalizeFeedUrl(url: string): string {
   return new URL(url.trim()).toString()
+}
+
+/** 陈旧度排序键：没抓过 = 空串（码位最小的字符串），与「无限陈旧」同义。 */
+function stalenessKey(record: FeedRecord): string {
+  return record.lastFetchedAt ?? ''
+}
+
+/**
+ * 这一轮该抓哪些源：按陈旧度升序取最旧的 `limit` 个，返回源 id（纯函数，无 IO）。
+ *
+ * **为什么调度必须是有界的**：每轮抓全部源时，200 源 / 并发 5 / 单源超时 15s 的最坏一轮是
+ * 200 × 15 ÷ 5 = **600s**（spec §3、§6），而这一轮的时长直接就是用户点「刷新」后的等待。
+ *
+ * **为什么有界是安全的 —— 全部安全性都来自这一条排序**：
+ * 这一轮没被选中的源，其 `lastFetchedAt` 一个都没变，而本轮抓过的那些全部变新了，
+ * 所以**下一轮它们一定排在最前面**，一定会在有限轮次内被选中。换句话说：
+ * 「少抓」不是「漏抓」，只是把这一轮的工作挪到下一轮 —— 没有任何源会被永久跳过。
+ *
+ * ⇒ 也因此这条排序必须是**确定**的：等值（同一时间戳 / 都没抓过）时按传入顺序
+ * （= `listFeeds()` 的键序 = config.json 的键序）稳定排列。tie-break 一旦是随机的，
+ * 同一批等值的源可能反复被挑中，排在后面的源就饿死了 —— 那是本条唯一的失效模式。
+ * 判据是 tests/refresh.test.mjs 的「陈旧度调度的饥饿不变式」（5 源 / K=2 ⇒ 3 轮覆盖全部）。
+ *
+ * 未抓过的源（缺 `lastFetchedAt`）排**最前**：没抓过 = 无限陈旧，它比任何抓过的都该先抓
+ * （Task 2 的逐字段搬运必须保住 `lastFetchedAt`，否则整条调度退化成按 config 键序轮流）。
+ *
+ * `limit <= 0` / NaN 一律返回**全部**：这是「上限没配上」而不是「这一轮一个都不抓」——
+ * 后者等于让所有源永久停更，是静默的**全量停摆**，比「上限没配」这句话严重得多。
+ * 与 `maxArticleCacheChars <= 0` 同一条纪律：非法上限回落到不制造破坏的那一边。
+ */
+export function selectStalestFeeds(
+  feeds: ReadonlyArray<[string, FeedRecord]>,
+  limit: number,
+): string[] {
+  if (!(limit > 0) || limit >= feeds.length) return feeds.map(([feedId]) => feedId)
+  // slice() 先复制再排：就地排序会改到调用方手里那一份的顺序。**这是防御，不是承重判定** ——
+  // 两条 store 的 listFeeds() 每次都返回新数组，去掉它没有任何输入会改变结果（等价变异，
+  // 所以 scripts/mutation-test.mjs 里没有对应条目，见「正文容器收窄」那条的判定先例）。
+  return feeds
+    .slice()
+    .sort(([, left], [, right]) => compareStaleness(left, right))
+    .slice(0, limit)
+    .map(([feedId]) => feedId)
+}
+
+/**
+ * 码位比较，不用 localeCompare：ISO-8601 UTC 字符串按码位比较**就是**时间顺序，
+ * 且不受 locale 影响，而上面那条旋转论证依赖排序是确定的。
+ */
+function compareStaleness(left: FeedRecord, right: FeedRecord): number {
+  const a = stalenessKey(left)
+  const b = stalenessKey(right)
+  if (a < b) return -1
+  return a > b ? 1 : 0
 }
 
 /** 单条正文截断；给截断留一句可辨认的标记，避免被误当成正文结尾。 */

@@ -43,8 +43,44 @@ export interface Config {
   cleanupAfterDays: number
   /** OPML 导入时的逐源校验并发上限（≥20 源逐个抓太慢，全放出去又不友好） */
   importConcurrency: number
-  /** 刷新时同时在飞的抓取数（逐源串行是 N x RTT 的线性等待，见 refresh.ts） */
+  /**
+   * 刷新时同时在飞的抓取数。
+   *
+   * ⚠️ **这个值至今没有实测过**（不是「测过之后定成 5」，是「还没测」）。
+   * spec §9.3 要求「同一台机器、20 个真实源」实测后再定；开发环境够不到真实外部源
+   * （沙箱里只有本地桩），所以默认值保持历史值 5，**没有**照抄 spec §6 的「8–12」——
+   * 那是个未经本机验证的区间，照抄就等于把别人的数当成自己的测量结果。
+   *
+   * 待测实验（有网络的人照这个跑）：20 个真实源（覆盖慢源与快源各半），固定其它参数，
+   * 扫 refreshConcurrency ∈ {1, 2, 4, 5, 8, 12}，每档重复 3 轮，记录每轮的墙钟时间与
+   * 失败/超时数。**证据形式** = 一张 (并发, 中位墙钟, 超时数) 表：出现「再加并发墙钟不降」
+   * 或「超时数开始上升」的那个拐点，就是该机器该网络的合理上限。
+   * 拿不到那张表之前，这里的 5 只是「不比现状差」的占位值。
+   *
+   * 本机跑过一条**合成**标定（`实测`，但**不是** spec §9.3 要的那种）：20 个本地桩源、
+   * 每源固定 20ms 延迟、每档 3 轮取中位墙钟 —— 并发 1 → 465ms、2 → 233、4 → 118、5 → 100、
+   * 8 → 74、12 → 51。它只证明「这个旋钮在本机确实按并发生效、且全程仍受上限约束」；
+   * 桩件没有 RTT / DNS / TLS / 限流，所以**不能**用它推真实源该取几 —— 那是上面那张表的活。
+   */
   refreshConcurrency: number
+  /**
+   * 每轮刷新最多抓多少个源（按陈旧度取最旧的 K 个，见 refresh.ts 的 selectStalestFeeds）。
+   *
+   * 这是「一轮 600s」那条缺陷（spec §3：200 源 × 15s 超时 ÷ 并发 5）的修法所在：
+   * 调度必须有界，否则每轮的网络工作量随订阅数线性增长。
+   *
+   * **默认 20 是起点值，不是测量结果**（同上：没有真实源可测，不编造「最优 K」）。
+   * 它只保证最坏一轮从「源数 × 超时 ÷ 并发」变成「20 × 超时 ÷ 并发」——
+   * 默认配置下即 20 × 15 ÷ 5 = 60s，与源数脱钩。
+   *
+   * 有界之所以安全，唯一理由是排序按**陈旧度**：本轮没选中的源下一轮最旧，必然被选中
+   * （旋转论证与判据见 refresh.ts 的 selectStalestFeeds 与 tests/refresh.test.mjs 的
+   * 「饥饿不变式」用例）。调大 = 每轮更全但更慢，调小 = 每轮更快但源更新更稀；
+   * 一律不会被饿死。0 / 负数 / NaN 视为「未配置」⇒ 退回抓全部（不是「一个都不抓」）。
+   *
+   * 计时口径：一轮 = 一批（有界），不是「全部源都抓过一遍」。
+   */
+  refreshFeedsPerRound: number
   /** 按需抓原站正文的体积上限（字节）——单篇文章比 feed 大，与 maxBytes 分开 */
   articleMaxBytes: number
   /** 同一篇文章两次抓取之间的最小间隔（缓存未命中时），防连按造成的请求风暴 */
@@ -71,6 +107,8 @@ export const Config: z<Config> = z.object({
   cleanupAfterDays: z.number().default(30),
   importConcurrency: z.number().default(5),
   refreshConcurrency: z.number().default(5),
+  // 20 见上面的注释：起点值，不是实测值；安全性由「按陈旧度旋转」保证，不靠这个数字
+  refreshFeedsPerRound: z.number().default(20),
   articleMaxBytes: z.number().default(2 * 1024 * 1024),
   articleCooldownMs: z.number().default(30000),
   refreshOnStart: z.boolean().default(true),

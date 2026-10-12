@@ -24,7 +24,7 @@ import { dailyLogPath, pruneOldLogs } from './storage/log-file.js'
 import { openDatabase, migrateSchema } from './storage/db.js'
 import { migrateFromDomainFile } from './storage/migrate.js'
 import { createSqliteStore } from './store-sqlite.js'
-import { normalizeFeedUrl, refreshFeeds, type FeedOutcome } from './refresh.js'
+import { normalizeFeedUrl, refreshFeeds, selectStalestFeeds, type FeedOutcome } from './refresh.js'
 import { repairIdentities } from './identity-repair.js'
 import { blocksToText, fetchArticle } from './article.js'
 import { articleCharsOf, selectCleanup, type CleanupRow } from './retention.js'
@@ -202,7 +202,17 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
       log('刷新被节流：距上次完成不足 ' + Math.round(config.minRefreshIntervalMs / 1000) + 's（还需等 ' + waitSec + 's）')
       return false
     }
-    const subscriptions = target.listFeeds().map(([feedId]) => feedId)
+    // 取源：不是全量，而是**最旧的 K 个**（纯函数，见 refresh.ts）。一轮的时长因此与源数脱钩
+    // （200 源 × 15s ÷ 5 = 600s 是一轮全抓的情形），而「没被选中的下一轮最旧」保证谁都不饿死。
+    // 未抓过（缺 lastFetchedAt）的源排最前；K ≥ 源数或 K ≤ 0（未配置）都退回全量，一个不丢。
+    //
+    // ⚠️ 与**节流/强制**各是什么关系（别把下面两段当成待修的 bug）：
+    //   · `force` 只绕过节流，**不绕过**轮转：refreshOnStart 的那一轮同样只抓 K 个。
+    //     首次装载 200 个源时因此只先抓到 20 个，其余分 ⌈200/20⌉ = 10 轮补齐 ——
+    //     这就是「有界」的代价，也正是本任务要的形状（换成不限量就等于把 600s 还回来）。
+    //   · 节流决定轮转**多快**：每轮之间至少 minRefreshIntervalMs，所以 200 源 / K=20 下
+    //     全部源被摸一遍约需 10 轮。要更快就调大 refreshFeedsPerRound（它换的就是这个）。
+    const subscriptions = selectStalestFeeds(target.listFeeds(), config.refreshFeedsPerRound)
     inFlight = (async () => {
       const outcomes = await refreshFeeds(subscriptions, target, {
         // 订阅源来自用户自己的配置 ⇒ 可信目标（因此允许内网自建服务）；feed 内容里的链接不受此待见

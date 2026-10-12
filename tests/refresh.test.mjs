@@ -5,7 +5,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
-import { refreshFeeds } from '../lib/refresh.js'
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { refreshFeeds, selectStalestFeeds } from '../lib/refresh.js'
+import { Config, apply } from '../lib/index.js'
 
 function memoryStore() {
   const feeds = new Map()
@@ -676,4 +680,231 @@ test('全局预算：上限 <= 0 表示未配置，一条都不清（不是「�
     '上限 0 视为未配置：把用户的正文缓存整份清空是静默丢数据，不是限流')
   await refreshFeeds(feeds.map(([url]) => url), store, { ...BASE_OPTIONS, maxArticleCacheChars: -1 })
   assert.equal(cachedIds(store).length, 3, '负上限同理')
+})
+
+
+/**
+ * ── 刷新调度：按陈旧度取源（2026-10-11 任务 10）────────────────────────────────────
+ *
+ * 病象：每一轮都抓**全部**源。200 源 / 并发 5 / 单源超时 15s ⇒ 最坏一轮 200 × 15 ÷ 5 = 600s
+ * （spec §3、§6）。修法是把「这一轮抓哪些源」交给陈旧度排序，每轮只抓最旧的 K 个。
+ *
+ * **有界默认值之所以安全，唯一理由是「排序按陈旧度」**：这一轮没被选中的源，下一轮一定是
+ * 最旧的那批，所以它一定会在有限轮次内被选中 —— 没有任何源会被永久跳过。
+ * 下面第三条用例钉的就是这条旋转不变式（也是本任务真正的验收点，不是「选出 K 个」这个动作）。
+ */
+
+test('selectStalestFeeds：按 lastFetchedAt 升序取最旧的 K 个，未抓过的排最前（无限陈旧）', () => {
+  const feeds = [
+    ['c', { url: 'c', lastFetchedAt: '2026-10-03T00:00:00.000Z' }],
+    ['a', { url: 'a' }],
+    ['b', { url: 'b', lastFetchedAt: '2026-10-01T00:00:00.000Z' }],
+    ['d', { url: 'd', lastFetchedAt: '2026-10-02T00:00:00.000Z' }],
+  ]
+
+  assert.deepEqual(selectStalestFeeds(feeds, 2), ['a', 'b'],
+    '未抓过的（a）必须先于所有抓过的：没抓过 = 无限陈旧')
+  assert.deepEqual(selectStalestFeeds(feeds, 3), ['a', 'b', 'd'], '再往上是抓取时间最早的')
+  assert.equal(selectStalestFeeds(feeds, 1).length, 1, 'limit=1 只给一个')
+  assert.deepEqual(selectStalestFeeds([], 5), [], '没有源就返回空（不得凭空造 id）')
+})
+
+test('selectStalestFeeds：limit ≥ 源数时返回全部，一个都不许丢', () => {
+  const feeds = [
+    ['a', { url: 'a' }],
+    ['b', { url: 'b', lastFetchedAt: '2026-10-01T00:00:00.000Z' }],
+    ['c', { url: 'c', lastFetchedAt: '2026-10-02T00:00:00.000Z' }],
+  ]
+  const all = selectStalestFeeds(feeds, 3)
+  assert.deepEqual([...all].sort(), ['a', 'b', 'c'], 'limit 恰好等于源数 ⇒ 全部（相等也不许裁）')
+  assert.equal(selectStalestFeeds(feeds, 99).length, 3, 'limit 更大 ⇒ 全部，不得返回 undefined 或重复 id')
+  assert.equal(new Set(selectStalestFeeds(feeds, 99)).size, 3, '不得重复同一个源')
+})
+
+test('selectStalestFeeds：上限 <= 0 视为「未配置」⇒ 返回全部，不许解读成「一个都不抓」', () => {
+  // 为什么是「全部」而不是「空」：空 = 每一轮都不抓任何源 ⇒ 所有源永久停更，
+  // 那是**静默的全量停摆**，比「上限没配上」这句话严重得多（与 maxArticleCacheChars ≤ 0
+  // 同一条纪律：非法上限一律回落到安全那一边，不制造破坏性行为）。
+  const feeds = [
+    ['a', { url: 'a' }],
+    ['b', { url: 'b', lastFetchedAt: '2026-10-01T00:00:00.000Z' }],
+  ]
+  assert.equal(selectStalestFeeds(feeds, 0).length, 2, '0 不许解释成「这一轮一个都不抓」')
+  assert.equal(selectStalestFeeds(feeds, -1).length, 2, '负上限同理')
+  assert.equal(selectStalestFeeds(feeds, Number.NaN).length, 2, 'NaN 上限同样回落到安全侧')
+})
+
+test('陈旧度调度的饥饿不变式：源数 > K 时，连续轮次内每个源都会被选中（旋转覆盖全部）', () => {
+  // 这条是本任务的核心判据：**有界默认值**只有在「没被选中的下一轮必被选中」时才成立。
+  // 5 个源、K=2：一轮全抓的实现会一次抓 5 个，而这条用例要求每一轮 ≤ 2 ——
+  // 于是「有界」与「不饿死」必须同时成立，缺一条都翻红。
+  const ids = ['a', 'b', 'c', 'd', 'e']
+  let feeds = ids.map((id) => [id, { url: id }])
+  const seen = new Set()
+  for (let round = 0; round < 3; round += 1) {
+    const picked = selectStalestFeeds(feeds, 2)
+    assert.ok(picked.length <= 2, '第 ' + round + ' 轮最多抓 K=2 个，实际 ' + picked.length)
+    for (const id of picked) seen.add(id)
+    // 抓取成功：被选中的源拿到本轮时间戳（未被选中的保持原样 = 下一轮更旧）
+    feeds = feeds.map(([id, record]) => picked.includes(id)
+      ? [id, { ...record, lastFetchedAt: '2026-10-11T00:00:0' + round + '.000Z' }]
+      : [id, record])
+  }
+  assert.deepEqual([...seen].sort(), ids,
+    'K=2 抓 5 个源，3 轮内必须覆盖全部 —— 只要有一个源永远选不中，有界默认值就不能接受')
+})
+
+
+/**
+ * 起 count 个各含一条的本地源；hits 记录**实际收到请求的源编号**。
+ * 为什么每个源一台服务器：请求落在哪台服务器上就是「哪个源被抓了」的直接证据。
+ */
+async function startFeedServers(count, hits) {
+  const started = []
+  for (let n = 1; n <= count; n += 1) {
+    const server = createServer((_req, res) => {
+      hits.push(n)
+      res.writeHead(200, { 'content-type': 'application/rss+xml' })
+      res.end(rss([{
+        title: '第' + n + '源', link: 'https://ex.test/f' + n, guid: 'g' + n,
+        date: 'Mon, 01 Jan 2024 00:00:00 GMT',
+      }]))
+    })
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+    started.push({ server, url: 'http://127.0.0.1:' + server.address().port + '/feed.xml' })
+  }
+  return started
+}
+
+/**
+ * 真装配：让 `refreshNow` 在真存储（真 sqlite + 真 config.json）上跑起来。
+ *
+ * 为什么非走到这一层：判据是「一轮最多抓 K 个源」，而 K 是在 `refreshNow` 里读的配置。
+ * 只在 `tests/` 里断言 `selectStalestFeeds` 挑对了 K 个，恰恰漏掉本任务最可能失效的一段 ——
+ * 「挑出来的子集有没有真的交给 `refreshFeeds`」（挑选对了却没接线 = 200 源照样一轮全抓）。
+ * 仓库里有过「全套测试全绿而插件在 DSH 里是坏的」，所以这条接线必须有断言看着。
+ *
+ * $DSH_HOME 同时设 USERPROFILE：本机实际装的那个 storage-paths 实现优先读 USERPROFILE
+ * （%USERPROFILE%\\.dsh），官方那版读 $DSH_HOME —— 两个实现都要落到同一个临时目录，
+ * 判据才是「刷新调度」而不是「这台机器装的是哪个版本的路径算法」。用例结束一律复原。
+ */
+async function withRealRefresh(feedsPerRound, run) {
+  const home = mkdtempSync(join(tmpdir(), 'rss-refresh-round-'))
+  const savedHome = process.env.DSH_HOME
+  const savedUserProfile = process.env.USERPROFILE
+  process.env.DSH_HOME = home
+  process.env.USERPROFILE = home
+  const hits = []
+  const disposers = []
+  let handler
+  let started = []
+  try {
+    started = await startFeedServers(3, hits)
+    const ctx = {
+      logger: { info: () => {}, warn: () => {} },
+      effect: (callback) => { const dispose = callback(); if (typeof dispose === 'function') disposers.push(dispose); return dispose },
+      webServer: { register: (route) => { handler = route.handler; return () => { handler = undefined } } },
+      connection: { requestRejection: () => undefined },
+    }
+    apply(ctx, {
+      feeds: started.map((entry) => entry.url),
+      // 0 = 不节流（默认 10 分钟会把第二轮拦掉）；启动刷新保持开启，第一轮就发生在 apply 里
+      minRefreshIntervalMs: 0,
+      refreshOnStart: true,
+      timeoutMs: 5000,
+      refreshFeedsPerRound: feedsPerRound,
+    })
+    // 等启动那一轮真的跑完：判据是本插件自己写的那行「刷新完成」（log() 在 refreshOne 全部
+    // 返回之后同步落盘）。轮询 config.json 或 sleep 都是在赌时间，而这条是**因果信号**。
+    await waitForCompletedRounds(home, 1)
+    return await run({ hits, handler, home })
+  } finally {
+    // 清理失败必须有可见后果：空 catch 正是本仓库记过的事故形状（吞掉失败 ⇒ 域句柄泄漏）。
+    // 这里不 rethrow —— 在 finally 里抛会顶掉真正的断言失败，反而更难查。
+    for (const dispose of disposers) {
+      try { await dispose() } catch (error) { console.error('清理装配失败（不影响断言）：', error) }
+    }
+    for (const entry of started) await new Promise((resolve) => entry.server.close(resolve))
+    rmSync(home, { recursive: true, force: true })
+    if (savedHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = savedHome
+    if (savedUserProfile === undefined) delete process.env.USERPROFILE
+    else process.env.USERPROFILE = savedUserProfile
+  }
+}
+
+/**
+ * 等 `rounds` 轮刷新**跑完落库**：数当天日志里的「刷新完成」行。
+ *
+ * 为什么不用 sleep：这台机器上跑测试时启动刷新可能还没落完，sleep 的时长就是在赌机器速度
+ * （本仓库记过 sleep 型断言的坑）。为什么不用 config.json 的 lastFetchedAt：K=1 时一轮只
+ * 抓一个源，等「全部源都有时间戳」要等到第 3 轮，信号是错的。
+ */
+function waitForCompletedRounds(home, rounds) {
+  const root = join(home, 'storages', 'rss-reader')
+  return (async () => {
+    const deadline = Date.now() + 20000
+    while (Date.now() < deadline) {
+      let done = 0
+      try {
+        for (const name of readdirSync(root)) {
+          if (!name.startsWith('reader-') || !name.endsWith('.log')) continue
+          done += readFileSync(join(root, name), 'utf8').split('刷新完成').length - 1
+        }
+      } catch (error) {
+        // 日志目录还没建出来是启动早期的正常状态，不是失败；其余错误必须可见
+        if (error?.code !== 'ENOENT') console.error('读刷新日志失败：', error)
+      }
+      if (done >= rounds) return
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    throw new Error('等 ' + rounds + ' 轮刷新完成超时（20s）—— 刷新很可能压根没跑起来')
+  })()
+}
+
+/** 通过插件的真 HTTP 路由触发一轮 refresh（与客户端走的是同一条路）。 */
+async function requestRefresh(handler) {
+  const request = {
+    method: 'POST',
+    async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify({ endpoint: 'refresh', payload: {} })) },
+  }
+  const response = { status: 0, body: '', writeHead(status) { this.status = status }, end(body) { this.body = body } }
+  await handler(request, response)
+  return response
+}
+
+test('refreshNow 每轮只抓 refreshFeedsPerRound 个源，且下一轮换一批（接线 + 旋转）', async () => {
+  await withRealRefresh(1, async ({ hits, handler, home }) => {
+    assert.deepEqual(hits, [1], 'K=1 的第一轮只许抓一个源，实际 ' + JSON.stringify(hits))
+    assert.equal(typeof handler, 'function', '前置条件：HTTP 路由必须注册上，否则第二轮无从触发')
+
+    // requestRefresh 是 await 到底的（dispatch → refreshNow → await inFlight），
+    // 所以它返回时这一轮已经落完库，hits 是稳定的。
+    const response = await requestRefresh(handler)
+    assert.equal(response.status, 200, 'refresh 端点应当正常返回')
+    assert.deepEqual(hits, [1, 2],
+      '第二轮必须抓**另一个**源（第一轮抓过的已不再最旧）；' +
+      '若这里变成 [1,1,1] 就是「总是抓同一个源」，与本任务的不变式正相反')
+
+    // 第三轮再换一个：三轮覆盖三个源 = 旋转真的在转
+    await requestRefresh(handler)
+    assert.deepEqual(hits, [1, 2, 3], '第三轮抓到最后一个没抓过的源')
+
+    const feeds = JSON.parse(readFileSync(join(home, 'storages', 'rss-reader', 'config.json'), 'utf8')).feeds ?? {}
+    assert.equal(Object.keys(feeds).length, 3, '整整三轮下来，三个源都必须还在订阅表里（不许因为没被选中而被丢）')
+    assert.equal(hits.length, 3, '三轮恰好三次请求：既没漏抓也没把没选中的源捎上')
+  })
+})
+
+
+test('refreshFeedsPerRound 的默认值必须是个具体条数（0 / Infinity = 把「一轮 600s」放回来）', () => {
+  // 这条守的不是「20」这个数，而是**缺陷不许以默认值的形式复现**：selectStalestFeeds 把
+  // 0 / NaN 解读成「未配置 ⇒ 抓全部」（安全侧），所以默认值一旦被改成 0 或 Infinity，
+  // 全量抓取就悄悄回来了，而所有别的用例都照样绿 —— 那是本任务最容易被回退的形态。
+  const parsed = Config({ feeds: [] })
+  assert.ok(Number.isFinite(parsed.refreshFeedsPerRound), '默认值必须有限，不得是 Infinity')
+  assert.ok(parsed.refreshFeedsPerRound > 0, '默认值必须 > 0；0 在调度里等于「每轮抓全部」')
+  // 改动这个数 = 产品决策（见 src/config.ts 的注释：20 是起点值）。改了就同步改这里，
+  // 让「默认调度有多宽」这件事在 diff 里看得见，而不是藏在一个 schema 字面量里。
+  assert.equal(parsed.refreshFeedsPerRound, 20, '默认每轮 20 源；要改就带着实测证据一起改')
 })
