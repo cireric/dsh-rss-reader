@@ -92,9 +92,15 @@ const MUTATIONS = [
   { id: 'refresh-正文不得降级覆盖', file: 'lib/refresh.js',
     from: 'if (existing !== undefined && (summary?.length ?? 0) > (existing.summary?.length ?? 0))',
     to: 'if (existing !== undefined)' },
-  { id: 'refresh-缓存闸门认 blocks', file: 'lib/refresh.js',
-    from: 'chars: articleCharsOf(record.article),',
-    to: 'chars: (record.article?.paragraphs ?? []).reduce((sum, paragraph) => sum + paragraph.length, 0),' },
+  // 闸门必须认**现行**的 blocks 形态（2026-07 事故：只统计 paragraphs ⇒ 字符数恒为 0 ⇒ 闸门永不触发）。
+  // ⚠️ 2026-10-11 修复轮 1 改写锚点：字符计数已随「清算原料」一起搬进 store-sqlite 的
+  // articleCharsFromBody（原锚 `chars: articleCharsOf(record.article),` 已从 lib/refresh.js
+  // 消失 ⇒ 报「未应用」；docs/pitfalls.md 二、2.7：未应用比幸存更隐蔽，因为它等于这条根本没跑）。
+  // 语义不变，仍是「退回只数 paragraphs」。from 照**编译产物**的实际形状写（pitfalls 一、1.4）：
+  // lib/store-sqlite.js:296，独立实测 OCCURRENCES=1。
+  { id: 'refresh-缓存闸门认 blocks', file: 'lib/store-sqlite.js',
+    from: "if (typeof fields['text'] === 'string') {",
+    to: "if (false) {" },
   // 全局预算的承重点（2026-10-11 任务 9）：这份名单必须覆盖**全库**。
   // 退回成「只看一个源」（等价于把它改回 2026-10-11 之前的逐源闸门）⇒ 200 源各有 8M 字符的名额，
   // 上限形同虚设；而每个源单独看又都没超自己的份额，连「哪一源超了」都判不出来。
