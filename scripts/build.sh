@@ -88,6 +88,9 @@ link_pnpm fast-xml-parser fast-xml-parser
 link_pnpm zod zod
 # 自持存储的路径解析（resolveDshHome）：$DSH_HOME 的优先级语义（空白视为未设置）只有官方实现里
 # 有，src/storage/paths.ts 曾手抄过一份，在 DSH_HOME 为纯空白时会把数据落到 CWD 上（Task 7 已删）
+# ⚠️ 这条 link **不只是编译期**：src/storage/paths.ts 在**运行期** import 它（storageRoot 每次装载都会走），
+# 所以它与 dsh-storage-domain 一样在 package.json 里申报为 peerDependency ——
+# 漏掉那个申报的后果是「在别的机器上装载时模块解析失败」（2026-10-11 终检评审 A1 抓出的正是它）。
 link_pkg @deepseek-ai/dsh-home-paths packages/util/home-paths
 # ⚠️ 存储域这条 link **不再**服务于装载路径（Task 8 起插件一次也不 open 存储域），
 # 但**还不能删**：src/domain.ts 里那行 import { defineDomain, domainTable }（定义 readerDomain 的）是**运行期**
