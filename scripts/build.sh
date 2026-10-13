@@ -98,8 +98,8 @@ link_pkg @deepseek-ai/dsh-home-paths packages/util/home-paths
 # （实测，隔离副本里验过）。**这里刻意不写行号**：本文件的注释会随上面每次编辑漂移，
 # 而「死行号」正是本轮在 paths.ts:5 与本行同时修掉的那类错误（源码核对：符号名不会漂）。
 # 唯一的消费者是旧适配器 src/store.ts 的 createStore —— 它只被测试当
-# 「旧实现 ↔ 自持实现」的同义性基线驱动（tests/overview-paging.test.mjs，且是变异门槛
-# scripts/mutation-test.mjs:691 的判据）。等那套基线撤掉，这里和 package.json 的
+# 「旧实现 ↔ 自持实现」的同义性基线驱动（tests/overview-paging.test.mjs，且是变异门槛里
+# 「paging-旧实现谓词的 id 方向写反」那条的判据）。等那套基线撤掉，这里和 package.json 的
 # peerDependency 才能一起删。
 link_pkg @deepseek-ai/dsh-storage-domain packages/storage/storage-domain
 link_pkg @deepseek-ai/dsh-client-connection packages/client/connection

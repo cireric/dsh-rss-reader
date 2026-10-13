@@ -108,7 +108,8 @@
 - 仓库完成定义全套：build / build:client / typecheck / test / mutation（隔离副本）。
 - 新增测试：未读账目守恒（§4.1）、叠加过滤（§4.2）、导航键 shift+n/p/o/u 语义、视图记忆。
 - 关键判定改动各补一条变异（非等价变异，判定方法见 scripts/mutation-test.mjs）。
-- 真机三步（dev_reload_package → reader.log 无装载失败 → curl overview 得 401）。
+- 真机三步（dev_reload_package → `$DSH_HOME/storages/rss-reader/reader-$(date -u +%F).log` 无装载失败
+  → curl overview 得 401）。`state/dsh-rss-reader/reader.log` 是自持前的旧路径，**永远不再写**。
 
 ## 7. 已决定（实现期定案，回写本文）
 

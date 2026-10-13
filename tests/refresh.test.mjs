@@ -693,7 +693,10 @@ test('全局预算：上限 <= 0 表示未配置，一条都不清（不是「�
  * 下面第三条用例钉的就是这条旋转不变式（也是本任务真正的验收点，不是「选出 K 个」这个动作）。
  */
 
-test('selectStalestFeeds：按 lastFetchedAt 升序取最旧的 K 个，未抓过的排最前（无限陈旧）', () => {
+test('selectStalestFeeds：按 lastAttemptedAt ?? lastFetchedAt 升序取最旧的 K 个，未抓过的排最前（无限陈旧）', () => {
+  // 键是「上次**尝试**」而非「上次成功」（Task 10 修复轮 1，评审实测）：永久失败的源只有前者，
+  // 只看成功会让失败源永远最旧、≥K 个时永久霸占每轮窗口。下面这条夹具没有 lastAttemptedAt，
+  // 所以它证明的是**回落**那一半；「失败的尝试也盖时间」由文件末的真装配用例钉。
   const feeds = [
     ['c', { url: 'c', lastFetchedAt: '2026-10-03T00:00:00.000Z' }],
     ['a', { url: 'a' }],

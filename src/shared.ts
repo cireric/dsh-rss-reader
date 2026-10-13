@@ -61,10 +61,12 @@ export interface ItemView {
  * **本函数是这条判据的定义处**；JS 侧任何算未读的地方都必须走它（唯一现役调用方是下面的
  * countUnreadPerFeed，createStore 的 unreadPerFeed 经它实现）。
  *
- * ⚠️ Task 5 之后宿主侧**不再有 JS 侧的全表记账**：buildOverview / accountOf 都改走存储侧的
+ * ⚠️ Task 5 之后**两条端点路径**（buildOverview / accountOf）不再有 JS 侧的全表记账：都改走存储侧的
  * unreadPerFeed，而自持实现为了不物化 10 万行，在 SQL 里写作 `read_at IS NULL` ——
  * 那是**同一判据的第二实现**，不是第二口径；「两者确实等价」由 tests/store-sqlite.test.mjs 的
  * 逐键对账用例钉住（「unreadPerFeed：与 shared.ts 的唯一口径在同一夹具上逐键相等」）。
+ * ⚠️ **不是「宿主侧一处都不剩」**：旧适配器 `src/store.ts` 的 createStore 仍把整张 items 表
+ * 摊进 JS 再数一遍（它只被测试当「旧实现 ↔ 自持实现」的同义性基线驱动，不在装载路径上）。
  * 改本条判据时，那处 SQL 与它的对账用例必须一起改。
  */
 export const isUnread = (item: Pick<ItemView, 'readAt'>): boolean => item.readAt === undefined

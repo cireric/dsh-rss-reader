@@ -386,7 +386,7 @@ npm run build && npm run build:client && npm run typecheck && npm test
 
 - [ ] **步骤 3：真机三步**
 
-dev_reload_package（重载前后都应 [active]）→ 看 `$DSH_HOME/state/dsh-rss-reader/reader.log` 无「装载失败」→ `curl -X POST http://127.0.0.1:3080/rss-reader-api -d '{"endpoint":"overview","payload":{}}'` 得 401（路由活着）。
+dev_reload_package（重载前后都应 [active]）→ 看**今天**的 `$DSH_HOME/storages/rss-reader/reader-$(date -u +%F).log` 无「装载失败」（`state/dsh-rss-reader/reader.log` 是自持前的旧路径，永远不再写）→ `curl -X POST http://127.0.0.1:3080/rss-reader-api -d '{"endpoint":"overview","payload":{}}'` 得 401（路由活着）。
 
 - [ ] **步骤 4：报告并等待确认再提交**
 
