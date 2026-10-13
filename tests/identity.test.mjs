@@ -58,7 +58,6 @@ function memoryStore() {
       return entries
     },
     listFeeds: () => [...feeds.entries()],
-    allItems: () => [...items.entries()],
     /**
      * 与自持实现同形（Task 5 的三条 SQL 取数方法）。
      *

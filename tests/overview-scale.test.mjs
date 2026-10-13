@@ -27,6 +27,9 @@ const FEEDS = 200
 const PER_FEED = 500
 const TOTAL = FEEDS * PER_FEED
 
+/** 默认配置读一次：截断条数这类断言从它取，默认值改了不该让本文件无关地翻红。 */
+const DEFAULTS = Config({})
+
 /** 源 id 与前缀：合成数据与 config.json 必须用**同一个**键，否则量到的是空结果（Task 3 踩过）。 */
 const feedIdOf = (index) => 'https://feed' + index + '.example.com/atom.xml'
 
@@ -130,7 +133,8 @@ test('10 万行：overview 不再物化全表，耗时在预算内，且账目�
       '最后一个源也要有键（0 未读的源丢键 = 左栏角标空白）')
 
     // ④ 列表仍是「全局 recency 降序取前 maxItemsShown 条」：截断真的发生了，且确实是最近的那批
-    assert.equal(view.items.length, 300, 'items 应按 maxItemsShown（默认 300）截断')
+    assert.equal(view.items.length, DEFAULTS.maxItemsShown,
+      'items 应按 maxItemsShown 截断（这里从 config 读默认值，不写死 300）')
     assert.equal(store.listRecent(1)[0][0], view.items[0].id, '列表首条必须是全局最新的那一条')
 
     // ⑤ 抽取守恒前的真值：总行数没被读路径改动

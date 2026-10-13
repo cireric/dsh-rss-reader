@@ -31,7 +31,6 @@ function memoryStore() {
     updateItem: async (id, fn) => { items.set(id, fn(items.get(id))) },
     deleteItem: async (id) => { items.delete(id) },
     listItems: (feedId) => [...items.entries()].filter(([, record]) => record.feedId === feedId),
-    allItems: () => [...items.entries()],
     /**
      * 清算原料（src/store.ts 的契约）：**只交出这三样，正文不许跟着出来**。
      * 桩也必须守这条 —— 否则测的其实是「桩自己把正文摊开了」，
