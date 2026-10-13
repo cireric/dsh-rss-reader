@@ -564,6 +564,17 @@ const MUTATIONS = [
     // 判据：tests/storage-skeleton.test.mjs 的「ensureStorageRoot 递归建出 0700 目录」。
     from: 'mkdirSync(root, { recursive: true, mode: 0o700 });',
     to: 'mkdirSync(root, { recursive: true, mode: 0o777 });' },
+  // texts.fetched_at 的 NOT NULL（2026-10-11 终检评审 C1）：DDL 漏掉这个约束时读侧三处都走
+  // `requiredText(row.article_fetched_at, ...)`，一条 NULL 行会让 item / listItems / allItems
+  // **同时**抛。本版自己的写入口写不出 NULL（articleRecordSchema.fetchedAt 必填），所以这条
+  // 是「不可达但可能」的那类守卫 —— 判据不能是行为断言（喂不进 NULL），只能是声明。
+  // 判据：tests/storage-skeleton.test.mjs 与 tests/store-sqlite.test.mjs 的「texts.fetched_at
+  // 声明 NOT NULL」，前者查 PRAGMA、后者断言直插 NULL 必须抛。
+  // ⚠️ from 照**编译产物**的真实形状写（docs/pitfalls.md 一、1.4）：lib/storage/db.js 里
+  // `fetched_at TEXT NOT NULL\n  );` 独立实测 OCCURRENCES=1。
+  { id: 'storage-正文抓取时间可空', file: 'lib/storage/db.js',
+    from: 'fetched_at TEXT NOT NULL',
+    to: 'fetched_at TEXT' },
   // ── SQLite 版 ReaderStore（2026-10-11 大规模存储任务 3）───────────────────────────
   // 这一族是「换实现之后，旧实现的每一条承诺是否还在」的承重点，而它们的失效大半**安静**：
   // 列表顺序变了、并发已读被抹掉、正文被级联删掉 —— 界面上都只是「好像少了点什么」。

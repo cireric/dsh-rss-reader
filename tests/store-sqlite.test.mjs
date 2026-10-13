@@ -792,3 +792,41 @@ test('listArticleCacheEntries：只交出 { id, chars, fetchedAt }，且 chars �
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+/**
+ * texts.fetched_at 是 NOT NULL（2026-10-11 终检评审 C1）。
+ *
+ * 为什么值得单独一条：读侧三处（item / listItems / allItems）都走
+ * `requiredText(row.article_fetched_at, 'texts.fetched_at')`，而 DDL 原先允许 NULL ——
+ * 一条 NULL 行会让**三条读路径同时抛**。本版自己的写入口写不出它（articleRecordSchema.fetchedAt
+ * 是必填），所以「不可达」是这份判断的全部理由；可库里是用户数据，手工改库 / 别的写者都能造出
+ * 那一行。两条断言各钉一半：
+ *  ① 声明 = NOT NULL（PRAGMA table_info）——这是约束本身；
+ *  ② 往**真库**里直插一行 NULL ⇒ 必须抛（「NULL 写不进去」是可执行的，不是注释里的主张）；
+ *  ③ 正向对照：读路径确实把这一列交出来（否则 ①② 守的就是一列没人用的数据）。
+ */
+test('texts.fetched_at 声明 NOT NULL：NULL 写不进去，且读路径确实消费这一列', async () => {
+  const { store, db, dir } = freshStore('texts-not-null')
+  try {
+    const column = db.prepare('PRAGMA table_info(texts)').all().find((entry) => entry.name === 'fetched_at')
+    assert.equal(column.notnull, 1,
+      'texts.fetched_at 必须 NOT NULL：读侧走 requiredText，NULL 会让 item/listItems/allItems 一起抛')
+
+    await store.saveItem('has-body', item('feed-a', {
+      article: { fetchedAt: '2026-09-01T00:00:00.000Z', blocks: [{ kind: 'p', text: '正文' }] },
+    }))
+
+    // ② 约束是活的：绕开 store 直插 NULL 也要被库本身挡下
+    assert.throws(
+      () => db.prepare('INSERT INTO texts(item_id, body, fetched_at) VALUES (?, ?, ?)').run('orphan', '[]', null),
+      /NOT NULL/i,
+      'texts.fetched_at 上的 NOT NULL 必须真的生效：NULL 行写不进去（否则读侧 requiredText 迟早抛）')
+
+    // ③ 正向对照：读路径真的消费这一列（item 读回 article.fetchedAt）
+    assert.equal(store.item('has-body').article.fetchedAt, '2026-09-01T00:00:00.000Z',
+      'item() 必须把 texts.fetched_at 交出来 —— 它是正文缓存淘汰的排序键')
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

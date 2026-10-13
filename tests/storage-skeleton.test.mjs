@@ -232,8 +232,8 @@ test('migrateSchema 物化 items/texts/cursors，recency = COALESCE(published_at
     assert.equal(recencyOf.get('has-pub').recency, '2026-09-01T00:00:00.000Z')
 
     // 正文另表 + 级联：删条目不得留下孤儿正文
-    db.prepare('INSERT INTO texts(item_id, body, revision, frameable, title) VALUES (?, ?, ?, ?, ?)')
-      .run('no-pub', 'body', 2, 1, 't')
+    db.prepare('INSERT INTO texts(item_id, body, revision, frameable, title, fetched_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run('no-pub', 'body', 2, 1, 't', '2026-10-11T10:00:00.000Z')
     db.prepare('DELETE FROM items WHERE id = ?').run('no-pub')
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM texts').get().n, 0, '正文必须随条目级联删除')
 
@@ -245,6 +245,15 @@ test('migrateSchema 物化 items/texts/cursors，recency = COALESCE(published_at
     const names = db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('i1', 'i2') ORDER BY name")
       .all().map((row) => row.name)
     assert.deepEqual(names, ['i1', 'i2'])
+
+    // texts.fetched_at 必须 NOT NULL（2026-10-11 终检评审 C1）：
+    // 读侧三处（item / listItems / allItems）都走 requiredText，而 DDL 原先允许 NULL
+    // ⇒ 一条 NULL 行会让这三处**全都抛**。本版自己的写入口写不出它
+    //（articleRecordSchema.fetchedAt 必填），所以这里查声明；
+    // 「NULL 真的写不进去」的可执行判据在 tests/store-sqlite.test.mjs 的同名用例里。
+    const fetchedAtColumn = db.prepare('PRAGMA table_info(texts)').all().find((column) => column.name === 'fetched_at')
+    assert.equal(fetchedAtColumn.notnull, 1,
+      'texts.fetched_at 必须声明 NOT NULL —— 读侧走 requiredText，NULL 行会让读路径整条抛')
   } finally {
     db.close()
   }

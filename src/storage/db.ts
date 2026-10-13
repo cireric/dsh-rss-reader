@@ -150,8 +150,13 @@ export function migrateSchema(db: DatabaseSync): void {
  * - **`texts.fetched_at` 是 Task 3 加的一列**（原参考 schema 没有它）：`articleRecordSchema.fetchedAt`
  *   是**必填**字段，而 `refresh.ts:118` 的 `record.article?.fetchedAt` 是正文缓存淘汰的排序键 ——
  *   没有它，「正文缓存超限从最旧清起」退化成整表不可判（全部 fetchedAt 相同）。
- *   与 spec 保留 revision/frameable/title 是同一条理由。改的是建表语句，不是已建库的迁移：
- *   迁到本版尚未开始，没有需要搬的数据。
+ *   与 spec 保留 revision/frameable/title 是同一条理由。
+ * - **`texts.fetched_at` 是 `NOT NULL`**（2026-10-11 终检修复轮：原 DDL 漏了约束）。
+ *   读侧三处（item() / listItems() / allItems()）都走 `requiredText(row.article_fetched_at, ...)`，
+ *   而 DDL 原先允许 NULL ⇒ 一条 NULL 行会让这三处**全都抛**。本版自己的写入口写不出它
+ *   （`articleRecordSchema.fetchedAt` 是必填），但「本版不可达」不是「不可能」——
+ *   库里是用户数据，手工改库、别的写者、以后的迁移代码都能造出那一行，而报错发生在读路径上。
+ *   改的是建表语句，不是已建库的迁移：本版尚未发布，没有任何库需要回填（迁移也未开始）。
  * - `cursors.seen` 存 id 窗口的 JSON 文本：窗口是每源 5000 个 id 的定长列表，
  *   没有按单个 id 查询的需求，拆成行只会换来百万行表（spec §2 的漏项表）。
  */
@@ -183,7 +188,7 @@ const SCHEMA_DDL = `
     frameable  INTEGER,
     title      TEXT,
     -- articleRecord.fetchedAt：正文缓存淘汰的排序键（见上方注释）
-    fetched_at TEXT
+    fetched_at TEXT NOT NULL
   );
 
   CREATE TABLE cursors (
