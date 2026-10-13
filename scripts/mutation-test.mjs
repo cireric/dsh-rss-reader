@@ -820,6 +820,30 @@ const MUTATIONS = [
     // 判据：tests/overview-paging.test.mjs 的「旧实现（createStore）：listRecent 的游标谓词…」。
     from: 'return recency < cursor.recency || (recency === cursor.recency && itemId > cursor.id);',
     to: 'return recency < cursor.recency || (recency === cursor.recency && itemId < cursor.id);' },
+  // 另三条同义性基线（2026-10-11 终检评审 G1）：`listRecent` 的游标谓词原先**是唯一一条**
+  // 「旧实现 ↔ 自持实现」的对照用例，其余三条各自只被钉在「与自己的桩一致」上 ——
+  // 两份实现悄悄分家时没有任何断言翻红，而生产早已是 createSqliteStore：坏掉的那份没人用。
+  // 本轮在新用例里把**同一份夹具**喂给两边、逐字段 deepEqual（tests/overview-paging.test.mjs
+  // 的「逐方法同义性」三条），下面三条变异各自指向其中一条。
+  // ⚠️ from 照**编译产物**的真实形状写（docs/pitfalls.md 一、1.4），OCCURRENCES 均独立实测 = 1。
+  { id: 'store-旧实现每源账目不铺键域', file: 'lib/store.js',
+    // 键域退回「条目里出现过的源」⇒ 0 未读的源丢键（左栏那一行的角标变空白而不是 0），
+    // 与自持实现「先按 feeds 表铺 0」不再同义。
+    // 判据：tests/overview-paging.test.mjs 的「逐方法同义性：unreadPerFeed…逐键相等」。
+    from: 'unreadPerFeed: (feedIds) => countUnreadPerFeed(feedIds, [...items.entries()].map(([, record]) => record)),',
+    to: 'unreadPerFeed: (feedIds) => countUnreadPerFeed([...items.entries()].map(([, record]) => record.feedId), [...items.entries()].map(([, record]) => record)),' },
+  { id: 'store-旧实现正文清单字符数恒 0', file: 'lib/store.js',
+    // 清算原料的 chars 退回 0 ⇒ 正文缓存闸门以为整库正文一文不值，淘汰名单算出来与自持实现不同
+    //（chars 是 articleCharsOf 的第二处调用点，两处分家时这条要翻红）。
+    // 判据：tests/overview-paging.test.mjs 的「逐方法同义性：listArticleCacheEntries…」。
+    from: 'chars: articleCharsOf(record.article),',
+    to: 'chars: 0,' },
+  { id: 'store-旧实现候选集放过保持未读', file: 'lib/store.js',
+    // 去掉「保持未读」的保护后，旧实现会把用户明确说「别动它」的条目交出去当清理候选 ——
+    // 与 SQL 谓词（第四项 kept_unread = 0）不再同义，最终删除集也就跟着变宽。
+    // 判据：tests/overview-paging.test.mjs 的「逐方法同义性：listCleanupCandidates…」。
+    from: 'rows.filter((row) => !row.kept),',
+    to: 'rows,' },
   { id: 'paging-续页不追加而是替换', file: 'lib/client.js',
     // 替换 ⇒ 翻到第二页时第一页整个消失（用户找不到刚读的那条）。
     // 判据：tests/nav-selection.test.mjs 的「续页是追加到列表尾部，不是替换」。

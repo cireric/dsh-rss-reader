@@ -27,6 +27,7 @@ import { createDispatch } from '../lib/endpoints.js'
 import { Config } from '../lib/config.js'
 import { createStore } from '../lib/store.js'
 import { decodeCursor, encodeCursor } from '../lib/shared.js'
+import { selectCleanup } from '../lib/retention.js'
 
 const FEED_ID = 'https://feed0.example.com/atom.xml'
 /** 一组条目共享的 recency：真实形状就是「同一轮抓取共享 fetchedAt」。 */
@@ -255,6 +256,165 @@ test('overview：游标认不出时响亮拒绝（bad-request），绝不静默�
     // 「没有游标」的表达是**缺席**（或 null），不是空串 —— 空串被上面那条挡住
     assert.equal((await dispatch('overview', {})).ok, true, '不带游标 = 第一页')
     assert.equal((await dispatch('overview', { cursor: null })).ok, true, 'null 与缺席同义')
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+/**
+ * ── 旧实现 ↔ 自持实现的**逐方法**同义性基线（2026-10-11 终检评审 G1）───────────────
+ *
+ * 病象：`createStore` 是「换实现之后旧行为还在不在」的对照物，但只有 `listRecent` 的游标谓词
+ * 有一条对照用例 —— `unreadPerFeed` / `listCleanupCandidates` / `listArticleCacheEntries`
+ * 各自只被钉在「与自己的桩一致」上。两份实现悄悄分家时没有任何断言会翻红，
+ * 而生产早已是 createSqliteStore：坏掉的那份没人用，也就没人发现。
+ *
+ * 为什么钉得住：夹具里放齐三类行（受保护 / 可清理 / 带正文），两边的**同一份输入**各跑一遍，
+ * 逐字段 deepEqual。判据是「结果」而不是「写法」——所以它同时挡住 SQLite 侧与旧侧的任何漂移。
+ */
+const FEED_EMPTY = 'https://empty.example.com/atom.xml'
+
+/** 两套实现共用的输入。recency 两边都取 publishedAt ?? fetchedAt（这里两者同值，简化对照）。 */
+const EQUIV_ROWS = [
+  { id: 'old-plain', recency: '2020-01-01T00:00:00.000Z', readAt: '2026-10-01T00:00:00.000Z', summary: 'x'.repeat(10) },
+  { id: 'old-starred', recency: '2020-01-01T00:00:00.000Z', readAt: '2026-10-01T00:00:00.000Z', starred: true, summary: 'y'.repeat(7) },
+  { id: 'old-kept', recency: '2020-01-01T00:00:00.000Z', readAt: '2026-10-01T00:00:00.000Z', keptUnread: true },
+  { id: 'old-with-body', recency: '2020-01-01T00:00:00.000Z', readAt: '2026-10-01T00:00:00.000Z',
+    article: { fetchedAt: '2020-02-02T00:00:00.000Z', blocks: [{ kind: 'p', text: '正文' }, { kind: 'list', items: ['ab', 'c'] }] } },
+  { id: 'new-read', recency: '2026-10-11T00:00:00.000Z', readAt: '2026-10-11T00:00:00.000Z' },
+  { id: 'unread-1', recency: '2026-10-11T09:00:00.000Z' },
+  { id: 'unread-2', recency: '2026-10-11T08:00:00.000Z', article: { fetchedAt: '2026-10-11T08:30:00.000Z', blocks: [{ kind: 'p', text: '一二三' }] } },
+  { id: 'orphan-1', feedId: 'https://gone.example.com/atom.xml', recency: '2026-10-11T07:00:00.000Z' },
+]
+
+/** 旧实现（createStore）的完整夹具：把每条记录按 ItemRecord 的形状放进域表。 */
+function legacyStoreWithRecords(rows, feedIds) {
+  const items = new Map(rows.map((row) => [row.id, {
+    feedId: row.feedId ?? FEED_ID, title: '标题 ' + row.id, link: 'https://site.example/post/' + row.id,
+    publishedAt: row.recency, fetchedAt: row.recency, starred: row.starred === true,
+    ...(row.readAt === undefined ? {} : { readAt: row.readAt }),
+    ...(row.keptUnread === undefined ? {} : { keptUnread: row.keptUnread }),
+    ...(row.summary === undefined ? {} : { summary: row.summary }),
+    ...(row.article === undefined ? {} : { article: row.article }),
+  }]))
+  const feeds = new Map(feedIds.map((id) => [id, { url: id, title: id }]))
+  const tables = { feeds, items, cursors: new Map() }
+  const handle = (name) => ({
+    get: (key) => tables[name].get(key),
+    entries: () => [...tables[name].entries()][Symbol.iterator](),
+    keys: () => [...tables[name].keys()][Symbol.iterator](),
+    get size() { return tables[name].size },
+    put: async (key, value) => { tables[name].set(key, value) },
+    delete: async (key) => { tables[name].delete(key) },
+    update: async (key, fn) => { const next = fn(tables[name].get(key)); tables[name].set(key, next); return next },
+  })
+  return createStore({ name: 'rss_reader', table: handle, global: { get: () => undefined, set: async () => {} } })
+}
+
+/** 自持实现的同一份夹具：直灌 items + texts（单事务，量的是读路径）。 */
+function sqliteStoreWithRecords(rows, feedIds) {
+  const dir = mkdtempSync(join(tmpdir(), 'rss-equiv-'))
+  const db = openDatabase(':memory:')
+  migrateSchema(db)
+  const store = createSqliteStore(db, join(dir, 'config.json'))
+  const insertItem = db.prepare(
+    'INSERT INTO items (id, feed_id, title, link, published_at, fetched_at, summary, read_at, starred, kept_unread)'
+    + ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+  )
+  const insertText = db.prepare(
+    'INSERT INTO texts (item_id, body, revision, frameable, title, fetched_at) VALUES (?, ?, ?, ?, ?, ?)',
+  )
+  db.exec('BEGIN')
+  for (const row of rows) {
+    insertItem.run(row.id, row.feedId ?? FEED_ID, '标题 ' + row.id,
+      'https://site.example/post/' + row.id, row.recency, row.recency,
+      row.summary ?? null, row.readAt ?? null, row.starred === true ? 1 : 0, row.keptUnread === true ? 1 : 0)
+    if (row.article !== undefined) {
+      insertText.run(row.id, JSON.stringify(row.article.blocks),
+        row.article.revision ?? null, null, row.article.title ?? null, row.article.fetchedAt)
+    }
+  }
+  db.exec('COMMIT')
+  const feeds = {}
+  for (const id of feedIds) feeds[id] = { url: id, title: id }
+  writeConfigFile(join(dir, 'config.json'), { version: 1, feeds })
+  return { store, db, dir }
+}
+
+/** 只取两边共有的字段做对照，顺带按 id 排序 —— 顺序不是这条判据要钉的东西。 */
+const candidatesOf = (rows) => rows
+  .map(({ id, starred, kept, read, recency, articleChars, summaryChars }) =>
+    ({ id, starred, kept, read, recency, articleChars, summaryChars }))
+  .sort((a, b) => a.id.localeCompare(b.id))
+
+test('逐方法同义性：listCleanupCandidates 的候选行与旧实现逐字段相等（两边都比判据之家更窄）', () => {
+  const cutoff = '2026-01-01T00:00:00.000Z'
+  const feedIds = [FEED_ID, FEED_EMPTY]
+  const legacy = legacyStoreWithRecords(EQUIV_ROWS, feedIds)
+  const { store, db, dir } = sqliteStoreWithRecords(EQUIV_ROWS, feedIds)
+  try {
+    const legacyRows = legacy.listCleanupCandidates(cutoff)
+    const sqliteRows = store.listCleanupCandidates(cutoff)
+
+    // ① 候选集两边**逐字段**相等 —— 且「保持未读」那条两边都被排除。
+    //    （写这条时我原以为旧实现会把 kept 那条交出来 —— 实测它同样先按 !kept 过滤再跑判据，
+    //      两边的口径本来就一致；断言在这里当场把那个错判暴露了，这正是逐方法对照的用处。）
+    assert.deepEqual(candidatesOf(sqliteRows), candidatesOf(legacyRows),
+      '候选行（含 articleChars / summaryChars）必须与旧实现逐字段相等 —— 两份实现分家时这条要翻红')
+
+    // ② 三类受保护的行两边都不进候选：星标、未读、与「保持未读」
+    for (const id of ['old-starred', 'old-kept', 'new-read', 'unread-1']) {
+      assert.equal(sqliteRows.some((row) => row.id === id), false, id + ' 不得进候选')
+    }
+
+    // ③ 与「判据之家」的原始集合对照：selectCleanup 单算会把「保持未读」也算进去 ——
+    //    所以两份实现都必须比它更窄（SQL 谓词的第四项 / 旧实现的 filter(!kept)）。
+    //    这条钉的是「更窄」这件事本身，而不是某一份实现的写法。
+    const raw = { id: 'old-kept', starred: false, kept: true, read: true, recency: '2020-01-01T00:00:00.000Z' }
+    assert.deepEqual(selectCleanup([raw], cutoff), ['old-kept'],
+      '判据之家单独算会认为它可以清 —— 两份实现的候选集都必须比它更窄（多守「保持未读」）')
+
+    // ④ **最终删除集**才是 cleanup 的实际效果：候选 ∩ selectCleanup —— 两边必须逐字相等
+    const doomed = (rows) => selectCleanup(rows, cutoff).sort()
+    assert.deepEqual(doomed(sqliteRows), doomed(legacyRows),
+      '两边算出的最终删除集必须逐字相等（星标 / 保持未读都不许被动）')
+    assert.deepEqual(doomed(sqliteRows), ['old-plain', 'old-with-body'], '实际该删的就是这两条')
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('逐方法同义性：unreadPerFeed 与旧实现逐键相等（0 未读的源两边都留 0 值键）', () => {
+  const feedIds = [FEED_ID, FEED_EMPTY]
+  const legacy = legacyStoreWithRecords(EQUIV_ROWS, feedIds)
+  const { store, db, dir } = sqliteStoreWithRecords(EQUIV_ROWS, feedIds)
+  try {
+    const expected = legacy.unreadPerFeed(feedIds)
+    const actual = store.unreadPerFeed(feedIds)
+    assert.deepEqual(actual, expected, '每源账目必须与旧实现逐键相等（含键域）')
+    assert.deepEqual(actual, {
+      [FEED_ID]: 2,
+      [FEED_EMPTY]: 0,
+    }, '前置条件：未读 = unread-1 / unread-2；已退订源的残留条目不进账、空源留 0 值键')
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('逐方法同义性：listArticleCacheEntries 与旧实现逐条相等（只交出 { id, chars, fetchedAt }）', () => {
+  const feedIds = [FEED_ID, FEED_EMPTY]
+  const legacy = legacyStoreWithRecords(EQUIV_ROWS, feedIds)
+  const { store, db, dir } = sqliteStoreWithRecords(EQUIV_ROWS, feedIds)
+  try {
+    const expected = [...legacy.listArticleCacheEntries()].sort((a, b) => a.id.localeCompare(b.id))
+    const actual = [...store.listArticleCacheEntries()].sort((a, b) => a.id.localeCompare(b.id))
+    assert.deepEqual(actual, expected, '清算原料必须与旧实现逐条相等（chars 的口径最容易在两处分家）')
+    assert.deepEqual(actual, [
+      { id: 'old-with-body', chars: 5, fetchedAt: '2020-02-02T00:00:00.000Z' },
+      { id: 'unread-2', chars: 3, fetchedAt: '2026-10-11T08:30:00.000Z' },
+    ], '前置条件：只有带正文的条目进名单，chars 含 blocks 的 text 与 items')
   } finally {
     db.close()
     rmSync(dir, { recursive: true, force: true })
