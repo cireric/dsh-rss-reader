@@ -586,8 +586,11 @@ const MUTATIONS = [
   // 每条 from 均照**编译产物**的真实形状写（docs/pitfalls.md 一、1.4），
   // 并已独立实测 OCCURRENCES=1（在 /tmp 隔离副本里跑过一轮：11/11 全部被抓到）。
   { id: 'store-listItems 退回 JS 全表过滤', file: 'lib/store-sqlite.js',
-    // 这是**扫描族的结构性修复**（spec §3.1）：退回「读全表再在 JS 里过滤」后行为完全一样，
-    // 只有 SQL 的形状变了 —— 所以判据是 tests/store-sqlite.test.mjs 里录 prepared SQL 的那条。
+    // 这是**扫描族的结构性修复**（spec §3.1）：把源条件从 SQL 挪走之后，选中哪些行不再由 SQL 决定
+    // —— 所以判据是 tests/store-sqlite.test.mjs 里录 prepared SQL 的那条（行为层的「快」不可靠：
+    // 一个把全表读回来再过滤的实现同样「快」）。
+    // ⚠️ 本条 `to` 的字面实义：`SELECT_ALL_ITEMS.all().map(...)` —— **整表原样返回、连过滤都没有**
+    //（不是「读全表再在 JS 里按 feedId 过滤」；那种写法会多一个谓词，与下面的 `to` 不同）。
     from: 'listItems: (feedId) => sql(SELECT_ITEM_BY_FEED).all(feedId).map((row) => {',
     to: 'listItems: (feedId) => sql(SELECT_ALL_ITEMS).all().map((row) => {' },
   { id: 'store-排序退回 published_at', file: 'lib/store-sqlite.js',
