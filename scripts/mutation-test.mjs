@@ -930,6 +930,20 @@ const MUTATIONS = [
   // 教训的教训：写下「这是等价变异」之前必须按**执行路径**推一遍（哪个分支被走到、走到哪里），
   // 而不是只看表达式的值像不像。docs/pitfalls.md 二、2.7 记的「未应用比幸存更隐蔽」是同一族错误
   // 的另一种形态 —— 两者都源于对「这条变异到底改变了哪次执行」没有真的验证。
+  //
+  // ── teardown 的「abort → 等落定 → close」顺序（2026-10-13 真机缺陷修复）──────────────
+  // 病象（真机日志，两次）：两次成功装载之间夹着 装载失败：Error: database is not open。
+  // 根因：teardown 是「abort 之后同步 close」，而在途刷新（装载启动的那轮、或面板点的那轮）
+  // 仍在写库 —— refreshNow 早在进入时就用 ready() 把 store 抓走了。
+  // 承重点就是这个 wait：去掉它 ⇒ close 又跑到在途刷新前头。
+  // 判据：tests/teardown-race.test.mjs 两条（两条走不同的 signal 来源：启动那轮带 controller.signal，
+  // 面板那轮一个 signal 都没带 —— 后者正是旧代码完全挡不住的入口）。
+  // from 照**编译产物**的实际形状写（docs/pitfalls.md 一、1.4）：lib/index.js:403，独立实测 OCCURRENCES=1。
+  // ⚠️ `to` 里刻意**只用产物作用域内存在的东西**（Promise 是全局）：写成引用某个局外名字会退化成
+  // ReferenceError，那种红不算被抓住（docs/pitfalls.md 二、2.7b）。
+  { id: 'teardown-不等在途刷新就关库', file: 'lib/index.js',
+    from: 'await Promise.all([generation, inFlight]);',
+    to: 'await Promise.resolve();' },
 ]
 
 function runSuite() {

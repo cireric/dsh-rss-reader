@@ -141,6 +141,23 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
   let cancelled = false
   let lastRefreshCompletedAt: number | undefined
   let inFlight: Promise<void> | undefined
+  /**
+   * 这一代**装载链**本身的 promise（下面 effect 的异步体）。
+   *
+   * teardown 必须等它：装载链中间有几个 await（迁移 / 种子 / 身份修复），它们同样在写库 ——
+   * 只等 `refreshNow` 的 inFlight 挡不住「teardown 正好落在种子写入中途」。
+   */
+  let generation: Promise<void> | undefined
+  /**
+   * 这一代自己的中止信号，由下面的 effect 建好并登记在这里。
+   *
+   * **为什么要有它**（2026-10-13 真机缺陷）：teardown 调的是 controller.abort()，但面板点刷新那条
+   * 路径是 `refreshNow()` —— **一个 signal 都没带**，于是 abort 根本到不了在途的那一次抓取。
+   * teardown 若只 abort、不等它，句柄就会在它还在写的时候被关掉（病象就是日志里的
+   * `装载失败：Error: database is not open`）。让“没自带 signal 的调用”一并受这一代的信号约束，
+   * abort 才能真的中止**在途**的那一轮，而不是干等它自己超时。
+   */
+  let generationSignal: AbortSignal | undefined
 
   /**
    * **自己解析一次配置**，不假设宿主替我们做过。
@@ -179,6 +196,23 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
       }
     }
     return seeded
+  }
+
+  /**
+   * 交给 `refreshFeeds` 的中止信号 = 调用方自带的 **叠加** 这一代自己的信号。
+   *
+   * **为什么必须叠加**（2026-10-13 真机缺陷的一半）：teardown 只 abort 了 controller，
+   * 而面板点刷新那条路径是 `refreshNow()` —— 一个 signal 都没带，于是 abort 到不了在途的抓取，
+   * teardown 若不等它就会在它还在写的时候关掉句柄。叠加之后，「中止在途刷新」才真的做得到，
+   * teardown 的等待也因此是有界的（abort 一到，fetch 立刻以「已中止」收束）。
+   *
+   * 两个信号都缺席时返回 undefined：`fetchFeed` 对 undefined 的处理与原先逐字相同
+   *（它自己还有一层 AbortSignal.timeout，不走这条路也不会挂死）。
+   */
+  const refreshSignal = (own?: AbortSignal): AbortSignal | undefined => {
+    if (generationSignal === undefined) return own
+    if (own === undefined || own === generationSignal) return generationSignal
+    return AbortSignal.any([own, generationSignal])
   }
 
   /**
@@ -222,7 +256,7 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
         maxContentChars: config.maxContentChars,
         maxArticleCacheChars: config.maxArticleCacheChars,
         refreshConcurrency: config.refreshConcurrency,
-      }, options.signal)
+      }, refreshSignal(options.signal))
       log(summarize(outcomes))
     })()
     try {
@@ -304,7 +338,12 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
   // 自持存储与启动刷新：异步部分全在这个 effect 体内
   ctx.effect(() => {
     const controller = new AbortController()
-    void (async () => {
+    // 这一代的信号对**所有** `refreshNow` 生效（含不带 signal 的面板那条），理由见 refreshSignal。
+    // 它是 **apply 闭包里的局部量**：每次装载（每个 fiber）都有一份自己的，不跨代共享。
+    generationSignal = controller.signal
+    // 装载链本身也要能被 teardown 等：它中间有几个 await（迁移 / 种子 / 身份修复），
+    // 而它们同样在写库 —— 只等 refreshNow 的 inFlight 挡不住「teardown 正好落在种子写入中途」。
+    generation = (async () => {
       try {
         // 打开序列的顺序**不能换**（src/storage/db.ts 与 store-sqlite.ts 各有一个握手）：
         // 建目录 → 开库（跑 pragma + 版本闸）→ 建表盖章 → 迁移 → 建 store。
@@ -363,16 +402,48 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
     })()
     return async () => {
       cancelled = true
+      // ① 先中止：`abort` 让在途的抓取当场以「已中止」收束（refreshSignal 保证它到得了
+      //    每一轮，含不带 signal 的面板那条）。
       controller.abort()
+      // ② 再等在途刷新**落定**，③ 最后关句柄 —— 顺序不能换。
+      //
+      // **病象**（2026-10-13 真机日志，两次）：两次成功装载之间夹着
+      //   [..] 装载失败：Error: database is not open
+      // **根因**：teardown 曾经是「abort 之后同步 close」。abort 只对**真的带了这个 signal**
+      // 的调用有效，而面板点刷新那条 `refreshNow()` 一个 signal 都没带；refreshNow 早在进入时
+      // 就用 ready() 把 store 抓在手里（ready() 只挡得住**下一次**取 store），于是它继续在已关闭的
+      // 句柄上写，node:sqlite 抛 database is not open，外层 catch 记成「装载失败」。老代码
+      //（存储域）的 `await domain.close()` 恰好掩盖了这件事：它**等**了写链排空。
+      //
+      // **修法**：abort → 等这一代落定 → close。等待是**有界**的：
+      //   · refreshFeeds 的每个抓取都带 AbortSignal.timeout(timeoutMs)，abort 又叠了一层，
+      //     所以「卡住的 fetch」最多再等一个单源超时（实测：本地不响应的源在 abort 后立即收束）；
+      //   · 更一般地，数据库在**每一条**写语句里，句柄只能被**写完之后**的下一句摸到，
+      //     任何一条写语句一旦开始就必然结束（SQLite 不中断进行中的语句），所以「等落定」
+      //     不会因为「正在写的那个写语句卡住」而无界 —— 它每一刻都有尽头。
+      // **为什么必须等**（现有注释的那条要求仍然成立）：句柄要在本次 teardown 返回前真正释放，
+      // 否则资源由 ctx.effect 回收之后再有人摸它就越界了。等落定正是「close 之前没有别人在用它」。
+      //
+      // ⚠️ 这个 await **不许**让 teardown 抛出去：effect 的 teardown 抛错会把「资源已回收」这件事
+      // 变成宿主侧的一次失败。但不能吞（AGENTS.md 禁空 catch）：inFlight 真的以异常收尾时留痕。
+      // 它平时由调用方观察（启动路径是 generation 的 catch，RPC 路径是 dispatch 的 catch），
+      // 这里只是第二个观察者，所以重复一行日志是诚实的代价，好过让 teardown 炸掉。
+      try {
+        await Promise.all([generation, inFlight])
+      } catch (error) {
+        log('等待在途刷新结束时出错（句柄仍会被关闭，不影响本次 teardown 的回收）：' + String(error))
+      }
       if (database) {
-        // 同步 close：node:sqlite 的关闭是同步的，而「句柄已释放」必须在本次 teardown 返回前成立
-        // （资源由 ctx.effect 负责回收，返回后再去摸它就越界了）。失败要留痕，不许吞。
         try {
           database.close()
         } catch (error) {
           log('关闭订阅库失败：' + String(error))
         }
       }
+      // 这一代已经收摊：信号清掉，免得这一代的 effect 被复用/再次 teardown 时还看着一个已中止
+      // 的信号（那会让下一次抓取一出发就被 abort —— 表现为「插件重载后再也不刷新」）。
+      // 它本来就是 apply 闭包里的局部量（不跨代共享），所以这里可以无条件清。
+      generationSignal = undefined
     }
   }, 'dsh-rss-reader: sqlite storage + start refresh')
 }
