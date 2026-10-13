@@ -31,6 +31,8 @@ import { sanitizeViewPreferences, DEFAULT_VIEW_PREFERENCES } from '../lib/shared
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const BUNDLE = join(ROOT, 'lib', 'client.js')
+// 与 client-bundle.test.mjs 的 BUNDLE_NAME 同一条理由（变异门槛的「崩了」分类器靠帧里的文件名）
+const BUNDLE_NAME = 'client.js'
 
 /** 等一轮宏任务：客户端写盘是 fire-and-forget 的异步链，断言前必须先让它落定。 */
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
@@ -339,7 +341,7 @@ function loadExports({ items, prefs, failSave = false, writeDelayMs = [] }) {
     console, HTMLElement: HTMLElementStub, setTimeout, clearTimeout, Date, JSON,
   }
   vm.createContext(sandbox)
-  vm.runInContext(source, sandbox)
+  vm.runInContext(source, sandbox, { filename: BUNDLE_NAME })
   assert.ok(captured !== null, 'client bundle 没有调用 window.__ModuleLoader__.load')
   sandbox.fetch = async (_url, init) => {
     const body = JSON.parse(init.body)

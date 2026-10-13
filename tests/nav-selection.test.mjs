@@ -17,6 +17,8 @@ import vm from 'node:vm'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const BUNDLE = join(ROOT, 'lib', 'client.js')
+// 与 client-bundle.test.mjs 的 BUNDLE_NAME 同一条理由（变异门槛的「崩了」分类器靠帧里的文件名）
+const BUNDLE_NAME = 'client.js'
 
 /** 一条最小可用的条目。默认 feedA，两个源的场景各自覆盖 feedId。 */
 function item(id, overrides = {}) {
@@ -73,7 +75,7 @@ function loadExports(overview) {
     JSON,
   }
   vm.createContext(sandbox)
-  vm.runInContext(source, sandbox)
+  vm.runInContext(source, sandbox, { filename: BUNDLE_NAME })
   assert.ok(captured !== null, 'client bundle 没有调用 window.__ModuleLoader__.load')
   // pages：overview 被调用时按 payload.cursor 分派。默认只有第一页（不带 cursor 时回 overview 本身），
   // 带 cursor 的请求一律按 pages[cursor] 取 —— 分页的断言必须能看见「客户端回带了哪个游标」。

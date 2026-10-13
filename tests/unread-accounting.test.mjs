@@ -25,6 +25,8 @@ import { Config } from '../lib/config.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const BUNDLE = join(ROOT, 'lib', 'client.js')
+// 与 client-bundle.test.mjs 的 BUNDLE_NAME 同一条理由（变异门槛的「崩了」分类器靠帧里的文件名）
+const BUNDLE_NAME = 'client.js'
 
 /* ------------------------------------------------------------------ host 半 */
 
@@ -303,7 +305,7 @@ function loadStore(overview, hostTruth) {
     JSON,
   }
   vm.createContext(sandbox)
-  vm.runInContext(source, sandbox)
+  vm.runInContext(source, sandbox, { filename: BUNDLE_NAME })
   assert.ok(captured !== null, 'client bundle 没有调用 window.__ModuleLoader__.load')
 
   // 宿主侧的真账：可由调用方给一份比本地 items 更大的（截断场景）

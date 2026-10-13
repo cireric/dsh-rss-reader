@@ -302,8 +302,13 @@ const MUTATIONS = [
   // 角标数据源换回 items 派生 ⇒ items 按 maxItemsShown 截断，角标与顶栏总数对不上。
   // 判据由 tests/scroll-dom.test.mjs 的「隐藏未读计数时左栏角标也消失」看着。
   { id: 'client-左栏角标无视 showUnread', file: 'lib/client.js',
+    // ⚠️ `to` 必须**保留展开运算符**：2026-10-11 终检评审 B1 修好分类器后，这条被当场抓成
+    //   「崩了（SyntaxError）」—— 它原先写成不带 `...` 的对象字面量，而在对象字面量里少一个 `...`
+    //   会让那对花括号被解析成**块语句** ⇒ 产物**加载期**就语法错、整个 client 组一起红。
+    //   **那正是这个分类器要堵的假通过**：崩了被当成「抓到」，而没有任何断言真的看见「角标无视
+    //   showUnread」。补回 `...` 后红条数才代表这条变异的本义（实测 3 条翻红）。
     from: '...showUnread ? { "data-rss-nav-badge": String(unread) } : {},',
-    to: '{ "data-rss-nav-badge": String(unread) },' },
+    to: '...{ "data-rss-nav-badge": String(unread) },' },
   { id: 'client-左栏角标改用派生', file: 'lib/client.js',
     from: 'const unread = perFeedUnread[feed.id];',
     to: 'const unread = 0;' },
@@ -952,12 +957,41 @@ for (const m of MUTATIONS) {
   //   ② 只在**错误那一行**里找文件名 ⇒ 一条都找不到 —— node 的 TAP 输出把
   //      「ReferenceError: ...」放在一行、**栈帧放在下一行**（实测：行 37 是错误、38 行才是
   //      `at file:///…/lib/refresh.js:79:104`）。
-  //   ⇒ 判据是：**错误行往后 5 行内**出现被改过的那个文件名，才算「崩的是变异写入的代码」。
+  //   ⇒ 判据是「被改过的那个文件名出现在崩溃块里」，才算「崩的是变异写入的代码」。
+  //
+  // ⚠️ **三个形状上的坑，都是 2026-10-11 终检评审 B1 在隔离副本里实测出来的**（改任一条都要重跑）：
+  //
+  //   ① 匹配的是**文件基名**（`m.file.split('/').pop()`），栈帧里带产物名就够 —— 而 **vm 加载的
+  //      产物不给 `filename` 就永远匹配不上**：`lib/client.js` 由四个测试用 `vm.runInContext` 加载，
+  //      不给 `filename` 时帧上是 `evalmachine.<anonymous>` ⇒ client 那一族（50 条）永远进不了
+  //      分类器，那 50 行号称被守、其实没有被守。
+  //      `实测`：在 `lib/client.js` 末尾注入 `MUTANT_BOOM_UNDEFINED_NAME();`（一个 ReferenceError）——
+  //        · 撤掉 filename（= 修前）：帧 `at evalmachine.<anonymous>:3047:1`，`ℹ fail 91`，判 **crashed = false**；
+  //        · 补上 filename：帧 `at client.js:3047:1`，同样 `ℹ fail 91`，判 **crashed = true**。
+  //      ⇒ **修法在加载点**：四处都补了 `{ filename: BUNDLE_NAME }`（tests/client-bundle.test.mjs 的
+  //      `BUNDLE_NAME`，另三处同源）。**新增任何 vm 加载点都要照抄那一行。**
+  //
+  //   ② 错误名必须**带 TAP 缩进**（正则写 `^\s+(ReferenceError|SyntaxError):`，是 `\s+` 不是 `\s*`）。
+  //      两个会误判的形状都是**列 0**，各自实测：
+  //      · client 在正常路径上会**记录**（不是抛出）`[rss-reader] 读取视图记忆失败…ReferenceError:
+  //        fetch is not defined`（行首是日志前缀）；
+  //      · `client-守卫改回环境全局` 那条**合法**变异，让按键处理器在 jsdom 的事件派发里抛
+  //        ReferenceError —— jsdom 把它原样重播到列 0，而**断言仍然抓到了它**（scroll-dom.test.mjs:408
+  //        的 `false !== true`）。那条变异只是恰好抛了个怪东西，`to` 本身没写错，不算「崩了」。
+  //      真正的加载期崩溃一律由 TAP 缩进两格（实测：host / client 的 ReferenceError、vm 的
+  //      SyntaxError，以及四条探针用例）。
+  //
+  //   ③ 窗口**向两边各取 6 行**。两种崩溃的行文形状不同（都实测过）：
+  //      · ReferenceError：错误行**后面**的栈帧里印文件名（`at client.js:3047:1`）；
+  //      · vm 编译期的 SyntaxError：**没有栈帧**，文件名印在错误行**前面**的源码回显里
+  //        （`  client.js:3047` / `  const = ;` / `        ^` / 空行 / `  SyntaxError: …`）。
+  //      只往后看会漏掉 SyntaxError，只往前看会漏掉 ReferenceError。
   const mutatedFile = m.file.split('/').pop()
   const outLines = res.out.split('\n')
-  const errorAt = outLines.findIndex((line) => /\b(ReferenceError|SyntaxError)\b/.test(line))
+  // ⚠️ `\s+`（不是 `\s*`）：见上面 ② 的两种列 0 形状。
+  const errorAt = outLines.findIndex((line) => /^\s+(ReferenceError|SyntaxError):/.test(line))
   const stackMentionsMutatedFile = errorAt >= 0 && outLines
-    .slice(errorAt, errorAt + 6)
+    .slice(Math.max(0, errorAt - 6), errorAt + 7)
     .some((line) => line.includes(mutatedFile))
   const crashed = errorAt >= 0 && stackMentionsMutatedFile
     ? outLines[errorAt].match(/\b(ReferenceError|SyntaxError)\b/)

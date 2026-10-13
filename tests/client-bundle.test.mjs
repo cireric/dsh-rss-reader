@@ -15,6 +15,14 @@ import vm from 'node:vm'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const BUNDLE = join(ROOT, 'lib', 'client.js')
+/**
+ * 加载产物时给 vm 的文件名。**不是装饰**：变异门槛的「崩了」分类器靠在错误栈帧里找
+ * 被改过的文件名来分辨「断言失败」与「变异代码自己崩了」；不给 filename 时帧上只有
+ * `evalmachine.<anonymous>`，client 那一族（50 条变异）就永远进不了那个分类器
+ * （2026-10-11 终检评审 B1 实测：lib/client.js 顶层抛 ReferenceError 时门槛报「未判为崩溃」）。
+ * 新增任何加载 lib/client.js 的沙箱，都必须照抄这一行。
+ */
+const BUNDLE_NAME = 'client.js'
 
 function loadClientBundle() {
   const source = readFileSync(BUNDLE, 'utf8')
@@ -45,7 +53,7 @@ function loadClientBundle() {
     JSON,
   }
   vm.createContext(sandbox)
-  vm.runInContext(source, sandbox)
+  vm.runInContext(source, sandbox, { filename: BUNDLE_NAME })
   assert.ok(captured, 'client bundle 没有调用 window.__ModuleLoader__.load')
   for (const field of ['id', 'factory']) assert.ok(captured[field], 'bundle entry 缺 ' + field)
   // 元素桩保留 type/props，测试才能检查 onClick 真正接了什么
