@@ -393,12 +393,20 @@ JSON 后端每次写整份原子重写。在 200 源 × 500 条（10 万条目�
 方案见 `docs/superpowers/specs/2026-10-11-large-scale-storage.md` 的 §4 与 §10，
 实施步骤见 `docs/superpowers/plans/2026-10-11-large-scale-storage.md`。
 
-**✅ 状态：已落地（2026-10-11，任务 2–8 全部完成）。** 逐项兑现：
-`src/storage/db.ts` 持有 DDL、`src/store-sqlite.ts` 是新 store、`src/storage/migrate.ts`
-一次性读老域文件（**只读，原文件留存**）、`src/index.ts` 走
-`ensureStorageRoot → openDatabase → migrateSchema → migrateFromDomainFile → createSqliteStore`。
+**✅ 状态：已落地（2026-10-11，任务 2–8 全部完成；2026-10-13 起迁移**本身**也下线了）。** 逐项兑现：
+`src/storage/db.ts` 持有 DDL、`src/store-sqlite.ts` 是新 store、`src/index.ts` 走
+`ensureStorageRoot → openDatabase → migrateSchema → assertSubscriptionsNotLost → createSqliteStore`。
 收尾（Task 8）摘掉了 `inject` 里的 `storageDomain` 声明，并删掉 `openDomainWithRetry`
 与孤儿句柄接管、开域后的全表 `normalizeLegacyArticles`。
+
+**🗑️ 迁移下线（2026-10-13，用户拍板）**：真机上那次迁移已跑完且成功（8 源 / 158 条 / 67 份正文），
+老文件 `storages/rss_reader.json` 与旧日志目录已（在备份验证后）删除 ⇒ `src/storage/migrate.ts`
+连同 `tests/migrate.test.mjs`、6 条 `migrate-*` 变异一并删除，装载路径不再读任何存储域文件。
+**它的核心判定没有消失，只是搬了家**：迁移的闸门二（「库里有条目、配置那份却没写成 ⇒ 订阅丢了」）
+搬进 `src/index.ts` 的 `assertSubscriptionsNotLost`（那里的注释写了为什么必须响亮失败），
+由 `tests/storage-skeleton.test.mjs` 与一条 `storage-订阅丢了却不报错` 变异守着。
+**一条通用教训（本次没踩到，但是这条迁移留下的）**：删掉一个判定时，必须**同时**删掉它的变异条目
+—— `from` 已不存在的条目会被门槛计成「未应用」→算作幸存者（§2.7），删漏一条就整轮门槛红。
 **存活的存储域对象只剩 `src/store.ts` 的 `createStore` 与 `src/domain.ts` 的 `readerDomain`**，
 它们只被测试当「旧实现 ↔ 新实现」的同义性基线用，不在装载路径上（见 §4.7 / §4.8）。
 

@@ -17,9 +17,59 @@ import { DatabaseSync } from 'node:sqlite'
 import { storageRoot, ensureStorageRoot } from '../lib/storage/paths.js'
 import { openDatabase, migrateSchema, SCHEMA_VERSION } from '../lib/storage/db.js'
 import { readConfigFile, writeConfigFile } from '../lib/storage/config-file.js'
+import { apply } from '../lib/index.js'
 
 /** 每个用例一个独立临时目录；调用方负责在 finally 里删掉它。 */
 const tempDir = (tag) => mkdtempSync(join(tmpdir(), 'rss-skeleton-' + tag + '-'))
+
+/**
+ * 把 apply 装到一个假宿主上（形状照 tests/teardown-race.test.mjs 的 assemble，这里只要日志与
+ * teardown）。**刻意用真装配**：被判定的是「装载链在什么时候抛错」，桩掉装载链等于把待验证的
+ * 那一层换成我的理解（docs/pitfalls.md 二、2.6）。
+ */
+function assemble(home) {
+  const savedHome = process.env.DSH_HOME
+  const savedProfile = process.env.USERPROFILE
+  process.env.DSH_HOME = home
+  process.env.USERPROFILE = home
+  const lines = []
+  const disposers = []
+  const ctx = {
+    logger: { info: (line) => lines.push(line), warn: (line) => lines.push(line) },
+    effect: (callback) => {
+      const dispose = callback()
+      if (typeof dispose === 'function') disposers.push(dispose)
+      return dispose
+    },
+    webServer: { register: () => () => {} },
+    connection: { requestRejection: () => undefined },
+  }
+  apply(ctx, { feeds: [], refreshOnStart: false })
+  return {
+    lines,
+    teardown: async () => { for (const dispose of disposers) await dispose() },
+    restore: () => {
+      if (savedHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = savedHome
+      if (savedProfile === undefined) delete process.env.USERPROFILE
+      else process.env.USERPROFILE = savedProfile
+    },
+  }
+}
+
+/** 造一份「迁移跑完了、条目还在」的库：建库建表 + 直插一行条目（config.json 刻意不写）。 */
+function seedStoredItem(root, id) {
+  ensureStorageRoot(root)
+  const db = openDatabase(join(root, 'rss.db'))
+  try {
+    migrateSchema(db)
+    db.prepare(
+      'INSERT INTO items (id, feed_id, title, link, fetched_at, starred) VALUES (?, ?, ?, ?, ?, 0)',
+    ).run(id, 'https://a.example/feed.xml', '标题', 'https://a.example/1', '2026-10-13T00:00:00.000Z')
+  } finally {
+    db.close()
+  }
+}
 
 test('storageRoot 落在 <home>/storages/rss-reader，且三段优先级跟随 resolveDshHome', () => {
   const saved = process.env.DSH_HOME
@@ -354,3 +404,74 @@ test('readConfigFile 对从未写过的文件返回空订阅（首次安装，�
     rmSync(base, { recursive: true, force: true })
   }
 })
+
+/**
+ * 「订阅丢了」与「首次安装」是**两类事实**，装载路径必须分清 —— 这是已下线的一次性迁移当初
+ * 那条闸门二（migrate.ts 的 `if (existingItems > 0)`）搬过来的语义，判据对象换了、承诺没换：
+ * config.json 是订阅的唯一可备份副本，而库里还有条目 ⇒ 订阅那份已经丢了，必须响亮失败。
+ *
+ * ⚠️ 这三条走**真装配**（`apply` + 假宿主 + DSH_HOME 指到临时目录）：它要判的是「装载链会不会
+ * 抛错、有没有留痕」，把装载链换成桩就等于把待验证的那一层换成我的理解（docs/pitfalls.md 二、2.6）。
+ */
+test('config.json 缺失且库里有条目 ⇒ 装载必须响亮失败（订阅丢了不许静默变空面板）', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'rss-skeleton-lost-'))
+  const root = join(home, 'storages', 'rss-reader')
+  let host
+  try {
+    // ⚠️ 库必须在 **apply 之前** 就位：这条守卫是同步的（它在 apply 里跑，正是为了不让
+    // 「这一代已经装好」和「守卫抛错」之间有缝），所以先装配再播种等于造假绿。
+    seedStoredItem(root, 'i-1') // 有数据、没有 config.json
+    host = assemble(home)
+    const failure = host.lines.find((line) => line.includes('装载失败'))
+    assert.ok(failure, '必须留痕「装载失败」，实际日志：\n' + host.lines.join('\n'))
+    // 路径与条目数都要在消息里：缺了路径，用户不知道去恢复哪份文件
+    assert.ok(failure.includes('1 条条目'), '消息必须报出库里的条目数，实际：' + failure)
+    assert.ok(failure.includes(join(root, 'config.json')), '消息必须带 config.json 的路径，实际：' + failure)
+  } finally {
+    if (host) await host.teardown()
+    if (host) host.restore()
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('库里没有条目、config.json 也不在 ⇒ 首次安装，不许报「订阅丢了」', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'rss-skeleton-fresh-'))
+  let host
+  try {
+    // 与上一条的唯一差别就是库是空的。守卫若只看「文件不在」，这一条会跟着红 —— 而那会把
+    // 每一个新装用户都拦在门外（正是「认不出就响亮失败」要求排除掉的那类误伤）。
+    host = assemble(home)
+    assert.equal(
+      host.lines.some((line) => line.includes('装载失败')),
+      false,
+      '新装不许被当成订阅丢了，实际日志：\n' + host.lines.join('\n'),
+    )
+  } finally {
+    if (host) await host.teardown()
+    if (host) host.restore()
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('config.json 在而库里没条目 ⇒ 照常装载（守卫不许把正常空订阅也拒了）', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'rss-skeleton-empty-config-'))
+  const root = join(home, 'storages', 'rss-reader')
+  let host
+  try {
+    ensureStorageRoot(root)
+    // 0 个订阅是**合法状态**（用户退订光了）。守卫只守「那一份文件读不回来 / 已经不在」，
+    // 不拿「必须有源」当损坏 —— 那条判据属于用户，不属于我们。
+    writeConfigFile(join(root, 'config.json'), { version: 1, feeds: {} })
+    host = assemble(home)
+    assert.equal(
+      host.lines.some((line) => line.includes('装载失败')),
+      false,
+      '空的 config.json 是合法输入，实际日志：\n' + host.lines.join('\n'),
+    )
+  } finally {
+    if (host) await host.teardown()
+    if (host) host.restore()
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+

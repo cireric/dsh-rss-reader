@@ -7,6 +7,9 @@
  * 搬进插件自己的存储根之后，日志与 config.json / rss.db 同住，按天分文件让「保留多少天」
  * 变成一个能真的执行的策略。
  *
+ * ⚠️ **上面那个旧路径是历史，不是活着的落点**：本文件只写 `reader-YYYY-MM-DD.log`，
+ * 没有任何代码再写或读 `state/dsh-rss-reader/`。别照着它去找今天的日志。
+ *
  * ⚠️ **prune 的杀伤面必须窄到只认 `reader-YYYY-MM-DD.log`**：同一个目录里躺着用户订阅的
  * 唯一副本 config.json 和装着已读态/星标的 rss.db（含 -wal / -shm 边车）。一次前缀匹配
  * （`startsWith('reader-')`）或随手一个 `reader-*` glob，某天就会开始删用户数据 ——

@@ -8,11 +8,13 @@
  *
  * 为什么这些 zod schema 仍然留着（它们是下游真在用的东西）：
  *   - `feedRecordSchema` / `itemRecordSchema` / `cursorRecordSchema` 仍被
- *     src/storage/config-file.ts（写前校验订阅）、src/storage/migrate.ts（读老域文件）、
- *     src/store-sqlite.ts（行记录与 zod 记录的互转）import —— 库侧把行读成这些 zod 类型，
- *     保证「同一份形状」两处不漂。
- *   - `rebuildItem` / `normalizeLegacyArticle` 是纯函数，被 refresh / endpoints /
- *     identity-repair / migrate 直接调用。
+ *     src/storage/config-file.ts（写前校验订阅）与 src/store-sqlite.ts（行记录与 zod 记录的互转）
+ *     import —— 库侧把行读成这些 zod 类型，保证「同一份形状」两处不漂。
+ *     （原第三处消费者 src/storage/migrate.ts 已随一次性迁移下线删除。）
+ *   - `rebuildItem` 是纯函数，被 refresh / endpoints / identity-repair 直接调用；
+ *     `normalizeLegacyArticle` 的老调用方（迁移）没了，但它仍是**老正文形状的唯一转换口径**
+ *     —— store-sqlite 的 writeArticle 拒绝写入该形状时指的就是它，测试由
+ *     tests/domain.test.mjs 与 tests/store-sqlite.test.mjs 两处钉住（它是兼容读的一道保险）。
  *   - 下文的 `readerDomain`（`defineDomain`）目前**仅**由 src/store.ts 的 `createStore`
  *     使用，而 createStore 是**旧存储域适配器**，只为测试里的「旧实现 ↔ 自持实现」同义性
  *     断言保留（见 tests/overview-paging.test.mjs，也是 scripts/mutation-test.mjs 的判据）。
@@ -186,7 +188,9 @@ export type CursorRecord = z.infer<typeof cursorRecordSchema>
 /**
  * 域版本 2 = 正文缓存从「纯文本段落」改成「结构化块」（2026-10-07）。
  *
- * 关于「什么时候能删掉 legacy 的 paragraphs 字段」——2026-10-07 实测把两条路都堵死了：
+ * 关于「什么时候能删掉 legacy 的 paragraphs 字段」——2026-10-07 实测把两条路都堵死了
+ * （这一节连同下面的 `readerDomain` 现在都是**历史**：自持存储后装载路径一次也不打开存储域，
+ *  保留的原因见下面的注释）：
  *
  * ① **不能靠版本号**：spec 的 compatibleVersions 注释说的是「per-record backend 会读version 在列表里
  *    的文档」，而本域用的是默认的 **single** layout ⇒ 版本是**硬相等**检查。实测把 version 升到 2
@@ -195,9 +199,10 @@ export type CursorRecord = z.infer<typeof cursorRecordSchema>
  * ② **不能靠 onInvalidRecord: 'backup-and-skip'**：那是给「可丢弃的派生数据」的，而 items 表里混着
  *    用户的已读态与星标，skip 会把它们一起丢掉。
  *
- * 所以现状是：**schema 继续声明 paragraphs（只为兼容读）**，而打开域后由 normalizeLegacyArticle
- * 把老缓存就地规范化成 blocks —— 跑过一次之后数据里就不再有 paragraphs。要真正删掉字段，只剩
- * 「换 per-record layout」或「一次性数据迁移脚本」两条路，都得单独评估（不是这一版的事）。
+ * 所以现状是：**schema 继续声明 paragraphs（只为兼容读）**—— 它是老域文件年代的形状，
+ * 写成列也落不进 `texts`（那列存的是 blocks），写侧只会**响亮拒绝**（store-sqlite 的 writeArticle）。
+ * 转换口径 `normalizeLegacyArticle` 仍在，但**调用方已随迁移一起下线**：装载路径不再全表跑它。
+ * 要真正删掉这个字段，只剩「换 per-record layout」或「一次性数据迁移脚本」两条路，都得单独评估。
  */
 export const readerDomain = defineDomain({
   name: 'rss_reader',

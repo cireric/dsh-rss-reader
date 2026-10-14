@@ -387,12 +387,13 @@ test('saveItem 覆盖已有条目时正文不被级联删掉（ON CONFLICT DO UP
   }
 })
 
-test('拒绝写入老形态正文（只有 paragraphs）：不许静默把正文丢掉（Review Focus 1 的迁移约束）', async () => {
+test('拒绝写入老形态正文（只有 paragraphs）：不许静默把正文丢掉（兼容读的保险，不再有正常调用方）', async () => {
   const { store, db, dir } = freshStore('legacy-article')
   try {
     // 库里没有存 paragraphs 的列。若「没有 blocks 就当作没有正文」，这条写入会成功落地，
     // 而用户在详情页看到的是正文凭空消失 —— 没有任何断言会翻红的那类失败。
-    // 转换口径只有 domain.ts 的 normalizeLegacyArticle 一处（Task 4 的迁移必须先过它）。
+    // 转换口径只有 domain.ts 的 normalizeLegacyArticle 一处。搬老形状进来的那次迁移已下线
+    // （老域文件也从真机删了）⇒ 本用例守的是「写侧不许把老形状静默丢掉」这道保险本身。
     await store.saveItem('legacy', item('f1', {
       article: { fetchedAt: '2026-10-11T11:00:00.000Z', paragraphs: ['第一段', '第二段'] },
     })).then(
@@ -652,11 +653,11 @@ test('viewPreferences 读侧一定给可信形状：坏值逐字段回落，已�
   }
 })
 
-test('调用方自己开着事务时写入不崩、且不替调用方提交（Task 4 的迁移就是单事务批量写）', async () => {
+test('调用方自己开着事务时写入不崩、且不替调用方提交（当年 Task 4 的迁移就是单事务批量写）', async () => {
   const { store, db, dir } = freshStore('nested')
   try {
-    // 迁移会在一个事务里连续写几万条：store 若在这里再发一次 BEGIN，SQLite 会直接抛
-    // 「cannot start a transaction within a transaction」——一次正常的批量导入变成崩溃。
+    // 批量导入会在一个事务里连续写几万条：store 若在这里再发一次 BEGIN，SQLite 会直接抛
+    // 「cannot start a transaction within a transaction」——一次正常的批量写入变成崩溃。
     db.exec('BEGIN')
     await store.saveItem('n-1', item('f1'))
     await store.saveItem('n-2', item('f1'))

@@ -688,54 +688,33 @@ const MUTATIONS = [
     // 判据：tests/store-sqlite.test.mjs 的「item 把 texts 的正文按 blocks 还原」。
     from: 'article.title ?? null, article.fetchedAt);',
     to: 'article.title ?? null, null);' },
-  // ── 一次性迁移（2026-10-11 大规模存储任务 4，cutover）────────────────────────────
-  // 迁移是**单向门**：跑完之后插件只认自持存储，而老文件是用户订阅在 config.json 之外的
-  // 唯一副本。这五条的失效大半**安静** —— 最坏的一条（认不出就当没有）会让用户看到
-  // 「订阅全没了」而套件全绿，所以它们必须各自有人看着。
-  // 每条 from 均照**编译产物** lib/storage/migrate.js 的真实形状逐字抄，
-  // 并已独立核对 OCCURRENCES=1（docs/pitfalls.md 一、1.4）。
-  { id: 'migrate-已迁移仍重放老文件', file: 'lib/storage/migrate.js',
-    // 闸门一失效 ⇒ config.json 已经在了还去拿老文件覆盖一遍。判据不是「重复行」（id 是主键，
-    // upsert 看不出重复），而是 tests/migrate.test.mjs 的「config.json 写不进去时…」那条：
-    // 库里那 3 行、订阅映射都会被一份旧的老文件回退。
-    from: '    if (configAlreadyMigrated(configPath)) {',
-    to: '    if (false) {' },
-  { id: 'migrate-中断后重放条目', file: 'lib/storage/migrate.js',
-    // 闸门二失效 ⇒ 「库提交了、config.json 没写成」的中断被当成首次迁移，整份老文件重放一遍：
-    // 用户在这之后退订的源、清理掉的条目全部复活，且**没有任何断言会翻红**（除非有这个用例）。
-    // 判据：tests/migrate.test.mjs 的「中断后重入：…只补配置，不重放条目」。
-    from: '    if (existingItems > 0) {',
-    to: '    if (false) {' },
-  { id: 'migrate-读不出来当成首次安装', file: 'lib/storage/migrate.js',
-    // Review Focus 1 的**缺陷本体**：只认「文件不存在」是首装，其余读失败（EISDIR / EACCES /
-    // 越过 512 MiB 字符串墙 / 损坏）一律响亮抛错。放开之后，一次读取失败会静静建出一个空库 ——
-    // 那在用户眼里就是「我的订阅全没了」。
-    // 判据：tests/migrate.test.mjs 的「域文件读不出来（路径是目录）⇒ 抛错」与「域文件损坏」两条。
-    from: '        if (errnoOf(error) === \'ENOENT\')\n            return undefined;',
-    to: '        return undefined;' },
-  { id: 'migrate-老正文形态不折成 blocks', file: 'lib/storage/migrate.js',
-    // 库里没有存 paragraphs 的列。少了这一步，第一条老形态记录会让 store 当场拒绝整份迁移
-    // （响亮，可接受）；真正危险的是有人反过来「修」成「当没有正文」—— 那用户在详情页看到的
-    // 就是正文凭空消失。这里钉的是「必须过 normalizeLegacyArticle」这个位置本身。
-    // 判据：tests/migrate.test.mjs 的「从域文件导入…」那条（含 i-3 老形态夹具）。
-    from: 'normalizeLegacyArticle(record),',
-    to: 'record,' },
-  { id: 'migrate-不校验域名', file: 'lib/storage/migrate.js',
-    // 别人的域文件形状完全不同（session_projcache / workspace …）。不校验就按本插件的形状
-    // 解释它，等于把无关字段搬进用户的订阅库，且**没有任何断言会翻红**（除非有这个用例）。
-    // 判据：tests/migrate.test.mjs 的「域文件不是本插件的（unit.name 不匹配）⇒ 抛错」。
-    from: '    if (unit.name !== DOMAIN_NAME) {',
-    to: '    if (false) {' },
-  { id: `migrate-读不出来的 config 冒充已迁移`, file: `lib/storage/migrate.js`,
-    // 收窄前的旧口径：路径上有东西就算「已迁移」。EACCES / EISDIR / ELOOP / EIO 于是全部
-    // 冒充成「迁移过了」，一份**尚未迁移**的库被静默跳过，而消息说「config.json 已存在」——
-    // 把人引向错误的排查方向。与 readLegacy 的口径必须一致：只有 ENOENT 算「没有」。
-    // 判据：tests/migrate.test.mjs 的「config.json 路径存在但读不出来（EISDIR）⇒ 抛错」。
-    from: [
-      "        throw new Error('读取订阅文件 ' + path + ' 失败（它既不可读、也不表示「尚未迁移」，无法判断是否已迁移；' +",
-      "            '已保留原文件，未做任何写入）：' + String(error), { cause: error });",
-    ].join(String.fromCharCode(10)),
-    to: '        return true;' },
+  // ── 订阅完整性闸（2026-10-11 大规模存储任务 4 的迁移下线后搬过来）──────────────
+  // 这 6 条（原 `migrate-*`）随 src/storage/migrate.ts 一起删掉了：那条一次性迁移已经完成、
+  // 老文件也已从真机删除，路由不再读它 ⇒ 它们的 `from` 在产物里不再存在，留着会被计成
+  // 「未应用」而**记成幸存者**（docs/pitfalls.md 二、2.7）。判定本身没有消失，只是搬了家：
+  //
+  //   · 「认不出就响亮失败，绝不回落成空库」——现在由 assertSubscriptionsNotLost 承担：
+  //     config.json 读不出来 ⇒ readConfigFile 带路径抛错；它不在而库里有条目 ⇒ 那次调用抛错。
+  //   · 「库里有条目、但订阅文件没了」= 迁移闸门二的原语义，同一条调用（见下）。
+  //   · 「老正文形态必须先折成 blocks」——老的那个调用方没了，但转换口径与拒写守卫都还在：
+  //     domain.ts 的 normalizeLegacyArticle 由 tests/domain.test.mjs 钉，store-sqlite 的
+  //     拒写由 tests/store-sqlite.test.mjs 的「拒绝写入老形态正文」钉（本节末尾那条变异守的就是它）。
+  //   · 「不校验域名 / 读不出来当成首次安装」——判据的对象（老域文件的读取）已经不存在。
+  //
+  // ⚠️ from 照**编译产物**的实际形状写（docs/pitfalls.md 一、1.4）。
+  { id: 'storage-订阅丢了却不报错', file: 'lib/index.js',
+    // 把「订阅文件不在（且库里有条目）就抛错」改成「永远放行」⇒ 一次读取失败被静默当成
+    // 首次安装，插件带着「有数据、没订阅」的库继续跑，用户看到订阅列表空白而日志里没有一行错。
+    // 这正是迁移闸门二当初存在的原因，所以它必须仍然有人看着。
+    // 判据：tests/storage-skeleton.test.mjs 的「config.json 缺失且库里有条目 ⇒ 装载必须响亮失败」。
+    // ⚠️ 改法只动**值比较**那一半，不碰 configFileMissing：否则同一处里两个判定会被一起
+    //    拆掉，翻红就分不清是哪一半在守（等价于把两条判据压成一条）。
+    // ⚠️ `stored >= 0` 对任何非负数字恒真（0 与正数都早返回）—— 不是等价变异：条目非空时
+    //    守卫的结论与后续行为都变（实测该用例翻红）。
+    // ⚠️ from 必须写成**编译产物的两行形状**：tsc 会把 `if (stored === 0) return` 拆行，
+    //    单行写法匹配不上 ⇒ 报「未应用」并被计成幸存者（docs/pitfalls.md 一、1.4 与二、2.7）。
+    from: 'if (stored === 0)\n            return;',
+    to: 'if (stored >= 0)\n            return;' },
   // ── 未读记账与列表取数改 SQL（2026-10-11 大规模存储任务 5）────────────────────────
   // 这一族的失效大半**安静**：账目少算一个源、0 未读的源丢键、清理多删了用户说「别动它」的条目
   // —— 界面上分别是「角标空白」「星标/保持未读的条目凭空消失」，都不报错。

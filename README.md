@@ -39,7 +39,7 @@ npm run mutation         # 变异门槛：每条都必须被抓到
 
 | 目录 | 内容 |
 |---|---|
-| `src/` | host 半：抓取 / 解析 / 自持存储（SQLite + 迁移）/ 抽取 / HTTP 端点（tsc → `lib/`） |
+| `src/` | host 半：抓取 / 解析 / 自持存储（SQLite）/ 抽取 / HTTP 端点（tsc → `lib/`） |
 | `src/client/` | 浏览器半：React 组件 + 状态 store（tsdown → 单文件 `lib/client.js`） |
 | `docs/pitfalls.md` | **踩坑与开发经验**：工程流程 / 测试夹具 / React / 宿主平台 / 数据解析 / 产品决定 |
 | `docs/google-reader-feature-spec.md` | 功能基准：§5「不变量」是复刻时最容易踩错的地方 |
@@ -53,8 +53,9 @@ npm run mutation         # 变异门槛：每条都必须被抓到
 | `config.json` | 订阅源与视图偏好 |
 | `reader-YYYY-MM-DD.log` | 刷新日志（按天分文件，保留 14 天；UTC 日期） |
 
-老存储域文件 `$DSH_HOME/storages/rss_reader.json` **只读不写**：装载时一次性迁移进 `rss.db`
-与 `config.json`，原文件原样留存。日志路径曾在 `state/dsh-rss-reader/reader.log`，
+订阅的唯一真相是 `config.json`：它不在（而库里还有条目）时装载**响亮失败**，不会静默给出空面板。
+存储域年代的老文件 `$DSH_HOME/storages/rss_reader.json` 与那次一次性迁移**都已下线**（迁移已跑完、
+老文件已删），代码里没有任何路径再读它。日志路径曾在 `state/dsh-rss-reader/reader.log`，
 自持后不再写那个文件。
 
 ## 配置

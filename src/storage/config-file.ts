@@ -13,7 +13,7 @@
  * 表现是「迁移后第一轮全量重抓 + 摘要回填空转」，而不会有任何断言翻红（spec 的定稿加固）。
  * 每个记录都过 `feedRecordSchema`（`strict`）就是为了让这个「逐字段同形」由机器来保证。
  */
-import { closeSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { closeSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { feedRecordSchema, type FeedRecord } from '../domain.js'
@@ -29,6 +29,32 @@ export interface ReaderConfigFile {
 }
 
 const CURRENT_CONFIG_VERSION = 1
+
+/**
+ * 订阅文件是不是**不存在**（只有 ENOENT 算「不在」）。
+ *
+ * **为什么单独问一次、而不复用 {@link readConfigFile} 的返回值**：那条对 ENOENT 返回「空订阅」
+ * （首次安装的既定语义），于是调用方再也分不出「首次安装」与「文件半路没了」—— 而这恰是装载
+ * 路径必须分清的两类事实（见 src/index.ts 的 assertSubscriptionsNotLost：库里还有条目就必须
+ * 响亮失败）。让它改返回一个带标记的对象会牵动 store-sqlite 的三处调用，为这一问不值。
+ *
+ * **口径必须与 {@link readConfigFile} 逐字相同**：只有 ENOENT 算「不在」，其余 errno 一律抛错 ——
+ * 把「读不出来」当成「不在」等于让一次故障冒充首次安装（EACCES / ELOOP / EIO 会走进同一个分支）。
+ *
+ * @throws 路径存在但 stat 不了时，消息含路径。
+ */
+export function configFileMissing(path: string): boolean {
+  try {
+    statSync(path)
+    return false
+  } catch (error) {
+    if (isErrno(error, 'ENOENT')) return true
+    throw new Error(
+      `无法判断订阅文件 ${path} 是否存在（它既不是「没有」、也不是「在」，未做任何写入）：${String(error)}`,
+      { cause: error },
+    )
+  }
+}
 
 /**
  * 读订阅文件。

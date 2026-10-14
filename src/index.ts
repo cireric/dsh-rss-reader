@@ -22,7 +22,7 @@ import { type ReaderStore } from './store.js'
 import { storageRoot, ensureStorageRoot } from './storage/paths.js'
 import { dailyLogPath, pruneOldLogs } from './storage/log-file.js'
 import { openDatabase, migrateSchema } from './storage/db.js'
-import { migrateFromDomainFile } from './storage/migrate.js'
+import { configFileMissing, readConfigFile } from './storage/config-file.js'
 import { createSqliteStore } from './store-sqlite.js'
 import { normalizeFeedUrl, refreshFeeds, selectStalestFeeds, type FeedOutcome } from './refresh.js'
 import { repairIdentities } from './identity-repair.js'
@@ -95,10 +95,6 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
   // ⚠️ 默认落点**推迟到每次写日志时**才算（见下面的 log 函数）：DSH 是长驻进程，一跑就是几天，
   // 装载时算一次会把之后所有日志都写进「装载那天」的文件里 —— 按天分文件在常见路径上当场落空。
   const logFile = config.logFile
-  // 老域文件的落点：存储域的 base bundle 把 root 设为 <DSH_HOME>/storages，域名 rss_reader
-  // ⇒ <storages>/rss_reader.json。从 storageRoot 的父目录推，不另手抄一份 storages 路径 ——
-  // 拼错的后果是「读不到老文件 ⇒ 静默走首装」，那在用户眼里就是订阅全没了（Review Focus 1）。
-  const legacyDomainFile = join(dirname(storagesRoot), 'rss_reader.json')
   // 订阅映射与视图偏好的落点（Task 2 的 config.json）：宿主半只在装配处用它，其余读写全在 store 里
   const configFile = join(storagesRoot, 'config.json')
 
@@ -196,6 +192,45 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
       }
     }
     return seeded
+  }
+
+  /**
+   * 「订阅映射丢了，但条目还在」必须响亮失败 —— 这条判定本来住在已删除的一次性迁移里
+   * （migrate.ts 的闸门二），迁移下线时把它的语义搬到这里。
+   *
+   * **它在守什么**：config.json 是用户订阅的**唯一**可备份副本（条目与正文可再生，spec §9.2）。
+   * 库里还有条目、而那份文件却不在了 ⇒ 订阅那份已经丢了。此时 seedConfiguredFeeds 只会照
+   * Config.feeds 空转，插件会带着「有数据、没订阅」的库一路跑下去，用户看到的是订阅列表空空如也，
+   * 而**日志里一个错字都没有**（一次读不到的故障，最终表现成了「用户自己的订阅没了」）。
+   * 所以宁可让装载响亮失败，把处置权交回用户：从备份恢复 config.json。
+   *
+   * **与「首次安装」怎么区分**：items 为 0 时一路放过（新装用户本来就该从 Config.feeds 播种）；
+   * 只有「有数据却没了订阅」才是故障。真正判「文件在不在」的是 configFileMissing —— 只有
+   * ENOENT 算不在，其余 errno 带路径抛错（把 EACCES 当成「不在」会让故障冒充首次安装）。
+   *
+   * **两条判定合成一次调用**：文件在就先把整份读一遍（readConfigFile 的校验与拒绝逻辑原样复用），
+   * 于是形状不对 / 版本不认 / 记录不合 schema 这几类损坏在这里就炸掉，而且**下一次再读同一份
+   * 文件时判定与这一次逐字相同**（整个装载链上只有这一次「订阅是否可用」的判定，不会两处漂开）。
+   *
+   * ⚠️ **`feeds:{}` 不在本条守的范围内**：0 个订阅是**合法状态**（用户退订光了），
+   * readConfigFile 按设计接受它，这里也不该拿「必须有源」当损坏 —— 那条判据属于用户而不是我们。
+   * 本条只守「那一份文件读不回来 / 已经不在」。
+   */
+  const assertSubscriptionsNotLost = (db: DatabaseSync): void => {
+    if (!configFileMissing(configFile)) {
+      readConfigFile(configFile)
+      return
+    }
+    const row = db.prepare('SELECT COUNT(*) AS n FROM items').get()
+    const stored = row?.n
+    if (typeof stored !== 'number') {
+      throw new Error('读不出订阅库的条目数（返回 ' + JSON.stringify(row) + '）：库被外部改动过？')
+    }
+    if (stored === 0) return
+    throw new Error(
+      '订阅库里有 ' + stored + ' 条条目，但订阅文件 ' + configFile + ' 不存在 —— 订阅映射无从重建。' +
+        '请从备份恢复该文件。不静默继续：那会让用户看到一份空订阅列表。',
+    )
   }
 
   /**
@@ -346,7 +381,7 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
     generation = (async () => {
       try {
         // 打开序列的顺序**不能换**（src/storage/db.ts 与 store-sqlite.ts 各有一个握手）：
-        // 建目录 → 开库（跑 pragma + 版本闸）→ 建表盖章 → 迁移 → 建 store。
+        // 建目录 → 开库（跑 pragma + 版本闸）→ 建表盖章 → 建 store。
         // 少了 migrateSchema 会被 store 的版本握手当场拒绝（响亮的失败，好过写到一半才发现）。
         ensureStorageRoot(storagesRoot)
         // 装载时清一次超期日志（保留 14 天）。失败**不许拖垮装载** —— 与 log() 的写失败同一条纪律：
@@ -360,15 +395,25 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
           }
         }
         const db = openDatabase(join(storagesRoot, 'rss.db'))
-        migrateSchema(db)
-        const migrated = await migrateFromDomainFile({
-          domainPath: legacyDomainFile,
-          db,
-          configPath: configFile,
-          log,
-        })
-        if (!migrated.skipped) {
-          log('迁移完成：订阅 ' + migrated.feeds + ' 个、条目 ' + migrated.items + ' 条、去重窗口 ' + migrated.cursors + ' 个')
+        try {
+          migrateSchema(db)
+          // 订阅这一份的完整性闸：损坏要么在这里带路径抛错，要么由「丢了没」判定兜住。
+          //
+          // **为什么必须在建 store 之前**：它一旦通过，后面 seedConfiguredFeeds / repairIdentities /
+          // 启动刷新就都带着一份**已证明可用**的订阅在跑；放在 store 之后的话，这中间任何一步都可能
+          // 先写库，而守卫抛错时这一代已经半装好了（ready() 已经开始交出 store）。
+          assertSubscriptionsNotLost(db)
+        } catch (error) {
+          // 这个句柄此刻还**没有**登记到 database（下面的 `database = db` 才登记），所以 teardown 的
+          // 「先看 database 再 close」关不到它 —— 失败路径必须自己关。不关的后果是每失败一次泄漏一个
+          // SQLite 连接，而守卫抛错（订阅丢了）恰恰是**最可能反复发生**的那种失败：用户不修好
+          // config.json，每次重载都再漏一个。关失败也要留痕（本仓库禁空 catch）。
+          try {
+            db.close()
+          } catch (closeError) {
+            log('装载失败后关闭订阅库也失败：' + String(closeError))
+          }
+          throw error
         }
         if (cancelled) {
           // 取消途中才建出来的库必须立刻关掉：句柄留着会让下一次装载撞 SQLITE_BUSY /
@@ -382,9 +427,10 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
         }
         database = db
         store = createSqliteStore(db, configFile)
-        // 老正文缓存的规范化**搬进了迁移**（src/storage/migrate.ts 的 normalizeLegacyArticle）：
-        // 库那边没有存 paragraphs 的列，所以必须在写入之前折成 blocks。这里不再全表跑一遍 ——
-        // 那在 10 万行下就是一次全表扫描，而迁移之后库里已经不可能有老形态。
+        // 老正文缓存的规范化（domain.ts 的 normalizeLegacyArticle）在装载路径上**不再跑全表**：
+        // 库那边没有存 paragraphs 的列，而这个形状只可能来自存储域年代的老域文件 ——
+        // 那个一次性迁移已经完成并下线（见 src/storage/config-file.ts 的头注释）。全表跑一遍
+        // 在 10 万行下就是一次扫描，而库里已经不可能再有这个形状（写入口见 store-sqlite 的 writeArticle）。
         const seeded = await seedConfiguredFeeds(store)
         if (seeded > 0) log('新增订阅源种子 ' + seeded + ' 个')
         // 身份修复：把历史上因「源换 id 形态」分叉出的重复条目合并回一条（幂等，跑过一次就无事可做）。

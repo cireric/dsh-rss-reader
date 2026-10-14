@@ -414,7 +414,7 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
    *
    * **先看 isTransaction**：db.exec('BEGIN') 在已有事务里会抛
    * 「cannot start a transaction within a transaction」——于是「调用方自己开了事务」
-   * （Task 4 的迁移就是单事务批量写）会把一次正常写入变成崩溃。已在事务里就**不提交**：
+   * （当年 Task 4 的迁移就是单事务批量写）会把一次正常写入变成崩溃。已在事务里就**不提交**：
    * 提交权属于开事务的那个人。
    *
    * **还要 SAVEPOINT**：SQLite 里没有「内层失败不影响外层」这回事 —— 一条写语句失败只中止
@@ -459,20 +459,22 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
    *
    * 「没有 blocks」单独判一次：article.blocks 是可选字段，而 texts.body 是 NOT NULL ——
    * 一条只有 fetchedAt 的 articleRecord 没有可存的正文。本仓库**没有任何调用方会造**这种记录
-   * （写正文的两处都带 blocks：endpoints.ts:221 与 domain.ts 的 normalizeLegacyArticle），
+   * （写正文的调用方一律带 blocks；domain.ts 的 normalizeLegacyArticle 是唯一会产生老形状的地方），
    * 所以这里选择「当作没有正文」，而不是编造一个空 blocks 糊过去（禁止编造数据）。
    *
    * ⚠️ **老形态（只有 paragraphs、没有 blocks）一律响亮拒绝**：`itemRecordSchema` 允许它，
    * 但库里的正文列存的是 blocks，写下去只会得到一个「有 items 行、正文行被删掉」的条目 ——
    * 用户重开时正文**静默消失**，而没有任何断言会翻红。转换只有一个口径（domain.ts 的
-   * `normalizeLegacyArticle`，Task 4 的迁移必须先过它），本模块不另抄一份。
+   * `normalizeLegacyArticle`），本模块不另抄一份。
+   * 那个形状只剩「存储域年代的老数据」一种来路，而搬它进来的一次性迁移已下线（老文件已删）——
+   * 这条守卫因此是**兼容读的保险**，不再有正常调用方会撞上它。
    */
   function writeArticle(itemId: string, article: ArticleRecord | undefined): void {
     if (article !== undefined && article.blocks === undefined && article.paragraphs !== undefined) {
       throw new Error(
         '拒绝写入老形态的正文缓存（只有 paragraphs、没有 blocks）：条目 ' + itemId + '。' +
-          '库里没有存 paragraphs 的列，直写会让正文静默消失。请先过 domain.ts 的 normalizeLegacyArticle' +
-          '（Task 4 的迁移必须走这一步），再调用 saveItem / updateItem。',
+          '库里没有存 paragraphs 的列，直写会让正文静默消失。请先过 domain.ts 的 normalizeLegacyArticle，' +
+          '再调用 saveItem / updateItem。',
       )
     }
     if (article === undefined || article.blocks === undefined) {

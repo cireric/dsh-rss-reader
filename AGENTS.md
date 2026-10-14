@@ -14,8 +14,9 @@ DSH 插件的**两半**：host 半 `src/`（Node ESM，tsc → `lib/`）；clien
 （React，tsdown 打成单文件 `lib/client.js`）。入口是侧栏图标 → 主栏阅读器；
 数据落**插件自持**存储（`$DSH_HOME/storages/rss-reader/`：`rss.db` 是条目库，
 DDL 在 `src/storage/db.ts`；`config.json` 放订阅与视图偏好；`reader-YYYY-MM-DD.log` 是刷新日志）。
-`src/domain.ts` 仍持有 zod 记录 schema（库侧与迁移共用），但**不再**声明落盘方案。
-老存储域文件 `storages/rss_reader.json` 只读不写（迁移的源）。
+`src/domain.ts` 仍持有 zod 记录 schema（库侧与 config.json 读写共用），但**不再**声明落盘方案。
+存储域年代的老文件 `storages/rss_reader.json` 与那次一次性迁移**都已下线**（迁移已跑完、老文件已删，
+代码里已无任何路径读它）；订阅的唯一真相是 `config.json`。
 
 ## 完成定义
 
