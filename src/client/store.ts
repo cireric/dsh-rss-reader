@@ -6,7 +6,7 @@
  * 列表、正文、订阅管理与键盘接线，任一改动都要动同一个文件。
  */
 import { useEffect, useState } from 'react'
-import { ROUTE_PATH, recencyOf, sanitizeViewPreferences, type ArticlePayload, type CleanupResult, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult, type UnreadAccount, type ViewPreferences } from '../shared.js'
+import { ROUTE_PATH, recencyOf, sanitizeViewPreferences, type ArticlePayload, type CleanupResult, type Endpoint, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult, type UnreadAccount, type ViewPreferences } from '../shared.js'
 
 export type Filter = 'all' | 'unread' | 'starred'
 
@@ -138,8 +138,13 @@ export interface ReaderState {
   loadingMore: boolean
 }
 
-/** 调一个端点并解信封；失败抛出 `code: message`，由面板渲染。 */
-async function callRpc<T>(endpoint: string, payload?: unknown): Promise<T> {
+/**
+ * 调一个端点并解信封；失败抛出 `code: message`，由面板渲染。
+ *
+ * endpoint 收的是 shared.ts 的 Endpoint（= ENDPOINT_NAMES 派生）：拼错名字从「运行时收一个
+ * unknown-endpoint」变成**编译错误**。这是本文件与宿主之间唯一的那条 seam，值得有类型。
+ */
+async function callRpc<T>(endpoint: Endpoint, payload?: unknown): Promise<T> {
   const response = await fetch(ROUTE_PATH, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

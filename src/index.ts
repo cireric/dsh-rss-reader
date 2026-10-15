@@ -11,7 +11,6 @@
  * 也不注册模型工具：模型可见即已记录（技能硬规则 #8），阅读面走 UI。
  */
 import type { Context } from 'cordis'
-import { recencyOf } from './shared.js'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { DatabaseSync } from 'node:sqlite'
@@ -26,9 +25,6 @@ import { configFileMissing, readConfigFile } from './storage/config-file.js'
 import { createSqliteStore } from './store-sqlite.js'
 import { normalizeFeedUrl, refreshFeeds, selectStalestFeeds, type FeedOutcome } from './refresh.js'
 import { repairIdentities } from './identity-repair.js'
-import { blocksToText, fetchArticle } from './article.js'
-import { buildOpml, parseOpml } from './opml.js'
-import { validateSubscriptions } from './subscribe.js'
 import { Config } from './config.js'
 import type { Config as ConfigShape } from './config.js'
 // **入口必须导出 schema 本身**：宿主（含注入器）靠它给 config 补默认值。
@@ -37,7 +33,7 @@ import type { Config as ConfigShape } from './config.js'
 export { Config }
 import { createDispatch } from './endpoints.js'
 import { fail } from './shared.js'
-import { ROUTE_PATH, type Endpoint, type ItemView, type Overview, type RpcResult } from './shared.js'
+import { ROUTE_PATH, type RpcResult } from './shared.js'
 
 export const name = '@dsh-external/dsh-rss-reader'
 

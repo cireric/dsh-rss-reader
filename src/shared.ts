@@ -16,9 +16,19 @@
  */
 export const ROUTE_PATH = '/rss-reader-api'
 
-export type Endpoint = 'overview' | 'refresh' | 'markRead' | 'unmarkRead' | 'toggleStar' | 'toggleKeepUnread' | 'article' | 'cleanup'
-  | 'opmlExport' | 'opmlImport' | 'addFeed' | 'removeFeed'
-  | 'viewPreferences' | 'saveViewPreferences'
+/**
+ * 端点名字的**单一来源**。
+ *
+ * 为什么是运行时常量而不是纯类型：注册表表的完整性检查（tests/endpoint-registry.test.mjs）
+ * 与「未知端点」排查都需要在运行时枚举名字，纯类型给不出这个能力；类型由它派生，
+ * 于是「加端点要改几处」这个问题只剩一处答案。
+ */
+export const ENDPOINT_NAMES = [
+  'overview', 'refresh', 'markRead', 'unmarkRead', 'toggleStar', 'toggleKeepUnread', 'article', 'cleanup',
+  'opmlExport', 'opmlImport', 'addFeed', 'removeFeed',
+  'viewPreferences', 'saveViewPreferences',
+] as const
+export type Endpoint = (typeof ENDPOINT_NAMES)[number]
 
 export type RpcResult<T> =
   | { ok: true; value: T }

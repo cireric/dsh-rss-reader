@@ -554,12 +554,15 @@ const MUTATIONS = [
   // 一旦本地看不见的漂移发生（另一个面板把某源标空），幽灵未读就留在基线里 ⇒ 左栏各源之和
   // 17 ≠ 顶栏 14（spec §4 不变量 1）。判据是 tests/unread-accounting.test.mjs 的
   // 「host：markRead / unmarkRead 的回包必须带 perFeedUnread」+ 两条「截断 + 外部漂移」用例。
-  // from 照**编译产物**的真实形状写（docs/pitfalls.md 一、1.4）：lib/endpoints.js:132，独立实测
-  // OCCURRENCES=1（另一处同串在 unmarkRead 分支，靠后随的 case 名区分）。
+  // from 照**编译产物**的真实形状写（docs/pitfalls.md 一、1.4）。
+  // ⚠️ 2026-10-15 端点注册表重构后重锚：账目合并从「每个 case 各写一遍」搬到**分发核一处**
+  // （lib/endpoints.js:494-496），旧的 `...accountOf(target)` 串已从产物消失 ⇒ 原锚会变「未应用」
+  // （比幸存更隐蔽）。语义不变：仍是「标读回包只带 unread、不带每源账目」。
+  // 锚点唯一性实测 OCCURRENCES=1（`if (spec.carriesAccount === true` 在产物里只有分发核这一处）。
   { id: 'endpoints-标读回包不带每源账目', file: 'lib/endpoints.js',
     judges: ['overview-scale.test.mjs', 'unread-accounting.test.mjs'],
-    from: "return ok({ changed, ...accountOf(target) });\n                }\n                case 'unmarkRead': {",
-    to: "return ok({ changed, unread: accountOf(target).unread });\n                }\n                case 'unmarkRead': {" },
+    from: 'return ok({ ...result.value, unread: account.unread, perFeedUnread: account.perFeedUnread });',
+    to: 'return ok({ ...result.value, unread: account.unread });' },
   // 客户端这一侧的承重点：回包到手必须**整体覆盖**。退回「只覆盖 unread」= 又用本地那份
   // 看不见全量的账当真相，与上面那条是同一个不变式的两端，各自都要有人看着。
   // from 照**编译产物**的真实形状写：lib/client.js:416-421 的 applyAccount，独立实测 OCCURRENCES=1。
@@ -594,10 +597,13 @@ const MUTATIONS = [
   // 正文写入必须**合并进当前记录**（2026-10-10 用户实测：详情页逐篇读，已读状态丢失）。
   // 退回「用抓取前的快照整体写回」会把窗口期内并发 markRead 写进去的 readAt 抹掉 —— 丢失更新。
   // 判据：tests/article-markread-race.test.mjs（并发 markRead + 正文写入，断言 readAt 存活）。
+  // ⚠️ 2026-10-15 端点注册表重构后重锚：handler 内的闭包变量 `target` 改成了 ctx 入参 `ctx.store`
+  // （switch case → ENDPOINTS.article.to），旧 from 串里的 `target.updateItem` 已不在产物中 ⇒
+  // 原锚会变「未应用」（比幸存更隐蔽）。语义不变：仍是「用抓取前的快照整体写回覆盖并发写入」。
   { id: 'article-用旧快照整体写回覆盖并发写入', file: 'lib/endpoints.js',
     judges: ['article-markread-race.test.mjs'],
-    from: 'await target.updateItem(itemId, (current) => ({ ...current, articleFailure: fetched.reason }));',
-    to: 'await target.saveItem(itemId, { ...existing, articleFailure: fetched.reason });' },
+    from: 'await ctx.store.updateItem(itemId, (current) => ({ ...current, articleFailure: fetched.reason }));',
+    to: 'await ctx.store.saveItem(itemId, { ...existing, articleFailure: fetched.reason });' },
   // 刷新期间的写同样必须合并进当前记录（2026-10-10 与 article 端点同类）：
   // 抓取/淘汰是长任务，期间用户完全可能标已读、加星；用快照整体写回会静默抹掉这些用户数据。
   // 判据：tests/refresh.test.mjs 的两条「并发标已读」用例（各自注入一次窗口内并发写）。
@@ -913,16 +919,32 @@ const MUTATIONS = [
     // 「解不出就从第一页开始」会让翻页永远翻不完：每页都回同一批条目，界面无限追加重复行，
     // 而用户看到的是一份「永远滚不到底」的列表，不是一句报错。
     // 判据：tests/overview-paging.test.mjs 的「游标认不出时响亮拒绝（bad-request）」。
-    from: `                    if (cursor === undefined) {
-                        return fail('bad-request', '未知的续页游标（格式应为 "<recency>|<id>"）：' + raw);
-                    }`,
-    to: '                    if (cursor === undefined) return ok(buildOverview(false));' },
+    // ⚠️ 2026-10-15 端点注册表重构后重锚：overview 的 handler 体缩进从 20 格变 16 格
+    // （switch case → ENDPOINTS.overview.to），且 `buildOverview` 多了 ctx 首参 ⇒ 旧 from 串失配。
+    // 语义不变：认不出游标时**响亮拒绝**，而不是静默从第一页开始。
+    from: "            if (cursor === undefined) {\n                return fail('bad-request', '未知的续页游标（格式应为 \"<recency>|<id>\"）：' + raw);\n            }",
+    to: "            if (cursor === undefined) return ok(buildOverview(ctx, false));" },
   { id: 'paging-到底也硬给续页游标', file: 'lib/endpoints.js',
     judges: ['overview-paging.test.mjs', 'overview-scale.test.mjs'],
     // 到底时还给游标 ⇒ 客户端一直显示「加载更多」，点下去得到空页（界面上的死按钮）。
     // 判据：tests/overview-paging.test.mjs 的「末页没有 nextCursor」。
     from: 'const nextCursor = lastDelivered >= 0 && (lastDelivered + 1 < rows.length || !exhausted)',
     to: 'const nextCursor = lastDelivered >= 0' },
+  // ── 端点注册表（2026-10-15 H1 深化）─────────────────────────────────────────
+  // 两条各守一个**横切**失效面：前者是「表与名字表分家」，后者是「守卫顺序被绕过」。
+  // 判据都在 tests/endpoint-registry.test.mjs（新增文件，见该文件头注释）。
+  { id: 'endpoint-表漏掉一个端点', file: 'lib/endpoints.js',
+    judges: ['endpoint-registry.test.mjs'],
+    // 病象：表里少一个 key ⇒ 该端点名下落到 undefined ⇒ 用户点它得到 unknown-endpoint。
+    // 类型层本该拦住（Record<Endpoint,…> 穷尽），但产物是 JS，运行时只有这条断言看得见。
+    from: '    toggleStar: {',
+    to: '    toggleStarX: {' },
+  { id: 'endpoint-未就绪守卫被绕过', file: 'lib/endpoints.js',
+    judges: ['endpoint-registry.test.mjs'],
+    // 病象：守卫被绕过 ⇒ 存储没起来时先撞「未知端点」或直接抛错，而不是稳定回 not-ready。
+    // 判据：endpoint-registry.test.mjs 的「not-ready 先于 unknown-endpoint」用例（三个名字都试）。
+    from: "            if (!target)\n                return fail('not-ready', '存储域尚未就绪，稍后重试');",
+    to: "            if (false)\n                return fail('not-ready', '存储域尚未就绪，稍后重试');" },
   { id: 'paging-旧实现谓词的 id 方向写反', file: 'lib/store.js',
     judges: ['overview-paging.test.mjs'],
     // 与自持实现那条同一个失效面（P-7 把游标加在**接口**上 ⇒ 两份实现都得守）。只钉 SQL 一侧的话，
