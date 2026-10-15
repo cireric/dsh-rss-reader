@@ -13,7 +13,7 @@
  *
  * 数据只经同源 HTTP 通道走主进程（见 shared.ts），浏览器半不直连存储。
  */
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import type { Context as ClientContext } from 'cordis'
 // 只为触发模块增强（与官方客户端插件同一写法）：ctx.slots 由 ui-renderer/client 声明
 // （它 declare module '@deepseek-ai/cordis' 把 slots 挂到 Context 上），运行时由宿主提供，
@@ -72,7 +72,7 @@ const STYLE = `
   background:currentColor; opacity:.45; animation: dsh-rss-slide 1s ease-in-out infinite; }
 @keyframes dsh-rss-slide { 0% { left:-35%; } 100% { left:100%; } }
 .dsh-rss-help { position:absolute; inset:0; z-index:6; display:flex; justify-content:center;
-  align-items:flex-start; padding:20px; pointer-events:none; }
+  align-items:center; padding:20px; pointer-events:none; }
 .dsh-rss-help-card { pointer-events:auto; display:flex; flex-direction:column; gap:2px;
   width:100%; max-width:660px; max-height:100%; overflow-y:auto; padding:12px 16px 14px;
   border-radius:10px; font-size:13px;
@@ -82,13 +82,22 @@ const STYLE = `
 .dsh-rss-help-head { display:flex; align-items:center; gap:10px; padding-bottom:4px; }
 .dsh-rss-help-title { font-size:14px; font-weight:600; }
 .dsh-rss-help-legend { font-size:11px; opacity:.6; }
-.dsh-rss-help-group { font-size:11px; font-weight:600; opacity:.55; letter-spacing:.06em;
-  margin:8px 0 2px; }
-.dsh-rss-help-row { display:flex; align-items:baseline; gap:10px; padding:2.5px 0; }
-.dsh-rss-help-key { flex:0 0 132px; font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size:12px; }
-.dsh-rss-help-sum { flex:1; min-width:0; }
-.dsh-rss-help-scope { flex:0 0 auto; font-size:11px; opacity:.5; }
+/* 三列一个 grid（整卡共用列宽，不是每行各排各的：行若各自 max-content，summary 的起点
+   会随键位列长短参差，比旧的固定 132px 更糟）。键位列 max-content 随内容自适应。
+   行用 display:contents —— 它的三个单元格直接进 grid；代价是行自身不成盒（行 hover 若做
+   在 P2，得挂在单元格上）。 */
+.dsh-rss-help-body { display:grid; grid-template-columns:max-content 1fr max-content;
+  column-gap:10px; row-gap:3px; align-items:baseline; }
+.dsh-rss-help-group { grid-column:1 / -1; font-size:11px; font-weight:600; opacity:.55;
+  letter-spacing:.06em; margin:8px 0 2px; }
+.dsh-rss-help-row { display:contents; }
+.dsh-rss-help-key { font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:12px; white-space:nowrap; }
+.dsh-rss-help-key kbd { font-family:inherit; font-size:inherit; padding:1px 5px;
+  border:1px solid color-mix(in srgb, CanvasText 22%, transparent); border-radius:4px;
+  background:color-mix(in srgb, CanvasText 6%, transparent); }
+.dsh-rss-help-sum { min-width:0; }
+.dsh-rss-help-scope { font-size:11px; opacity:.5; white-space:nowrap; }
 `
 
 /** 刷新图标：加载时整圈旋转，省掉额外的 spinner 元素。 */
@@ -201,18 +210,29 @@ function HelpPanel({ onClose }: { onClose: () => void }): ReactNode {
           <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
             aria-label="关闭快捷键帮助" onClick={onClose}>✕</button>
         </div>
-        {READER_KEY_HELP.map((section) => (
-          <div key={section.title}>
-            <div className="dsh-rss-help-group">{section.title}</div>
-            {section.entries.map((entry) => (
-              <div key={entry.label} className="dsh-rss-help-row">
-                <span className="dsh-rss-help-key">{entry.label}</span>
-                <span className="dsh-rss-help-sum">{entry.summary}</span>
-                <span className="dsh-rss-help-scope">{READER_HELP_SCOPE_LABEL[entry.scope]}</span>
-              </div>
-            ))}
-          </div>
-        ))}
+        {/* 键位渲染成 <kbd> 芯片，但分隔符仍写原文 ' / '：scroll-dom 的断言是
+            text.includes(entry.label)，textContent 少一个空格当场红。 */}
+        <div className="dsh-rss-help-body">
+          {READER_KEY_HELP.map((section) => (
+            <Fragment key={section.title}>
+              <div className="dsh-rss-help-group">{section.title}</div>
+              {section.entries.map((entry) => (
+                <div key={entry.label} className="dsh-rss-help-row">
+                  <span className="dsh-rss-help-key">
+                    {entry.label.split(' / ').map((part, index) => (
+                      <Fragment key={part}>
+                        {index > 0 ? ' / ' : null}
+                        <kbd>{part}</kbd>
+                      </Fragment>
+                    ))}
+                  </span>
+                  <span className="dsh-rss-help-sum">{entry.summary}</span>
+                  <span className="dsh-rss-help-scope">{READER_HELP_SCOPE_LABEL[entry.scope]}</span>
+                </div>
+              ))}
+            </Fragment>
+          ))}
+        </div>
       </div>
     </div>
   )
