@@ -116,6 +116,11 @@
   必须 preserveTimestamps（mtime 反超会让 client-bundle:265 对任何变异必红，「0 幸存」变空洞判据）；
   ③runner 的 ✖ 行只印测试名不印文件名，judges 提取走 ±6 行窗口；④副本基线卫兵：基线红 ⇒ 全部
   变异记 worker_error 计入失败清单。均已随 Task 3/5 落进 runner 与冒烟测试。
+- 终审修复轮（2026-10-15，评审 With fixes → C1/I1 修复后复验全绿）：C1 gate 挂死风险——套件
+  execSync 加 120s 时限（超时判 crashed「套件超时」，execSync 失败对象的 signal 是 null 不是
+  undefined，判式要排除）+ worker 15min 总预算强制回收 + 逐条完成即打印；I1 内环残余墙钟——
+  overview-scale 的 100ms 预算判据移 tests/perf/（结构判据留内环，夹具抽 helpers/ 共享），
+  默认 K 降 6（spec §3 实测安全包线）。I2（承重判定行为级测试固化）转 follow-up 未做。
 
 ## 9. 复现方法（全部只读，除临时副本）
 

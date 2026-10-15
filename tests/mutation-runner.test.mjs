@@ -23,3 +23,13 @@ test('副本忠实化：mtime 镜像 + 副本基线红必须使判定无效', ()
   assert.ok(src.includes('preserveTimestamps: true'), '缺 preserveTimestamps（mtime 反超会让 client-bundle:265 对任何变异必红）')
   assert.ok(src.includes('副本基线红'), '缺 worker 副本基线卫兵')
 })
+test('套件挂死不许挂死门槛：execSync 时限 + worker 预算 + 逐条流式打印', () => {
+  assert.ok(src.includes('SUITE_TIMEOUT_MS'), '缺套件时限（终审 C1 实测挂死 40+ 分钟）')
+  assert.ok(src.includes('套件超时'), '缺超时判名')
+  assert.ok(src.includes('worker 超预算'), '缺 worker 预算兜底')
+  assert.ok(src.includes("'  · '"), '缺逐条回传即打印的可观测性')
+})
+test('内环无墙钟断言（timing 判据全部住在 tests/perf/）', () => {
+  assert.ok(!readFileSync('tests/overview-scale.test.mjs', 'utf8').includes('OVERVIEW_BUDGET_MS'), '内环仍有墙钟判据（终审 I1：负载刀口）')
+  assert.ok(readFileSync('tests/perf/overview-scale.test.mjs', 'utf8').includes('OVERVIEW_BUDGET_MS'), 'perf 侧未收编 timing 判据')
+})

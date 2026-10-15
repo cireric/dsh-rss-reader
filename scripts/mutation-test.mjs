@@ -1071,19 +1071,28 @@ const MUTATIONS = [
 // 并行 worker / judges 反查）需要同一套判定逻辑服务多条路径，所以拆成下面的可复用函数；
 // MUTATIONS 表与崩溃分类器的判定逐字保留（分类器三坑注释原样随迁，改任一条都要重跑）。
 
+// 终审 C1（2026-10-15 实测挂死 40+ 分钟，K=4 干净复跑零推进）：套件与 worker 都必须有时限——
+// 否则任一套件在负载下卡死 = 整个门槛无输出、无退出码地永久挂死。
+const SUITE_TIMEOUT_MS = 120_000        // 单次套件墙钟上限（正常 ≈7s；超时 ⇒ 判定无效记「套件超时」）
+const WORKER_BUDGET_MS = 15 * 60_000    // 单个 worker 总预算（正常全量 ≈4min；超时强制回收并 sweep）
+
 // 「跑一次套件」。root 参数化（隔离副本跑副本、源目录跑基线）；files 省缺 = 全量内环 glob。
 function runSuite(root, files) {
   const spec = files === undefined ? 'tests/*.test.mjs' : files.join(' ')
   try {
-    const out = execSync('node --test ' + spec + ' 2>&1', { cwd: root, encoding: 'utf8', maxBuffer: 128 * 1024 * 1024 })
+    const out = execSync('node --test ' + spec + ' 2>&1', { cwd: root, encoding: 'utf8', maxBuffer: 128 * 1024 * 1024, timeout: SUITE_TIMEOUT_MS })
     return { ok: true, out: out }
   } catch (error) {
-    return { ok: false, out: String(error.stdout || '') + String(error.stderr || '') }
+    // 超时（SIGTERM 杀）也是「判定无效」：分类器见 timeout 标志记 crashed——红 ≠ 被抓住。
+    // ⚠️ signal 要排除 null：正常非零退出的 error.signal 是 null 而不是 undefined（实测踩过：
+    //    判式写成 !== undefined 时每一条正常的套件红都被误判成「套件超时」，138 条全 crashed）
+    return { ok: false, timeout: error.killed === true || Boolean(error.signal), out: String(error.stdout || '') + String(error.stderr || '') }
   }
 }
 
 // 分类器：原 :1009-1023 逐字搬入（含三坑注释）。res.ok 参与 caught/survived 的区分，故入参是 res。
 function classify(res, m) {
+  if (res.timeout) return 'crashed'
   const mutatedFile = m.file.split('/').pop()
   const outLines = res.out.split('\n')
   // ⚠️ `\\s+`（不是 `\\s*`）：见上面 ② 的两种列 0 形状。
@@ -1097,6 +1106,7 @@ function classify(res, m) {
 
 // 崩溃错误名（打印用，与 classify 同一条错误行正则）。
 function crashName(res) {
+  if (res.timeout) return '套件超时'
   const hit = res.out.split('\n').find((line) => /^\s+(ReferenceError|SyntaxError):/.test(line))
   return (hit && hit.match(/\b(ReferenceError|SyntaxError)\b/) || [])[1] || '未知'
 }
@@ -1166,6 +1176,10 @@ const { readFileSync, writeFileSync } = require('node:fs')
 const path = require('node:path')
 const { parentPort } = require('node:worker_threads')
 const root = ${JSON.stringify(workerRoot)}
+// 时限常量随函数一起序列化（C1 修复轮实测：runSuite 引用而模板缺失 ⇒ worker 里 ReferenceError
+// 被 runSuite 的 try/catch 吞成 ok:false ⇒ 基线卫兵判「副本基线红」——卫兵拦下了它，但不能靠它兜）
+const SUITE_TIMEOUT_MS = ${JSON.stringify(SUITE_TIMEOUT_MS)}
+const WORKER_BUDGET_MS = ${JSON.stringify(WORKER_BUDGET_MS)}
 const mutations = ${JSON.stringify(mutations)}
 const runSuite = ${runSuite.toString()}
 const classify = ${classify.toString()}
@@ -1182,10 +1196,13 @@ if (!base.ok) {
     const applied = applyMutation(root, m)
     if (!applied.ok) { parentPort.postMessage({ id: m.id, status: 'unapplied' }); continue }
     let res
+    const startedAt = Date.now()
     try { res = runSuite(root) } finally { writeFileSync(path.join(root, m.file), applied.original) }
     const fails = res.out.split('\\n').filter((l) => /^\\s*✖/.test(l)).map((l) => l.trim().replace(/\\s*\\(\\d.*$/, ''))
     const judges = judgesFromFails(res.out)
     const verdict = classify(res, m)
+    // 逐条回传即打印（终审 C1 教训：挂死 40 分钟零输出——进度必须实时可见；worker stdout 直通主进程）
+    console.log('  · ' + m.id.padEnd(26) + ' → ' + verdict + '（' + (Date.now() - startedAt) + 'ms）')
     parentPort.postMessage(verdict === 'crashed' ? { id: m.id, status: 'crashed', crash: crashName(res), fails, judges } : { id: m.id, status: verdict, fails, judges })
   } catch (error) {
     parentPort.postMessage({ id: m.id, status: 'crashed', crash: 'worker 内异常：' + error.message, fails: [] })
@@ -1199,20 +1216,24 @@ function runWorker(workerRoot, mutations) {
     const worker = new Worker(buildWorkerScript(workerRoot, mutations), { eval: true })
     const results = []
     const sweep = (why) => {
-      // worker 本体崩了（eval 失败 / 未捕获异常 / 非零退出）：没回传结果的变异全部记 crashed，不许静默丢
+      clearTimeout(deadline)
+      // worker 本体崩了（eval 失败 / 未捕获异常 / 非零退出 / 超预算）：没回传结果的变异全部记 crashed，不许静默丢
       for (const m of mutations) {
         if (!results.some((r) => r.id === m.id)) results.push({ id: m.id, status: 'crashed', crash: why, fails: [] })
       }
       resolve(results)
     }
+    // worker 总预算（终审 C1 第二道网）：卡死的 worker 强制回收，由 sweep 收尾
+    const deadline = setTimeout(() => { worker.terminate(); sweep('worker 超预算 ' + WORKER_BUDGET_MS + 'ms——强制回收') }, WORKER_BUDGET_MS)
     worker.on('message', (r) => results.push(r))
     worker.on('error', (error) => sweep('worker 未捕获：' + error.message))
-    worker.on('exit', (code) => { if (code !== 0) sweep('worker exit ' + code); else resolve(results) })
+    worker.on('exit', (code) => { if (code !== 0) sweep('worker exit ' + code); else { clearTimeout(deadline); resolve(results) } })
   })
 }
 
 function parseArgs(argv) {
-  const args = { mode: 'gate', workers: Math.min(8, Math.max(1, os.cpus().length - 2)), dumpJudges: undefined, only: undefined }
+  // 默认 K=6：spec §3 实测的安全包线（8 并发曾在 100ms 级时序断言上翻红，I1 拆分前）；宁可保守
+  const args = { mode: 'gate', workers: Math.min(6, Math.max(1, os.cpus().length - 2)), dumpJudges: undefined, only: undefined }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--mode') args.mode = argv[++i]

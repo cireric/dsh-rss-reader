@@ -3,141 +3,50 @@
  *
  * 为什么另起一个文件而不是并进 unread-accounting.test.mjs：那边用的是内存桩，它测不到本任务的
  * 全部要点 —— 「记账是不是真的落到 SQL 上」。行为层看不出差别（一个把全表读回 JS 再算的实现
- * 同样「对」），所以本文件的两类判据缺一不可：
+ * 同样「对」），所以本文件钉的是**结构性**判据：包一层 store，数 allItems() 被调了几次 ——
+ * buildOverview / accountOf / cleanup 三处都必须是 0 次（spec §3.1 的「扫描族归零」，
+ * 点一次星标 = 一次 100 000 行全表遍历）。
  *
- *   ① **结构性**：包一层 store，数 allItems() 被调了几次 —— buildOverview / accountOf / cleanup
- *      三处都必须是 0 次（spec §3.1 的「扫描族归零」，点一次星标 = 一次 100 000 行全表遍历）。
- *   ② **规模**：10 万行下打开面板的耗时上界。改造前实测 ~215–238 ms（每次开面板一次全表物化），
- *      预算 100 ms 留了 ~5 倍余量：二次实现会稳定超界，而慢机器不会误报。
+ * **规模**判据（10 万行下打开面板的耗时上界）住 tests/perf/overview-scale.test.mjs：
+ * 2026-10-15 终审 I1 实测，墙钟断言留在内环会在并行负载下站在预算刀口两侧
+ * （8 并发下实测 111–122ms 翻红，预算 100ms）——timing 闸门集中在 perf/ 是同一条教训的第二课。
  *
  * 断言钉的是不变量与口径（各源之和 === 总未读、0 未读的源留键、清理只动该动的），不钉实现细节。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { openDatabase, migrateSchema } from '../lib/storage/db.js'
-import { writeConfigFile } from '../lib/storage/config-file.js'
-import { createSqliteStore } from '../lib/store-sqlite.js'
+import { rmSync } from 'node:fs'
+import { FEEDS, TOTAL, feedIdOf, freshLargeStore, counting, deps, sumUnread, DEFAULTS } from './helpers/overview-scale-fixture.mjs'
 import { createDispatch } from '../lib/endpoints.js'
 import { Config } from '../lib/config.js'
 
-const FEEDS = 200
-const PER_FEED = 500
-const TOTAL = FEEDS * PER_FEED
-
-/** 默认配置读一次：截断条数这类断言从它取，默认值改了不该让本文件无关地翻红。 */
-const DEFAULTS = Config({})
-
-/** 源 id 与前缀：合成数据与 config.json 必须用**同一个**键，否则量到的是空结果（Task 3 踩过）。 */
-const feedIdOf = (index) => 'https://feed' + index + '.example.com/atom.xml'
-
-/** 打开面板的耗时预算（毫秒）。改造前实测 215–238 ms ⇒ 这条会稳定翻红，而修好后 ~15 ms。 */
-const OVERVIEW_BUDGET_MS = 100
-
-/**
- * 造一个 10 万行的真实库（单事务直灌 —— 量的是读路径，不是 saveItem 的写入成本）。
- *
- * 行形状刻意与 scripts/scale-bench.mjs 同形：1/3 没有发布时间（考排序键的 COALESCE 与
- * 「缺发布时间的行必须按抓取时间归位」），1/3 已读（考未读判据）。
- */
-async function freshLargeStore(tag) {
-  const dir = mkdtempSync(join(tmpdir(), 'rss-scale-' + tag + '-'))
-  const db = openDatabase(join(dir, 'rss.db'))
-  migrateSchema(db)
-  const store = createSqliteStore(db, join(dir, 'config.json'))
-
-  const insert = db.prepare(
-    'INSERT INTO items (id, feed_id, title, link, published_at, fetched_at, summary, read_at, starred)'
-    + ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-  )
-  db.exec('BEGIN')
-  for (let f = 0; f < FEEDS; f += 1) {
-    for (let i = 0; i < PER_FEED; i += 1) {
-      insert.run(
-        'item-' + f + '-' + i, feedIdOf(f), 't'.repeat(40) + '#' + f + '_' + i,
-        'https://site' + f + '.example.com/post/' + i,
-        i % 3 === 0 ? null : '2026-10-11T09:00:00.000Z',
-        '2026-10-11T10:00:00.000Z',
-        '摘要' + f + '_' + i,
-        i % 3 === 0 ? '2026-10-11T10:05:00.000Z' : null,
-        i % 7 === 0 ? 1 : 0,
-      )
-    }
-  }
-  db.exec('COMMIT')
-
-  // feeds 表（= config.json）一次写完：键域与合成数据的键必须完全一致。
-  // 刻意走 writeConfigFile 而不是 200 次 saveFeed —— 后者每次都要「读全份 → 改一处 → fsync 原子写回」，
-  // 在这里要花掉约 1 秒，而本文件是**10 万行规模**的判据，不该把预算花在夹具的 fsync 上。
-  // 语义等价：store 的 feed/listFeeds/viewPreferences 每次都是现读这份文件（没有内存副本）。
-  const feeds = {}
-  for (let f = 0; f < FEEDS; f += 1) feeds[feedIdOf(f)] = { url: feedIdOf(f), title: '源 ' + f }
-  writeConfigFile(join(dir, 'config.json'), { version: 1, feeds })
-  return { store, db, dir }
-}
-
-/**
- * 包一层计数：只关心 allItems() 被调了几次。
- *
- * 展开成新对象即可 —— store 的每个方法都是闭包里的箭头函数，不依赖 this。
- */
-function counting(store) {
-  const calls = { allItems: 0 }
-  return {
-    calls,
-    store: { ...store, allItems: () => { calls.allItems += 1; return store.allItems() } },
-  }
-}
-
-function deps(store, config) {
-  return {
-    config,
-    log: () => {},
-    ready: () => store,
-    refreshNow: async () => false,
-    lastRefreshCompletedAt: () => undefined,
-    articleAttempts: new Map(),
-  }
-}
-
-const sumUnread = (map) => Object.values(map).reduce((acc, n) => acc + n, 0)
-
-test('10 万行：overview 不再物化全表，耗时在预算内，且账目守恒（键域 = feeds 表）', async () => {
+test('10 万行：overview 不再物化全表，且账目守恒（键域 = feeds 表）', async () => {
   const { store, db, dir } = await freshLargeStore('overview')
   try {
     const spy = counting(store)
     const dispatch = createDispatch(deps(spy.store, Config({})))
 
-    const started = process.hrtime.bigint()
     const result = await dispatch('overview', {})
-    const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6
 
     assert.equal(result.ok, true, 'overview 应当成功')
     const view = result.value
 
-    // ① 结构性判据：扫描族归零。改回 allItems() 时这条当场翻红（而不是躲在耗时的噪声里）。
+    // 结构性判据：扫描族归零。改回 allItems() 时这条当场翻红（而不是躲在耗时的噪声里）。
     assert.equal(spy.calls.allItems, 0,
       'overview 不许再物化全表：记账走 unreadPerFeed（GROUP BY）、列表走 listRecent（LIMIT）')
 
-    // ② 规模判据：改造前 215–238 ms（每次开面板一次全表物化 + 排序 10 万条 ItemView）
-    assert.ok(elapsedMs < OVERVIEW_BUDGET_MS,
-      'overview 耗时 ' + elapsedMs.toFixed(1) + ' ms，超过预算 ' + OVERVIEW_BUDGET_MS +
-      ' ms —— 疑似又退回全表物化（改造前实测 ~230 ms，改造后 ~15 ms）')
-
-    // ③ 账目守恒（spec §4 不变量 1）：顶栏总数必须由每源账目求和派生，两处不许各算一遍
+    // 账目守恒（spec §4 不变量 1）：顶栏总数必须由每源账目求和派生，两处不许各算一遍
     assert.equal(sumUnread(view.perFeedUnread), view.unread, '左栏各源之和必须等于顶栏总未读')
     assert.equal(Object.keys(view.perFeedUnread).length, FEEDS, '键域 = feeds 表（一个都不能少）')
     assert.equal(Object.prototype.hasOwnProperty.call(view.perFeedUnread, feedIdOf(FEEDS - 1)), true,
       '最后一个源也要有键（0 未读的源丢键 = 左栏角标空白）')
 
-    // ④ 列表仍是「全局 recency 降序取前 maxItemsShown 条」：截断真的发生了，且确实是最近的那批
+    // 列表仍是「全局 recency 降序取前 maxItemsShown 条」：截断真的发生了，且确实是最近的那批
     assert.equal(view.items.length, DEFAULTS.maxItemsShown,
       'items 应按 maxItemsShown 截断（这里从 config 读默认值，不写死 300）')
     assert.equal(store.listRecent(1)[0][0], view.items[0].id, '列表首条必须是全局最新的那一条')
 
-    // ⑤ 抽取守恒前的真值：总行数没被读路径改动
+    // 抽取守恒前的真值：总行数没被读路径改动
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM items').get().n, TOTAL, '读路径不许改库')
   } finally {
     db.close()
