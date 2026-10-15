@@ -9,7 +9,7 @@
  * 用法：npm run mutation（需先 npm run build + npm run build:client —— 改的是 lib/ 产物）。
  * 判据：**每一条变异都必须被抓到**；有幸存者就以非零码退出，并指出是哪条漏了。
  */
-import { readFileSync, writeFileSync, mkdirSync, cpSync, rmSync, mkdtempSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, cpSync, rmSync, mkdtempSync, existsSync } from 'node:fs'
 import { execSync } from 'node:child_process'
 import { Worker } from 'node:worker_threads'
 import os from 'node:os'
@@ -1131,7 +1131,7 @@ function judgesFromFails(out) {
 // .git / .worktrees 不拷（worktree 里是整份检出副本，拷了既慢又可能级联）。
 function seedWorkerCopy(workerRoot) {
   for (const entry of ['lib', 'tests', 'scripts', 'src', 'node_modules', 'package.json']) {
-    cpSync(path.join(ROOT, entry), path.join(workerRoot, entry), { recursive: true })
+    cpSync(path.join(ROOT, entry), path.join(workerRoot, entry), { recursive: true, preserveTimestamps: true })
   }
 }
 
@@ -1172,7 +1172,12 @@ const classify = ${classify.toString()}
 const crashName = ${crashName.toString()}
 const judgesFromFails = ${judgesFromFails.toString()}
 const applyMutation = ${applyMutation.toString()}
-for (const m of mutations) {
+// 副本基线卫兵：副本不忠实（如 mtime 反超让 client-bundle:265 必红）⇒ 每条变异的套件必红 ⇒
+// 「幸存 0」就是空洞判据。基线红 ⇒ 本副本全部变异记 worker_error，主进程计入失败清单。
+const base = runSuite(root)
+if (!base.ok) {
+  for (const m of mutations) parentPort.postMessage({ id: m.id, status: 'worker_error', crash: '副本基线红', fails: [], judges: [] })
+} else for (const m of mutations) {
   try {
     const applied = applyMutation(root, m)
     if (!applied.ok) { parentPort.postMessage({ id: m.id, status: 'unapplied' }); continue }
@@ -1231,6 +1236,10 @@ function collectResults(results) {
       applied += 1
       console.log('  !  ' + r.id.padEnd(26) + ' 崩了（' + (r.crash || '未知') + '：变异 `to` 自己写错了，不算被抓住 —— 请改 `to`）')
       survivors.push(r.id + '（崩了：' + (r.crash || '未知') + '）')
+    } else if (r.status === 'worker_error') {
+      applied += 1
+      console.log('  !  ' + r.id.padEnd(26) + ' 副本基线红（判定无效——先修副本忠实化，重跑门槛）')
+      survivors.push(r.id + '（副本基线红）')
     } else if (r.status === 'survived') {
       applied += 1
       console.log('  x  ' + r.id.padEnd(26) + ' 幸存（套件仍然全绿）')
@@ -1257,11 +1266,77 @@ function writeJudgesDump(file, results, selected) {
   console.log('judges 快照已写入 ' + file + '（' + Object.keys(mutations).length + ' 条）')
 }
 
+// 退出码契约（spec §0）：gate 干净=0 / gate 失败=1 / 基线红=2；fast 一律非 0——全抓到=3、
+// 有任何非抓到=4。fast 通过 ≠ gate 通过：fast 是建议通道，只有 gate 干净才允许 exit 0。
+function exitCodeFor(mode, ok) {
+  return mode === 'fast' ? (ok ? 3 : 4) : (ok ? 0 : 1)
+}
+
+// fast 内环（杠杆 A）：judges 是 gate 轮的快照，只跑每条变异真正翻红的文件并集。
+// 漂移兜底（spec §7）：judges 缺失或指向不存在的文件 ⇒ 计「未应用」入失败清单，绝不静默跳过；
+// 副本基线红 ⇒ 全部记失败，本轮不给出任何建议。结论只是建议，gate 永远权威。
+async function runFast(args, selected) {
+  const workerRoot = mkdtempSync(path.join(os.tmpdir(), 'mutation-fast-'))
+  const results = []
+  try {
+    const sub = path.join(workerRoot, 'w0')
+    mkdirSync(sub, { recursive: true })
+    seedWorkerCopy(sub)
+    const baseline = runSuite(sub)
+    if (!baseline.ok) {
+      console.error('fast：隔离副本基线红——副本或快照不可信，本轮不给出建议。')
+      for (const m of selected) results.push({ id: m.id, status: 'crashed', crash: '副本基线红', fails: [], judges: [] })
+    } else {
+      console.log('fast：基线绿。只跑 judges 并集（' + selected.length + ' 条；建议通道，gate 永远权威）：')
+      console.log('')
+      for (const m of selected) {
+        const declared = [...new Set(m.judges ?? [])]
+        const files = declared.filter((f) => existsSync(path.join(sub, 'tests', f)))
+        if (declared.length === 0 || files.length !== declared.length) {
+          console.log('  ?  ' + m.id.padEnd(26) + ' judges 缺失或指向不存在的测试文件——计「未应用」（漂移兜底：重跑 mutation:calibrate）')
+          results.push({ id: m.id, status: 'unapplied', fails: [], judges: [] })
+          continue
+        }
+        const applied = applyMutation(sub, m)
+        if (!applied.ok) {
+          console.log('  ?  ' + m.id.padEnd(26) + ' 未应用（产物里形状与预期不符，请同步更新本条）')
+          results.push({ id: m.id, status: 'unapplied', fails: [], judges: [] })
+          continue
+        }
+        let res
+        try { res = runSuite(sub, files.map((f) => 'tests/' + f)) } finally { writeFileSync(path.join(sub, m.file), applied.original) }
+        const fails = res.out.split('\n').filter((l) => /^\s*✖/.test(l)).map((l) => l.trim().replace(/\s*\(\d.*$/, ''))
+        const verdict = classify(res, m)
+        const redJudges = judgesFromFails(res.out).filter((j) => files.includes(j))
+        const mark = verdict === 'caught' ? 'v' : verdict === 'crashed' ? '!' : 'x'
+        const label = verdict === 'caught'
+          ? '被 ' + (redJudges.join('、') || '未知文件') + ' 翻红（' + fails.length + ' 条）'
+          : verdict === 'crashed'
+            ? '崩了（' + crashName(res) + '：变异 `to` 自己写错了，不算被抓住）'
+            : '幸存（judges 文件全绿——建议仅供参考，以 gate 为准）'
+        console.log('  ' + mark + '  ' + m.id.padEnd(26) + ' ' + label)
+        results.push({ id: m.id, status: verdict, fails, judges: redJudges })
+      }
+    }
+  } finally {
+    rmSync(workerRoot, { recursive: true, force: true })
+  }
+  const applied = results.filter((r) => r.status !== 'unapplied').length
+  const survivors = results
+    .filter((r) => r.status !== 'caught')
+    .map((r) => r.id + (r.status === 'unapplied' ? '（未应用）' : r.status === 'crashed' ? '（崩了：' + (r.crash || '') + '）' : ''))
+  console.log('')
+  console.log('应用 ' + applied + '/' + selected.length + ' 条 · 幸存 ' + survivors.length + ' 条（fast 退出码恒非 0——fast 通过 ≠ gate 通过）')
+  if (survivors.length > 0) console.error('幸存清单：' + survivors.join('、'))
+  process.exitCode = exitCodeFor('fast', survivors.length === 0)
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
-  if (args.mode !== 'gate') { console.error('--mode ' + args.mode + ' 尚未实现（fast 随杠杆 A 落地）'); process.exitCode = 2; return }
   const selected = args.only ? MUTATIONS.filter((m) => args.only.includes(m.id)) : MUTATIONS
   if (selected.length === 0) { console.error('--mutations 没匹配到任何条目'); process.exitCode = 2; return }
+  if (args.mode === 'fast') { await runFast(args, selected); return }
+  if (args.mode !== 'gate') { console.error('--mode ' + args.mode + ' 不认识（gate | fast）'); process.exitCode = 2; return }
 
   const baseline = runSuite(ROOT)
   if (!baseline.ok) {
