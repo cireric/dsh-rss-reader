@@ -26,7 +26,7 @@ DDL 在 `src/storage/db.ts`；`config.json` 放订阅与视图偏好；`reader-Y
 npm run build            # 动过 src/client/** 则追加 npm run build:client
 npm run typecheck        # host + client 两个工程，0 错误
 npm test                 # 全绿
-npm run mutation         # 每条变异都必须被抓到，0 幸存（在隔离副本里跑）
+npm run mutation         # 每条变异都必须被抓到，0 幸存（默认并行 gate，自动建隔离副本；--mode fast 仅内环建议，退出码恒非 0——fast 通过 ≠ gate 通过）
 ```
 
 改了关键判定 → **同时补一条变异**。

@@ -30,7 +30,8 @@ npm run build            # host：链接依赖 + tsc → lib/
 npm run build:client     # client：tsdown → lib/client.js（改过 src/client/** 必跑）
 npm run typecheck        # 两个工程：host + client
 npm test                 # 单元/集成 + 真实 DOM 接线
-npm run mutation         # 变异门槛：每条都必须被抓到
+npm run mutation         # 变异门槛：默认并行 gate（整轮 ~4min 量级，副本自动建在 /tmp；K 默认按核数）
+npm run mutation:calibrate # 刷新 judges 快照（fast 的映射过期时重跑；快照收 docs/superpowers/plans/2026-10-15-judges-dump.json）
 ```
 
 改代码前先扫一遍 [docs/pitfalls.md](docs/pitfalls.md) 的标题 —— 构建与测试的三个坑都在那里。
