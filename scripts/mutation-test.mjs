@@ -9,8 +9,11 @@
  * 用法：npm run mutation（需先 npm run build + npm run build:client —— 改的是 lib/ 产物）。
  * 判据：**每一条变异都必须被抓到**；有幸存者就以非零码退出，并指出是哪条漏了。
  */
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, cpSync, rmSync, mkdtempSync } from 'node:fs'
 import { execSync } from 'node:child_process'
+import { Worker } from 'node:worker_threads'
+import os from 'node:os'
+import path from 'node:path'
 
 const ROOT = process.cwd()
 
@@ -925,117 +928,211 @@ const MUTATIONS = [
     to: 'await Promise.resolve();' },
 ]
 
-function runSuite() {
+// ── 函数化 + 并行化（2026-10-15 变异测试提速，杠杆 B；spec docs/mutation-test-speedup-plan.md）──
+// 为什么：原实现是顶层直跑、串行 + 每次全量（138 条 ≈ 14.6min）。提速三杠杆（分层 perf gate /
+// 并行 worker / judges 反查）需要同一套判定逻辑服务多条路径，所以拆成下面的可复用函数；
+// MUTATIONS 表与崩溃分类器的判定逐字保留（分类器三坑注释原样随迁，改任一条都要重跑）。
+
+// 「跑一次套件」。root 参数化（隔离副本跑副本、源目录跑基线）；files 省缺 = 全量内环 glob。
+function runSuite(root, files) {
+  const spec = files === undefined ? 'tests/*.test.mjs' : files.join(' ')
   try {
-    const out = execSync('node --test tests/*.test.mjs 2>&1', { cwd: ROOT, encoding: 'utf8', maxBuffer: 128 * 1024 * 1024 })
+    const out = execSync('node --test ' + spec + ' 2>&1', { cwd: root, encoding: 'utf8', maxBuffer: 128 * 1024 * 1024 })
     return { ok: true, out: out }
   } catch (error) {
     return { ok: false, out: String(error.stdout || '') + String(error.stderr || '') }
   }
 }
 
-const baseline = runSuite()
-if (!baseline.ok) {
-  console.error('基线不是绿的 —— 先修好再跑变异。')
-  console.error(baseline.out.split('\n').filter((l) => /^\s*(✖|not ok)/.test(l)).slice(0, 5).join('\n'))
-  process.exit(2)
-}
-console.log('基线绿。逐条改坏关键判定，看套件是否见红：')
-console.log('')
-
-const backups = new Map()
-for (const path of new Set(MUTATIONS.map((m) => ROOT + '/' + m.file))) backups.set(path, readFileSync(path, 'utf8'))
-
-const survivors = []
-let applied = 0
-for (const m of MUTATIONS) {
-  const path = ROOT + '/' + m.file
-  const original = backups.get(path)
-  const mutated = original.replace(m.from, m.to)
-  if (mutated === original) {
-    console.log('  ?  ' + m.id.padEnd(26) + ' 未应用（产物里形状与预期不符，请同步更新本条）')
-    survivors.push(m.id + '（未应用）')
-    continue
-  }
-  applied += 1
-  writeFileSync(path, mutated)
-  let res
-  try { res = runSuite() } finally { writeFileSync(path, original) }
-  const fails = res.out.split('\n').filter((l) => /^\s*✖/.test(l)).map((l) => l.trim().replace(/\s*\(\d.*$/, ''))
-  // ⚠️ **第四态：变异代码自己崩了**（2026-10-11 任务 9 修复轮 2，评审抓出）。
-  // `to` 里若引用作用域外的名字、或产物里没有的符号，套件当然红 —— 但红的是 ReferenceError /
-  // SyntaxError，**没有一条断言真的观察到这条变异想制造的缺陷**。
-  // 旧版把它记成「被抓到」，于是汇总里「幸存 0 条」看起来一切正常，而判据其实**完全没被保护**。
-  // 任务 9 真踩过两次（先产物没 import 的函数名 ⇒ SyntaxError，再作用域外的 urls ⇒ ReferenceError），
-  // 两次都是「红，但不是被抓住」；docs/pitfalls.md 二、2.7b 记了这件事。
-  // ⇒ 把「崩了」单列成一类并**计入失败清单**：它必须像幸存者一样逼人去修 `to`。
-  //
-  // ⚠️ **判据必须把「本条变异改过的那个文件」和「这两种错误名」关联起来**
-  //   （实测踩到两次，两次的错法不同，都记在这儿）：
-  //   ① 对整段输出做全文匹配 ⇒ **每一条**都判成「崩了」—— 真崩的那条会让整个套件里的所有
-  //      文件都红，别的条目只要输出里出现 ReferenceError 就被误伤；
-  //   ② 只在**错误那一行**里找文件名 ⇒ 一条都找不到 —— node 的 TAP 输出把
-  //      「ReferenceError: ...」放在一行、**栈帧放在下一行**（实测：行 37 是错误、38 行才是
-  //      `at file:///…/lib/refresh.js:79:104`）。
-  //   ⇒ 判据是「被改过的那个文件名出现在崩溃块里」，才算「崩的是变异写入的代码」。
-  //
-  // ⚠️ **三个形状上的坑，都是 2026-10-11 终检评审 B1 在隔离副本里实测出来的**（改任一条都要重跑）：
-  //
-  //   ① 匹配的是**文件基名**（`m.file.split('/').pop()`），栈帧里带产物名就够 —— 而 **vm 加载的
-  //      产物不给 `filename` 就永远匹配不上**：`lib/client.js` 由四个测试用 `vm.runInContext` 加载，
-  //      不给 `filename` 时帧上是 `evalmachine.<anonymous>` ⇒ client 那一族（50 条）永远进不了
-  //      分类器，那 50 行号称被守、其实没有被守。
-  //      `实测`：在 `lib/client.js` 末尾注入 `MUTANT_BOOM_UNDEFINED_NAME();`（一个 ReferenceError）——
-  //        · 撤掉 filename（= 修前）：帧 `at evalmachine.<anonymous>:3047:1`，`ℹ fail 91`，判 **crashed = false**；
-  //        · 补上 filename：帧 `at client.js:3047:1`，同样 `ℹ fail 91`，判 **crashed = true**。
-  //      ⇒ **修法在加载点**：四处都补了 `{ filename: BUNDLE_NAME }`（tests/client-bundle.test.mjs 的
-  //      `BUNDLE_NAME`，另三处同源）。**新增任何 vm 加载点都要照抄那一行。**
-  //
-  //   ② 错误名必须**带 TAP 缩进**（正则写 `^\s+(ReferenceError|SyntaxError):`，是 `\s+` 不是 `\s*`）。
-  //      两个会误判的形状都是**列 0**，各自实测：
-  //      · client 在正常路径上会**记录**（不是抛出）`[rss-reader] 读取视图记忆失败…ReferenceError:
-  //        fetch is not defined`（行首是日志前缀）；
-  //      · `client-守卫改回环境全局` 那条**合法**变异，让按键处理器在 jsdom 的事件派发里抛
-  //        ReferenceError —— jsdom 把它原样重播到列 0，而**断言仍然抓到了它**（scroll-dom.test.mjs:408
-  //        的 `false !== true`）。那条变异只是恰好抛了个怪东西，`to` 本身没写错，不算「崩了」。
-  //      真正的加载期崩溃一律由 TAP 缩进两格（实测：host / client 的 ReferenceError、vm 的
-  //      SyntaxError，以及四条探针用例）。
-  //
-  //   ③ 窗口**向两边各取 6 行**。两种崩溃的行文形状不同（都实测过）：
-  //      · ReferenceError：错误行**后面**的栈帧里印文件名（`at client.js:3047:1`）；
-  //      · vm 编译期的 SyntaxError：**没有栈帧**，文件名印在错误行**前面**的源码回显里
-  //        （`  client.js:3047` / `  const = ;` / `        ^` / 空行 / `  SyntaxError: …`）。
-  //      只往后看会漏掉 SyntaxError，只往前看会漏掉 ReferenceError。
+// 分类器：原 :1009-1023 逐字搬入（含三坑注释）。res.ok 参与 caught/survived 的区分，故入参是 res。
+function classify(res, m) {
   const mutatedFile = m.file.split('/').pop()
   const outLines = res.out.split('\n')
-  // ⚠️ `\s+`（不是 `\s*`）：见上面 ② 的两种列 0 形状。
+  // ⚠️ `\\s+`（不是 `\\s*`）：见上面 ② 的两种列 0 形状。
   const errorAt = outLines.findIndex((line) => /^\s+(ReferenceError|SyntaxError):/.test(line))
   const stackMentionsMutatedFile = errorAt >= 0 && outLines
     .slice(Math.max(0, errorAt - 6), errorAt + 7)
     .some((line) => line.includes(mutatedFile))
-  const crashed = errorAt >= 0 && stackMentionsMutatedFile
-    ? outLines[errorAt].match(/\b(ReferenceError|SyntaxError)\b/)
-    : null
-  if (crashed) {
-    console.log('  !  ' + m.id.padEnd(26) + ' 崩了（' + crashed[1] + '：变异 `to` 自己写错了，不算被抓住 —— 请改 `to`）')
-    survivors.push(m.id + '（崩了：' + crashed[1] + '）')
-    continue
-  }
-  if (res.ok) {
-    console.log('  x  ' + m.id.padEnd(26) + ' 幸存（套件仍然全绿）')
-    survivors.push(m.id)
-  } else {
-    console.log('  v  ' + m.id.padEnd(26) + ' 被抓到（' + fails.length + ' 条翻红：' + (fails[0] || '').slice(0, 44) + '）')
+  if (errorAt >= 0 && stackMentionsMutatedFile) return 'crashed'
+  return res.ok ? 'survived' : 'caught'
+}
+
+// 崩溃错误名（打印用，与 classify 同一条错误行正则）。
+function crashName(res) {
+  const hit = res.out.split('\n').find((line) => /^\s+(ReferenceError|SyntaxError):/.test(line))
+  return (hit && hit.match(/\b(ReferenceError|SyntaxError)\b/) || [])[1] || '未知'
+}
+
+// 翻红 ✖ 行 → 测试文件基名（去重排序）。gate 校准与 fast 消费同一份口径。
+function judgesFromFails(fails) {
+  return [...new Set(fails.map((line) => (line.match(/tests\/([\w.-]+\.test\.mjs)/) || [])[1]).filter(Boolean))].sort()
+}
+
+// 隔离副本骨架（docs/pitfalls.md §1.3：变异门槛绝不在源目录改 lib/）。
+// node_modules 必须跟着走（pre-flight Ruling）：tests/lib import zod 等第三方包，缺了假红；
+// .git / .worktrees 不拷（worktree 里是整份检出副本，拷了既慢又可能级联）。
+function seedWorkerCopy(workerRoot) {
+  for (const entry of ['lib', 'tests', 'scripts', 'node_modules', 'package.json']) {
+    cpSync(path.join(ROOT, entry), path.join(workerRoot, entry), { recursive: true })
   }
 }
 
-const after = runSuite()
-console.log('')
-console.log('应用 ' + applied + '/' + MUTATIONS.length + ' 条 · 幸存 ' + survivors.length + ' 条 · 恢复后基线 ' + (after.ok ? '仍然绿' : '没恢复干净！'))
-if (survivors.length > 0) {
-  console.error('幸存清单：' + survivors.join('、'))
-  console.error('-> 标「幸存」的是测试没覆盖到的判定（补一条会翻红的断言，或确认它是等价变异）；')
-  console.error('   标「崩了」的：变异 `to` 自己写错了（ReferenceError / SyntaxError），那种红不算被抓住（docs/pitfalls.md 二、2.7b）。')
-  process.exit(1)
+// 应用一条变异（原 :953-963 的逐条子逻辑）。ok:false = 「未应用」——比幸存更隐蔽（pitfalls 二、2.7）。
+function applyMutation(root, m) {
+  const target = path.join(root, m.file)
+  const original = readFileSync(target, 'utf8')
+  const mutated = original.replace(m.from, m.to)
+  if (mutated === original) return { ok: false, original }
+  writeFileSync(target, mutated)
+  return { ok: true, original }
 }
-console.log('全部被抓到。')
+
+// 大头在前：同文件条目经排序后轮转均分 ⇒ 任何单 worker 都不会独吞整个 client 族（50 条是大头）。
+const FILE_PREFIXES = ['lib/client.js', 'lib/store-sqlite.js', 'lib/refresh.js', 'lib/keys.js',
+  'lib/retention.js', 'lib/store.js', 'lib/endpoints.js', 'lib/identity-repair.js',
+  'lib/feed/', 'lib/storage/', 'lib/article.js', 'lib/list-scroll.js', 'lib/index.js',
+  'lib/domain.js', 'lib/shared.js', 'lib/subscribe.js', 'lib/config.js']
+function partitionMutations(mutations, n) {
+  const rank = (file) => { const i = FILE_PREFIXES.findIndex((p) => file.startsWith(p)); return i === -1 ? FILE_PREFIXES.length : i }
+  const sorted = [...mutations].sort((a, b) => rank(a.file) - rank(b.file))
+  return Array.from({ length: n }, () => []).map((_, i) => sorted.filter((__, j) => j % n === i))
+}
+
+// worker 侧脚本：把主进程的 runSuite / classify / applyMutation / crashName **函数源码序列化**进去
+// （Function.prototype.toString）——三条路径共用同一份实现，worker 里不维护第二份判定逻辑。
+// 结果用 postMessage 回传；worker 内任何异常都记成 crashed，不许静默吞掉一条变异。
+function buildWorkerScript(workerRoot, mutations) {
+  return `
+const { execSync } = require('node:child_process')
+const { readFileSync, writeFileSync } = require('node:fs')
+const path = require('node:path')
+const { parentPort } = require('node:worker_threads')
+const root = ${JSON.stringify(workerRoot)}
+const mutations = ${JSON.stringify(mutations)}
+const runSuite = ${runSuite.toString()}
+const classify = ${classify.toString()}
+const crashName = ${crashName.toString()}
+const applyMutation = ${applyMutation.toString()}
+for (const m of mutations) {
+  try {
+    const applied = applyMutation(root, m)
+    if (!applied.ok) { parentPort.postMessage({ id: m.id, status: 'unapplied' }); continue }
+    let res
+    try { res = runSuite(root) } finally { writeFileSync(path.join(root, m.file), applied.original) }
+    const fails = res.out.split('\\n').filter((l) => /^\\s*✖/.test(l)).map((l) => l.trim().replace(/\\s*\\(\\d.*$/, ''))
+    const verdict = classify(res, m)
+    parentPort.postMessage(verdict === 'crashed' ? { id: m.id, status: 'crashed', crash: crashName(res), fails } : { id: m.id, status: verdict, fails })
+  } catch (error) {
+    parentPort.postMessage({ id: m.id, status: 'crashed', crash: 'worker 内异常：' + error.message, fails: [] })
+  }
+}
+`
+}
+
+function runWorker(workerRoot, mutations) {
+  return new Promise((resolve) => {
+    const worker = new Worker(buildWorkerScript(workerRoot, mutations), { eval: true })
+    const results = []
+    const sweep = (why) => {
+      // worker 本体崩了（eval 失败 / 未捕获异常 / 非零退出）：没回传结果的变异全部记 crashed，不许静默丢
+      for (const m of mutations) {
+        if (!results.some((r) => r.id === m.id)) results.push({ id: m.id, status: 'crashed', crash: why, fails: [] })
+      }
+      resolve(results)
+    }
+    worker.on('message', (r) => results.push(r))
+    worker.on('error', (error) => sweep('worker 未捕获：' + error.message))
+    worker.on('exit', (code) => { if (code !== 0) sweep('worker exit ' + code); else resolve(results) })
+  })
+}
+
+function parseArgs(argv) {
+  const args = { mode: 'gate', workers: Math.min(8, Math.max(1, os.cpus().length - 2)), dumpJudges: undefined, only: undefined }
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]
+    if (a === '--mode') args.mode = argv[++i]
+    else if (a === '--workers') args.workers = Number(argv[++i])
+    else if (a === '--dump-judges') args.dumpJudges = argv[++i] ?? true
+    else if (a === '--mutations') args.only = String(argv[++i]).split(',').map((s) => s.trim()).filter(Boolean)
+    else { console.error('未知参数: ' + a); process.exit(2) }
+  }
+  return args
+}
+
+// 汇总（原 :1032-1040 的判定与文案逐字保留；applied 口径 = 除「未应用」外全部计入，同原实现）。
+function collectResults(results) {
+  const survivors = []
+  let applied = 0
+  for (const r of results) {
+    if (r.status === 'unapplied') {
+      console.log('  ?  ' + r.id.padEnd(26) + ' 未应用（产物里形状与预期不符，请同步更新本条）')
+      survivors.push(r.id + '（未应用）')
+    } else if (r.status === 'crashed') {
+      applied += 1
+      console.log('  !  ' + r.id.padEnd(26) + ' 崩了（' + (r.crash || '未知') + '：变异 `to` 自己写错了，不算被抓住 —— 请改 `to`）')
+      survivors.push(r.id + '（崩了：' + (r.crash || '未知') + '）')
+    } else if (r.status === 'survived') {
+      applied += 1
+      console.log('  x  ' + r.id.padEnd(26) + ' 幸存（套件仍然全绿）')
+      survivors.push(r.id)
+    } else {
+      applied += 1
+      console.log('  v  ' + r.id.padEnd(26) + ' 被抓到（' + (r.fails?.length ?? 0) + ' 条翻红：' + (r.fails?.[0] || '').slice(0, 44) + '）')
+    }
+  }
+  return { applied, survivors }
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2))
+  if (args.mode !== 'gate') { console.error('--mode ' + args.mode + ' 尚未实现（fast 随杠杆 A 落地）'); process.exitCode = 2; return }
+  const selected = args.only ? MUTATIONS.filter((m) => args.only.includes(m.id)) : MUTATIONS
+  if (selected.length === 0) { console.error('--mutations 没匹配到任何条目'); process.exitCode = 2; return }
+
+  const baseline = runSuite(ROOT)
+  if (!baseline.ok) {
+    console.error('基线不是绿的 —— 先修好再跑变异。')
+    console.error(baseline.out.split('\n').filter((l) => /^\s*(✖|not ok)/.test(l)).slice(0, 5).join('\n'))
+    process.exitCode = 2
+    return
+  }
+  console.log('基线绿。逐条改坏关键判定，看套件是否见红：')
+  console.log('')
+
+  const workerRoot = mkdtempSync(path.join(os.tmpdir(), 'mutation-gate-'))
+  let results
+  try {
+    const n = Math.max(1, Math.min(args.workers || 1, selected.length))
+    const buckets = partitionMutations(selected, n)
+    const running = []
+    for (let i = 0; i < buckets.length; i++) {
+      if (buckets[i].length === 0) continue
+      const sub = path.join(workerRoot, 'w' + i)
+      mkdirSync(sub, { recursive: true })
+      seedWorkerCopy(sub)
+      running.push(runWorker(sub, buckets[i]))
+    }
+    results = (await Promise.all(running)).flat()
+  } finally {
+    rmSync(workerRoot, { recursive: true, force: true })
+  }
+
+  // 打印顺序对齐 MUTATIONS 定义序（并行回传顺序不定）
+  const order = new Map(selected.map((m, i) => [m.id, i]))
+  results.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0))
+  const { applied, survivors } = collectResults(results)
+
+  const after = runSuite(ROOT)
+  console.log('')
+  console.log('应用 ' + applied + '/' + selected.length + ' 条 · 幸存 ' + survivors.length + ' 条 · 恢复后基线 ' + (after.ok ? '仍然绿' : '没恢复干净！'))
+  if (survivors.length > 0) {
+    console.error('幸存清单：' + survivors.join('、'))
+    console.error('-> 标「幸存」的是测试没覆盖到的判定（补一条会翻红的断言，或确认它是等价变异）；')
+    console.error('   标「崩了」的：变异 `to` 自己写错了（ReferenceError / SyntaxError），那种红不算被抓住（docs/pitfalls.md 二、2.7b）。')
+    process.exitCode = 1
+    return
+  }
+  console.log('全部被抓到。')
+}
+
+main().then(() => process.exit(process.exitCode ?? 0))
