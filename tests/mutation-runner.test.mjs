@@ -8,3 +8,8 @@ test('runner 已函数化且走 worker_threads', () => {
 test('隔离副本只拷必要目录、不拷 node_modules/.git/.worktrees', () => {
   assert.ok(src.includes("mkdtempSync(") && src.includes(".worktrees"))
 })
+test('gate 轮可回收 judges 快照（--dump-judges + mutation:calibrate 入口）', () => {
+  assert.ok(src.includes('function writeJudgesDump('), '缺 writeJudgesDump')
+  const pkg = readFileSync('package.json', 'utf8')
+  assert.ok(pkg.includes('"mutation:calibrate"'), 'package.json 缺 mutation:calibrate')
+})

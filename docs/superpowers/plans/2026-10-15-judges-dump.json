@@ -1,0 +1,906 @@
+{
+  "generatedAt": "2026-10-15T04:26:08.992Z",
+  "suiteGlob": "tests/*.test.mjs",
+  "mutations": {
+    "article-装饰性小图过滤": {
+      "file": "lib/article.js",
+      "judges": [
+        "article.test.mjs"
+      ]
+    },
+    "article-重复图去重": {
+      "file": "lib/article.js",
+      "judges": [
+        "article.test.mjs"
+      ]
+    },
+    "article-容器识别的整页兜底": {
+      "file": "lib/article.js",
+      "judges": [
+        "article.test.mjs",
+        "overview-scale.test.mjs"
+      ]
+    },
+    "keys-r 归还刷新计数": {
+      "file": "lib/keys.js",
+      "judges": [
+        "keys.test.mjs"
+      ]
+    },
+    "client-A 的范围阈值过滤": {
+      "file": "lib/client.js",
+      "judges": [
+        "client-bundle.test.mjs"
+      ]
+    },
+    "subscribe-信任不跨源传播": {
+      "file": "lib/subscribe.js",
+      "judges": [
+        "subscribe.test.mjs"
+      ]
+    },
+    "discover-只认 rel=alternate": {
+      "file": "lib/feed/discover.js",
+      "judges": [
+        "discover.test.mjs"
+      ]
+    },
+    "client-1 键切展开视图": {
+      "file": "lib/client.js",
+      "judges": [
+        "client-bundle.test.mjs"
+      ]
+    },
+    "retention-星标保护": {
+      "file": "lib/retention.js",
+      "judges": [
+        "refresh.test.mjs",
+        "retention.test.mjs"
+      ]
+    },
+    "retention-未读优先级": {
+      "file": "lib/retention.js",
+      "judges": [
+        "retention.test.mjs"
+      ]
+    },
+    "retention-清理的星标保护": {
+      "file": "lib/retention.js",
+      "judges": [
+        "overview-paging.test.mjs",
+        "retention.test.mjs",
+        "store-sqlite.test.mjs"
+      ]
+    },
+    "retention-非法上限保护": {
+      "file": "lib/retention.js",
+      "judges": [
+        "refresh.test.mjs",
+        "retention.test.mjs"
+      ]
+    },
+    "retention-NaN 上限不得清空": {
+      "file": "lib/retention.js",
+      "judges": [
+        "retention.test.mjs"
+      ]
+    },
+    "list-scroll-视口内判定": {
+      "file": "lib/list-scroll.js",
+      "judges": [
+        "list-scroll.test.mjs"
+      ]
+    },
+    "list-scroll-夹取保护": {
+      "file": "lib/list-scroll.js",
+      "judges": [
+        "list-scroll.test.mjs"
+      ]
+    },
+    "item-id-guid 优先级": {
+      "file": "lib/feed/item-id.js",
+      "judges": [
+        "parse.test.mjs"
+      ]
+    },
+    "keys-大写 R": {
+      "file": "lib/keys.js",
+      "judges": [
+        "keys.test.mjs",
+        "overview-scale.test.mjs"
+      ]
+    },
+    "keys-大写 F": {
+      "file": "lib/keys.js",
+      "judges": [
+        "keys.test.mjs"
+      ]
+    },
+    "refresh-正文升级判定": {
+      "file": "lib/refresh.js",
+      "judges": [
+        "refresh.test.mjs"
+      ]
+    },
+    "refresh-正文不得降级覆盖": {
+      "file": "lib/refresh.js",
+      "judges": [
+        "overview-scale.test.mjs",
+        "refresh.test.mjs"
+      ]
+    },
+    "refresh-缓存闸门认 blocks": {
+      "file": "lib/store-sqlite.js",
+      "judges": [
+        "overview-paging.test.mjs",
+        "overview-scale.test.mjs",
+        "store-sqlite.test.mjs"
+      ]
+    },
+    "refresh-正文闸门退回单源": {
+      "file": "lib/refresh.js",
+      "judges": [
+        "refresh.test.mjs"
+      ]
+    },
+    "refresh-正文闸门改走整表": {
+      "file": "lib/refresh.js",
+      "judges": [
+        "refresh.test.mjs"
+      ]
+    },
+    "refresh-调度键退回只看成功": {
+      "file": "lib/refresh.js",
+      "judges": [
+        "refresh.test.mjs"
+      ]
+    },
+    "refresh-失败的尝试不盖时间": {
+      "file": "lib/refresh.js",
+      "judges": [
+        "refresh.test.mjs",
+        "teardown-race.test.mjs"
+      ]
+    },
+    "refresh-陈旧度不再回落": {
+      "file": "lib/refresh.js",
+      "judges": [
+        "refresh.test.mjs"
+      ]
+    },
+    "refresh-陈旧度排序倒退": {
+      "file": "lib/refresh.js",
+      "judges": [
+        "refresh.test.mjs"
+      ]
+    },
+    "refresh-每轮上限失效": {
+      "file": "lib/refresh.js",
+      "judges": [
+        "refresh.test.mjs"
+      ]
+    },
+    "refresh-取源退回全量": {
+      "file": "lib/index.js",
+      "judges": [
+        "refresh.test.mjs"
+      ]
+    },
+    "config-每轮取源默认无界": {
+      "file": "lib/config.js",
+      "judges": [
+        "refresh.test.mjs"
+      ]
+    },
+    "domain-rebuildItem 的 omit": {
+      "file": "lib/domain.js",
+      "judges": [
+        "domain.test.mjs",
+        "refresh.test.mjs",
+        "unread-accounting.test.mjs"
+      ]
+    },
+    "item-id-撞车即不可信": {
+      "file": "lib/feed/item-id.js",
+      "judges": [
+        "parse.test.mjs"
+      ]
+    },
+    "item-id-链接反查认回老身份": {
+      "file": "lib/feed/item-id.js",
+      "judges": [
+        "identity.test.mjs"
+      ]
+    },
+    "item-id-退级不得再用源 id": {
+      "file": "lib/feed/item-id.js",
+      "judges": [
+        "parse.test.mjs"
+      ]
+    },
+    "item-id-认回身份要有旁证": {
+      "file": "lib/feed/item-id.js",
+      "judges": [
+        "identity.test.mjs"
+      ]
+    },
+    "identity-幸存者取最早一条": {
+      "file": "lib/identity-repair.js",
+      "judges": [
+        "identity.test.mjs"
+      ]
+    },
+    "identity-空链接不参与合并": {
+      "file": "lib/identity-repair.js",
+      "judges": [
+        "identity.test.mjs"
+      ]
+    },
+    "identity-合并保住已读态": {
+      "file": "lib/identity-repair.js",
+      "judges": [
+        "identity.test.mjs"
+      ]
+    },
+    "identity-合并保住星标": {
+      "file": "lib/identity-repair.js",
+      "judges": [
+        "identity.test.mjs"
+      ]
+    },
+    "retention-保持未读不裁剪": {
+      "file": "lib/retention.js",
+      "judges": [
+        "retention.test.mjs"
+      ]
+    },
+    "fetch-重定向目标不可信": {
+      "file": "lib/feed/fetch.js",
+      "judges": [
+        "fetch.test.mjs"
+      ]
+    },
+    "fetch-解析层内网拦截": {
+      "file": "lib/feed/fetch.js",
+      "judges": [
+        "fetch.test.mjs"
+      ]
+    },
+    "client-键解析短路": {
+      "file": "lib/client.js",
+      "judges": [
+        "client-bundle.test.mjs",
+        "scroll-dom.test.mjs"
+      ]
+    },
+    "client-可见性守卫恒真": {
+      "file": "lib/client.js",
+      "judges": [
+        "client-bundle.test.mjs",
+        "scroll-dom.test.mjs"
+      ]
+    },
+    "client-不注册监听器": {
+      "file": "lib/client.js",
+      "judges": [
+        "client-bundle.test.mjs",
+        "scroll-dom.test.mjs"
+      ]
+    },
+    "client-容器退回渲染期捕获": {
+      "file": "lib/client.js",
+      "judges": [
+        "scroll-dom.test.mjs"
+      ]
+    },
+    "client-容器选择器不分视图": {
+      "file": "lib/list-scroll.js",
+      "judges": [
+        "list-scroll.test.mjs"
+      ]
+    },
+    "client-正文行高量错对象": {
+      "file": "lib/client.js",
+      "judges": [
+        "scroll-dom.test.mjs"
+      ]
+    },
+    "client-半页退化成整页": {
+      "file": "lib/client.js",
+      "judges": [
+        "scroll-dom.test.mjs"
+      ]
+    },
+    "client-换文章不归零": {
+      "file": "lib/client.js",
+      "judges": [
+        "scroll-dom.test.mjs"
+      ]
+    },
+    "client-导航轴叠加失效": {
+      "file": "lib/client.js",
+      "judges": [
+        "nav-persistence.test.mjs",
+        "nav-selection.test.mjs",
+        "scroll-dom.test.mjs"
+      ]
+    },
+    "client-切源不重落选中": {
+      "file": "lib/client.js",
+      "judges": [
+        "client-bundle.test.mjs",
+        "nav-selection.test.mjs",
+        "scroll-dom.test.mjs"
+      ]
+    },
+    "client-perFeedUnread 不落 state": {
+      "file": "lib/client.js",
+      "judges": [
+        "nav-selection.test.mjs",
+        "scroll-dom.test.mjs",
+        "unread-accounting.test.mjs"
+      ]
+    },
+    "client-setFilter 丢掉源条件": {
+      "file": "lib/client.js",
+      "judges": [
+        "nav-selection.test.mjs"
+      ]
+    },
+    "client-再选同源不取消": {
+      "file": "lib/client.js",
+      "judges": [
+        "nav-selection.test.mjs",
+        "scroll-dom.test.mjs"
+      ]
+    },
+    "client-virtual 不归位 filter": {
+      "file": "lib/client.js",
+      "judges": [
+        "nav-selection.test.mjs"
+      ]
+    },
+    "endpoints-perFeedUnread 键域铺 0": {
+      "file": "lib/shared.js",
+      "judges": [
+        "overview-paging.test.mjs",
+        "store-sqlite.test.mjs"
+      ]
+    },
+    "client-左栏角标无视 showUnread": {
+      "file": "lib/client.js",
+      "judges": [
+        "scroll-dom.test.mjs"
+      ]
+    },
+    "client-左栏角标改用派生": {
+      "file": "lib/client.js",
+      "judges": [
+        "scroll-dom.test.mjs"
+      ]
+    },
+    "client-折叠时左栏仍渲染": {
+      "file": "lib/client.js",
+      "judges": [
+        "scroll-dom.test.mjs"
+      ]
+    },
+    "client-左栏也被标成滚动容器": {
+      "file": "lib/client.js",
+      "judges": [
+        "scroll-dom.test.mjs"
+      ]
+    },
+    "client-守卫改回环境全局": {
+      "file": "lib/client.js",
+      "judges": [
+        "scroll-dom.test.mjs"
+      ]
+    },
+    "client-去底部反成回顶部": {
+      "file": "lib/client.js",
+      "judges": [
+        "scroll-dom.test.mjs"
+      ]
+    },
+    "client-箭头按钮不接容器": {
+      "file": "lib/client.js",
+      "judges": [
+        "scroll-dom.test.mjs"
+      ]
+    },
+    "client-到底后不贴住底部": {
+      "file": "lib/client.js",
+      "judges": [
+        "scroll-dom.test.mjs"
+      ]
+    },
+    "client-用户滚走不解除贴底": {
+      "file": "lib/client.js",
+      "judges": [
+        "scroll-dom.test.mjs"
+      ]
+    },
+    "keys-u 改回向上半页": {
+      "file": "lib/keys.js",
+      "judges": [
+        "keys.test.mjs"
+      ]
+    },
+    "keys-shift+d 不接盘上半页": {
+      "file": "lib/keys.js",
+      "judges": [
+        "keys.test.mjs"
+      ]
+    },
+    "client-u 键不接左栏显隐": {
+      "file": "lib/client.js",
+      "judges": [
+        "scroll-dom.test.mjs"
+      ]
+    },
+    "client-shift+n 改成「移动即打开」": {
+      "file": "lib/client.js",
+      "judges": [
+        "scroll-dom.test.mjs"
+      ]
+    },
+    "client-移动光标顺带换 filter": {
+      "file": "lib/client.js",
+      "judges": [
+        "nav-selection.test.mjs",
+        "scroll-dom.test.mjs"
+      ]
+    },
+    "client-打开光标不动作用域": {
+      "file": "lib/client.js",
+      "judges": [
+        "nav-selection.test.mjs",
+        "scroll-dom.test.mjs"
+      ]
+    },
+    "client-markRead 不动每源账目": {
+      "file": "lib/client.js",
+      "judges": [
+        "unread-accounting.test.mjs"
+      ]
+    },
+    "client-每源账目丢键域": {
+      "file": "lib/client.js",
+      "judges": [
+        "overview-scale.test.mjs",
+        "unread-accounting.test.mjs"
+      ]
+    },
+    "client-每源账目整体重算": {
+      "file": "lib/client.js",
+      "judges": [
+        "unread-accounting.test.mjs"
+      ]
+    },
+    "persist-读侧不校验形状": {
+      "file": "lib/client.js",
+      "judges": [
+        "nav-persistence.test.mjs"
+      ]
+    },
+    "persist-filter 不校验枚举": {
+      "file": "lib/client.js",
+      "judges": [
+        "nav-persistence.test.mjs"
+      ]
+    },
+    "persist-恢复盖掉用户手势": {
+      "file": "lib/client.js",
+      "judges": [
+        "nav-persistence.test.mjs"
+      ]
+    },
+    "persist-恢复不落到 state": {
+      "file": "lib/client.js",
+      "judges": [
+        "client-bundle.test.mjs",
+        "nav-persistence.test.mjs",
+        "overview-scale.test.mjs"
+      ]
+    },
+    "persist-写盘不串行化": {
+      "file": "lib/client.js",
+      "judges": [
+        "nav-persistence.test.mjs"
+      ]
+    },
+    "persist-宿主写侧不归一": {
+      "file": "lib/store.js",
+      "judges": [
+        "nav-persistence.test.mjs"
+      ]
+    },
+    "persist-宿主读侧不校验": {
+      "file": "lib/store.js",
+      "judges": [
+        "nav-persistence.test.mjs",
+        "overview-scale.test.mjs"
+      ]
+    },
+    "persist-setFilter 不写盘": {
+      "file": "lib/client.js",
+      "judges": [
+        "nav-persistence.test.mjs"
+      ]
+    },
+    "persist-selectNav 不写盘": {
+      "file": "lib/client.js",
+      "judges": [
+        "nav-persistence.test.mjs"
+      ]
+    },
+    "persist-toggleNav 不写盘": {
+      "file": "lib/client.js",
+      "judges": [
+        "nav-persistence.test.mjs"
+      ]
+    },
+    "endpoints-标读回包不带每源账目": {
+      "file": "lib/endpoints.js",
+      "judges": [
+        "overview-scale.test.mjs",
+        "unread-accounting.test.mjs"
+      ]
+    },
+    "client-标读回包不整体覆盖每源账目": {
+      "file": "lib/client.js",
+      "judges": [
+        "nav-selection.test.mjs",
+        "unread-accounting.test.mjs"
+      ]
+    },
+    "persist-global schema 接受 null": {
+      "file": "lib/domain.js",
+      "judges": [
+        "domain.test.mjs",
+        "nav-persistence.test.mjs"
+      ],
+      "converged": true
+    },
+    "client-过滤行对 all 特殊对待（三个标签不一致）": {
+      "file": "lib/client.js",
+      "judges": [
+        "scroll-dom.test.mjs"
+      ]
+    },
+    "refresh-304 成功不残留上次失败标记": {
+      "file": "lib/refresh.js",
+      "judges": [
+        "refresh.test.mjs"
+      ]
+    },
+    "article-用旧快照整体写回覆盖并发写入": {
+      "file": "lib/endpoints.js",
+      "judges": [
+        "article-markread-race.test.mjs"
+      ]
+    },
+    "refresh-缓存淘汰用旧快照覆盖并发写入": {
+      "file": "lib/refresh.js",
+      "judges": [
+        "refresh.test.mjs"
+      ]
+    },
+    "refresh-正文回填用旧快照覆盖并发写入": {
+      "file": "lib/refresh.js",
+      "judges": [
+        "refresh.test.mjs"
+      ]
+    },
+    "keys-? 不认帮助键": {
+      "file": "lib/keys.js",
+      "judges": [
+        "keys.test.mjs"
+      ]
+    },
+    "client-? 不接浮窗": {
+      "file": "lib/client.js",
+      "judges": [
+        "scroll-dom.test.mjs"
+      ]
+    },
+    "client-Esc 不先关浮窗": {
+      "file": "lib/client.js",
+      "judges": [
+        "scroll-dom.test.mjs"
+      ]
+    },
+    "client-浮窗标成 dialog 角色": {
+      "file": "lib/client.js",
+      "judges": [
+        "scroll-dom.test.mjs"
+      ]
+    },
+    "client-helpOpen 不进依赖数组": {
+      "file": "lib/client.js",
+      "judges": [
+        "overview-scale.test.mjs",
+        "scroll-dom.test.mjs"
+      ]
+    },
+    "storage-版本闸把好库一起拒了": {
+      "file": "lib/storage/db.js",
+      "judges": [
+        "storage-skeleton.test.mjs"
+      ]
+    },
+    "storage-订阅文件版本闸失效": {
+      "file": "lib/storage/config-file.js",
+      "judges": [
+        "storage-skeleton.test.mjs",
+        "store-sqlite.test.mjs"
+      ]
+    },
+    "storage-目录权限放宽到 0777": {
+      "file": "lib/storage/paths.js",
+      "judges": [
+        "storage-skeleton.test.mjs"
+      ]
+    },
+    "storage-正文抓取时间可空": {
+      "file": "lib/storage/db.js",
+      "judges": [
+        "storage-skeleton.test.mjs",
+        "store-sqlite.test.mjs"
+      ]
+    },
+    "store-listItems 退回 JS 全表过滤": {
+      "file": "lib/store-sqlite.js",
+      "judges": [
+        "store-sqlite.test.mjs"
+      ]
+    },
+    "store-排序退回 published_at": {
+      "file": "lib/store-sqlite.js",
+      "judges": [
+        "store-sqlite.test.mjs"
+      ]
+    },
+    "store-updateItem 抹掉并发已读态": {
+      "file": "lib/store-sqlite.js",
+      "judges": [
+        "store-sqlite.test.mjs"
+      ]
+    },
+    "store-updateItem 缺失键顺手创建": {
+      "file": "lib/store-sqlite.js",
+      "judges": [
+        "store-sqlite.test.mjs"
+      ]
+    },
+    "store-版本握手失效": {
+      "file": "lib/store-sqlite.js",
+      "judges": [
+        "store-sqlite.test.mjs"
+      ]
+    },
+    "store-读偏好不校验形状": {
+      "file": "lib/store-sqlite.js",
+      "judges": [
+        "nav-persistence.test.mjs",
+        "store-sqlite.test.mjs"
+      ]
+    },
+    "store-写偏好覆盖掉订阅映射": {
+      "file": "lib/store-sqlite.js",
+      "judges": [
+        "nav-persistence.test.mjs",
+        "store-sqlite.test.mjs"
+      ]
+    },
+    "store-缺席字段写成 undefined 键": {
+      "file": "lib/store-sqlite.js",
+      "judges": [
+        "store-sqlite.test.mjs"
+      ]
+    },
+    "store-deleteFeed 先删游标后写 config": {
+      "file": "lib/store-sqlite.js",
+      "judges": [
+        "store-sqlite.test.mjs"
+      ]
+    },
+    "store-老形态正文静默丢正文": {
+      "file": "lib/store-sqlite.js",
+      "judges": [
+        "store-sqlite.test.mjs"
+      ]
+    },
+    "store-正文 fetchedAt 不落列": {
+      "file": "lib/store-sqlite.js",
+      "judges": [
+        "overview-scale.test.mjs",
+        "store-sqlite.test.mjs"
+      ]
+    },
+    "storage-订阅丢了却不报错": {
+      "file": "lib/index.js",
+      "judges": [
+        "storage-skeleton.test.mjs"
+      ]
+    },
+    "unreadPerFeed-SQL 判据反过来": {
+      "file": "lib/store-sqlite.js",
+      "judges": [
+        "overview-paging.test.mjs",
+        "store-sqlite.test.mjs"
+      ]
+    },
+    "unreadPerFeed-丢键域（0 未读的源不留键）": {
+      "file": "lib/store-sqlite.js",
+      "judges": [
+        "overview-paging.test.mjs",
+        "overview-scale.test.mjs",
+        "store-sqlite.test.mjs"
+      ]
+    },
+    "cleanup-保持未读不再受保护": {
+      "file": "lib/store-sqlite.js",
+      "judges": [
+        "overview-paging.test.mjs",
+        "overview-scale.test.mjs",
+        "store-sqlite.test.mjs"
+      ]
+    },
+    "cleanup-星标不再受保护": {
+      "file": "lib/store-sqlite.js",
+      "judges": [
+        "overview-paging.test.mjs",
+        "overview-scale.test.mjs",
+        "store-sqlite.test.mjs"
+      ]
+    },
+    "listRecent-负数上限下传给 SQLite": {
+      "file": "lib/store-sqlite.js",
+      "judges": [
+        "store-sqlite.test.mjs"
+      ]
+    },
+    "overview-列表窗口不再放大重取": {
+      "file": "lib/endpoints.js",
+      "judges": [
+        "endpoints-perfeed-unread.test.mjs"
+      ]
+    },
+    "paging-续页谓词的 id 方向写反": {
+      "file": "lib/store-sqlite.js",
+      "judges": [
+        "overview-paging.test.mjs"
+      ]
+    },
+    "paging-游标不校验形状（垃圾当第一页）": {
+      "file": "lib/shared.js",
+      "judges": [
+        "overview-paging.test.mjs"
+      ]
+    },
+    "paging-端点不拒绝坏游标": {
+      "file": "lib/endpoints.js",
+      "judges": [
+        "overview-paging.test.mjs",
+        "overview-scale.test.mjs"
+      ]
+    },
+    "paging-到底也硬给续页游标": {
+      "file": "lib/endpoints.js",
+      "judges": [
+        "overview-paging.test.mjs",
+        "overview-scale.test.mjs"
+      ]
+    },
+    "paging-旧实现谓词的 id 方向写反": {
+      "file": "lib/store.js",
+      "judges": [
+        "overview-paging.test.mjs"
+      ]
+    },
+    "store-旧实现每源账目不铺键域": {
+      "file": "lib/store.js",
+      "judges": [
+        "overview-paging.test.mjs"
+      ]
+    },
+    "store-旧实现正文清单字符数恒 0": {
+      "file": "lib/store.js",
+      "judges": [
+        "overview-paging.test.mjs"
+      ]
+    },
+    "store-旧实现候选集放过保持未读": {
+      "file": "lib/store.js",
+      "judges": [
+        "overview-paging.test.mjs"
+      ]
+    },
+    "paging-续页不追加而是替换": {
+      "file": "lib/client.js",
+      "judges": [
+        "client-bundle.test.mjs",
+        "nav-selection.test.mjs"
+      ]
+    },
+    "paging-续页改按本地 items 派生账目": {
+      "file": "lib/client.js",
+      "judges": [
+        "nav-selection.test.mjs"
+      ]
+    },
+    "paging-首屏游标不落 state": {
+      "file": "lib/client.js",
+      "judges": [
+        "client-bundle.test.mjs",
+        "nav-selection.test.mjs"
+      ]
+    },
+    "paging-客户端不回带游标": {
+      "file": "lib/client.js",
+      "judges": [
+        "client-bundle.test.mjs",
+        "nav-selection.test.mjs"
+      ]
+    },
+    "paging-在途不挡重复请求": {
+      "file": "lib/client.js",
+      "judges": [
+        "nav-selection.test.mjs"
+      ]
+    },
+    "log-文件名判据放宽成前缀匹配": {
+      "file": "lib/storage/log-file.js",
+      "judges": [
+        "log-file.test.mjs"
+      ]
+    },
+    "log-认不出的名字被当成可删": {
+      "file": "lib/storage/log-file.js",
+      "judges": [
+        "log-file.test.mjs",
+        "storage-skeleton.test.mjs"
+      ]
+    },
+    "log-同名目录不再跳过（EISDIR 抬升为整次失败）": {
+      "file": "lib/storage/log-file.js",
+      "judges": [
+        "log-file.test.mjs"
+      ]
+    },
+    "log-保留窗口多留一天（边界偏移）": {
+      "file": "lib/storage/log-file.js",
+      "judges": [
+        "log-file.test.mjs"
+      ]
+    },
+    "teardown-不等在途刷新就关库": {
+      "file": "lib/index.js",
+      "judges": [
+        "teardown-race.test.mjs"
+      ]
+    }
+  },
+  "_notes": {
+    "convergedAt": "2026-10-15T04:28:38.330Z",
+    "persist-global schema 接受 null": "14→2：剔除的 12 个是「store 构造抛错 ⇒ 装载失败」的连带红（变异本体注释自述 defineDomain 运行时检查会同时炸），非断言看见缺陷；保留 domain.test.mjs（schema 拒绝 null 的行为本体）与 nav-persistence.test.mjs（persist-global round-trip——spec.d.ts:83-89 那条缺陷的判据）。",
+    "族锚点实测": "retention 族 → retention/refresh/store-sqlite/overview-paging；paging 族 → overview-paging（+overview-scale 两条）；计划预设为示例，以本快照实测为准。",
+    "拆分 unread-accounting": "按 spec §8 预告作废——judges 按实测翻红取，未见 host 变异需要它作唯一判据，不拆。",
+    "droppedFrom16": [
+      "article-markread-race.test.mjs",
+      "endpoints-perfeed-unread.test.mjs",
+      "identity.test.mjs",
+      "opml.test.mjs",
+      "overview-paging.test.mjs",
+      "overview-scale.test.mjs",
+      "refresh.test.mjs",
+      "storage-skeleton.test.mjs",
+      "store-sqlite.test.mjs",
+      "subscribe.test.mjs",
+      "teardown-race.test.mjs",
+      "unread-accounting.test.mjs"
+    ]
+  }
+}

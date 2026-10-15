@@ -33,6 +33,7 @@
     "build:client": "tsdown",
     "test": "node --test tests/*.test.mjs tests/perf/*.test.mjs",
     "mutation": "node scripts/mutation-test.mjs",
+    "mutation:calibrate": "node scripts/mutation-test.mjs --mode gate --dump-judges docs/superpowers/plans/2026-10-15-judges-dump.json",
     "bench": "node --expose-gc scripts/scale-bench.mjs"
   },
   "exports": {

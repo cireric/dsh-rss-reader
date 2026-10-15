@@ -963,16 +963,36 @@ function crashName(res) {
   return (hit && hit.match(/\b(ReferenceError|SyntaxError)\b/) || [])[1] || '未知'
 }
 
-// 翻红 ✖ 行 → 测试文件基名（去重排序）。gate 校准与 fast 消费同一份口径。
-function judgesFromFails(fails) {
-  return [...new Set(fails.map((line) => (line.match(/tests\/([\w.-]+\.test\.mjs)/) || [])[1]).filter(Boolean))].sort()
+// 翻红 → 测试文件基名（去重排序）。gate 校准与 fast 消费同一份口径。
+// 实测（2026-10-15 scratch 失败用例）：reporter 的 ✖ 行印的是**测试名**不是文件名；
+// 文件名印在紧邻的「test at tests/…」行（失败汇总里在其上方 1 行）与断言栈帧里
+// （file:///…/tests/foo.test.mjs:4:10）。⇒ 对每个 ✖ 行在 ±6 行窗口内就近找 tests/*.test.mjs
+// 引用，先上后下（汇总节的 at 行在上；就地节的栈帧在下）。
+function judgesFromFails(out) {
+  const lines = out.split('\n')
+  const judges = new Set()
+  lines.forEach((line, i) => {
+    if (!/^\s*✖/.test(line)) return
+    for (let d = 1; d <= 6; d++) {
+      for (const j of [i - d, i + d]) {
+        if (j < 0 || j >= lines.length) continue
+        const m = lines[j].match(/tests\/([\w.-]+\.test\.mjs)/)
+        if (m) { judges.add(m[1]); d = 7; break }
+      }
+    }
+  })
+  return [...judges].sort()
 }
 
 // 隔离副本骨架（docs/pitfalls.md §1.3：变异门槛绝不在源目录改 lib/）。
-// node_modules 必须跟着走（pre-flight Ruling）：tests/lib import zod 等第三方包，缺了假红；
+// 副本必须忠实于「测试可见面」（两条实测教训，2026-10-15 校准轮）：
+//   · node_modules——tests/lib import zod 等第三方包，缺了假红；
+//   · src/——article.test.mjs:254 与 client-bundle.test.mjs:266 直接读源树文件
+//     （抽取版本守护、产物 mtime 新鲜度），缺了这两个用例对**任何**变异都翻红，
+//     快照里 138 条全部带噪声（探针：keys 变异下两用例必炸，非断言看见缺陷）。
 // .git / .worktrees 不拷（worktree 里是整份检出副本，拷了既慢又可能级联）。
 function seedWorkerCopy(workerRoot) {
-  for (const entry of ['lib', 'tests', 'scripts', 'node_modules', 'package.json']) {
+  for (const entry of ['lib', 'tests', 'scripts', 'src', 'node_modules', 'package.json']) {
     cpSync(path.join(ROOT, entry), path.join(workerRoot, entry), { recursive: true })
   }
 }
@@ -1012,6 +1032,7 @@ const mutations = ${JSON.stringify(mutations)}
 const runSuite = ${runSuite.toString()}
 const classify = ${classify.toString()}
 const crashName = ${crashName.toString()}
+const judgesFromFails = ${judgesFromFails.toString()}
 const applyMutation = ${applyMutation.toString()}
 for (const m of mutations) {
   try {
@@ -1020,8 +1041,9 @@ for (const m of mutations) {
     let res
     try { res = runSuite(root) } finally { writeFileSync(path.join(root, m.file), applied.original) }
     const fails = res.out.split('\\n').filter((l) => /^\\s*✖/.test(l)).map((l) => l.trim().replace(/\\s*\\(\\d.*$/, ''))
+    const judges = judgesFromFails(res.out)
     const verdict = classify(res, m)
-    parentPort.postMessage(verdict === 'crashed' ? { id: m.id, status: 'crashed', crash: crashName(res), fails } : { id: m.id, status: verdict, fails })
+    parentPort.postMessage(verdict === 'crashed' ? { id: m.id, status: 'crashed', crash: crashName(res), fails, judges } : { id: m.id, status: verdict, fails, judges })
   } catch (error) {
     parentPort.postMessage({ id: m.id, status: 'crashed', crash: 'worker 内异常：' + error.message, fails: [] })
   }
@@ -1083,6 +1105,20 @@ function collectResults(results) {
   return { applied, survivors }
 }
 
+// judges 快照落盘（杠杆 A 前置）：gate 全量轮的实测翻红就是「哪些测试看着这条变异」的快照——
+// fast 只跑这些文件的前提是快照采自 gate（gateRed ⊆ judges 由构造成立，spec §5）。
+// crashed / survived / unapplied 不进快照：它们本来就令 gate exit 1，没有「看着谁」可言。
+function writeJudgesDump(file, results, selected) {
+  const mutations = {}
+  for (const r of results) {
+    if (r.status !== 'caught') continue
+    const m = selected.find((x) => x.id === r.id)
+    mutations[r.id] = { file: m ? m.file : '', judges: r.judges ?? [] }
+  }
+  writeFileSync(file, JSON.stringify({ generatedAt: new Date().toISOString(), suiteGlob: 'tests/*.test.mjs', mutations }, null, 2))
+  console.log('judges 快照已写入 ' + file + '（' + Object.keys(mutations).length + ' 条）')
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (args.mode !== 'gate') { console.error('--mode ' + args.mode + ' 尚未实现（fast 随杠杆 A 落地）'); process.exitCode = 2; return }
@@ -1121,6 +1157,7 @@ async function main() {
   const order = new Map(selected.map((m, i) => [m.id, i]))
   results.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0))
   const { applied, survivors } = collectResults(results)
+  if (args.dumpJudges !== undefined) writeJudgesDump(args.dumpJudges === true ? 'judges-dump.json' : args.dumpJudges, results, selected)
 
   const after = runSuite(ROOT)
   console.log('')
