@@ -1121,6 +1121,29 @@ const MUTATIONS = [
     judges: ['teardown-race.test.mjs'],
     from: "try {\n            await Promise.all([generation, inFlight]);\n        }\n        catch (error) {\n            log('等待在途刷新结束时出错",
     to: "try {\n            await Promise.resolve();\n        }\n        catch (error) {\n            log('等待在途刷新结束时出错" },
+  // C3 未读账镜像（2026-10-16）：六动作共用「乐观 → RPC → 覆盖 / 回滚」管线。两条判据：
+  // ① 成功路径必须拿宿主回包的账整体覆盖 —— 删掉 applyAccount 调用后，回包里的 unread /
+  //   perFeedUnread 被整个丢掉（正是 C3 修的缺陷之一），toggleStar 之后账目停在乐观基线。
+  //   client-bundle 的「C3：toggleStar 成功后账目以宿主回包为准落地」用它看守（hostTruth=5）。
+  // ② 失败必须回滚到按下前 —— undoMarkAll 失败时只恢复 items/账目、不把 undo 条塞回去的话，
+  //   「失败 = 撤销没发生」就不成立：条目已翻回未读、撤销条却没了，界面自相矛盾。
+  //   client-bundle 的「C3：undoMarkAll 失败恢复撤销条并重新武装 5 秒窗口」用它看守。
+  { id: 'client-回包账目必须落地', file: 'lib/client.js',
+    judges: ['client-bundle.test.mjs'],
+    from: 'deps.applyAccount(await deps.callRpc(action.endpoint, action.payload));',
+    to: 'void (await deps.callRpc(action.endpoint, action.payload));' },
+  { id: 'client-撤销失败必须恢复撤销条', file: 'lib/client.js',
+    judges: ['client-bundle.test.mjs'],
+    // from 照产物实测（7 个 tab，进了 rollback 的 if 块后缩进加深；2026-10-16 实测 5-tab 旧串让该变异「未应用」假幸存——锚串必须随产物形状走，docs/pitfalls.md 一、1.4 同款坑）
+    from: 'set({ undo: { ids: undo.ids } });\n\t\t\t\t\t\t\tarmUndoExpiry();',
+    to: 'armUndoExpiry();' },
+  // ③ 身份 CAS：undoMarkAll 失败回滚只在撤销条仍是「本动作清掉后的空态」时才恢复 ——
+  //   改成无条件恢复后，交错场景（撤销在飞时更晚的 A 已写下自己的撤销条）里旧 batch 会盖掉
+  //   A2 的条目并把窗口重置。client-bundle 的「C3：撤销在飞…」用 shouldFail 时序闸门看守。
+  { id: 'client-撤销条恢复带身份 CAS', file: 'lib/client.js',
+    judges: ['client-bundle.test.mjs'],
+    from: 'if (state.undo === void 0) {',
+    to: 'if (true) {' },
 ]
 
 // ── 函数化 + 并行化（2026-10-15 变异测试提速，杠杆 B；spec docs/mutation-test-speedup-plan.md）──

@@ -110,17 +110,32 @@ function loadClientBundle() {
  * 「接线」上（按键没接上、动作漏了副作用），不是算法上。这一层让「按 v 打开时是否
  * 真的调了 markRead」这类问题变成可断言的，而不是靠读代码确认。
  */
-async function driveStore({ items = [], article } = {}) {
+async function driveStore({ items = [], article, hostTruth, failEndpoints = [], shouldFail } = {}) {
   const { exports, sandbox, opened } = loadClientBundle()
   const endpoints = []
   // calls 是加法式的：给「请求体本身也要断言」的用例用（例如 markRead 的 skipKept）
   const calls = []
-  const host = hostAccount(items)
+  const host = hostAccount(items, hostTruth)
+  // shouldFail = { endpoint, when }：把该端点的请求**挂起**到 when(calls) 为真再回失败信封 ——
+  // 交错用例的时序闸门（单线程桩里这是唯一能让「A2 在 U 的 RPC 在飞时挤进来」成立的办法）。
+  const held = []
+  const failEnvelope = () => ({ ok: true, status: 200, json: async () => ({ ok: false, error: { code: 'injected', message: '注入失败' } }) })
   sandbox.fetch = async (_url, init) => {
     const body = JSON.parse(init.body)
     endpoints.push(body.endpoint)
     calls.push(body)
     const ok = (value) => ({ ok: true, status: 200, json: async () => ({ ok: true, value }) })
+    // 释放已满足条件的挂起请求（每来一个新请求都重新判定一次）
+    for (let i = held.length - 1; i >= 0; i--) {
+      if (shouldFail?.when?.(calls) === true) { held[i].resolve(failEnvelope()); held.splice(i, 1) }
+    }
+    // 失败注入：统一回滚判据的触发器。回**分发核 fail() 的真实形状**——HTTP 200 + ok:false 信封
+    //（若回 HTTP 500，callRpc 在 HTTP 层就 throw，正文信封根本不被读，错误文本变成 'HTTP 500'）
+    if (failEndpoints.includes(body.endpoint)) return failEnvelope()
+    if (shouldFail !== undefined && body.endpoint === shouldFail.endpoint) {
+      if (shouldFail.when === undefined || shouldFail.when(calls) === true) return failEnvelope()
+      return new Promise((resolve) => { held.push({ resolve }) })
+    }
     // refresh 与 overview 都回完整 Overview（src/endpoints.ts:112-118）：面板挂载时走的是
     // refresh（index.tsx:184），桩件若把 refresh 回成 {changed,unread}，applyOverview 会拿到
     // 一堆 undefined。这是夹具要守的契约，不是代码该容忍的形状。
@@ -132,11 +147,13 @@ async function driveStore({ items = [], article } = {}) {
       const ids = Array.isArray(body.payload?.itemIds) ? body.payload.itemIds : []
       return ok(host.reply(body.endpoint, ids))
     }
-    return ok({ changed: 1, unread: 0 })
+    // toggleStar / toggleKeepUnread 的回包同样带账（分发核按 carriesAccount 合并）——
+    // 旧桩只回 {changed, unread:0} 是契约上不存在的形状；新管线照单全收，桩必须守契约
+    return ok({ changed: 1, ...host.snapshot() })
   }
   const store = exports.createReaderStore()
   await store.load('overview')
-  return { store, endpoints, calls, opened }
+  return { store, endpoints, calls, opened, sandbox }
 }
 
 /**
@@ -177,11 +194,18 @@ function overviewStub(items, feeds) {
  * 会把本地看不见的外部漂移留成幽灵未读）。桩件少给一个字段，就等于要求作品代码去容忍一个
  * **契约上不该存在的形状** —— 本仓库明确不选那条路（docs/pitfalls.md 二、2.5 / 2.6）。
  */
-function hostAccount(items) {
+function hostAccount(items, hostTruth) {
   const base = overviewStub(items)
-  const account = { unread: base.unread, perFeedUnread: { ...base.perFeedUnread } }
+  const account = {
+    unread: hostTruth?.unread ?? base.unread,
+    perFeedUnread: { ...base.perFeedUnread, ...(hostTruth?.perFeedUnread ?? {}) },
+  }
   const feedOf = new Map(items.map((entry) => [entry.id, entry.feedId]))
   return {
+    /** 当前宿主真账的只读副本：所有 carriesAccount 端点的回包都带这一份（分发核的合并契约）。 */
+    snapshot() {
+      return { unread: account.unread, perFeedUnread: { ...account.perFeedUnread } }
+    },
     reply(endpoint, ids) {
       const delta = endpoint === 'markRead' ? -1 : 1
       for (const id of ids) {
@@ -464,7 +488,8 @@ function mountReader({ items = [], article } = {}) {
       const ids = Array.isArray(body.payload?.itemIds) ? body.payload.itemIds : []
       return ok(host.reply(body.endpoint, ids))
     }
-    return ok({ changed: 1, unread: 0 })
+    // 其余 carriesAccount 端点的回包同样带账（契约形状；新管线会照单全收这份账）
+    return ok({ changed: 1, ...host.snapshot() })
   }
   const ctx = {
     slots: {
@@ -590,7 +615,8 @@ function renderReader({ items = [] } = {}) {
       const ids = Array.isArray(body.payload?.itemIds) ? body.payload.itemIds : []
       return ok(host.reply(body.endpoint, ids))
     }
-    return ok({ changed: 1, unread: 0 })
+    // 其余 carriesAccount 端点的回包同样带账（契约形状；新管线会照单全收这份账）
+    return ok({ changed: 1, ...host.snapshot() })
   }
   const store = exports.createReaderStore()
   const Reader = exports.createReader(store)
@@ -715,6 +741,112 @@ test('保持未读可切换，并把状态回填到条目上', async () => {
   assert.equal(store.get().items[0].keptUnread, false, '再切一次应取消')
 })
 
+/* ------------------ C3：六动作统一的「乐观 → 覆盖 / 回滚」判据 ------------------ */
+/* 判据之家 = src/client/account-mirror.ts 头部的动作表；2026-10-16 拍板「失败统一回滚」。 */
+
+test('C3：toggleStar 失败回滚星标并进 error 条（统一回滚）', async () => {
+  const { store } = await driveStore({ items: [item({ id: 'a' })], failEndpoints: ['toggleStar'] })
+  store.select('a')
+  await store.toggleStar()
+  assert.equal(store.get().items[0].starred, false, '失败 = 动作没发生：星标必须回到按下前')
+  assert.ok(String(store.get().error).includes('injected'), '错误必须可见（AGENTS.md 禁静默）')
+})
+
+test('C3：toggleKeepUnread 失败回滚保持未读并进 error 条（统一回滚）', async () => {
+  const { store } = await driveStore({ items: [item({ id: 'a' })], failEndpoints: ['toggleKeepUnread'] })
+  await store.toggleKeepUnread('a')
+  // 按下前这个键是 undefined（乐观把它翻成 true，失败回滚到按下前 = undefined，不是 false）
+  assert.equal(store.get().items[0].keptUnread, undefined, '失败必须回到按下前——若没回滚它会是 true')
+  assert.ok(String(store.get().error).includes('injected'), '错误必须可见')
+})
+
+test('C3：toggleRead 撤销已读失败回滚 readAt 与账目（统一回滚）', async () => {
+  const readAt = '2026-10-15T00:00:00.000Z'
+  const { store } = await driveStore({ items: [item({ id: 'a', readAt })], failEndpoints: ['unmarkRead'] })
+  store.select('a')
+  const beforeUnread = store.get().unread
+  await store.toggleRead()
+  assert.equal(store.get().items[0].readAt, readAt, '失败必须回到按下前的 readAt')
+  assert.equal(store.get().unread, beforeUnread, '账目也必须回到按下前')
+  assert.ok(String(store.get().error).includes('injected'), '错误必须可见')
+})
+
+test('C3：markRead 失败回滚已读与账目（统一回滚收编的第一处旧缺口）', async () => {
+  const { store } = await driveStore({ items: [item({ id: 'a' })], failEndpoints: ['markRead'] })
+  const beforeUnread = store.get().unread
+  await store.markRead('a')
+  assert.equal(store.get().items[0].readAt, undefined, '失败必须回到按下前——旧实现只报错不回滚')
+  assert.equal(store.get().unread, beforeUnread, '账目同样回滚')
+  assert.ok(String(store.get().error).includes('injected'), '错误必须可见')
+})
+
+test('C3：markAllRead 失败回滚整批并撤掉撤销条（挂着回不去的撤销只会再吃一次错）', async () => {
+  const { store } = await driveStore({
+    items: [item({ id: 'a' }), item({ id: 'b' })], failEndpoints: ['markRead'],
+  })
+  await store.markAllRead()
+  const state = store.get()
+  assert.equal(state.items.find((entry) => entry.id === 'a').readAt, undefined, '失败必须整批回到按下前')
+  assert.equal(state.undo, undefined, '撤销条必须撤掉——它对应的动作没有发生')
+  assert.ok(String(state.error).includes('injected'), '错误必须可见')
+})
+
+test('C3：undoMarkAll 失败恢复撤销条并重新武装 5 秒窗口（只塞回 state 会常驻）', async () => {
+  const { store, sandbox } = await driveStore({ items: [item({ id: 'a' })], failEndpoints: ['unmarkRead'] })
+  const timers = []
+  sandbox.setTimeout = (fn, ms) => { timers.push({ fn, ms }); return timers.length }
+  sandbox.clearTimeout = () => {}
+  await store.markAllRead()
+  const before = timers.length
+  await store.undoMarkAll()
+  assert.ok(store.get().undo !== undefined, '失败 = 撤销没发生：撤销条必须恢复')
+  assert.equal(timers.length, before + 1, '必须重新武装定时器——否则恢复出的撤销条常驻（2026-10-07 那类缺陷）')
+  assert.equal(timers[timers.length - 1].ms, 5000, '窗口仍是 5 秒（README 承诺）')
+})
+
+test('C3：撤销在飞时更晚的 A 写下自己的撤销条，U 失败不得用旧 batch 盖掉它（身份 CAS）', async () => {
+  // 时序：A1（只标 a，b 太新）→ U 撤销在飞（挂起）→ A2 全量标 [a,b] 挤进来写下 U2 → U 回失败。
+  // 若 rollback 不做身份 CAS，U 会把撤销条恢复成自己那个旧 batch ['a']，把 A2 的 ['a','b'] 盖掉，
+  // 且多武装一次定时器把 A2 的窗口重置 —— 两个都是 2026-10-07「撤销条管理」缺陷的变体。
+  const old = new Date(Date.now() - 10 * 24 * 3600 * 1000).toISOString()
+  const recent = new Date(Date.now() - 60 * 1000).toISOString()
+  const { store, sandbox } = await driveStore({
+    items: [item({ id: 'a', fetchedAt: old }), item({ id: 'b', fetchedAt: recent })],
+    shouldFail: {
+      endpoint: 'unmarkRead',
+      // U 的 unmarkRead 是第 1 个请求；等到第 2 个 markRead（= A2 已挤进来）再放行失败
+      when: (calls) => calls.filter((entry) => entry.endpoint === 'markRead').length >= 2,
+    },
+  })
+  const timers = []
+  sandbox.setTimeout = (fn, ms) => { timers.push({ fn, ms }); return timers.length }
+  sandbox.clearTimeout = () => {}
+
+  store.setMarkAllRange('day')
+  await store.markAllRead()               // A1：批 = [a]，撤销条 U1，武装定时器 ①
+  const pendingUndo = store.undoMarkAll() // U：乐观清条目、清撤销条，RPC 挂起
+  store.setMarkAllRange('all')
+  const pendingA2 = store.markAllRead()   // A2：批 = [a,b]，写下 U2 并武装定时器 ②；随后 U 被放行失败
+  await pendingUndo
+  await pendingA2
+
+  assert.deepEqual(store.get().undo?.ids, ['a', 'b'], '撤销条必须还是 A2 的那批 —— 被 U 的旧 batch 盖掉就是 CAS 失效')
+  assert.equal(timers.length, 2, '定时器只由两次 A 各武装一次；U 的失败回滚不得再武装（否则 A2 的窗口被重置）')
+  assert.ok(String(store.get().error).includes('injected'), 'U 的失败仍要可见（回滚跳过 ≠ 吞错）')
+})
+
+test('C3：toggleStar 成功后账目以宿主回包为准落地（旧实现把回包整个丢掉）', async () => {
+  // 宿主真账故意大于本地视图：只有「回包账目真的落了地」才能得到 5
+  const { store } = await driveStore({
+    items: [item({ id: 'a' })], hostTruth: { unread: 5, perFeedUnread: { f: 5 } },
+  })
+  store.select('a')
+  await store.toggleStar()
+  assert.equal(store.get().unread, 5, '回包里的 unread 必须落地——丢弃回包会让账目停在乐观基线')
+  assert.equal(store.get().perFeedUnread.f, 5, '每源账目同落地')
+  assert.equal(store.get().items[0].starred, true, '翻转本身照常生效')
+})
+
 test('按键接线：1 切展开视图、2 切回列表（且默认是列表 = 既有行为）', async () => {
   const harness = renderReader({ items: [item({ id: 'a' }), item({ id: 'b' })] })
   await harness.store.load('overview')
@@ -772,7 +904,9 @@ test('分页接线：续页游标在时渲染「加载更多」，点它真的�
       if (body.payload?.cursor === 'C1') return ok(overviewStub(second))
       return ok({ ...overviewStub(first), nextCursor: 'C1' })
     }
-    return ok({ changed: 1, unread: 0 })
+    // 兜底同样守回包契约（本用例不会打到这些端点，但这条桩常被复制当模板 —— 别把契约上
+    // 不存在的形状传给下一代用例，与 driveStore / mountReader / renderReader 的桩同一条纪律）
+    return ok({ changed: 1, unread: 0, perFeedUnread: {} })
   }
   const store = exports.createReaderStore()
   const Reader = exports.createReader(store)

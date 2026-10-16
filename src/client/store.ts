@@ -7,6 +7,7 @@
  */
 import { useEffect, useState } from 'react'
 import { ROUTE_PATH, recencyOf, sanitizeViewPreferences, type ArticlePayload, type CleanupResult, type Endpoint, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult, type UnreadAccount, type ViewPreferences } from '../shared.js'
+import { createAccountMirror } from './account-mirror.js'
 
 export type Filter = 'all' | 'unread' | 'starred'
 
@@ -462,28 +463,47 @@ export function createReaderStore() {
     return next
   }
 
+  /**
+   * 六个动作共用「乐观 → RPC → 覆盖 / 回滚」管线（失败统一回滚，2026-10-16 拍板）。
+   * 动作 × 行为的判据之家在 src/client/account-mirror.ts 头部 —— 这里只留守卫与载荷组装。
+   */
+  const mirror = createAccountMirror({
+    callRpc,
+    applyAccount,
+    fail: (failure) => { set({ error: failure instanceof Error ? failure.message : String(failure) }) },
+  })
+
   const markRead = async (itemId: string): Promise<void> => {
     const target = state.items.find((item) => item.id === itemId)
     if (target?.readAt !== undefined) return
-    patchItem(itemId, { readAt: new Date().toISOString() })
-    // 左栏角标（perFeedUnread）与顶栏总数（unread）是同一条守恒式的两边——各源之和 === unread。
-    // 只减 unread 会让界面自相矛盾：角标还写着 3、顶栏已经 2（index.tsx:374 与 :385 分读两处）。
-    // 宿主侧 unread 由 countUnread 重算，客户端这一侧的每源账目必须跟着一起补。
-    set(target === undefined
-      ? { unread: Math.max(0, state.unread - 1) }
-      : {
-        unread: Math.max(0, state.unread - 1),
-        perFeedUnread: {
-          ...state.perFeedUnread,
-          [target.feedId]: Math.max(0, (state.perFeedUnread[target.feedId] ?? 0) - 1),
-        },
-      })
-    try {
-      // 宿主回包带着每源账目，落地时以它为准 —— 本地那笔只是乐观镜像
-      applyAccount(await callRpc<UnreadAccount>('markRead', { itemIds: [itemId] }))
-    } catch (failure) {
-      set({ error: failure instanceof Error ? failure.message : String(failure) })
-    }
+    // 快照在按下前取：失败回滚 = 恢复到「动作没发生」（account-mirror 不变量 ②——
+    // 不用反向增量：Math.max 夹到 0 的减量没法用加法精确还原）
+    const stamp = new Date().toISOString()
+    const beforeUnread = state.unread
+    const beforePerFeed = state.perFeedUnread
+    await mirror.run({
+      endpoint: 'markRead',
+      payload: { itemIds: [itemId] },
+      optimistic: () => {
+        patchItem(itemId, { readAt: stamp })
+        // 左栏角标（perFeedUnread）与顶栏总数（unread）是同一条守恒式的两边——各源之和 === unread。
+        // 只减 unread 会让界面自相矛盾：角标还写着 3、顶栏已经 2（index.tsx:374 与 :385 分读两处）。
+        // 宿主侧 unread 由 countUnread 重算，客户端这一侧的每源账目必须跟着一起补。
+        set(target === undefined
+          ? { unread: Math.max(0, state.unread - 1) }
+          : {
+            unread: Math.max(0, state.unread - 1),
+            perFeedUnread: {
+              ...state.perFeedUnread,
+              [target.feedId]: Math.max(0, (state.perFeedUnread[target.feedId] ?? 0) - 1),
+            },
+          })
+      },
+      rollback: () => {
+        patchItem(itemId, { readAt: target?.readAt })
+        set({ unread: beforeUnread, perFeedUnread: beforePerFeed })
+      },
+    })
   }
 
   /**
@@ -521,13 +541,14 @@ export function createReaderStore() {
   const toggleStar = async (): Promise<void> => {
     const item = visible().find((entry) => entry.id === state.selectedId)
     if (item === undefined) return
-    patchItem(item.id, { starred: !item.starred })
-    try {
-      await callRpc('toggleStar', { itemId: item.id })
-    } catch (failure) {
-      patchItem(item.id, { starred: item.starred })
-      set({ error: failure instanceof Error ? failure.message : String(failure) })
-    }
+    await mirror.run({
+      endpoint: 'toggleStar',
+      payload: { itemId: item.id },
+      // 此前 await 不接返回值，回包里的 unread / perFeedUnread 整个被丢 —— 现在由管线统一落账（不变量 ①）
+      optimistic: () => { patchItem(item.id, { starred: !item.starred }) },
+      // 回滚用按下前的快照，不是「再翻转一次」：并发窗口里两次翻转未必回到原值
+      rollback: () => { patchItem(item.id, { starred: item.starred }) },
+    })
   }
 
   /**
@@ -538,14 +559,12 @@ export function createReaderStore() {
   const toggleKeepUnread = async (itemId: string): Promise<void> => {
     const item = state.items.find((entry) => entry.id === itemId)
     if (item === undefined) return
-    const next = item.keptUnread !== true
-    patchItem(itemId, { keptUnread: next })
-    try {
-      await callRpc('toggleKeepUnread', { itemId })
-    } catch (failure) {
-      patchItem(itemId, { keptUnread: item.keptUnread })
-      set({ error: failure instanceof Error ? failure.message : String(failure) })
-    }
+    await mirror.run({
+      endpoint: 'toggleKeepUnread',
+      payload: { itemId },
+      optimistic: () => { patchItem(itemId, { keptUnread: item.keptUnread !== true }) },
+      rollback: () => { patchItem(itemId, { keptUnread: item.keptUnread }) },
+    })
   }
 
   const toggleRead = async (): Promise<void> => {
@@ -555,23 +574,24 @@ export function createReaderStore() {
       await markRead(item.id)
       return
     }
-    patchItem(item.id, { readAt: undefined })
-    // 同上：取消已读要把这条账加回**它所属源**，否则角标会比顶栏少一
-    set({
-      unread: state.unread + 1,
-      perFeedUnread: { ...state.perFeedUnread, [item.feedId]: (state.perFeedUnread[item.feedId] ?? 0) + 1 },
+    const beforeUnread = state.unread
+    const beforePerFeed = state.perFeedUnread
+    await mirror.run({
+      endpoint: 'unmarkRead',
+      payload: { itemIds: [item.id] },
+      optimistic: () => {
+        patchItem(item.id, { readAt: undefined })
+        // 同上：取消已读要把这条账加回**它所属源**，否则角标会比顶栏少一
+        set({
+          unread: state.unread + 1,
+          perFeedUnread: { ...state.perFeedUnread, [item.feedId]: (state.perFeedUnread[item.feedId] ?? 0) + 1 },
+        })
+      },
+      rollback: () => {
+        patchItem(item.id, { readAt: item.readAt })
+        set({ unread: beforeUnread, perFeedUnread: beforePerFeed })
+      },
     })
-    try {
-      // 同 markRead：撤销也以宿主回包为准（截断场景下本地增量看不见的账由回包纠正）
-      applyAccount(await callRpc<UnreadAccount>('unmarkRead', { itemIds: [item.id] }))
-    } catch (failure) {
-      patchItem(item.id, { readAt: item.readAt })
-      set({
-        unread: Math.max(0, state.unread - 1),
-        perFeedUnread: { ...state.perFeedUnread, [item.feedId]: Math.max(0, (state.perFeedUnread[item.feedId] ?? 0) - 1) },
-        error: failure instanceof Error ? failure.message : String(failure),
-      })
-    }
   }
 
   /** A：把**当前过滤下**的未读全部标为已读，留一个短时撤销窗口。 */
@@ -587,40 +607,69 @@ export function createReaderStore() {
       .map((item) => item.id)
     if (ids.length === 0) return
     const stamp = new Date().toISOString()
-    set({
-      items: state.items.map((item) => (ids.includes(item.id) ? { ...item, readAt: stamp } : item)),
-      unread: Math.max(0, state.unread - ids.length),
-      // 乐观更新也要带上每源账目：否则从按下 A 到宿主回包之间，左栏角标停在旧数上。
-      // 基线用宿主下发的那份（含截断之外的账），只按本批 ids 增量减。
-      perFeedUnread: shiftPerFeedUnread(ids, -1),
-      undo: { ids },
+    const beforeUnread = state.unread
+    const beforePerFeed = state.perFeedUnread
+    const beforeItems = state.items
+    // 连按两次 A、第二次失败时，第一条的撤销窗口还没走完 —— 回滚必须恢复「按下前」的 undo。
+    // 不需要身份 CAS：A2 的 beforeUndo 在按下那一刻就是 A1 的条目（undo 是单槽），快照恢复
+    // 天然还原它；真正的并发风险在 undoMarkAll 那一侧（见其 rollback 注释）。
+    const beforeUndo = state.undo
+    await mirror.run({
+      endpoint: 'markRead',
+      payload: { itemIds: ids, skipKept: true, before },
+      optimistic: () => {
+        set({
+          items: state.items.map((item) => (ids.includes(item.id) ? { ...item, readAt: stamp } : item)),
+          unread: Math.max(0, state.unread - ids.length),
+          // 乐观更新也要带上每源账目：否则从按下 A 到宿主回包之间，左栏角标停在旧数上。
+          // 基线用宿主下发的那份（含截断之外的账），只按本批 ids 增量减。
+          perFeedUnread: shiftPerFeedUnread(ids, -1),
+          undo: { ids },
+        })
+        armUndoExpiry()
+      },
+      // 失败 = 动作没发生：界面（含撤销窗口）整体回到按下前 —— 挂着一条回不去的撤销，
+      // 按了只会再吃一次错；恢复出撤销条则必须重新武装定时器（否则常驻，见 undoMarkAll）。
+      // 恢复出的窗口从恢复时刻重新计 5s：state 刻意不存时间戳，恢复剩余秒数得先改数据形状。
+      rollback: () => {
+        set({ items: beforeItems, unread: beforeUnread, perFeedUnread: beforePerFeed, undo: beforeUndo })
+        if (beforeUndo === undefined) clearUndoExpiry()
+        else armUndoExpiry()
+      },
     })
-    armUndoExpiry()
-    try {
-      // 回包里同时有 unread 与 perFeedUnread（宿主按全量表算的真值），整体覆盖本地那份乐观镜像：
-      // 只覆盖 unread 会把「本地看不见的外部漂移」留在 perFeedUnread 里 ⇒ 幽灵未读（任务 9 实测）。
-      const result = await callRpc<UnreadAccount>('markRead', { itemIds: ids, skipKept: true, before })
-      applyAccount(result)
-    } catch (failure) {
-      set({ error: failure instanceof Error ? failure.message : String(failure) })
-    }
   }
 
   const undoMarkAll = async (): Promise<void> => {
     const undo = state.undo
     if (undo === undefined) return
-    clearUndoExpiry()
-    set({ undo: undefined })
-    set({
-      items: state.items.map((item) => (undo.ids.includes(item.id) ? { ...item, readAt: undefined } : item)),
-      perFeedUnread: shiftPerFeedUnread(undo.ids, 1),
+    const beforeUnread = state.unread
+    const beforePerFeed = state.perFeedUnread
+    const beforeItems = state.items
+    await mirror.run({
+      endpoint: 'unmarkRead',
+      payload: { itemIds: undo.ids },
+      optimistic: () => {
+        clearUndoExpiry()
+        set({ undo: undefined })
+        set({
+          items: state.items.map((item) => (undo.ids.includes(item.id) ? { ...item, readAt: undefined } : item)),
+          perFeedUnread: shiftPerFeedUnread(undo.ids, 1),
+        })
+      },
+      // 失败 = 撤销没发生：undo 条恢复并重新武装 5 秒窗口 —— 只把 undo 塞回 state 而不定时器，
+      // 恢复出来的撤销条会**常驻**（「5 秒撤销窗口」名存实亡，正是 2026-10-07 修过的缺陷）。
+      // 身份 CAS（状态谓词式）：仅当撤销条仍是「本动作清掉后的空态」才恢复 —— 在飞窗口里
+      // 更晚的 A 已写下自己的条目时，不许拿本动作那个旧 batch 的条目盖掉它（撤销条是单槽资源，
+      // 恢复旧 batch 会把 A2 的撤销入口整个换掉；交错用例 C3「撤销在飞」看守这条）。
+      // markAllRead 一侧不需要 CAS：undo 是单槽，A2 的 beforeUndo 按下时就是 A1 的条目。
+      rollback: () => {
+        set({ items: beforeItems, unread: beforeUnread, perFeedUnread: beforePerFeed })
+        if (state.undo === undefined) {
+          set({ undo: { ids: undo.ids } })
+          armUndoExpiry()
+        }
+      },
     })
-    try {
-      // 同上：撤销同样以宿主回包为准（否则会把外部漂移那部分凭空加回去）
-      applyAccount(await callRpc<UnreadAccount>('unmarkRead', { itemIds: undo.ids }))
-    } catch (failure) {
-      set({ error: failure instanceof Error ? failure.message : String(failure) })
-    }
   }
 
   /**
