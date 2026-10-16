@@ -8,7 +8,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, statSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
@@ -262,12 +262,29 @@ test('注册侧栏图标与主面板，且二者 id 一致', () => {
   assert.equal(typeof main.component, 'function', 'main 需要一个面板组件')
   assert.equal(typeof panellist.options.label(), 'string', 'label 必须是字符串或返回字符串的函数')
 })
-test('产物不能过期：客户端源码比 lib/client.js 新时测试必须失败', () => {
-  const sourceMtime = statSync(join(ROOT, 'src', 'client', 'index.tsx')).mtimeMs
+/**
+ * src/client 下**每一个** .ts/.tsx 的最新 mtime（递归）。
+ *
+ * 为什么递归而不是只看 index.tsx：2026-10-15 新增了 src/client/keyboard-routing.ts，若判据
+ * 仍只 stat index.tsx，那「改了 keyboard-routing.ts 忘了 rebuild」就是**全套绿而真机行为是旧的**
+ * （独立评审实测：给 toggleNav 加一条真回归且不 rebuild ⇒ pass 40 / fail 0）。
+ */
+function newestClientSourceMtime(dir) {
+  let newest = 0
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name)
+    if (entry.isDirectory()) newest = Math.max(newest, newestClientSourceMtime(path))
+    else if (/\.tsx?$/.test(entry.name)) newest = Math.max(newest, statSync(path).mtimeMs)
+  }
+  return newest
+}
+
+test('产物不能过期：客户端任一源码比 lib/client.js 新时测试必须失败', () => {
+  const sourceMtime = newestClientSourceMtime(join(ROOT, 'src', 'client'))
   const bundleMtime = statSync(BUNDLE).mtimeMs
   assert.ok(
     bundleMtime >= sourceMtime,
-    '客户端产物过期（源码比 lib/client.js 新）——本测试会静默测旧代码。请先跑 dev_build_plugin 或 npm run build:client',
+    '客户端产物过期（src/client 下任一 .ts/.tsx 比 lib/client.js 新）——本测试会静默测旧代码。请先跑 dev_build_plugin 或 npm run build:client',
   )
 })
 

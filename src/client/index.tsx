@@ -27,15 +27,25 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import { createReaderStore, relativeTime, useReaderStore, VIRTUAL_VIEWS, type Filter, type MarkAllRange, type ReaderStore } from './store.js'
 // 导出面是构建产物对外的契约（契约测试直接调它），store 搬家后仍要从入口转出去
 export { createReaderStore }
+// **仅供单测取用的 re-export**：键盘路由住在 ./keyboard-routing.ts，而 client 半只出单文件
+// bundle（tsdown codeSplitting: false），.mjs 测试无法直接 import client 目录下的模块。
+// tests/keyboard-routing.test.mjs 用 vm 加载 lib/client.js 后从这里取它来驱动那 10 处 view 守卫。
+// ⚠️ 它**不是**运行时需要的导出 —— 删掉它，键盘功能照常，只是那组守卫失去单测。
+export { routeKey } from './keyboard-routing.js'
 // 左栏宽度：横向 flex 布局与本组件共用同一个常量（feed-nav.tsx），分散写会出现 1px 的缝
 export { LEFT_NAV_WIDTH } from './feed-nav.js'
+import { routeKey } from './keyboard-routing.js'
 import { FeedsView } from './feeds-view.js'
 import { FeedNav } from './feed-nav.js'
 import { ArticleView } from './article-pane.js'
 import { MIN_CONTENT_CHARS, recencyOf, ROUTE_PATH, type ArticlePayload, type CleanupResult, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult } from '../shared.js'
 import { htmlToText } from '../html-text.js'
-import { READER_KEY_HELP, READER_HELP_SCOPE_LABEL, resolveReaderKey } from '../keys.js'
-import { nextScrollTop, scanTop, pageTop, halfPageTop, scanStepFor, scrollSelectorFor, lineStepFrom, isElementNode, SCROLL_ATTR } from '../list-scroll.js'
+// resolveReaderKey 也搬去了（keyboard-routing.ts 第 1 层）；这里只留帮助浮窗要用的两张表。
+import { READER_KEY_HELP, READER_HELP_SCOPE_LABEL } from '../keys.js'
+// 只剩「跟随选中项滚动」那条 effect 用的三个（nextScrollTop / isElementNode / SCROLL_ATTR）；
+// 扫视与翻页那几个（scanTop / pageTop / halfPageTop / scanStepFor / scrollSelectorFor / lineStepFrom）
+// 已随 141 行键盘路由搬进 keyboard-routing.ts（2026-10-15）。
+import { nextScrollTop, isElementNode, SCROLL_ATTR } from '../list-scroll.js'
 
 export const inject = ['slots']
 
@@ -111,31 +121,6 @@ function RefreshIcon({ spinning }: { spinning?: boolean }): ReactNode {
   )
 }
 
-/**
- * 量列表「一行条目」的高度。量不到返回 undefined，由 scanStepFor 决定兜底 ——
- * 这里不自己编一个常数，否则「兜底多少」就会散落在两个文件里。
- */
-/**
- * 量「正文一行」的高度。
- *
- * ⚠️ 必须量**承载正文的元素**，不能量容器本身：容器上只有 flex/overflow 这些布局样式，
- * 字号行高是从面板根继承来的（14px × 1.55 = 21.7），而正文是内层块自己的
- * 16px × 1.85 = 29.6 —— 量错对象会得到一个小一号的步长，而且看起来「有值」，不会被兜底发现。
- * 优先取正文段落（`p`），它才是读者眼里的「一行」。
- */
-function measureLineStep(box: HTMLElement, win: Window | undefined): number | undefined {
-  if (win === undefined) return undefined
-  const sample = box.querySelector('p') ?? box
-  const style = win.getComputedStyle(sample)
-  return lineStepFrom(style.fontSize, style.lineHeight)
-}
-
-function measureRowHeight(box: HTMLElement): number | undefined {
-  const row = box.querySelector('[data-rss-row]')
-  if (!isElementNode(row)) return undefined
-  const height = row.offsetHeight
-  return Number.isFinite(height) && height > 0 ? height : undefined
-}
 
 function toParagraphs(html: string | undefined): string[] {
   // 直接用抽取层那套共享实现（html-text.ts）。原先这里自己抄了一份：标签处理规则逐字相同，
@@ -144,31 +129,6 @@ function toParagraphs(html: string | undefined): string[] {
   return htmlToText(html).split('\n')
 }
 
-
-/**
- * 快捷键的守卫：焦点在输入框、可编辑区或弹层里时不响应。
- *
- * 为什么不再要求「阅读器持有焦点」：用户实测切到阅读器后必须先用鼠标点一下才能用快捷键——
- * 因为宿主在面板切换后并不把按键交给我们的节点。现在监听挂在 document 上（面板卸载即移除），
- * 于是「只有阅读器存在时才可能响应」由生命周期保证，而「别抢输入框的键」由本函数保证。
- */
-function isTypingTarget(target: EventTarget | null): boolean {
-  // 用 isElementNode 而不是 instanceof HTMLElement：后者依赖全局标识符，
-  // 全局缺失时会在这一行抛 ReferenceError，把整套键位一起带走（见 list-scroll.ts 的说明）
-  if (!isElementNode(target)) return false
-  try {
-    if (target.isContentEditable) return true
-    if (target.closest('[role="dialog"], [aria-modal="true"], dialog') !== null) return true
-    const tag = target.tagName
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true
-  } catch (error) {
-    // 不能静默降级：判定失败意味着「这次按键会被当成非输入框而放行」，那是行为上的改变，
-    // 必须在控制台留下证据（浏览器里 console 是本插件唯一可见的通道）。
-    console.warn('[rss-reader] 输入框判定失败，本次按键按「非输入框」处理', error)
-    return false
-  }
-  return false
-}
 
 function ReaderIcon({ size = 16, active = false }: { size?: number; active?: boolean }) {
   return (
@@ -243,13 +203,16 @@ export function createReader(store: ReaderStore): () => ReactNode {
     const state = useReaderStore(store)
     const [root, setRoot] = useState<HTMLDivElement | null>(null)
     /**
-     * 滚动容器句柄。**刻意不用 useState**：这两个值是给长驻的 keydown 监听器读的，
-     * 而那个 effect 的依赖数组不会因为「articleBox 在别处被赋值」而重跑 ⇒ 监听器闭包里
-     * 读到的是注册那一刻的 null，详情页空格 / n / p 全部静默失效就是这么来的（2026-10-09）。
-     * useRef 的身份跨渲染稳定，读的永远是最新的 .current。
+     * 列表滚动容器句柄。**刻意不用 useState**：useRef 的身份跨渲染稳定，读的永远是最新的 .current。
+     *
+     * 原先这里还有第二个句柄 articleBox（阅读容器），2026-10-15 C2 随「换文章归零」一起搬去了
+     * article-pane。原文记着一条同形态事故，值得留在原地：正文容器曾被长驻的 keydown 监听器
+     * 闭包捕获（依赖数组不会因为「它在别处被赋值」而重跑 ⇒ 读到注册那一刻的 null），详情页
+     * 空格 / n / p 全部静默失效（2026-10-09）。**所以那条路径现在一律按键时刻现取容器**
+     * （按标记属性 querySelector，见 keyboard-routing.ts 的 focusScrollBox）——本仓库不为这件事
+     * 再留一个跨组件的 ref 桥接。
      */
     const listBox = useRef<HTMLDivElement | null>(null)
-    const articleBox = useRef<HTMLDivElement | null>(null)
     const [expanded, setExpanded] = useState<string | undefined>(undefined)
     /** 帮助浮窗开合。它进 keydown effect 的依赖数组（见那条 effect 的收尾注释）。 */
     const [helpOpen, setHelpOpen] = useState(false)
@@ -286,195 +249,39 @@ export function createReader(store: ReaderStore): () => ReactNode {
       // 依赖里没有 listBox：它现在是稳定句柄，变了也不该重跑（每次渲染都会变的话反而是噪音）
     }, [state.selectedId, state.view])
 
-    // 切文章时把阅读位置归零（2026-10-09 修）。
-    // 为什么需要：React 会复用正文容器的 DOM 节点，节点不换 ⇒ scrollTop 保留上一条的位置。
-    // 读了一半按 j，新文章会从半截开始 —— 而 j/k 的语义是「换条目」，不是「同一篇里翻页」。
-    // 以 itemId 为键而不是 view：连续按 j 时 view 一直是 'article'，只有 itemId 在变。
-    useEffect(() => {
-      const box = articleBox.current
-      if (box === null) return
-      box.scrollTop = 0
-    }, [state.article?.itemId])
-
-    // ref 回调写成稳定引用：内联箭头每次渲染都是新函数，React 会在每次提交时先置 null 再挂载，
-    // 于是 articleBox.current 在两次提交之间短暂为 null（同时也会让上面那条归零 effect 误判）。
-    const setArticleBox = useCallback((node: HTMLDivElement | null): void => { articleBox.current = node }, [])
+    // 换文章时的「归零阅读位置 + 解除钉底」已搬进 article-pane（2026-10-15 C2）：它与「内容长高时
+    // 继续贴底」是同一个行为的两半，原先分居两文件、同一个 effect 键、改一次要动两个文件。
+    //
+    // ref 回调写成稳定引用：内联箭头每次渲染都是新函数，React 会在每次提交时先置 null 再挂载。
     const setListBox = useCallback((node: HTMLDivElement | null): void => { listBox.current = node }, [])
 
-    // 键盘流：挂在 document 上 + 输入框守卫。
+    // 键盘流：挂在 document 上 + 输入框守卫（24 个 action 的判据与路由都在 keyboard-routing.ts）。
     // 原实现挂在面板根节点并要求其持有焦点，导致「必须先点一下页面」才响应（用户实测）。
-    // 挂 document 的代价是作用域变宽，因此用 isTypingTarget 挡住输入框/弹层；
+    // 挂 document 的代价是作用域变宽，因此由 routeKey 内部的 isTypingTarget 挡住输入框/弹层；
     // 面板卸载时监听随 effect 清理一并移除，所以只有阅读器存在时才可能响应。
     // ⚠️ 不走 ctx.shortcuts：平台规则禁止无修饰键的绑定（configuration.ts:100 ——
     // modifiers 为空或全为 shift 即 modifier-required，register 会直接 throw，实测会炸掉整个 client 半）。
     useEffect(() => {
-      /**
-       * 按键时刻解析滚动容器 —— **不读渲染期捕获的值**。
-       *
-       * 为什么必须现取：这个监听器挂在 document 上、生命周期跨很多次重渲染，而它的依赖数组
-       * 只在 root/store 变化时重跑。此前容器存在 state 里被闭包捕获，进详情页不会重新注册监听，
-       * 闭包读到的永远是 null ⇒ 空格 / n / p 全部静默 no-op（2026-10-09 用户实测）。
-       * 第一版修法是 useRef 句柄，但那只解决「值变了」；现取还能覆盖容器**换了个节点**
-       * （切换文章、重新挂载）的情况，闭包里索性不存在任何会变的东西。
-       */
-      const focusScrollBox = (view: string): HTMLElement | null => {
-        const selector = scrollSelectorFor(view)
-        if (selector === undefined) return null
-        const container = root === null ? null : root.querySelector(selector)
-        if (container === null) {
-          // 不静默降级：按了键却没反应是**行为上的改变**，必须留下证据（浏览器里 console 是唯一通道）
-          console.warn('[rss-reader] 找不到滚动容器 ' + selector + '（view=' + view + '）')
-          return null
-        }
-        return isElementNode(container) ? container : null
-      }
       const onKeyDown = (event: KeyboardEvent): void => {
-        if (isTypingTarget(event.target)) return
-        // 宿主可能把非当前主栏面板保活在后台（ui-layout 的 retainMainPanels 就是这个意图）：
-        // 面板没真正显示时不响应，否则你在对话里按 j/k 会去动一个看不见的列表。
-        // 用 getClientRects().length 判可见：display:none 或未挂载时为 0，且不受定位方式影响。
-        // root 来自 useState 且**在依赖数组里**：root 一变这个 effect 就重注册监听，
-        // 所以它不属于「闭包捕获」那一类缺陷，这里保持读闭包值即可（2026-10-09 核对）。
-        if (root === null || root.getClientRects().length === 0) return
-        if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return
-        // 键位语义在 src/keys.ts（纯函数，宿主侧有单测）；这里只把动作落到 store 上
-        // 空格的大小写不敏感，方向必须靠 shift 标志分辨（见 keys.ts 的单测）
-        const action = resolveReaderKey(event.key, event.shiftKey)
-        if (action === 'none') return
-        const view = store.get().view
-        const run = (act: () => void): void => { event.preventDefault(); act() }
-        switch (action) {
-          // 正文视图里 j/k 不移动：每次移动都意味着一次抓取，误按代价太高（Esc 回列表再移动）
-          // j/k 按视图分流——同一个键始终是「换条目」，语义不因视图而变：
-          //   列表页 → 移动选中（不标已读，用户 2026-10-06 定）
-          //   正文页 → 切上/下一条文章（B1：显示即打开，故标已读；在途防抖、边界停住）
-          case 'next':
-            if (view === 'article') { run(() => { store.stepArticle(1) }); break }
-            if (view !== 'list') return
-            run(() => store.selectRelative(1))
-            break
-          case 'prev':
-            if (view === 'article') { run(() => { store.stepArticle(-1) }); break }
-            if (view !== 'list') return
-            run(() => store.selectRelative(-1))
-            break
-          // Google Reader 语义：o 展开/折叠 + 标已读（已读的唯一自动触发点，另有显式的 m）
-          case 'expand':
-            // 只在列表页有意义：正文页按 o 曾会展开"背后那个看不见的列表"里的条目，
-            // 表现为按 Esc 回列表后发现某行莫名展开（既存缺陷，2026-10-06 修）
-            if (view !== 'list') return
-            run(() => {
-              const selected = store.get().selectedId
-              if (selected === undefined) return
-              setExpanded((current) => (current === selected ? undefined : selected))
-              void store.markRead(selected)
-            })
-            break
-          // n/p = 扫视：滚动视野但**不改变选中**（GR 原义：scroll without viewing）
-          // 列表页滚列表，详情页滚文章——两处都是「只看不动」
-          case 'scanNext':
-          case 'scanPrev': {
-            const direction: 1 | -1 = action === 'scanNext' ? 1 : -1
-            const box = focusScrollBox(view)
-            if (box === null) return
-            run(() => {
-              // 步长按视图算：列表用「一行条目」的高度，正文用「一行正文」的高度。
-              // 此前两者共用列表行高，正文页量不到就落回硬编码 48px —— 正文行高约 29.6px，
-              // 于是 n/p 在详情页成了「按一次滚一行半」（2026-10-09 修）。
-              // 用面板自己的 document 取样式，不用裸 getComputedStyle 全局：
-              // bundle 会被塞进宿主页面，多窗口/测试环境里裸全局并不保证存在（实测踩到）。
-              const win = root === null ? undefined : root.ownerDocument.defaultView
-              const step = scanStepFor(view, {
-                rowHeight: measureRowHeight(box),
-                lineHeight: measureLineStep(box, win ?? undefined),
-              })
-              box.scrollTop = scanTop(box.scrollTop, step, box.scrollHeight - box.clientHeight, direction)
-            })
-            break
-          }
-          // 空格 / shift+空格 = 整屏；d / shift+d = 半屏。三档距离并存，长文里整屏容易跳过头
-          case 'pageDown':
-          case 'pageUp':
-          case 'halfPageDown':
-          case 'halfPageUp': {
-            const forward = action === 'pageDown' || action === 'halfPageDown'
-            const direction: 1 | -1 = forward ? 1 : -1
-            const half = action === 'halfPageDown' || action === 'halfPageUp'
-            const box = focusScrollBox(view)
-            if (box === null) return
-            run(() => {
-              const maxTop = box.scrollHeight - box.clientHeight
-              box.scrollTop = half
-                ? halfPageTop(box.scrollTop, box.clientHeight, maxTop, direction)
-                : pageTop(box.scrollTop, box.clientHeight, maxTop, direction)
-            })
-            break
-          }
-          // u = 左栏显隐（GR spec §3.8 第 250 行）。2026-10-10 用户拍板 A 方案：u 从「向上半页」归还
-          // 给 GR 原义（旧语义是本仓库按 vim 习惯自加的），上半页改由 shift+d 接盘。
-          // 只在列表页生效：左栏**只影响条目流**（过滤/选源），正文页与订阅管理页里它属于「背后的东西」。
-          // 沿用上面 o 键的同一条裁决（正文页按 o 会展开背后那个看不见的列表，2026-10-06 修）——
-          // 在正文页按 u 收起左栏，读者回列表时才发现导航没了，而那一刻他正需要它。
-          case 'toggleNav':
-            if (view !== 'list') return
-            run(() => store.toggleNav())
-            break
-          // shift+n / shift+p = 在左栏导航里**移动光标**（GR spec §3.8 第 209 行的 navigation down/up；
-          // 规格 §2.4 把它与 shift+o 的「打开」写成两行）。
-          // 与 j/k 是两条轴：j/k 动右栏文章列表的选中项，这里动左栏那一列的光标。
-          // ⚠️ 移动**不改变**右栏看到什么（那要 shift+o 才发生）—— 行序、边界夹取、退订兜底都在
-          // store.moveNavCursor 里，此处只传方向，不在组件里重算一遍行表（两处各算一份迟早错位）。
-          // 为什么限定列表页：左栏只在列表页渲染，正文页里移动一个看不见的光标没有意义。
-          case 'navNext':
-          case 'navPrev':
-            if (view !== 'list') return
-            // 左栏折叠时没有「导航里的位置」可动，也没有任何可见反馈（按 u 找回来再动，链路不绕）。
-            if (!store.get().navVisible) return
-            run(() => store.moveNavCursor(action === 'navNext' ? 1 : -1))
-            break
-          // shift+o = **打开**光标所在行（GR spec §3.8 第 212 行 / 规格 §2.4）= 等价于点击它。
-          // 走到与鼠标点击**同一组动作**（虚拟视图行 → setFilter，源行 → selectNav），
-          // 而不是另写一套「按源过滤」的逻辑：那会变成第二份过滤状态，与顶栏那组 filter 各说各话。
-          case 'navOpen':
-            if (view !== 'list') return
-            // 同 navNext/navPrev：折叠态下没有「导航里的一行」可打开
-            if (!store.get().navVisible) return
-            run(() => store.openNavCursor())
-            break
-          // ? = 打开/关闭帮助浮窗（GR spec §3.8 第 255 行）。它不随视图分流：帮助在任何视图下
-          // 都该看得到，而它解释的恰恰是「别的视图里还能按什么」。
-          case 'help':
-            run(() => setHelpOpen((open) => !open))
-            break
-          case 'openExternal': run(() => store.openSelected()); break
-          case 'openArticle': if (view !== 'list') return; run(() => { void store.openArticle() }); break
-          // r：刷新未读计数（只重取本地视图，不抓取 —— 规格不变量 1）
-          case 'refreshCount': run(() => { void store.refreshCount() }); break
-          case 'manageFeeds': run(() => store.toggleFeeds()); break
-          // Esc：从正文回到列表；列表态下不拦截（不抢弹层的 Esc）
-          // Esc：正文 → 列表；订阅管理 → 列表。列表态不拦截（不抢弹层的 Esc）
-          case 'back':
-            // 帮助浮窗优先：开着帮助时 Esc **只**关帮助 —— 否则在正文页按 Esc 会「浮窗与文章一起
-            // 消失」，而读者只是想收掉那张挡住视线的卡片（用户拍板的三个关闭出口之一）。
-            if (helpOpen) { run(() => setHelpOpen(false)); break }
-            if (view === 'article') { event.preventDefault(); store.closeArticle(); break }
-            if (view === 'feeds') { event.preventDefault(); store.toggleFeeds(); break }
-            return
-          // 视图密度只在条目流上有意义（在正文页/订阅管理页按 1/2 不该改背后的列表）
-          case 'expandedView': if (view === 'list') store.setLayout('expanded'); break
-          case 'listView': if (view === 'list') store.setLayout('list'); break
-          case 'star': run(() => { void store.toggleStar() }); break
-          case 'toggleRead': run(() => { void store.toggleRead() }); break
-          case 'markAll': run(() => { void store.markAllRead() }); break
-          default: return
-        }
+        routeKey(event, {
+          root, store,
+          expanded, setExpanded,
+          helpOpen, setHelpOpen,
+        })
       }
       document.addEventListener('keydown', onKeyDown)
       return () => { document.removeEventListener('keydown', onKeyDown) }
-      // helpOpen 必须进依赖数组：处理器要**读**它（Esc 得判断「先关帮助还是先回列表」）。
-      // 漏了它就会重犯本文件记过的那类闭包捕获缺陷 —— 读到的是注册那一刻的值，
-      // 于是「开着浮窗按 Esc」会直接去关文章（同形态事故：容器被闭包捕获后空格静默失效）。
-    }, [root, store, helpOpen])
+      // 依赖数组里**必须**有 expanded 与 helpOpen：routeKey 要**读**它们（Esc 得判断「先关帮助还是
+      // 先回列表」；o 得判断「折叠这次展开的行」还是「展开当前行」）。
+      //
+      // ⚠️ 读到的之所以是「最新值」，**正因为它们在依赖里** —— 监听器因此在每次变化时重新注册。
+      // 漏了它，读到的就是**注册那一刻**的值（闭包捕获），不是「永远最新」：2026-10-15 独立评审实测，
+      // 拿掉 expanded 后按 o 永远收不起来，而当时全套 402 条测试全绿；
+      // 判据现已落在 tests/scroll-dom.test.mjs 的「同一行连按两次 o 必须收起」。
+      //
+      // 两个 setter **不进**依赖：它们的调用点全是函数式更新（setExpanded((current) => …)），
+      // setter 身份跨渲染稳定，放进去只是让 effect 白跑。
+    }, [root, store, expanded, helpOpen])
 
     const items = store.visible()
     const failing = state.feeds.filter((feed) => feed.lastFailure)
@@ -606,7 +413,8 @@ export function createReader(store: ReaderStore): () => ReactNode {
             article={state.article}
             link={state.items.find((entry) => entry.id === state.article?.itemId)?.link}
             onBack={() => store.closeArticle()}
-            setBox={setArticleBox}
+            // 不再传 setBox：阅读容器的滚动生命周期（换文章归零 / 内容长高贴底）已归 article-pane
+            // 自己（2026-10-15 C2）；键盘那条路径按键时刻按 scrollAttr 现取容器，不需要跨组件 ref 桥接。
             scrollAttr={SCROLL_ATTR}
             canPrev={store.canStepArticle(-1)}
             canNext={store.canStepArticle(1)}

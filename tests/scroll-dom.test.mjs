@@ -1150,3 +1150,22 @@ test('输入框里的 ? 不触发帮助（别抢正在打字的人的键）', sk
   await sleep(30)
   assert.equal(h.win.document.querySelector('[data-rss-help]'), null, '输入框里的 ? 不该弹出帮助')
 })
+
+test('o 键：同一行连按两次必须收起（依赖数组里的 expanded 是承重的）', skip, async () => {
+  const h = await mountReader({ items: [item({ id: 'a', summary: '这一段正文摘录，展开之后才出现在行里' })] })
+  await h.store.load('overview')
+  await sleep(30)
+  const row = h.win.document.querySelector('[data-rss-row="a"]')
+  assert.ok(row !== null, '前置条件：列表里有这一行')
+  // 展开态会多渲染一段摘录（index.tsx 的 isOpen 分支），所以行长度就是「是否展开」的可观察量。
+  const sizeNow = () => row.innerHTML.length
+
+  h.press('o'); await sleep(30)
+  const afterOpen = sizeNow()
+  assert.ok(afterOpen > 0, '前置条件：第一次按 o 应当展开')
+
+  h.press('o'); await sleep(30)
+  const afterSecondO = sizeNow()
+
+  assert.ok(afterSecondO < afterOpen, '第二次按 o 必须收起 —— 若 expanded 不在依赖数组里，监听器读到的是注册那一刻的 undefined，于是永远「展开」而收不起来（行长度 ' + afterOpen + ' → ' + afterSecondO + '）')
+})

@@ -282,7 +282,8 @@ const MUTATIONS = [
     to: "const action = 'none';" },
   { id: 'client-可见性守卫恒真', file: 'lib/client.js',
     judges: ['client-bundle.test.mjs', 'scroll-dom.test.mjs'],
-    from: 'if (root === null || root.getClientRects().length === 0)',
+    // ⚠️ 2026-10-15（C1）重锚：键盘路由搬进 keyboard-routing.ts 后，bundle 里这行是 ctx.root。
+    from: 'if (ctx.root === null || ctx.root.getClientRects().length === 0)',
     to: 'if (true)' },
   { id: 'client-不注册监听器', file: 'lib/client.js',
     judges: ['client-bundle.test.mjs', 'scroll-dom.test.mjs'],
@@ -293,7 +294,8 @@ const MUTATIONS = [
   // 判据由 tests/scroll-dom.test.mjs 用真实 React + jsdom 看着（那一层才能表达这个失效）。
   { id: 'client-容器退回渲染期捕获', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
-    from: 'const container = root === null ? null : root.querySelector(selector);',
+    // ⚠️ 2026-10-15（C1）重锚：搬进 keyboard-routing.ts 后是 ctx.root。
+    from: 'const container = ctx.root === null ? null : ctx.root.querySelector(selector);',
     to: 'const container = null;' },
   // ⚠️ 变异模式必须照**编译产物**的实际形状写（多行 if、单引号），
   // 照源码格式写会「未应用」——那等于这条变异根本没跑，比幸存更隐蔽。
@@ -639,12 +641,14 @@ const MUTATIONS = [
     judges: ['scroll-dom.test.mjs'],
     // lib/client.js:2470-2471。删掉 run(...) 之后 ? 既不 preventDefault 也不开浮窗 ——
     // 「被吞掉」与「毫无反应」是两种不同的病，都由这条变异造出来。
-    from: 'run(() => setHelpOpen((open) => !open));',
+    // ⚠️ 2026-10-15（C1）重锚：搬进 keyboard-routing.ts 后是 ctx.setHelpOpen(!ctx.helpOpen)（函数式更新 → 直接取反）。
+    from: 'run(() => ctx.setHelpOpen(!ctx.helpOpen));',
     to: 'run(() => {});' },
   { id: 'client-Esc 不先关浮窗', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
     // lib/client.js:2491，唯一一处。改坏后：开着浮窗按 Esc 会去关文章，浮窗留在屏幕上。
-    from: 'if (helpOpen) {',
+    // ⚠️ 2026-10-15（C1）重锚：搬进 keyboard-routing.ts 后是 ctx.helpOpen。
+    from: 'if (ctx.helpOpen) {',
     to: 'if (false) {' },
   { id: 'client-浮窗标成 dialog 角色', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
@@ -652,12 +656,14 @@ const MUTATIONS = [
     // 鼠标点过一次 ✕ 之后，? 与 Esc 双双失效。判据是「✕ 关闭；焦点落在浮窗里之后…」那条用例。
     from: 'role: "region",',
     to: 'role: "dialog",' },
+  // ⚠️ 2026-10-15（C1）重锚：依赖数组现在多了 expanded（routeKey 的 o 键要读它），
+  // 且 tsdown 把它展开成多行 tab 形态（含 }, [ 前缀）。
   { id: 'client-helpOpen 不进依赖数组', file: 'lib/client.js',
     judges: ['overview-scale.test.mjs', 'scroll-dom.test.mjs'],
     // lib/client.js:2534-2538。少了 helpOpen，按键处理器读到的永远是注册那一刻的 false：
     // 浮窗开着按 Esc → 走「关文章」分支，浮窗留在屏幕上（与上面第三条同一个病象、不同根因）。
-    from: '\t\t\t\t\troot,\n\t\t\t\t\tstore,\n\t\t\t\t\thelpOpen',
-    to: '\t\t\t\t\troot,\n\t\t\t\t\tstore' },
+    from: '}, [\n\t\t\t\t\troot,\n\t\t\t\t\tstore,\n\t\t\t\t\texpanded,\n\t\t\t\t\thelpOpen\n\t\t\t\t]);',
+    to: '}, [\n\t\t\t\t\troot,\n\t\t\t\t\tstore,\n\t\t\t\t\texpanded\n\t\t\t\t]);' },
   // ── 自持存储骨架（2026-10-11 大规模存储任务 2）─────────────────────────────────
   // 这三个模块是「下次装载还能不能读到用户数据」的全部承重点，而它们的失效**全都安静**：
   // 版本闸写错 ⇒ 好库被当成坏库拒掉，界面表现是「重启之后订阅全没了」；

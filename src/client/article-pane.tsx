@@ -99,12 +99,10 @@ function ArticleBlockView({ block }: { block: Record<string, unknown> }): ReactN
   return <p style={{ margin: '0 0 1.05em' }}>{text}</p>
 }
 
-export function ArticleView({ article, link, onBack, setBox, scrollAttr, canPrev, canNext, onPrev, onNext }: {
+export function ArticleView({ article, link, onBack, scrollAttr, canPrev, canNext, onPrev, onNext }: {
   article: ArticleState | undefined
   link: string | undefined
   onBack: () => void
-  /** 阅读视图滚动容器的 ref 回调：空格翻页要作用在它上面（跨组件只能传进来） */
-  setBox: (node: HTMLDivElement | null) => void
   /** 容器标记属性名：按键处理按它现取容器（取值集中在 list-scroll.ts 的 scrollSelectorFor） */
   scrollAttr: string
   /** 上/下一条是否可切（与键盘共用同一判定，见 canStepArticle） */
@@ -119,11 +117,14 @@ export function ArticleView({ article, link, onBack, setBox, scrollAttr, canPrev
     : (article?.paragraphs ?? []).map((text) => ({ kind: 'p', text }))
 
   /**
-   * 本组件自己也要拿到滚动容器 —— 右下角那两个按钮要作用在它上面。
+   * 本组件自己拿到滚动容器 —— 右下角那两个按钮要作用在它上面。
    *
    * 与键盘路径同一条约束（2026-10-09）：**点击时刻读 `boxRef.current`**，不在渲染期捕获节点。
    * 用 ref 而不是 state：身份跨渲染稳定，读的永远是最新的；用 state 会让回调闭包捕获旧值。
-   * 同时把节点转交给父组件的 setBox（键盘那条路径靠它），两者互不替代。
+   *
+   * 2026-10-15（C2）：原先还要把节点转交给父组件的 `setBox`（键盘路径靠它拿容器），
+   * 那条桥接 prop 已删 —— 键盘路径改为**按键时刻按 `scrollAttr` 标记属性现取**
+   * （keyboard-routing.ts 的 focusScrollBox，理由见那里：现取还能覆盖容器换节点的情况）。
    */
   const boxRef = useRef<HTMLDivElement | null>(null)
   /**
@@ -156,9 +157,8 @@ export function ArticleView({ article, link, onBack, setBox, scrollAttr, canPrev
     const previous = boxRef.current
     if (previous !== null && previous !== node) previous.removeEventListener('scroll', handleScroll)
     boxRef.current = node
-    setBox(node)
     if (node !== null) node.addEventListener('scroll', handleScroll)
-  }, [handleScroll, setBox])
+  }, [handleScroll])
 
   /** 跳到文章一端。容器量不到时什么都不做 —— 没有容器就没得滚，不该抛错。 */
   const scrollToEdge = (edge: 'top' | 'bottom'): void => {
@@ -175,8 +175,22 @@ export function ArticleView({ article, link, onBack, setBox, scrollAttr, canPrev
     pinToBottom(box)
   }
 
-  // 换文章时解除钉住（新文章要从顶部开始读，见 index.tsx 那条归零 effect）
-  useEffect(() => { pinnedRef.current = false }, [article?.itemId])
+  /**
+   * 换文章时：归零阅读位置 + 解除钉底 —— **同一件事的两个后果，用同一条 effect**。
+   *
+   * 2026-10-15（C2）从 index.tsx 搬来。为什么需要归零（2026-10-09 修）：React 会复用正文
+   * 容器的 DOM 节点，节点不换 ⇒ scrollTop 保留上一条的位置；读了一半按 j，新文章会从半截开始
+   * —— 而 j/k 的语义是「换条目」，不是「同一篇里翻页」。以 itemId 为键而不是 view：连续按 j 时
+   * view 一直是 'article'，只有 itemId 在变。
+   *
+   * 搬进来的理由：它与下面的「内容长高时继续贴底」是**同一个行为的两半**（阅读容器的滚动位置），
+   * 原先分居两个文件、同一个 effect 键、写同一个 scrollTop —— 今天改一次要动两个文件。
+   */
+  useEffect(() => {
+    pinnedRef.current = false
+    const box = boxRef.current
+    if (box !== null) box.scrollTop = 0
+  }, [article?.itemId])
 
   /**
    * 内容长高时继续贴底。
