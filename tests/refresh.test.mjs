@@ -9,92 +9,11 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { refreshFeeds, selectStalestFeeds } from '../lib/refresh.js'
+import { memoryStore, armConcurrentRead } from './helpers/reader-store-memory.mjs'
 import { Config, apply } from '../lib/index.js'
 
-function memoryStore() {
-  const feeds = new Map()
-  const cursors = new Map()
-  const items = new Map()
-  return {
-    feeds,
-    cursors,
-    items,
-    feed: (id) => feeds.get(id),
-    saveFeed: async (id, record) => { feeds.set(id, record) },
-    cursor: (id) => cursors.get(id),
-    saveCursor: async (id, record) => { cursors.set(id, record) },
-    item: (id) => items.get(id),
-    allItems: () => [...items.entries()],
-    deleteFeed: async (feedId) => { feeds.delete(feedId); cursors.delete(feedId) },
-    saveItem: async (id, record) => { items.set(id, record) },
-    // 原子读改写（ReaderStore 契约的一部分）：fn 在写入槽位看到当前记录，见 src/store.ts 的注释
-    updateItem: async (id, fn) => { items.set(id, fn(items.get(id))) },
-    deleteItem: async (id) => { items.delete(id) },
-    listItems: (feedId) => [...items.entries()].filter(([, record]) => record.feedId === feedId),
-    /**
-     * 清算原料（src/store.ts 的契约）：**只交出这三样，正文不许跟着出来**。
-     * 桩也必须守这条 —— 否则测的其实是「桩自己把正文摊开了」，
-     * 而生产实现恰恰是为了不让正文进堆才单列这条方法（docs/pitfalls.md 二、2.6）。
-     */
-    listArticleCacheEntries: () => {
-      const entries = []
-      for (const [itemId, record] of items.entries()) {
-        if (record.article === undefined) continue
-        const chars = (record.article.paragraphs ?? []).reduce((sum, paragraph) => sum + paragraph.length, 0)
-          + (record.article.blocks ?? []).reduce((sum, block) => {
-            const text = block.text
-            if (typeof text === 'string') return sum + text.length
-            const listItems = block.items
-            if (Array.isArray(listItems)) return sum + listItems.reduce((inner, i) => inner + String(i).length, 0)
-            return sum
-          }, 0)
-        entries.push({ id: itemId, chars, fetchedAt: record.article.fetchedAt ?? '' })
-      }
-      return entries
-    },
-    listFeeds: () => [...feeds.entries()],
-    /**
-     * 与自持实现同形（Task 5 的三条 SQL 取数方法）。
-     *
-     * 桩也必须守**同一条契约**：unreadPerFeed 先按传进来的键铺 0（0 未读的源留键）、
-     * listCleanupCandidates 把 SQL 谓词多守的「保持未读不删」一并实现 —— 桩与实现各写一套
-     * 语义，测出来的就只是桩的理解（docs/pitfalls.md 二、2.5 / 2.6）。
-     */
-    unreadPerFeed: (feedIds) => {
-      const unread = {}
-      for (const feedId of feedIds) unread[feedId] = 0
-      for (const record of items.values()) {
-        if (unread[record.feedId] === undefined || record.readAt !== undefined) continue
-        unread[record.feedId] += 1
-      }
-      return unread
-    },
-    listRecent: (limit) => {
-      if (limit <= 0) return []
-      const rows = [...items.entries()]
-      rows.sort(([idA, a], [idB, b]) => {
-        const byTime = (b.publishedAt ?? b.fetchedAt).localeCompare(a.publishedAt ?? a.fetchedAt)
-        return byTime !== 0 ? byTime : idA.localeCompare(idB)
-      })
-      return rows.slice(0, limit)
-    },
-    listCleanupCandidates: (cutoffIso) => {
-      const rows = []
-      for (const [id, record] of items.entries()) {
-        const recency = record.publishedAt ?? record.fetchedAt
-        // 判据 = retention.ts 的 selectCleanup（已读 + 未星标 + 早于阈值）另加「保持未读」保护
-        if (record.readAt === undefined || record.starred || record.keptUnread === true) continue
-        if (recency >= cutoffIso) continue
-        rows.push({
-          id, starred: false, kept: false, read: true, recency,
-          articleChars: 0, summaryChars: record.summary?.length ?? 0,
-        })
-      }
-      return rows
-    },
-  }
-}
-
+// 内存桩已抽到 tests/helpers/reader-store-memory.mjs（C4-a）：refresh 用的是它的全量版，
+// 连同「桩也必须守契约」的注释一起搬 —— 这里只留 import。
 const LIMITS = { timeoutMs: 2000, maxBytes: 1_000_000, trustedTarget: true }
 const BASE_OPTIONS = { limits: LIMITS, maxItemsPerFeed: 100, maxSeenPerFeed: 1000, maxContentChars: 100000, maxArticleCacheChars: 1000000, refreshConcurrency: 4 }
 
@@ -514,31 +433,6 @@ test('正文回填的反面：源变短时不得用更短的正文覆盖更完�
 })
 
 /* ================= 丢失更新：刷新期间的写不得覆盖并发写入（2026-10-10） ================= */
-
-/**
- * 让**下一次**对 `id` 的写入在其「窗口内」先落一次并发写（把 readAt 写进去）。
- *
- * 为什么用注入而不是真实并发：这两处的窗口只有一个微任务（读与构造之间没有 await），
- * 真实并发无法稳定复现；而缺陷的判据是明确的 —— 写入必须**合并进当前记录**，
- * 不许用写入前那份快照整体覆盖。注入把「窗口内有人写」变成确定性调度。
- *
- * ⚠️ 注入发生在写入方法内部、落盘之前：
- *   saveItem 那种「payload 早已定稿」的写法照样会把它盖掉；
- *   updateItem 的 fn 看到的则是含 readAt 的当前值 —— 这正是两者的分水岭。
- */
-function armConcurrentRead(store, id, readAt) {
-  let armed = true
-  const inject = (target) => {
-    if (!armed || target !== id) return
-    armed = false
-    const record = store.items.get(id)
-    if (record !== undefined) store.items.set(id, { ...record, readAt })
-  }
-  const originalSave = store.saveItem
-  const originalUpdate = store.updateItem
-  store.saveItem = async (itemId, record) => { inject(itemId); return originalSave(itemId, record) }
-  store.updateItem = async (itemId, fn) => { inject(itemId); return originalUpdate(itemId, fn) }
-}
 
 const RACE_READ_AT = '2024-06-01T00:00:00.000Z'
 

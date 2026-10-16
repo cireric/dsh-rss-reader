@@ -17,8 +17,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { openDatabase, migrateSchema, SCHEMA_VERSION } from '../lib/storage/db.js'
 import { writeConfigFile } from '../lib/storage/config-file.js'
@@ -26,16 +25,7 @@ import { createSqliteStore } from '../lib/store-sqlite.js'
 import { feedRecordSchema, itemRecordSchema } from '../lib/domain.js'
 import { articleCharsOf, selectCleanup } from '../lib/retention.js'
 import { countUnreadPerFeed, recencyOf } from '../lib/shared.js'
-
-const tempDir = (tag) => mkdtempSync(join(tmpdir(), 'rss-store-' + tag + '-'))
-
-/** 每个用例一个全新的内存库 + 一个临时 config.json 落点。 */
-function freshStore(tag) {
-  const dir = tempDir(tag)
-  const db = openDatabase(':memory:')
-  migrateSchema(db)
-  return { store: createSqliteStore(db, join(dir, 'config.json')), db, configPath: join(dir, 'config.json'), dir }
-}
+import { freshStore, tempDir } from './helpers/reader-store-memory.mjs'
 
 /** 断言读回来的记录合 ItemRecord（strict）——多带一列就会在这里翻红。 */
 function assertItem(record, label) {

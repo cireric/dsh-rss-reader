@@ -28,8 +28,9 @@ import { Config } from '../lib/config.js'
 import { createStore } from '../lib/store.js'
 import { decodeCursor, encodeCursor } from '../lib/shared.js'
 import { selectCleanup } from '../lib/retention.js'
+import { deps, freshRows, PAGING_FEED_ID } from './helpers/reader-store-memory.mjs'
 
-const FEED_ID = 'https://feed0.example.com/atom.xml'
+const FEED_ID = PAGING_FEED_ID
 /** 一组条目共享的 recency：真实形状就是「同一轮抓取共享 fetchedAt」。 */
 const ROUND_A = '2026-10-11T09:00:00.000Z'
 const ROUND_B = '2026-10-11T08:00:00.000Z'
@@ -38,40 +39,7 @@ const ROUND_C = '2026-10-11T07:00:00.000Z'
 /** 四位补零 ⇒ 字典序与数值序一致（页序断言读起来才是「第 n 条」）。 */
 const itemIdOf = (index) => 'item-' + String(index).padStart(4, '0')
 
-/**
- * 造一个真实库：`rows` 是 [{ id, recency }]，direct 插入（单事务直灌，量的是读路径）。
- * 刻意不逐条走 saveItem：300 条以上时那是 300 次事务，与判据无关。
- */
-function freshRows(tag, rows) {
-  const dir = mkdtempSync(join(tmpdir(), 'rss-paging-' + tag + '-'))
-  const db = openDatabase(':memory:')
-  migrateSchema(db)
-  const store = createSqliteStore(db, join(dir, 'config.json'))
-  const insert = db.prepare(
-    'INSERT INTO items (id, feed_id, title, link, published_at, fetched_at, starred)'
-    + ' VALUES (?, ?, ?, ?, ?, ?, 0)',
-  )
-  db.exec('BEGIN')
-  for (const row of rows) {
-    insert.run(row.id, FEED_ID, '标题 ' + row.id, 'https://site.example/post/' + row.id, row.recency, row.recency)
-  }
-  db.exec('COMMIT')
-  writeConfigFile(join(dir, 'config.json'), { version: 1, feeds: { [FEED_ID]: { url: FEED_ID, title: '源 0' } } })
-  return { store, db, dir }
-}
-
-/** EndpointDeps 的桩（形状照 src/endpoints.ts 的 EndpointDeps，不增减字段）。 */
-function deps(store, config) {
-  return {
-    config,
-    log: () => {},
-    ready: () => store,
-    refreshNow: async () => false,
-    lastRefreshCompletedAt: () => undefined,
-    articleAttempts: new Map(),
-  }
-}
-
+// freshRows / deps 已抽到 tests/helpers/reader-store-memory.mjs（C4-a）；FEED_ID 取自 helper 常量。
 /** 取一次 overview，顺手断言信封成功 —— 失败被当成空数据糊过去是最难查的一类假绿。 */
 async function view(dispatch, payload) {
   const result = await dispatch('overview', payload)
