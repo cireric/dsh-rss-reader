@@ -16,9 +16,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { basename, join } from 'node:path'
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dailyLogPath, pruneOldLogs } from '../lib/storage/log-file.js'
+import { createLogger, dailyLogPath, pruneOldLogs } from '../lib/storage/log-file.js'
 
 /** 每个用例一个独立临时目录；调用方负责在 finally 里删掉它。 */
 const tempDir = (tag) => mkdtempSync(join(tmpdir(), 'rss-logfile-' + tag + '-'))
@@ -179,4 +179,74 @@ test('pruneOldLogs 读不了目录必须抛错（消息带路径），不静默�
   } finally {
     rmSync(base, { recursive: true, force: true })
   }
+})
+// ── createLogger：日志的 Interface 化（2026-10-15 H2 Task 1）──────────────────────
+/**
+ * 这几条守的不是格式，是 index.ts:100-125 里那三条**判定**——它们各自出过实测事故，
+ * 却一直只活在 apply 闭包内，没有任何可直测的 Interface：
+ *  ① 时钟只取一次：行首时间戳与文件名必须来自**同一个时刻**。两次取时钟时中间隔着宿主
+ *     的 logger 调用，跨过 UTC 零点就会把「23:59:59.999Z 这一行」写进第二天的文件；
+ *  ② 默认落点按**当天现算**：DSH 是长驻进程，装载时算一次会把之后所有日志钉在那天；
+ *  ③ 默认落点目录 0700（订阅与已读态同住），而显式 config.logFile 保持操作者自己挑的权限；
+ *  ④ 写失败要可见（warn 一次）但**不许拖垮插件**（不抛）。
+ */
+test('createLogger：行首时间戳与文件名归属同一天（时钟只取一次）', () => {
+  const dir = tempDir('clock')
+  try {
+    // 两次取时钟就会跨文件：23:59:59.999Z 与 00:00:00.001Z 之间正好换天
+    const stamps = [new Date('2026-10-11T23:59:59.999Z'), new Date('2026-10-12T00:00:00.001Z')]
+    let i = 0
+    const log = createLogger({ logFile: '', storagesRoot: dir, clock: () => stamps[i++] })
+    log('第一条')
+    log('第二条')
+    assert.deepEqual(readdirSync(dir).sort(), ['reader-2026-10-11.log', 'reader-2026-10-12.log'],
+      '两条日志必须按同一次取值归属两天：各取一次时钟会跨过 UTC 零点')
+    assert.match(readFileSync(join(dir, 'reader-2026-10-11.log'), 'utf8'), /第一条/)
+    assert.match(readFileSync(join(dir, 'reader-2026-10-12.log'), 'utf8'), /第二条/)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('createLogger：sink 与文件逐字相同（双 sink 同源）', () => {
+  const dir = tempDir('sink')
+  try {
+    const seen = []
+    const log = createLogger({ logFile: '', storagesRoot: dir, sink: (line) => seen.push(line) })
+    log('同一句话')
+    const onDisk = readFileSync(join(dir, dailyLogPath(dir, new Date()).split('/').pop()), 'utf8').trim()
+    assert.equal(seen.length, 1, 'sink 必须收到那一行')
+    assert.equal(seen[0], onDisk, 'sink 与文件里的行必须逐字相同（同一时钟、同一格式化）')
+    assert.match(seen[0], /^\[\d{4}-\d{2}-\d{2}T[\d:.]+Z\] /, '行首必须是 ISO 时间戳')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('createLogger：默认落点目录 0700，显式落点不设权限', () => {
+  const dir = tempDir('perm')
+  try {
+    // 默认（按天）：目录必须 0700 —— 这里躺着 config.json 与 rss.db，umask 默认的 0755 不行
+    const defaults = createLogger({ logFile: '', storagesRoot: join(dir, 'default') })
+    defaults('走默认')
+    assert.equal(statSync(join(dir, 'default')).mode & 0o777, 0o700, '默认落点目录必须 0700')
+
+    // 显式 config.logFile：操作者自己挑的地方，保持旧行为（只建目录、不动权限）
+    const explicit = join(dir, 'explicit', 'my.log')
+    createLogger({ logFile: explicit, storagesRoot: dir })('走显式')
+    assert.equal(statSync(explicit).mode & 0o777, 0o644, '显式落点由操作者自己挑，不强制 0700')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('createLogger：写失败要 warn 一次，但不抛（不拖垮插件）', () => {
+  const dir = tempDir('fail')
+  try {
+    const warnings = []
+    // 落点在一个不存在的**文件**之下 ⇒ append 时必然失败（ENOTDIR 一类）
+    writeFileSync(join(dir, 'blocker'), 'x')
+    const log = createLogger({
+      logFile: join(dir, 'blocker', 'sub', 'reader.log'),
+      storagesRoot: dir,
+      sink: () => {},
+      warn: (line) => warnings.push(line),
+    })
+    assert.doesNotThrow(() => log('写不下去也要返回'), '日志是诊断面，坏了不许拖垮插件')
+    assert.equal(warnings.length, 1, '写失败必须留痕一次（否则日志静默停更，无人察觉）')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })

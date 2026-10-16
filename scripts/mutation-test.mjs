@@ -214,9 +214,11 @@ const MUTATIONS = [
     //   返回全部，没有任何输入会改变结果。它幸存的不是测试缺口（判定先例：本文件
     //   「正文容器收窄」那条的完整推导）。它是快路径，不是行为分支。
     from: 'if (!(limit > 0) || limit >= feeds.length)', to: 'if (false)' },
-  { id: 'refresh-取源退回全量', file: 'lib/index.js',
+  // ⚠️ 2026-10-15（H2）只改了 file：这条的代码搬进 lib/lifecycle.js，from 逐字未变（
+  //   产物 lib/lifecycle.js:126，独立实测 OCCURRENCES=1）。
+  { id: 'refresh-取源退回全量', file: 'lib/lifecycle.js',
     judges: ['refresh.test.mjs'],
-    // lib/index.js:178，独立实测 OCCURRENCES=1。退回「全量交出去」= 本任务要修的病象原样保留
+    // 退回「全量交出去」= 本任务要修的病象原样保留
     // （200 源 × 15s ÷ 并发 = 600s 一轮），而 selectStalestFeeds 自身的单测**全绿** ——
     // 这条证明「接线」那一层必须有独立断言看着（挑选对了却没生效是本仓库反复踩到的形态）。
     // 实测 1 条翻红（refreshNow 每轮只抓 K 个）。
@@ -824,7 +826,8 @@ const MUTATIONS = [
   //   · 「不校验域名 / 读不出来当成首次安装」——判据的对象（老域文件的读取）已经不存在。
   //
   // ⚠️ from 照**编译产物**的实际形状写（docs/pitfalls.md 一、1.4）。
-  { id: 'storage-订阅丢了却不报错', file: 'lib/index.js',
+  // ⚠️ 2026-10-15（H2）只改了 file：守卫搬进 lib/lifecycle.js，from 逐字未变。
+  { id: 'storage-订阅丢了却不报错', file: 'lib/lifecycle.js',
     judges: ['storage-skeleton.test.mjs'],
     // 把「订阅文件不在（且库里有条目）就抛错」改成「永远放行」⇒ 一次读取失败被静默当成
     // 首次安装，插件带着「有数据、没订阅」的库继续跑，用户看到订阅列表空白而日志里没有一行错。
@@ -1079,13 +1082,39 @@ const MUTATIONS = [
   // 承重点就是这个 wait：去掉它 ⇒ close 又跑到在途刷新前头。
   // 判据：tests/teardown-race.test.mjs 两条（两条走不同的 signal 来源：启动那轮带 controller.signal，
   // 面板那轮一个 signal 都没带 —— 后者正是旧代码完全挡不住的入口）。
-  // from 照**编译产物**的实际形状写（docs/pitfalls.md 一、1.4）：lib/index.js:403，独立实测 OCCURRENCES=1。
+  // from 照**编译产物**的实际形状写（docs/pitfalls.md 一、1.4）。
+  // ⚠️ 2026-10-15（H2 生命周期 module）重锚：这条的代码从 lib/index.js 搬进了 lib/lifecycle.js，
+  // 且产物里 `await Promise.all([generation, inFlight])` **出现两次**（:231 是「重复 stop 的空操作分支」，
+  //   :252 才是 stop 主路径的等待）——`String.replace` 只改第一处，单行锚会改错地方 ⇒ 必须带上下文。
+  // 现在锚串含 try/catch/log 三行，独立实测 OCCURRENCES=1。
   // ⚠️ `to` 里刻意**只用产物作用域内存在的东西**（Promise 是全局）：写成引用某个局外名字会退化成
   // ReferenceError，那种红不算被抓住（docs/pitfalls.md 二、2.7b）。
-  { id: 'teardown-不等在途刷新就关库', file: 'lib/index.js',
+  // ── 生命周期 module（2026-10-15 H2）────────────────────────────────────────────
+  // 搬动前这些判定只活在 src/index.ts 的 apply 闭包与注释里；搬进 lib/lifecycle.js 之后它们
+  // 各有了一条可直测的判据（tests/lifecycle.test.mjs），下面三条把它们钉进变异门槛。
+  { id: 'lifecycle-重复 stop 不再是空操作', file: 'lib/lifecycle.js',
+    judges: ['lifecycle.test.mjs'],
+    // 病象：effect 重放或异常路径二次进入时，第二次 stop 抛错 ⇒ teardown 抛出去会让宿主把
+    // 「资源已回收」报成失败（index.ts 的旧注释里就有这条纪律）。
+    from: "if (stopped) {\n            await Promise.all([generation, inFlight]);\n            return;\n        }",
+    to: "if (stopped) {\n            throw new Error('重复 stop');\n        }" },
+  { id: 'lifecycle-停止后仍交出 store', file: 'lib/lifecycle.js',
+    judges: ['lifecycle.test.mjs'],
+    // 病象：cancelled 没参与 ready() 判定 ⇒ 关停之后仍能把正在关的 store 交出去（悬垂句柄）。
+    from: 'const ready = () => (cancelled ? undefined : store);',
+    to: 'const ready = () => store;' },
+  // ⚠️ 2026-10-15（H2）**撤回**一条变异：`lifecycle-守卫抛错不自己关库`。它打的是「守卫抛错时
+  // 失败路径必须自己关掉句柄」（lifecycle.ts 的 catch 里那个 db.close()）。**实测这个失效面在
+  // macOS 上不可观测**：按变异的改法删掉那个 close 之后，tests/lifecycle.test.mjs（7 条）与
+  // tests/storage-skeleton.test.mjs 全绿 —— 删文件不因句柄而失败，重开同名库也不立刻撞
+  // SQLITE_BUSY（SQLite 的句柄语义对文件删除不构成约束）。锚串本身是对的（OCCURRENCES=1、
+  // 已应用），是**判据不存在**，不是锚写错。保留它只会永远幸存、制造噪声（docs/pitfalls.md
+  // 二、2.7：幸存者要么补判据要么撤掉，不许为了清单好看留着）。**代码里的 close 仍在** ——
+  // 它是正确性所需，缺的只是一个在本平台抓不到它的判据；该失效面记在 ledger 的「已知不可观测」一节。
+  { id: 'teardown-不等在途刷新就关库', file: 'lib/lifecycle.js',
     judges: ['teardown-race.test.mjs'],
-    from: 'await Promise.all([generation, inFlight]);',
-    to: 'await Promise.resolve();' },
+    from: "try {\n            await Promise.all([generation, inFlight]);\n        }\n        catch (error) {\n            log('等待在途刷新结束时出错",
+    to: "try {\n            await Promise.resolve();\n        }\n        catch (error) {\n            log('等待在途刷新结束时出错" },
 ]
 
 // ── 函数化 + 并行化（2026-10-15 变异测试提速，杠杆 B；spec docs/mutation-test-speedup-plan.md）──
@@ -1179,7 +1208,7 @@ function applyMutation(root, m) {
 
 // 大头在前：同文件条目经排序后轮转均分 ⇒ 任何单 worker 都不会独吞整个 client 族（50 条是大头）。
 const FILE_PREFIXES = ['lib/client.js', 'lib/store-sqlite.js', 'lib/refresh.js', 'lib/keys.js',
-  'lib/retention.js', 'lib/store.js', 'lib/endpoints.js', 'lib/identity-repair.js',
+  'lib/retention.js', 'lib/store.js', 'lib/endpoints.js', 'lib/lifecycle.js', 'lib/identity-repair.js',
   'lib/feed/', 'lib/storage/', 'lib/article.js', 'lib/list-scroll.js', 'lib/index.js',
   'lib/domain.js', 'lib/shared.js', 'lib/subscribe.js', 'lib/config.js']
 function partitionMutations(mutations, n) {

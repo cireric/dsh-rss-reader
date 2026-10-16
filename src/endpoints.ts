@@ -573,3 +573,67 @@ export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: 
 
   return dispatch
 }
+/**
+ * 读一个请求体（上限 256 KiB）。
+ *
+ * 上限**响亮拒绝**而不是静默截断：一个被截断的 JSON 会让 endpoint 收到半个 payload，
+ * 那比报错更难查。
+ */
+async function readJsonBody(req: import('node:http').IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = []
+  let size = 0
+  for await (const chunk of req) {
+    const buf = Buffer.from(chunk as Buffer)
+    size += buf.length
+    if (size > 256 * 1024) throw new Error('请求体过大')
+    chunks.push(buf)
+  }
+  const text = Buffer.concat(chunks).toString('utf8')
+  return text === '' ? undefined : JSON.parse(text)
+}
+
+/**
+ * HTTP 传输壳：从「一个 IncomingMessage」到「一条 RpcResult 信封」。
+ *
+ * 这一层只做传输：准入 → 方法 → 读 body → 交给 dispatch → 写信封。**端点语义全在
+ * dispatch 里**（见 ENDPOINTS）——把它搬进来是因为它与 dispatch 是同一个职责的两半，
+ * 而此前它们分别住在 endpoints.ts 与 index.ts 的 apply 闭包里，要测传输层只能走 apply
+ * 并伪造整个宿主（2026-10-15 H2 Task 2）。
+ *
+ * **刻意不含路由注册**（ctx.webServer.register）与热重载撞 duplicate prefix 时的响亮失败：
+ * 那两条依赖 ctx，留在 index.ts。
+ */
+export function createHttpHandler(
+  dispatch: (endpoint: string, payload: unknown) => Promise<RpcResult<unknown>>,
+  opts: {
+    requestRejection: (req: import('node:http').IncomingMessage) => number | undefined
+  },
+): (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void> {
+  const { requestRejection } = opts
+
+  return async (req, res): Promise<void> => {
+    // 与宿主其它路由同一套准入：Host/Origin 检查 + 浏览器鉴权
+    const rejection = requestRejection(req)
+    if (rejection !== undefined) {
+      res.writeHead(rejection, { 'content-type': 'text/plain' })
+      res.end(rejection === 401 ? 'unauthorized' : 'forbidden')
+      return
+    }
+    if (req.method !== 'POST') {
+      res.writeHead(405, { 'content-type': 'text/plain' })
+      res.end('method not allowed')
+      return
+    }
+    let result: RpcResult<unknown>
+    try {
+      const body = (await readJsonBody(req)) as { endpoint?: unknown; payload?: unknown } | undefined
+      // 端点名一律过 String(...)：body 里的类型不可信，而 dispatch 的 interface 就是 string。
+      // 缺省落成空串 ⇒ dispatch 回 unknown-endpoint（而不是把 undefined 传下去）。
+      result = await dispatch(String(body?.endpoint ?? ''), body?.payload)
+    } catch (error) {
+      result = fail('bad-request', error instanceof Error ? error.message : String(error))
+    }
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+    res.end(JSON.stringify(result))
+  }
+}

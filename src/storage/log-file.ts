@@ -21,8 +21,8 @@
  * **日期一律用 UTC**：日志行首的时间戳由 `toISOString()` 写死为 UTC，文件名必须跟着它走，
  * 否则「同一条日志属于哪一天」取决于在哪台机器上看（本机是 CST，差 8 小时）。
  */
-import { readdirSync, statSync, unlinkSync } from 'node:fs'
-import { join } from 'node:path'
+import { appendFileSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 
 /** 一天的毫秒数。日志按整天划分，不引入日历库（跨时区的偏移不存在：一切按 UTC）。 */
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -135,4 +135,58 @@ export function pruneOldLogs(root: string, keepDays = 14, now: Date = new Date()
     )
   }
   return removed
+}
+/**
+ * 日志写入器：把「行首时间戳 / 双 sink / 落点策略」三条判定收进一个 Interface
+ *（2026-10-15 H2 Task 1，从 src/index.ts 的 apply 闭包搬来）。
+ *
+ * 搬它而不是继续留在 apply 里，是因为那三条判定各自出过实测事故，而它们此前**没有任何
+ * 可直测的 Interface**——只能靠读 apply 的实现去确认：
+ *   ① 时钟只取一次（行首时间戳与文件名必须来自同一时刻，否则跨 UTC 零点会写错文件）；
+ *   ② 默认落点按当天现算（长驻进程不能只算一次）；
+ *   ③ 默认落点目录 0700，而显式 config.logFile 保持操作者自己挑的权限。
+ *
+ * @param opts.logFile      空串 = 按天分文件的默认落点；非空 = 操作者显式指定的固定文件
+ * @param opts.storagesRoot 插件存储根（默认落点与权限 0700 的作用域）
+ * @param opts.sink         宿主 logger 的去处（ctx.logger?.info）；缺省不落宿主
+ * @param opts.warn         写失败与宿主告警的去处；缺省退到 console.warn（绝不静默）
+ * @param opts.clock        取时钟的方式（测试注入；生产不传）
+ */
+export function createLogger(opts: {
+  logFile: string
+  storagesRoot: string
+  sink?: (line: string) => void
+  warn?: (line: string) => void
+  clock?: () => Date
+}): (message: string) => void {
+  const { logFile, storagesRoot } = opts
+  const sink = opts.sink
+  const warn = opts.warn ?? ((line: string) => { console.warn(line) })
+  const clock = opts.clock ?? (() => new Date())
+
+  return (message: string): void => {
+    // ⚠️ 时钟**只取一次**：行首时间戳与文件名必须来自同一个时刻。两次取时中间隔着宿主的
+    // logger 调用（耗时由宿主实现决定，本插件无从约束），跨过 UTC 零点就会出现
+    // 「2026-10-11T23:59:59.999Z 这一行落在 reader-2026-10-12.log 里」——排障时按日期找日志
+    // 会找不到它，而它明明在。
+    const at = clock()
+    const line = '[' + at.toISOString() + '] ' + message
+    sink?.(line)
+    // 默认落点按**当天现算**（长驻进程不能只算一次，否则之后所有日志都写进装载那天）
+    const target = logFile === '' ? dailyLogPath(storagesRoot, at) : logFile
+    try {
+      // 存储根（默认落点）必须是 0700：这一行**可能早于存储根的建立**（装载链最开始那几条日志
+      // 就早于它），而 mkdirSync 的默认权限受 umask 支配（通常 0755）。等存储根建好时目录已存在，
+      // 按它自己的规矩「已存在的目录不改权限」，存储根的 0700 会从这里被静默放宽，而目录里
+      // 放的是订阅与已读态。
+      // 显式指定的 logFile 保持旧行为（只建目录、不动权限）：那是操作者自己挑的地方。
+      mkdirSync(dirname(target), logFile === ''
+        ? { recursive: true, mode: 0o700 }
+        : { recursive: true })
+      appendFileSync(target, line + '\n')
+    } catch (error) {
+      // 日志写不进去要可见，但不能因此拖垮插件本身
+      warn('[dsh-rss-reader] 写刷新日志失败：' + String(error))
+    }
+  }
 }
