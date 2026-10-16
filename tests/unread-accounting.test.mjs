@@ -22,6 +22,7 @@ import vm from 'node:vm'
 import { articleCharsOf } from '../lib/retention.js'
 import { createDispatch } from '../lib/endpoints.js'
 import { Config } from '../lib/config.js'
+import { deps } from './helpers/reader-store-memory.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const BUNDLE = join(ROOT, 'lib', 'client.js')
@@ -116,18 +117,6 @@ function item(feedId, over = {}) {
 }
 
 const READ = '2026-01-02T00:00:00.000Z'
-
-/** EndpointDeps 的桩（形状照 src/endpoints.ts:18-30，不增减字段）。 */
-function deps(store, config) {
-  return {
-    config,
-    log: () => {},
-    ready: () => store,
-    refreshNow: async () => false,
-    lastRefreshCompletedAt: () => undefined,
-    articleAttempts: new Map(),
-  }
-}
 
 /** 调一次端点并断言信封成功——失败被当成空数据糊过去正是这类测试最容易的假绿。 */
 async function callEndpoint(store, endpoint, payload, config = Config({})) {

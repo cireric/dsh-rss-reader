@@ -22,6 +22,7 @@ import assert from 'node:assert/strict'
 import { articleCharsOf } from '../lib/retention.js'
 import { createDispatch } from '../lib/endpoints.js'
 import { Config } from '../lib/config.js'
+import { deps } from './helpers/reader-store-memory.mjs'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -113,18 +114,6 @@ function item(over = {}) {
     fetchedAt: '2026-01-01T00:00:00.000Z',
     starred: false,
     ...over,
-  }
-}
-
-/** EndpointDeps 的桩（形状照 src/endpoints.ts:18-30，不增减字段）。 */
-function deps(store, config) {
-  return {
-    config,
-    log: () => {},
-    ready: () => store,
-    refreshNow: async () => false,
-    lastRefreshCompletedAt: () => undefined,
-    articleAttempts: new Map(),
   }
 }
 

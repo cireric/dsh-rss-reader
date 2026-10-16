@@ -16,6 +16,7 @@ import assert from 'node:assert/strict'
 import { articleCharsOf } from '../lib/retention.js'
 import { createDispatch } from '../lib/endpoints.js'
 import { Config } from '../lib/config.js'
+import { deps } from './helpers/reader-store-memory.mjs' // C4-a'：与原本地桩逐字一致（214 字节体），契约注释随 helper
 
 /** 与 src/store.ts 的 ReaderStore 同形的内存实现（本文件只用到 listFeeds / allItems）。 */
 function memoryStore() {
@@ -98,18 +99,6 @@ function item(feedId, over = {}) {
 }
 
 const READ = '2026-01-02T00:00:00.000Z'
-
-/** EndpointDeps 的桩（形状照 src/endpoints.ts:18-30，不增减字段）。 */
-function deps(store, config) {
-  return {
-    config,
-    log: () => {},
-    ready: () => store,
-    refreshNow: async () => false,
-    lastRefreshCompletedAt: () => undefined,
-    articleAttempts: new Map(),
-  }
-}
 
 /** 取一次 overview；顺手断言信封是成功的，免得失败被当成空数据糊过去。 */
 async function overview(store, config) {

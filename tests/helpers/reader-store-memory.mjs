@@ -10,7 +10,9 @@
  *    unread-accounting / article-markread-race + 本轮已接的 overview-paging）⇒ 直接收一份；
  *    例外：nav-persistence.test.mjs 的 deps(store) 是**不同形状**（单参、内联 Config({})）——
  *    C4-a' 接它不是机械动作（调用点传 config 或 helper 加默认参，届时单独裁决）。
- *    其余三份同形文件的接线是机械动作，留待下一轮顺手（HANDOFF 记 C4-a'）。
+ *    其余三份同形文件（epf / race / unread-accounting）已于 C4-a' 接入（各删 10 行本地桩）；
+ *    全仓仍保留独立 deps 的只剩 nav-persistence（不同形状）与 overview-scale-fixture（本身
+ *    就是 helper 性质的夹具，不反向依赖）。
  *  - `memoryStore` 六份是**带能力漂移的近亲**（nav-persistence 版多 global、race 版多
  *    articleWriteDelayMs、endpoints-perfeed-unread 与 unread-accounting 版少了 cursors、
  *    identity 版的 listCleanupCandidates 真实累计 articleChars 而非桩的恒 0 且无 viewPreferences），
