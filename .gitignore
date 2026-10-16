@@ -7,4 +7,6 @@ lib/
 docs/inbox/
 docs/misc/
 
+HANDOFF.md
+
 .worktrees/
