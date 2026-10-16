@@ -59,3 +59,17 @@ npm run mutation         # 每条变异都必须被抓到，0 幸存（默认并
 - 测试跑的是 `lib/` 产物，改完不 build 等于测旧代码；`build` 不含客户端。
 - 变异门槛会在源目录改坏 `lib/`，**必须在 /tmp 隔离副本里跑**。
 - 长驻监听器不许捕获「会变的值」；按键路径不许依赖环境全局。
+
+## Agent skills
+
+### Issue tracker
+
+Issue 以本地 markdown 跟踪：落在本仓库 `.scratch/<feature-slug>/` 下，不走远端。See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+五个 triage 角色用默认标签字符串：needs-triage / needs-info / ready-for-agent / ready-for-human / wontfix。See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+single-context（根 `GLOSSARY.md` + `docs/adr/`，尚不存在，由 /domain-modeling 懒创建）。See `docs/agents/domain.md`.
