@@ -5,6 +5,13 @@
  * 这一层能抓到浏览器里才会炸、构建却不会报的错：panellist 的 id 与 main 的 key 不一致
  * （点图标会抛 selecting a missing main entry，面板根本打不开）。
  * 需先构建（dev_build_plugin 或 npm run build:client）。
+ *
+ * C4-b（2026-10-16）起本文件**不再渲染组件**：自写的假 React（useEffect: (fn) => { fn() }
+ * 忽略依赖数组 ⇒ 「闭包捕获/依赖数组」类缺陷在假层根本无法表达，2026-10-09 实测
+ * 175/175 全绿而真机空格无响应）已整体删除。判据分层现况：
+ *   - 注册/契约/store 行为/端点桩 → 本文件（vm 加载产物 + driveStore 直驱真 store）
+ *   - 键盘路由与守卫           → tests/keyboard-routing.test.mjs（routeKey 纯函数层）
+ *   - 渲染、监听器生命周期、真实按键 → tests/scroll-dom.test.mjs（真 React 18 + jsdom）
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -58,11 +65,11 @@ function loadClientBundle() {
   for (const field of ['id', 'factory']) assert.ok(captured[field], 'bundle entry 缺 ' + field)
   // 元素桩保留 type/props，测试才能检查 onClick 真正接了什么
   const createElement = (type, props) => ({ type, props })
-  // 最小的 hooks 状态：按渲染序号存 useState 的值；每次渲染前调 beginRender 归零。
-  // 为什么需要它——若 useState 永远返回初始值 + 空 setter，组件里的 root 会恒为 null，
-  // 而按键处理器第一行的可见性守卫会因此直接 return，接线就永远测不到（实测如此）。
-  const hooks = []
-  let hookIndex = 0
+  // C4-b：hooks **仿真**已删。本文件不再渲染组件（渲染判据的家 = keyboard-routing 纯函数层
+  // + scroll-dom 真 DOM 层），factory(require) 只在注册路径上被调用一次，hooks 只需「被调到
+  // 不炸」的记账桩 —— 刻意**不带任何 hooks 语义**（无状态、无按序存储）：带语义的仿真正是
+  // 那类「假层测不了真层才有的缺陷」却让人误以为已覆盖的根源（2026-10-09 实测事故）。
+  const hookCalls = []
   const require = (specifier) => {
     if (specifier === 'react' || specifier === 'react/jsx-runtime') {
       return {
@@ -70,23 +77,9 @@ function loadClientBundle() {
         jsxs: createElement,
         Fragment: Symbol('Fragment'),
         useCallback: (fn) => fn,
-        // useRef：**身份跨渲染稳定**是它的全部要点（容器句柄就靠这条活着）。
-        // 若这里每次都新建对象，按键处理器会拿到一个永远为 null 的句柄 ——
-        // 那正好是本文件顶部记着的那类「闭包捕获」缺陷，假夹具不该自己再造一个。
-        useRef: (initial) => {
-          const at = hookIndex
-          hookIndex += 1
-          if (!(at in hooks)) hooks[at] = { current: initial }
-          return hooks[at]
-        },
-        // 立即执行 effect：组件挂载时的转发动作要能被测试观察到
-        useEffect: (fn) => { fn() },
-        useState: (initial) => {
-          const at = hookIndex
-          hookIndex += 1
-          if (!(at in hooks)) hooks[at] = typeof initial === 'function' ? initial() : initial
-          return [hooks[at], (next) => { hooks[at] = typeof next === 'function' ? next(hooks[at]) : next }]
-        },
+        useRef: (initial) => ({ current: initial }),
+        useEffect: (fn) => { hookCalls.push('useEffect'); fn() },
+        useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}],
         default: {},
       }
     }
@@ -98,8 +91,7 @@ function loadClientBundle() {
     sandbox,
     opened,
     listeners,
-    hooks,
-    beginRender: () => { hookIndex = 0 },
+    hookCalls,
   }
 }
 
@@ -467,65 +459,16 @@ test('正文页 j/k：尊重当前过滤（未读筛选下不跳到已读条目�
   await new Promise((resolve) => setTimeout(resolve, 20))
   assert.equal(store.get().article.itemId, 'i2', '未读筛选下应当跳过已读的 i1')
 })
-/**
- * 渲染阅读器面板并取出它注册的 keydown 处理器。
- *
- * 为什么要走到这一层：n/p/空格的语义**只有在按键处理函数里才能验证**（纯函数测不到接线）。
- * 之前多次故障都出在「接线」上，所以这里直接派发按键事件。
- */
-function mountReader({ items = [], article } = {}) {
-  const { exports, sandbox, opened, listeners } = loadClientBundle()
-  const endpoints = []
-  const created = []
-  const host = hostAccount(items)
-  sandbox.fetch = async (_url, init) => {
-    const body = JSON.parse(init.body)
-    endpoints.push(body.endpoint)
-    const ok = (value) => ({ ok: true, status: 200, json: async () => ({ ok: true, value }) })
-    if (body.endpoint === 'overview' || body.endpoint === 'refresh') return ok(overviewStub(items))
-    if (body.endpoint === 'article') return ok(article ?? { itemId: body.payload.itemId, cached: false, paragraphs: ['正文'], frameable: false })
-    if (body.endpoint === 'markRead' || body.endpoint === 'unmarkRead') {
-      const ids = Array.isArray(body.payload?.itemIds) ? body.payload.itemIds : []
-      return ok(host.reply(body.endpoint, ids))
-    }
-    // 其余 carriesAccount 端点的回包同样带账（契约形状；新管线会照单全收这份账）
-    return ok({ changed: 1, ...host.snapshot() })
-  }
-  const ctx = {
-    slots: {
-      inject: (_slot, callback) => callback(),
-      register: (options, component) => {
-        if (options.name === 'main') created.push(component)
-        return () => {}
-      },
-    },
-    effect: (callback) => { callback(); return () => {} },
-  }
-  exports.apply(ctx)
-  assert.ok(created.length > 0, '没有捕获到 main 面板组件')
-
-  // 渲染：组件用 useState 拿 root ref，桩里返回一个假 DOM 节点
-  const box = {
-    scrollTop: 0, scrollHeight: 3000, clientHeight: 300,
-    querySelector: () => ({ offsetHeight: 40 }),
-    getClientRects: () => [{}],
-    focus: () => {},
-    contains: () => true,
-  }
-  const store = exports.createReaderStore()
-  return { store, endpoints, listeners, box, sandbox }
-}
+/* mountReader 已随 C4-b 删除：唯一租户用例只断 store 状态（已转 driveStore），实际派发
+ * 按键的判据由 keyboard-routing.test.mjs（纯函数层）与 scroll-dom.test.mjs（真 DOM 层）承载。 */
 
 test('接线：空格在列表页滚动视野、且不改变选中项（n/p 的扫视语义）', async () => {
-  const harness = mountReader({ items: [item({ id: 'a' }), item({ id: 'b' }), item({ id: 'c' })] })
-  // 直接驱动 store 建立状态，再手工构造一次按键派发所依赖的容器
-  await harness.store.load('overview')
-  const before = harness.store.get().selectedId
-  assert.equal(harness.store.get().view, 'list')
-
-  // 扫视的键位语义已在 keys 层钉住；这里验证 store 侧不会因扫视而改选中
-  // （纯滚动写在组件的 DOM 操作里，依赖真实容器；用 store 断言可覆盖的部分）
-  assert.equal(harness.store.get().selectedId, before, '扫视不应改变选中项')
+  // C4-b：原经假 React 渲染组件；实际断言全是 store 状态 —— 转直驱，不碰渲染层
+  const { store } = await driveStore({ items: [item({ id: 'a' }), item({ id: 'b' }), item({ id: 'c' })] })
+  await store.load('overview')
+  const before = store.get().selectedId
+  assert.equal(store.get().view, 'list')
+  assert.equal(store.get().selectedId, before, '扫视不应改变选中项')
 })
 
 test('客户端不得再内嵌原站页面（2026-10-08 删除 iframe 后的守护）', () => {
@@ -591,134 +534,19 @@ test('详情页按钮：尊重当前过滤（未读筛选下按钮也跳过已�
   assert.equal(store.get().article.itemId, 'c', '未读筛选下应当跳过已读的 b')
 })
 
-/**
- * 渲染**真实组件**并取出它注册的 keydown 处理器 —— 让按键「接线」可断言。
- *
- * 为什么需要这一层：既有的测试只驱动 store（断言最终状态），而历史故障几乎都出在接线
- * （键没接上、副作用漏了）。2026-10-07 实测：把「所有键解析短路」「可见性守卫恒真」
- * 「干脆不注册监听器」三条变异分别注入构建产物，套件全绿 —— 那一层此前零覆盖。
- *
- * 桩件是最小 React：useState 真的存值，渲染一遍后把树里所有 ref 回调用假 DOM 节点调一遍，
- * 再渲染一遍（第一遍里 root 还是 null，按键处理器的可见性守卫会拦住所有按键）。
- */
-function renderReader({ items = [] } = {}) {
-  const harness = loadClientBundle()
-  const { exports, sandbox, listeners } = harness
-  const endpoints = []
-  const host = hostAccount(items)
-  sandbox.fetch = async (_url, init) => {
-    const body = JSON.parse(init.body)
-    endpoints.push(body.endpoint)
-    const ok = (value) => ({ ok: true, status: 200, json: async () => ({ ok: true, value }) })
-    if (body.endpoint === 'overview' || body.endpoint === 'refresh') return ok(overviewStub(items))
-    if (body.endpoint === 'markRead' || body.endpoint === 'unmarkRead') {
-      const ids = Array.isArray(body.payload?.itemIds) ? body.payload.itemIds : []
-      return ok(host.reply(body.endpoint, ids))
-    }
-    // 其余 carriesAccount 端点的回包同样带账（契约形状；新管线会照单全收这份账）
-    return ok({ changed: 1, ...host.snapshot() })
-  }
-  const store = exports.createReaderStore()
-  const Reader = exports.createReader(store)
-  const box = {
-    scrollTop: 0,
-    scrollHeight: 3000,
-    clientHeight: 300,
-    querySelector: () => ({ offsetHeight: 40 }),
-    getClientRects: () => [{}],
-    focus: () => {},
-    contains: () => true,
-  }
-  const renderOnce = () => { harness.beginRender(); return Reader() }
-  // 桩件没有真的 React，ref 不会被自动调用：把树里的 ref 回调都拿假节点调一遍
-  for (const props of collectRefs(renderOnce())) props.ref(box)
-  renderOnce()
-  return { store, listeners, box, endpoints, sandbox }
-}
+/* renderReader / collectRefs / keyEvent 已随 C4-b 整体删除（含这套假 React 的 hooks 仿真）：
+ * useEffect 写成 (fn) => { fn() } 完全忽略依赖数组，「容器被闭包捕获、依赖里没有它」这类
+ * 失效在假层根本无法表达（2026-10-09 实测 175/175 全绿而真机空格无响应，docs/pitfalls.md §2.1）。
+ * 按键接线判据的家：keyboard-routing.test.mjs（纯函数层）+ scroll-dom.test.mjs（真 DOM 层）。 */
 
-/** 深度遍历元素桩（{type, props}）收集所有函数型 ref，供 renderReader 手工挂载。 */
-function collectRefs(node, found = []) {
-  if (node === null || node === undefined || typeof node !== 'object') return found
-  if (Array.isArray(node)) {
-    for (const child of node) collectRefs(child, found)
-    return found
-  }
-  const props = node.props
-  if (props !== null && typeof props === 'object') {
-    if (typeof props.ref === 'function') found.push(props)
-    for (const value of Object.values(props)) {
-      if (value !== null && typeof value === 'object') collectRefs(value, found)
-    }
-  }
-  return found
-}
-
-/** 构造一次按键事件：不需要真 DOM —— isTypingTarget 对 null 返回 false，正好放行。 */
-function keyEvent(key, shiftKey = false) {
-  return {
-    key,
-    shiftKey,
-    target: null,
-    metaKey: false,
-    ctrlKey: false,
-    altKey: false,
-    defaultPrevented: false,
-    preventDefault: () => {},
-  }
-}
-
-test('按键接线：j / k 真的驱动选中项（此前三条变异全部幸存）', async () => {
-  const harness = renderReader({ items: [item({ id: 'a' }), item({ id: 'b' }), item({ id: 'c' })] })
-  await harness.store.load('overview')
-  assert.ok(harness.listeners.length > 0, '组件必须注册 keydown 监听器')
-  const handler = harness.listeners[harness.listeners.length - 1]
-
-  const before = harness.store.get().selectedId
-  handler(keyEvent('j'))
-  assert.notEqual(harness.store.get().selectedId, before, 'j 必须移动选中项 —— 不动说明接线的某一环断了')
-  handler(keyEvent('k'))
-  assert.equal(harness.store.get().selectedId, before, 'k 必须移回来')
-})
-
-test('按键接线：未绑定的键不动任何状态（不误触发）', async () => {
-  const harness = renderReader({ items: [item({ id: 'a' }), item({ id: 'b' })] })
-  await harness.store.load('overview')
-  const handler = harness.listeners[harness.listeners.length - 1]
-  const snapshot = JSON.stringify(harness.store.get())
-  handler(keyEvent('z'))
-  assert.equal(JSON.stringify(harness.store.get()), snapshot, '未绑定的键不该改任何状态')
-})
-
-test('按键接线：o 展开并触发 markRead（副作用不能漏）', async () => {
-  const harness = renderReader({ items: [item({ id: 'a' }), item({ id: 'b' })] })
-  await harness.store.load('overview')
-  const handler = harness.listeners[harness.listeners.length - 1]
-  handler(keyEvent('o'))
-  await new Promise((resolve) => setTimeout(resolve, 20))
-  assert.ok(
-    harness.endpoints.includes('markRead'),
-    'o 必须触发 markRead 端点；实际端点：[' + harness.endpoints.join(', ') + ']',
-  )
-})
+/* 「按键接线：j/k / 未绑定键 / o→markRead」三条已随 C4-b 迁出：j/k 与未绑定键在
+ * scroll-dom（真 DOM 层）有等值或更强的用例；o→markRead 的端点级断言迁入同文件
+ *（真 React 派真 KeyboardEvent，副作用可经 endpoints 面板断言）。
+ * 假 React 层不再承载任何按键接线判据 —— 它的 useEffect 忽略依赖数组（盲区本体）。 */
 
 
-test('A 的撤销窗口：5 秒后自动撤掉（此前 until 只写不读，撤销条常驻）', async () => {
-  const harness = renderReader({ items: [item({ id: 'a' }), item({ id: 'b' })] })
-  // 记录定时器并手动触发到期回调 —— 不必真等 5 秒
-  const timers = []
-  harness.sandbox.setTimeout = (fn, ms) => { timers.push({ fn, ms }); return timers.length }
-  harness.sandbox.clearTimeout = () => {}
-
-  await harness.store.load('overview')
-  await harness.store.markAllRead()
-
-  const armed = timers.find((entry) => entry.ms === 5000)
-  assert.ok(armed !== undefined, 'markAll 必须给撤销窗口上定时器；实际 setTimeout 延时：' + JSON.stringify(timers.map((entry) => entry.ms)))
-  assert.ok(harness.store.get().undo !== undefined, '刚标完应当有撤销条')
-
-  armed.fn()
-  assert.equal(harness.store.get().undo, undefined, '窗口到期后撤销条必须消失')
-})
+/* 「A 的撤销窗口」已迁 tests/scroll-dom.test.mjs（C4-b）：定时器 × 真实监听器的组合必须
+ * 由真 DOM 层表达，假 React 层继续养着它就要继续养 hooks 仿真。 */
 
 test('A 全部标为已读必须跳过「保持未读」的条目（规格 §3.3 的存在理由）', async () => {
   const { store, calls } = await driveStore({ items: [item({ id: 'a' }), item({ id: 'b', keptUnread: true }), item({ id: 'c' })] })
@@ -847,17 +675,6 @@ test('C3：toggleStar 成功后账目以宿主回包为准落地（旧实现把�
   assert.equal(store.get().items[0].starred, true, '翻转本身照常生效')
 })
 
-test('按键接线：1 切展开视图、2 切回列表（且默认是列表 = 既有行为）', async () => {
-  const harness = renderReader({ items: [item({ id: 'a' }), item({ id: 'b' })] })
-  await harness.store.load('overview')
-  const handler = harness.listeners[harness.listeners.length - 1]
-  assert.equal(harness.store.get().layout, 'list', '默认必须是紧凑列表 —— 这是本插件既有行为')
-  handler(keyEvent('1'))
-  assert.equal(harness.store.get().layout, 'expanded', '1 必须切到展开视图')
-  handler(keyEvent('2'))
-  assert.equal(harness.store.get().layout, 'list', '2 必须切回列表视图')
-})
-
 test('A 的范围阈值：只标「早于所选范围」的条目（规格 §3.3 的 panic button）', async () => {
   // 时间基准现算，避免用例随真实日期漂移
   const old = new Date(Date.now() - 10 * 24 * 3600 * 1000).toISOString()
@@ -892,7 +709,10 @@ test('r 刷新未读计数：只重取本地视图，不触发抓取（规格不
 test('分页接线：续页游标在时渲染「加载更多」，点它真的取下一页（并追加到当前列表）', async () => {
   // 接线判据（不是算法判据）：按钮必须**真的**接上 store.loadMore，且它走的端点是 overview。
   // 本仓库多次踩到「解析对了但没接线」（键位、动作、副作用各一次），所以这一层不能省。
-  const { exports, sandbox, beginRender } = loadClientBundle()
+  // C4-b：从假 React 双遍渲染改为**直接调 createReader 工厂函数**拿当前树 —— 本用例
+  // 断的是「树里有没有按钮 + onClick 接没接」，元素桩 {type,props} 足够表达，不涉及
+  // hooks 语义；真 DOM 层的等值判据（按钮真的在页面上、点击真的滚）由 scroll-dom 承载。
+  const { exports, sandbox } = loadClientBundle()
   const first = [item({ id: 'a1' }), item({ id: 'a2' })]
   const second = [item({ id: 'a3' })]
   const endpoints = []
@@ -905,18 +725,11 @@ test('分页接线：续页游标在时渲染「加载更多」，点它真的�
       return ok({ ...overviewStub(first), nextCursor: 'C1' })
     }
     // 兜底同样守回包契约（本用例不会打到这些端点，但这条桩常被复制当模板 —— 别把契约上
-    // 不存在的形状传给下一代用例，与 driveStore / mountReader / renderReader 的桩同一条纪律）
+    // 不存在的形状传给下一代用例，与 driveStore / mountReader 的桩同一条纪律）
     return ok({ changed: 1, unread: 0, perFeedUnread: {} })
   }
   const store = exports.createReaderStore()
   const Reader = exports.createReader(store)
-  // 假 React：渲染两遍（第一遍 ref 还是 null，见文件顶部的说明），并在两遍之间挂上假节点
-  const box = {
-    scrollTop: 0, scrollHeight: 3000, clientHeight: 300,
-    querySelector: () => ({ offsetHeight: 40 }), getClientRects: () => [{}],
-    focus: () => {}, contains: () => true,
-  }
-  const renderOnce = () => { beginRender(); return Reader() }
   /**
    * 从渲染树里收集所有 button 元素桩。
    *
@@ -933,14 +746,10 @@ test('分页接线：续页游标在时渲染「加载更多」，点它真的�
       if (value !== null && typeof value === 'object') walk(value)
     }
   }
-  // 假 React 不会因为 store 变化自动重渲染（useEffect 里那次订阅只改 hooks 槽位，不触发渲染），
-  // 所以顺序是：先渲染一遍挂上假节点 → 拉数据 → **再渲染一遍**读取当前 state 的树。
-  // 这不是绕开接线判据：第二遍渲染出来的 onClick 正是组件在 nextCursor 到位后给出的那一个。
-  for (const props of collectRefs(renderOnce())) props.ref(box)
 
   await store.load('overview')
   assert.equal(store.get().nextCursor, 'C1', '前置条件：宿主给了续页游标')
-  walk(renderOnce())
+  walk(Reader())
   const more = buttons.find((entry) => typeof entry.props.children === 'string' && entry.props.children.includes('加载更多'))
   assert.ok(more !== undefined, 'state.nextCursor 存在时必须渲染「加载更多」入口；否则第 301 条之后又永远到不了')
 

@@ -252,6 +252,72 @@ test('o 键在列表页翻转展开：已展开则收起，否则展开当前行
   assert.deepEqual(closed.expandedCalls, [undefined], '已展开则收起')
 })
 
+/* ==================== C4-b：候选清单「基线零覆盖」判定的收编（2026-10-16） ==================== */
+/* 以下 7 条判定经反向变异复测（scripts/mutation-test.mjs --probes，今日 main）确认此前零覆盖；
+ * 每条判定同步有正式守门变异（MUTATIONS 表 client-probe-* 条目）。offsetHeight 一类在
+ * scroll-dom 的真 DOM 层表达（那里有真实布局桩），不在此文件。 */
+
+test('C4-b 判定：弹层开着时按键被弹层守卫挡住（closest dialog/modal）', { skip }, () => {
+  const h = makeCtx({})
+  if (h === undefined) return
+  // 弹层判定是「closest 到任一弹层角色」：把目标挂进一个 role=dialog 的容器。
+  // ⚠️ 目标必须是**非输入元素**：若用 <input>，tagName===INPUT 那一层（同一判定的另一半）
+  // 仍会挡住按键，closest 取反的变异照样全绿 —— 判据要钉的是 closest 这一半本体。
+  const dialog = h.setup.document.createElement('div')
+  dialog.setAttribute('role', 'dialog')
+  const inner = h.setup.document.createElement('span')
+  dialog.appendChild(inner)
+  h.setup.document.body.appendChild(dialog)
+  const ev = keyEvent('j', { target: inner })
+  routeKey(ev, h.ctx)
+  assert.deepEqual(h.store.calls, [], '弹层里的键不许漏到路由 —— closest 守卫取反时这条会红')
+})
+
+test('C4-b 判定：isContentEditable 的元素挡住按键', { skip }, () => {
+  const h = makeCtx({})
+  if (h === undefined) return
+  const editable = h.setup.document.createElement('div')
+  editable.isContentEditable = true
+  h.setup.document.body.appendChild(editable)
+  const ev = keyEvent('j', { target: editable })
+  routeKey(ev, h.ctx)
+  assert.deepEqual(h.store.calls, [], '可编辑区里的键不许触发动作（守卫取反时红）')
+})
+
+test('C4-b 判定：正文视图里 V/openArticle 被视图守卫挡住', { skip }, () => {
+  const h = makeCtx({ state: { view: 'article' } })
+  if (h === undefined) return
+  routeKeyOf('V', h)
+  assert.ok(!h.store.calls.some(([name]) => name === 'openArticle'), '正文页 V 不得再开正文（守卫删除时红）')
+})
+
+test('C4-b 判定：expandedView/listView 只在列表页切布局（正文/订阅管理不接管）', { skip }, () => {
+  const article = makeCtx({ state: { view: 'article' } })
+  if (article === undefined) return
+  routeKeyOf('1', article)
+  assert.ok(!article.store.calls.some(([name]) => name === 'setLayout'), '正文页按 1 不得切背后的列表布局（守卫删除时红）')
+  const feeds = makeCtx({ state: { view: 'feeds' } })
+  if (feeds === undefined) return
+  routeKeyOf('2', feeds)
+  assert.ok(!feeds.store.calls.some(([name]) => name === 'setLayout'), '订阅管理页按 2 同样不得接管（守卫删除时红）')
+})
+
+test('C4-b 判定：订阅管理页按 Esc 不得穿透成 toggleFeeds', { skip }, () => {
+  const h = makeCtx({ state: { view: 'feeds' } })
+  if (h === undefined) return
+  routeKeyOf('Escape', h)
+  // 2026-10-10 裁决后的契约：订阅页按 Esc 是**显式动作**（toggleFeeds 收订阅页），
+  // 不是 no-op —— 判据钉「它必须发生」；probe-Esc 订阅页 把该分支删掉时这条红。
+  assert.ok(h.store.calls.some(([name]) => name === 'toggleFeeds'), '订阅页 Esc 必须收订阅页（分支删除时红）')
+})
+
+test('C4-b 判定：s 键星标动作真实接线（star 分支删除时整条红）', { skip }, () => {
+  const h = makeCtx({})
+  if (h === undefined) return
+  routeKeyOf('s', h)
+  assert.ok(h.store.calls.some(([name]) => name === 'toggleStar'), 'star case 必须接到 store.toggleStar（case 改名时红）')
+})
+
 /** 派发一次按键给 routeKey。over 可覆盖事件字段（如修饰键）。 */
 function routeKeyOf(key, h, over = {}) {
   routeKey(keyEvent(key, { target: h.setup.document.body, ...over }), h.ctx)

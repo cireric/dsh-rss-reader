@@ -1144,6 +1144,34 @@ const MUTATIONS = [
     judges: ['client-bundle.test.mjs'],
     from: 'if (state.undo === void 0) {',
     to: 'if (true) {' },
+  // C4-b（2026-10-16）：候选清单「基线零覆盖」8 类判定的守门变异 —— 先经 --probes 反向
+  // 复测确认幸存（无判据看守），补判定后逐条入正表。expand 不 markRead 已有判据（C1 轮），
+  // 未入表。锚串照 lib/client.js 实际形状（tab 缩进 ×5；「未应用」假幸存 = 锚串过期的形态）。
+  { id: 'client-probe-弹层守卫', file: 'lib/client.js',
+    judges: ['keyboard-routing.test.mjs'],
+    // from 照产物 :1448 的真实字节（双引号包 selector、内层转义引号）——首版锚到 :1439 注释里的单引号形状，「改了不生效的行」照样全绿（幸存清单教训：注释不是判定）。
+    from: 'if (target.closest("[role=\\\"dialog\\\"], [aria-modal=\\\"true\\\"], dialog") !== null) return true;',
+    to: 'if (false) return true;' },
+  { id: 'client-probe-isContentEditable', file: 'lib/client.js',
+    judges: ['keyboard-routing.test.mjs'],
+    from: 'target.isContentEditable', to: 'false' },
+  { id: 'client-probe-sticky 选中', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    from: 'if (item.id === selectedId) return true', to: 'return inScope(item)' },
+  { id: 'client-probe-openArticle 视图守卫', file: 'lib/client.js',
+    judges: ['keyboard-routing.test.mjs'],
+    from: 'case "openArticle":\n\t\t\t\t\tif (view !== "list") return;',
+    to: 'case "openArticle":' },
+  { id: 'client-probe-expandedView 守卫', file: 'lib/client.js',
+    judges: ['keyboard-routing.test.mjs'],
+    from: 'case "expandedView":\n\t\t\t\t\tif (view === "list") store.setLayout("expanded");',
+    to: 'case "expandedView":\n\t\t\t\t\tstore.setLayout("expanded");' },
+  { id: 'client-probe-Esc 订阅页', file: 'lib/client.js',
+    judges: ['keyboard-routing.test.mjs'],
+    from: 'if (view === "feeds") {', to: 'if (false) {' },
+  { id: 'client-probe-删 star', file: 'lib/client.js',
+    judges: ['keyboard-routing.test.mjs'],
+    from: 'case "star":', to: 'case "star_never":' },
 ]
 
 // ── 函数化 + 并行化（2026-10-15 变异测试提速，杠杆 B；spec docs/mutation-test-speedup-plan.md）──
@@ -1434,7 +1462,7 @@ async function runFast(args, selected) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2))
-  const selected = args.only ? MUTATIONS.filter((m) => args.only.includes(m.id)) : MUTATIONS
+  let selected = args.only ? MUTATIONS.filter((m) => args.only.includes(m.id)) : MUTATIONS
   if (selected.length === 0) { console.error('--mutations 没匹配到任何条目'); process.exitCode = 2; return }
   if (args.mode === 'fast') { await runFast(args, selected); return }
   if (args.mode !== 'gate') { console.error('--mode ' + args.mode + ' 不认识（gate | fast）'); process.exitCode = 2; return }

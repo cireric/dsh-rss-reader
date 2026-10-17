@@ -12,7 +12,7 @@
  *  - react / react-dom：只存在于 checkout 的 .pnpm 目录，按 build.sh 同样的 glob 方式定位
  * 任何一条解析不到时**跳过而不是失败**：这是环境能力，不是本仓库的缺陷。
  */
-import { test } from 'node:test'
+import { test, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, existsSync, readdirSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -108,6 +108,9 @@ function overviewStub(items, feeds) {
  * 返回的 press 派发的是真 KeyboardEvent；box 是**从 DOM 里按标记属性现查的**真实节点
  * （所以它同时验证了「标记属性真的写进了 DOM」）。
  */
+/** 本轮 mountReader 的收尾函数登记表：afterEach 统一清（消灭未决 handle ⇒ 变异不再拖死套件）。 */
+const liveCleanups = []
+
 async function mountReader({ items = [], feeds, article, holdArticle } = {}) {
   const { JSDOM, React, jsxRuntime, createRoot } = STACK
   const dom = new JSDOM('<!DOCTYPE html><html><body><div id="root"></div></body></html>', { pretendToBeVisual: true })
@@ -190,7 +193,8 @@ async function mountReader({ items = [], feeds, article, holdArticle } = {}) {
   }
   const exportsObj = captured.factory(requireFn)
   const store = exportsObj.createReaderStore()
-  createRoot(win.document.getElementById('root')).render(React.createElement(exportsObj.createReader(store)))
+  const rootRef = createRoot(win.document.getElementById('root'))
+  rootRef.render(React.createElement(exportsObj.createReader(store)))
   await sleep(50)
 
   /** 按标记属性现取容器 —— 与按键处理器读的是同一个属性，所以它顺带钉住了标记。 */
@@ -241,7 +245,20 @@ async function mountReader({ items = [], feeds, article, holdArticle } = {}) {
     win.document.dispatchEvent(event)
     return event.defaultPrevented
   }
-  return { store, win, endpoints, box, byLabel, arm, observeContent, userScroll, press, exports: exportsObj, release: () => { if (releaseArticle !== undefined) releaseArticle() }, scrollTop: (el) => (geometry.get(el) ?? (() => el.scrollTop))() }
+  /**
+   * 收尾：卸载 React root + 关 JSDOM。为什么必须有（2026-10-16 C4-b 实测）：
+   * 变异门槛会往产物里注入「断言必红」的缺陷，其中 helpOpen/Esc 族的失效形态会让
+   * node:test 的收尾被本夹具留下的未决 handle（React root 的订阅、JSDOM 的 timer）拖住，
+   * 整个 judge 套件被拖过 gate 的 120s 悬崖 ⇒ 变异记「套件超时」= 判定无效。
+   * 挂起不是判据问题，是夹具的资源泄漏 —— cleanup 把泄漏本体消灭。
+   */
+  const cleanup = () => {
+    try { rootRef.unmount() } catch { /* 已卸载 */ }
+    try { dom.window.close() } catch { /* 已关 */ }
+  }
+  // 登记到模块级收尾表：afterEach 统一调用（用例无需逐一改）
+  liveCleanups.push(cleanup)
+  return { store, win, endpoints, box, byLabel, arm, observeContent, userScroll, press, exports: exportsObj, release: () => { if (releaseArticle !== undefined) releaseArticle() }, scrollTop: (el) => (geometry.get(el) ?? (() => el.scrollTop))(), cleanup }
 }
 
 /** 一条最小可用条目。 */
@@ -254,6 +271,12 @@ function item(overrides = {}) {
 }
 
 const skip = STACK === undefined ? { skip: '环境缺真实 React/jsdom（见本文件顶部说明）' } : {}
+
+afterEach(() => {
+  while (liveCleanups.length > 0) {
+    try { liveCleanups.pop()() } catch { /* 收尾失败不掩盖用例结果 */ }
+  }
+})
 
 test('详情页空格翻页：容器必须在 DOM 里、且按键真的改了它的 scrollTop', skip, async () => {
   // 这个用例就是 2026-10-09 那条缺陷的回归闸门：当时容器存在 state 里被 keydown 闭包捕获，
@@ -1073,7 +1096,11 @@ test('头部只留最右端一个 ? 入口：那行塞满键位的提示行必�
   assert.equal(entry.getAttribute('aria-expanded'), 'true', '展开态应当反映到 aria-expanded')
 })
 
-test('Esc 关浮窗且不穿透：正文页里只收浮窗，不把文章一起关掉', skip, async () => {
+test('Esc 关浮窗且不穿透：正文页里只收浮窗，不把文章一起关掉', STACK === undefined ? { skip: '环境缺真实 React/jsdom（见本文件顶部说明）' } : { timeout: 8000 }, async () => {
+  // ⚠️ timeout: 8000（2026-10-16 C4-b 实测）：helpOpen/Esc 族变异会让本用例在 node:test 下
+  // 挂起（断言必红，但 runner 的收尾被前面 mountReader 留下的未决 handle 拖住）⇒ judge 套件
+  // 被拖过 gate 的 120s 悬崖，变异记「套件超时」= 判定无效。node:test 原生 timeout 把「挂起」
+  // 变成「响亮的红」——红才是被抓住；判据本身（断言序列）未动。
   const h = await mountReader({ items: [item({ id: 'a' }), item({ id: 'b' })] })
   await h.store.load('overview')
   await sleep(30)
@@ -1168,4 +1195,98 @@ test('o 键：同一行连按两次必须收起（依赖数组里的 expanded �
   const afterSecondO = sizeNow()
 
   assert.ok(afterSecondO < afterOpen, '第二次按 o 必须收起 —— 若 expanded 不在依赖数组里，监听器读到的是注册那一刻的 undefined，于是永远「展开」而收不起来（行长度 ' + afterOpen + ' → ' + afterSecondO + '）')
+})
+
+/* ==================== C4-b 迁入（原 tests/client-bundle.test.mjs 假 React 层） ==================== */
+/* 这一组原来长在假 React 层，但它们的判据本体是「监听器 × 真渲染」—— useEffect 忽略
+ * 依赖数假的仿真层无法表达，如今由真 React 18 + jsdom 承载（迁入时判据逐字保真）。 */
+
+test('C4-b 迁入：A 的撤销窗口 5 秒后自动撤掉（此前 until 只写不读，撤销条常驻）', skip, async () => {
+  // 本用例首版等了**真的 5 秒**墙钟 —— 判据更硬，但把 judge 套件基线从 ~7s 抬到 ~11.6s，
+  // K=6 并行下直接越过 gate 的 120s 套件悬崖（实测：本轮 gate 两条变异假「套件超时」）。
+  // 退回「捕获定时器 + 手动触发」：虚拟化的**只有墙钟等待**，「5000ms 这个窗口时长」
+  // 本身改为断言钉住；真实渲染 / 监听器 / store 全保留。悬崖是 gate 侧的结构病
+  //（C1 终审 C1+I1 已记），等 gate 调优轮修，不在测试侧硬扛。
+  const realSetTimeout = globalThis.setTimeout
+  const timers = []
+  globalThis.setTimeout = (fn, ms) => {
+    if (ms === 5000) { timers.push({ fn, ms }); return 0 }
+    return realSetTimeout(fn, ms)
+  }
+  try {
+    const h = await mountReader({ items: [item({ id: 'a' }), item({ id: 'b' })] })
+    await h.store.load('overview')
+    await h.store.markAllRead()
+
+    const armed = timers.find((entry) => entry.ms === 5000)
+    assert.ok(armed !== undefined, 'markAll 必须给撤销窗口上 5000ms 定时器；实捕：' + JSON.stringify(timers.map((entry) => entry.ms)))
+    assert.ok(h.store.get().undo !== undefined, '刚标完应当有撤销条')
+
+    armed.fn()
+    assert.equal(h.store.get().undo, undefined, '窗口到期后撤销条必须消失')
+  } finally {
+    globalThis.setTimeout = realSetTimeout
+  }
+})
+
+test('C4-b 迁入：o 展开并触发 markRead 端点（副作用不能漏）', skip, async () => {
+  const h = await mountReader({ items: [item({ id: 'a' }), item({ id: 'b' })] })
+  await h.store.load('overview')
+  h.press('o')
+  await sleep(30)
+  assert.ok(
+    h.endpoints.includes('markRead'),
+    'o 必须触发 markRead 端点；实际端点：[' + h.endpoints.join(', ') + ']',
+  )
+})
+
+test('C4-b 迁入：1 切展开视图、2 切回列表（且默认是列表 = 既有行为）', skip, async () => {
+  const h = await mountReader({ items: [item({ id: 'a' }), item({ id: 'b' })] })
+  await h.store.load('overview')
+  assert.equal(h.store.get().layout, 'list', '默认必须是紧凑列表 —— 这是本插件既有行为')
+  h.press('1')
+  await sleep(30)
+  assert.equal(h.store.get().layout, 'expanded', '1 必须切到展开视图')
+  h.press('2')
+  await sleep(30)
+  assert.equal(h.store.get().layout, 'list', '2 必须切回列表视图')
+})
+
+test('C4-b 迁入：j / k 经真实监听器驱动选中项（接线判据在真 DOM 层安家）', skip, async () => {
+  const h = await mountReader({ items: [item({ id: 'a' }), item({ id: 'b' }), item({ id: 'c' })] })
+  await h.store.load('overview')
+  const before = h.store.get().selectedId
+  h.press('j')
+  await sleep(30)
+  assert.notEqual(h.store.get().selectedId, before, 'j 必须移动选中项 —— 不动说明接线的某一环断了')
+  h.press('k')
+  await sleep(30)
+  assert.equal(h.store.get().selectedId, before, 'k 必须移回来')
+})
+
+test('C4-b 迁入：未绑定的键不动任何状态（不误触发）', skip, async () => {
+  const h = await mountReader({ items: [item({ id: 'a' }), item({ id: 'b' })] })
+  await h.store.load('overview')
+  const snapshot = JSON.stringify(h.store.get())
+  h.press('z')
+  await sleep(30)
+  assert.equal(JSON.stringify(h.store.get()), snapshot, '未绑定的键不该改任何状态')
+})
+
+test('C4-b 判定：行高量不到（offsetHeight=0）时按列表兜底 48 滚，而不是按 0 滚（量错对象的「有值但不正确」是实测事故）', skip, async () => {
+  // 判据的现场：measureRowHeight 读 [data-rss-row] 的 offsetHeight，判定是
+  // Number.isFinite(height) && height > 0 —— 取反掉「0 行高」后必须落 LIST_ROW_STEP_FALLBACK(48)，
+  // 而不是把 0 当有效步长（按 0 滚 = 键盘扫视静默失效）。真 DOM 层才能把「行高=0」表达出来。
+  const h = await mountReader({ items: [item({ id: 'a' }), item({ id: 'b' }), item({ id: 'c' })] })
+  await h.store.load('overview')
+  const listBox = h.box('list')
+  assert.ok(listBox !== null, '前置：列表滚动容器在 DOM 里')
+  h.arm(listBox, { scrollHeight: 3000, clientHeight: 300 })
+  // 把唯一一行的 offsetHeight 打成 0（jsdom 本就无布局，这里显式钉住「量到 0」这个形状）
+  const row = listBox.querySelector('[data-rss-row]')
+  assert.ok(row !== null, '前置：列表里有一行 [data-rss-row]')
+  Object.defineProperty(row, 'offsetHeight', { get: () => 0, configurable: true })
+  h.press('n')
+  await sleep(30)
+  assert.equal(h.scrollTop(listBox), 48, '行高量到 0 必须走兜底 48（offsetHeight 判定取反时这条会按 0 滚而红）')
 })
