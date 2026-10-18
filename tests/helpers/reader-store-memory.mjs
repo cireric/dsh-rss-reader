@@ -29,6 +29,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { openDatabase, migrateSchema } from '../../lib/storage/db.js'
+import { applyFeedIntent } from '../../lib/feed-intent.js'
 import { writeConfigFile } from '../../lib/storage/config-file.js'
 import { createSqliteStore } from '../../lib/store-sqlite.js'
 
@@ -60,6 +61,11 @@ export function memoryStore() {
     items,
     feed: (id) => feeds.get(id),
     saveFeed: async (id, record) => { feeds.set(id, record) },
+    // 按意图变更（H4）：与生产实现同一条合并规则（applyFeedIntent）—— 桩不自己造第二套语义。
+    // previous undefined 合法（refresh 首次抓取兼创建，与旧行为逐字等价，见 feed-intent.ts 注释）。
+    updateFeed: async (id, intent) => {
+      feeds.set(id, applyFeedIntent(feeds.get(id), intent))
+    },
     cursor: (id) => cursors.get(id),
     saveCursor: async (id, record) => { cursors.set(id, record) },
     item: (id) => items.get(id),

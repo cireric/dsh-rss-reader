@@ -26,6 +26,7 @@ import { feedRecordSchema, itemRecordSchema } from '../lib/domain.js'
 import { articleCharsOf, selectCleanup } from '../lib/retention.js'
 import { countUnreadPerFeed, recencyOf } from '../lib/shared.js'
 import { freshStore, tempDir } from './helpers/reader-store-memory.mjs'
+import { applyFeedIntent } from '../lib/feed-intent.js'
 
 /** 断言读回来的记录合 ItemRecord（strict）——多带一列就会在这里翻红。 */
 function assertItem(record, label) {
@@ -820,4 +821,67 @@ test('texts.fetched_at 声明 NOT NULL：NULL 写不进去，且读路径确实�
     db.close()
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+/* ==================== H4：按意图变更订阅（2026-10-18） ==================== */
+/* 字段合并规则的家在 src/feed-intent.ts；这里的判据钉「合并语义与旧白名单等价」+ 「调度痕迹
+ * 不被订阅落库抹掉」（opmlImport/addFeed 侧此前零覆盖——C4-b 查证轮发现）。 */
+const H4_FEED_ID = 'https://h4.example.com/atom.xml'
+
+test('H4：upsert-subscription 保留调度与抓取痕迹，不抹 lastAttemptedAt / lastFetchedAt / lastFailure（此前零覆盖）', async () => {
+  const { store, db, dir } = freshStore('h4-upsert')
+  try {
+    // 既有源：抓取过一次且失败过（痕迹三件套齐）
+    await store.saveFeed(H4_FEED_ID, {
+      url: H4_FEED_ID, title: '旧标题', folder: '旧分组', etag: '"e1"', lastModified: '2026-10-11T08:00:00.000Z',
+      lastFetchedAt: '2026-10-11T09:00:00.000Z', lastAttemptedAt: '2026-10-11T09:00:00.000Z', lastFailure: 'HTTP 502',
+    })
+    await store.updateFeed(H4_FEED_ID, { kind: 'upsert-subscription', url: H4_FEED_ID, title: '新标题', folder: undefined })
+    const after = store.feed(H4_FEED_ID)
+    assert.equal(after.title, '新标题', 'title 按声明合并')
+    assert.equal(after.folder, '旧分组', 'folder 保留既有（用户可能在界面上改过）')
+    assert.equal(after.lastAttemptedAt, '2026-10-11T09:00:00.000Z', '调度痕迹不许被落库抹掉——否则下一轮又把没试过的源排最前')
+    assert.equal(after.lastFetchedAt, '2026-10-11T09:00:00.000Z', '上次成功同样保留')
+    // ⚠️ 与旧白名单逐字等价：旧实现的 opmlImport/addFeed 白名单**不含 lastFailure** ⇒ 落库会抹掉它。
+    // 这是不是合理语义是**产品决定**（抹掉=失败横幅消失但源仍坏；保留=横幅更诚实）——本轮是等价收拢，
+    // 不顺手改语义；疑似缺陷已记 HANDOFF 待拍板。
+    assert.equal(after.lastFailure, undefined, '旧白名单语义：订阅落库抹掉 lastFailure（等价收拢不改语义——疑似缺陷另记）')
+    assert.equal(after.etag, '"e1"', '条件请求凭据保留')
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('H4：refresh-success 清 lastFailure 且盖双时间戳（与旧白名单逐字段等价）', async () => {
+  const { store, db, dir } = freshStore('h4-success')
+  try {
+    await store.saveFeed(H4_FEED_ID, {
+      url: H4_FEED_ID, title: '旧标题', etag: '"old"', lastModified: '2026-10-11T08:00:00.000Z',
+      lastFetchedAt: '2026-10-11T08:00:00.000Z', lastAttemptedAt: '2026-10-11T08:00:00.000Z', lastFailure: 'HTTP 502',
+    })
+    const intent = { kind: 'refresh-success', url: H4_FEED_ID, stamp: '2026-10-12T10:00:00.000Z', title: '新标题', etag: '"v2"', lastModified: '2026-10-12T09:00:00.000Z', contentRevision: 2 }
+    await store.updateFeed(H4_FEED_ID, intent)
+    const after = store.feed(H4_FEED_ID)
+    // 等价性对照：旧白名单（refresh.ts 200 分支）对同一输入的输出 —— applyFeedIntent 必须逐字段相同
+    const expected = {
+      url: H4_FEED_ID, title: '新标题', folder: undefined,
+      etag: '"v2"', lastModified: '2026-10-12T09:00:00.000Z',
+      lastFetchedAt: '2026-10-12T10:00:00.000Z', lastAttemptedAt: '2026-10-12T10:00:00.000Z',
+      contentRevision: 2,
+    }
+    for (const [key, value] of Object.entries(expected)) {
+      assert.equal(after[key], value, '等价性：' + key + ' 必须与旧白名单输出一致')
+    }
+    assert.equal(after.lastFailure, undefined, '成功后 lastFailure 清掉（304 横幅残留事故的契约）')
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('H4：refresh-failure 盖 lastAttemptedAt 但不盖 lastFetchedAt（防饿死承重判定随意图走）', async () => {
+  const { store, db, dir } = freshStore('h4-failure')
+  try {
+    await store.saveFeed(H4_FEED_ID, { url: H4_FEED_ID, title: 'T', lastFetchedAt: '2026-10-11T09:00:00.000Z' })
+    await store.updateFeed(H4_FEED_ID, { kind: 'refresh-failure', url: H4_FEED_ID, stamp: '2026-10-12T10:00:00.000Z', reason: 'HTTP 500' })
+    const after = store.feed(H4_FEED_ID)
+    assert.equal(after.lastAttemptedAt, '2026-10-12T10:00:00.000Z', '失败的尝试也是一次尝试（防饿死）')
+    assert.equal(after.lastFetchedAt, '2026-10-11T09:00:00.000Z', 'lastFetchedAt 是「上次成功」，不许被失败盖掉')
+    assert.equal(after.lastFailure, 'HTTP 500', '失败原因如实记录')
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }) }
 })

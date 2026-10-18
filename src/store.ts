@@ -5,8 +5,9 @@
  * 去重、保留量裁剪与已读态保持，不必先起宿主。
  */
 import type { Domain } from '@deepseek-ai/dsh-storage-domain'
-import { readerDomain, type CursorRecord, type FeedRecord, type ItemRecord } from './domain.js'
+import { readerDomain, feedRecordSchema, type CursorRecord, type FeedRecord, type ItemRecord } from './domain.js'
 import { articleCharsOf, selectCleanup, type ArticleEntry, type CleanupRow } from './retention.js'
+import { applyFeedIntent, type FeedIntent } from './feed-intent.js'
 import { countUnreadPerFeed, recencyOf, sanitizeViewPreferences, type Cursor, type ViewPreferences } from './shared.js'
 
 /**
@@ -28,6 +29,13 @@ export interface CleanupCandidate extends CleanupRow {
 export interface ReaderStore {
   feed(feedId: string): FeedRecord | undefined
   saveFeed(feedId: string, record: FeedRecord): Promise<void>
+  /**
+   * **按意图变更**订阅（H4）：字段合并规则收在 src/feed-intent.ts 一处，调用方只声明
+   * 「这次是什么事」—— 五个镜像白名单（refresh×3 + opmlImport/addFeed×2）的收拢点。
+   * 原子读改写（KvTable.update，与 updateItem 同形）：并发窗口内别的写者不会被旧快照盖掉。
+   * 源不存在时按存储域语义拒绝（与 updateItem 同一条纪律：先确认在，别用「写一次即创建」蒙混）。
+   */
+  updateFeed(feedId: string, intent: FeedIntent): Promise<void>
   cursor(feedId: string): CursorRecord | undefined
   saveCursor(feedId: string, record: CursorRecord): Promise<void>
   /** 退订：删源记录与它的游标（条目由调用方一并删，避免留下孤儿） */
@@ -145,6 +153,16 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
   return {
     feed: (feedId) => feeds.get(feedId),
     saveFeed: (feedId, record) => feeds.put(feedId, record),
+    updateFeed: async (feedId, intent) => {
+      await feeds.update(feedId, (current: FeedRecord | undefined) => {
+        // refresh 三种 intent 的前提是源已在（种子先行），缺失即拒（与 updateItem 同一条纪律）；
+        // upsert-subscription 例外——update-or-insert 名字即语义，addFeed / opmlImport 的新源创建走它。
+        if (current === undefined && intent.kind !== 'upsert-subscription') {
+          throw new Error('updateFeed：源不存在（' + feedId + '）—— 变更的前提是它已在，创建走 saveFeed 或 upsert 意图')
+        }
+        return feedRecordSchema.parse(applyFeedIntent(current, intent))
+      })
+    },
     cursor: (feedId) => cursors.get(feedId),
     saveCursor: (feedId, record) => cursors.put(feedId, record),
     deleteFeed: async (feedId) => {

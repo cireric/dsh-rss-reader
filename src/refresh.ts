@@ -277,37 +277,18 @@ async function refreshOne(
   const stamp = now().toISOString()
 
   if (result.kind === 'failed') {
-    // ⚠️ 失败也要盖 lastAttemptedAt（调度排序键），但**不**盖 lastFetchedAt（那是「上次成功」）。
-    // 少了这一行，永久失败的源在调度里永远最旧，≥ K 个就能永久霸占每一轮的窗口 —— 健康源
-    // 全军覆没（评审实测：200 源 / 20 个永久失败 / K=20 ⇒ 60 轮覆盖 0/180）。
-    // 这条分支同时是「失败源不会被饿死」的唯一承重点，判据在 tests/refresh.test.mjs。
-    await store.saveFeed(feedId, {
-      ...(previous ?? {}),
-      url: feedId,
-      lastAttemptedAt: stamp,
-      lastFailure: result.reason,
-    })
+    // 字段合并规则在 src/feed-intent.ts（H4 收拢）；「失败的尝试也是一次尝试」的防饿死判据
+    // 随意图走（refresh-failure），判据在 tests/refresh.test.mjs。
+    await store.updateFeed(feedId, { kind: 'refresh-failure', url: feedId, stamp, reason: result.reason })
     return { feedId, url: feedId, status: 'failed', added: 0, reason: result.reason }
   }
 
   if (result.kind === 'not-modified') {
     // 升级轮里还被判 304（源忽略了无条件请求）：写回版本号避免每轮都重试，并留下痕迹
     const upgradeSkipped = needsContentUpgrade
-    // **字段必须显式列出，不能展开 previous**：展开会把上一次失败留下的 lastFailure 一起带回来，
-    // 于是「502 一闪而过、之后一路 304 成功」的源会永远挂着失败横幅（用户实测：月光博客连续十几次
-    // not-modified，横幅仍写 HTTP 502）。304 也是**成功**（源说「内容没变」），按 domain.ts:28 的
-    // 契约「成功后清掉」，它必须把失败标记清掉 —— 横幅只能反映**最近一次**真实结果。
-    await store.saveFeed(feedId, {
-      url: feedId,
-      title: previous?.title,
-      folder: previous?.folder,
-      etag: previous?.etag,
-      lastModified: previous?.lastModified,
-      lastFetchedAt: stamp,
-      // 调度排序键同样要盖：304 是一次**成功的尝试**（源说内容没变）
-      lastAttemptedAt: stamp,
-      contentRevision: CONTENT_REVISION,
-    })
+    // 304 也是**成功**（源说「内容没变」）：lastFailure 必须清 —— 横幅只能反映最近一次真实结果
+    //（用户实测：月光博客连续十几次 not-modified，横幅仍写 HTTP 502）。合并语义在 feed-intent.ts。
+    await store.updateFeed(feedId, { kind: 'refresh-not-modified', url: feedId, stamp, contentRevision: CONTENT_REVISION })
     return upgradeSkipped
       ? { feedId, url: feedId, status: 'not-modified', added: 0, reason: '源未响应无条件请求，正文升级跳过' }
       : { feedId, url: feedId, status: 'not-modified', added: 0 }
@@ -385,14 +366,13 @@ async function refreshOne(
     seen: [...freshIds, ...seen].slice(0, options.maxSeenPerFeed),
     cursorAt: stamp,
   })
-  await store.saveFeed(feedId, {
+  await store.updateFeed(feedId, {
+    kind: 'refresh-success',
     url: feedId,
+    stamp,
     title: parsed.title ?? previous?.title,
-    folder: previous?.folder,
     etag: result.etag,
     lastModified: result.lastModified,
-    lastFetchedAt: stamp,
-    lastAttemptedAt: stamp,
     contentRevision: CONTENT_REVISION,
   })
   await prune(store, feedId, options.maxItemsPerFeed)

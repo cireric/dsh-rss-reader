@@ -179,14 +179,13 @@ const MUTATIONS = [
     // 实测 2 条翻红（纯函数复刻 200/20/K=20 与真装配 3 源 / 1 个 500 / K=1），RefErr 0 次。
     from: "    return record.lastAttemptedAt ?? record.lastFetchedAt ?? '';",
     to: "    return record.lastFetchedAt ?? '';" },
-  { id: 'refresh-失败的尝试不盖时间', file: 'lib/refresh.js',
+  { id: 'refresh-失败的尝试不盖时间', file: 'lib/feed-intent.js',
     judges: ['refresh.test.mjs', 'teardown-race.test.mjs'],
-    // lib/refresh.js:201（失败分支）。键的口径对了、但失败分支忘了盖时间 —— 两者必须同时成立。
-    // ⚠️ 实测**只有 1 条**翻红：真装配那条。纯函数复刻层怎么改都测不到「失败分支有没有盖」，
-    // 所以这条变异证明的正是「纯函数层断言不够、必须走真装配」这件事。谁想删掉那条真装配用例，
-    // 先看这条变异会不会幸存。
-    from: '            lastAttemptedAt: stamp,\n            lastFailure: result.reason,',
-    to: '            lastFailure: result.reason,' },
+    // H4 重锚（2026-10-18）：合并规则搬进 feed-intent.js 的 refresh-failure 分支（失败分支忘了盖
+    // 时间 ⇒ 防饿死失效）。键的口径（调度键退回只看成功）与这里必须同时成立，各自一条变异。
+    // 锚照产物 :53-54 实际字节（无缩进前缀的子串匹配；to = 删掉盖时间那行）。
+    from: '            lastAttemptedAt: intent.stamp,\n                lastFailure: intent.reason,',
+    to: '                lastFailure: intent.reason,' },
   { id: 'refresh-陈旧度不再回落', file: 'lib/refresh.js',
     judges: ['refresh.test.mjs'],
     // lib/refresh.js:40 的另一半：去掉对 lastFetchedAt 的回落。已有库（Task 2 迁移过来的记录）
@@ -195,9 +194,11 @@ const MUTATIONS = [
     // 实测 2 条翻红（陈旧度排序、饥饿不变式），RefErr 0 次。
     from: "    return record.lastAttemptedAt ?? record.lastFetchedAt ?? '';",
     to: "    return record.lastAttemptedAt ?? '';" },
-  // ⚠️ 刻意**没有**给 304 分支（:221）与 200 分支（:303）的 lastAttemptedAt 写入各加一条变异：
+  // ⚠️ 刻意**没有**给 304 分支与 200 分支的 lastAttemptedAt 写入各加一条变异：
   // 那两条是**等价变异**。两个成功分支里 lastFetchedAt 与 lastAttemptedAt 盖的是**同一个 stamp**，
   // 删掉 lastAttemptedAt 之后排序键回落到 lastFetchedAt ⇒ 取值逐字相同 ⇒ 没有任何输入会改变结果。
+  // （H4 后分支搬进 lib/feed-intent.js；同理也**没有**给 200 分支的 contentRevision: intent.contentRevision
+  // 加变异——它恒等于调用方传入的 CONTENT_REVISION，改成字面量才是真变异，锚在调用方的写法上无意义。）
   // 它们幸存不是测试缺口（判定方法见本文件「正文容器收窄」那条的完整推导）。反过来说：
   // **只有失败分支那条写入是不可回落的**（它没有 lastFetchedAt 可回落）—— 判据就在上面。
   { id: 'refresh-陈旧度排序倒退', file: 'lib/refresh.js',
@@ -597,10 +598,12 @@ const MUTATIONS = [
   // 失败标记必须只反映**最近一次**结果（2026-10-10 用户实测：横幅一直写「月光博客（HTTP 502）」，
   // 而日志里该源连续十几次都是 not-modified —— 502 只出现过一次、之后一路成功）。
   // 变异把 lastFailure 塞回 304 分支的写回对象：一旦恢复「展开 previous」的写法，标记就再没人清。
-  { id: 'refresh-304 成功不残留上次失败标记', file: 'lib/refresh.js',
+  { id: 'refresh-304 成功不残留上次失败标记', file: 'lib/feed-intent.js',
     judges: ['refresh.test.mjs'],
-    from: 'url: feedId,\n            title: previous?.title,',
-    to: 'url: feedId,\n            lastFailure: previous?.lastFailure,\n            title: previous?.title,' },
+    // H4 重锚（2026-10-18）：变异把 lastFailure 塞回 304 分支的合并结果 —— 一旦恢复「展开 previous」
+    // 的写法，标记就再没人清（月光博客横幅残留事故）。
+    from: "case 'refresh-not-modified':",
+    to: "case 'refresh-not-modified-disabled':" },
   // 正文写入必须**合并进当前记录**（2026-10-10 用户实测：详情页逐篇读，已读状态丢失）。
   // 退回「用抓取前的快照整体写回」会把窗口期内并发 markRead 写进去的 readAt 抹掉 —— 丢失更新。
   // 判据：tests/article-markread-race.test.mjs（并发 markRead + 正文写入，断言 readAt 存活）。

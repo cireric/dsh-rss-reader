@@ -13,6 +13,7 @@
  * 与用户实际跑的路径一致。修复前它们必须见红——「分叉」这条断言就是量尺。
  */
 import { test } from 'node:test'
+import { applyFeedIntent } from '../lib/feed-intent.js'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { refreshFeeds } from '../lib/refresh.js'
@@ -26,6 +27,8 @@ function memoryStore() {
     feeds, cursors, items,
     feed: (id) => feeds.get(id),
     saveFeed: async (id, record) => { feeds.set(id, record) },
+    // 按意图变更（H4）：与生产实现同一条合并规则（桩不自己造第二套语义）；previous undefined 合法。
+    updateFeed: async (id, intent) => { feeds.set(id, applyFeedIntent(feeds.get(id), intent)) },
     cursor: (id) => cursors.get(id),
     saveCursor: async (id, record) => { cursors.set(id, record) },
     item: (id) => items.get(id),

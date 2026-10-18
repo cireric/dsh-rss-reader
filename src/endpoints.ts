@@ -378,17 +378,14 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         const previous = ctx.store.feed(result.url)
         existed += previous === undefined ? 0 : 1
         added += previous === undefined ? 1 : 0
-        // 已存在的源保留其 folder（用户可能在界面上改过），新源才写入 OPML 的分组
-        await ctx.store.saveFeed(result.url, {
+        // 已存在的源保留其 folder（用户可能在界面上改过），新源才写入 OPML 的分组。
+        // 意图声明（H4）：调度痕迹（lastAttemptedAt）的保留规则在 feed-intent.ts 一处 ——
+        // 不逐字段搬，「源刚试过一次」这个事实会被导入 OPML 抹掉，该源下一轮又被当「没试过」排到最前。
+        await ctx.store.updateFeed(result.url, {
+          kind: 'upsert-subscription',
           url: result.url,
           title: result.title ?? subscription?.title ?? previous?.title,
           folder: previous?.folder ?? subscription?.folder,
-          etag: previous?.etag,
-          lastModified: previous?.lastModified,
-          lastFetchedAt: previous?.lastFetchedAt,
-          // 这里也是**显式白名单**：不逐字段搬，「源刚试过一次」这个事实会被导入 OPML 抹掉，
-          // 该源下一轮又被当「没试过」排到最前（调度键见 refresh.ts 的 stalenessKey）。
-          lastAttemptedAt: previous?.lastAttemptedAt,
         })
         accepted.push({ url: result.url, title: result.title ?? subscription?.title, folder: previous?.folder ?? subscription?.folder })
       }
@@ -411,15 +408,12 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         return ok({ added: 0, existed: 0, failed: [{ url: raw, reason: result?.reason ?? '校验失败' }], skipped: [], accepted: [] })
       }
       const previous = ctx.store.feed(result.url)
-      await ctx.store.saveFeed(result.url, {
+      // 同 OPML 导入：意图声明（H4），「刚试过」的痕迹保留规则在 feed-intent.ts
+      await ctx.store.updateFeed(result.url, {
+        kind: 'upsert-subscription',
         url: result.url,
         title: result.title ?? previous?.title,
         folder: previous?.folder,
-        etag: previous?.etag,
-        lastModified: previous?.lastModified,
-        lastFetchedAt: previous?.lastFetchedAt,
-        // 同 OPML 导入：显式白名单，别把「刚试过」的痕迹抹掉
-        lastAttemptedAt: previous?.lastAttemptedAt,
       })
       return ok({
         added: previous === undefined ? 1 : 0,

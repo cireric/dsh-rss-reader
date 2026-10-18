@@ -38,6 +38,7 @@ import { SCHEMA_VERSION } from './storage/db.js'
 import { sanitizeViewPreferences, type Cursor } from './shared.js'
 import type { CleanupCandidate, ReaderStore } from './store.js'
 import type { ArticleEntry } from './retention.js'
+import { applyFeedIntent, type FeedIntent } from './feed-intent.js'
 
 /** 事务里的保存点名。写成常量即可：db 是单连接，嵌套只发生在同一个连接上。 */
 const SAVEPOINT = 'rss_store_write'
@@ -524,6 +525,21 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
       // 认不出的记录若原样进文件，之后每次读都要再兜一次 —— 那就是「存储里攒着垃圾，只是被读侧遮住」。
       const safe = feedRecordSchema.parse(record)
       writeFeeds(configPath, (feeds) => ({ ...feeds, [feedId]: safe }))
+    },
+
+    updateFeed: async (feedId, intent) => {
+      // 按意图变更（H4）：合并规则在 src/feed-intent.ts 一处；这里只负责「读当前 → 合并 →
+      // 形状校验 → 原子写回」。refresh 三种 intent 的前提是源已在（种子先行），缺失即拒绝
+      //（与 updateItem 同一条纪律）；**upsert-subscription 例外** —— update-or-insert 名字即语义，
+      // addFeed / opmlImport 的新源创建就是它的合法路径。
+      writeFeeds(configPath, (feeds) => {
+        const current = feeds[feedId]
+        if (current === undefined && intent.kind !== 'upsert-subscription') {
+          throw new Error('updateFeed：源不存在（' + feedId + '）—— 变更的前提是它已在，创建走 saveFeed 或 upsert 意图')
+        }
+        const next = feedRecordSchema.parse(applyFeedIntent(current, intent))
+        return { ...feeds, [feedId]: next }
+      })
     },
 
     cursor: (feedId) => {
