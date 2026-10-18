@@ -79,6 +79,54 @@ host 侧 `lib/*.js` 没有这种守护，旧产物会静默通过）。
 **一般化**：**任何一条与「刚改的那几行」无关的稳定失败，先怀疑环境（残留产物 / 并发），再怀疑代码。**
 「这条红是不是我的」是要**先证伪**的假设，不是事后要解释的意外。
 
+### 1.10 变异门槛会把**整机**拖死：进程数没有上限，而这台机器没有 swap
+
+**病象**（`实测`，2026-10-15 起三次）：跑 `npm run mutation` 期间整机失去响应（鼠标卡顿、
+风扇满转、最后要么硬重启要么等十几分钟自愈）。加 `NODE_OPTIONS=--max-old-space-size=4096` 无效。
+
+**根因**：门槛限制的是「变异条数并发」（K），**从来没有限制进程数**，两者相乘之后是几十个 node：
+
+- K 默认 `min(6, cpus-2)` = **6**（本机 10 核）；
+- 每个 worker 里 `execSync('node --test …')`，而 `node --test` 的**文件级并发默认 = availableParallelism() = 10**；
+- 合计 ≈ 1 主进程 + 6 worker 线程 + 6 ×(1 runner + 10 文件) ≈ **60+ 个 node 进程**；
+- 每个 node 默认堆上限 **4288 MB**（实测 `v8.getHeapStatistics().heap_size_limit`，与有没有传
+  `--max-old-space-size` 无关 —— 所以调 NODE_OPTIONS 不改变这条）。
+
+本机真正的放大器是**没有 swap**：`sysctl vm.swapusage` 恒为 `total = 0.00M`、
+`/System/Volumes/VM` 里 0 个 swapfile。内存一旦超过物理量，macOS 无处可换出，
+只能靠 compressor 压缩，而压缩又吃 CPU —— 进入「压缩 → 变慢 → 更多未回收 → 更压」的死亡螺旋。
+历史现场（`实测`，`/Library/Logs/DiagnosticReports/`）：2026-10-16 一晚 **14 个 JetsamEvent**，
+`largestProcess` 全是 `node`（单个 2329 MB + 1313 MB，其余 20+ 个各 150–290 MB），
+kill reason 全为 `vm-compressor-space-shortage`；紧接 00:24 一次 panic + shutdown stall。
+`NODE_OPTIONS` 解释不了它：那是**整台机器的内存**被吃光，不是某个 V8 堆越界。
+
+**修法**（`scripts/mutation-test.mjs`，四道闸，全部只压上限、不压按需）：
+
+1. **worker 数由宿主算出**：`min(6, cpus/3, 内存GB/4)` ⇒ 本机 3（旧的固定 6 给到 6）；
+2. **套件内文件级并发封顶**：`node --test --test-concurrency=<cpus/3，上限 4>` ⇒ 本机 3
+   （实测单套件 7s → 8s，可忽略）；
+3. **每个套件子进程带堆上限**：`--max-old-space-size=1024`，且**先摘掉继承来的那一份**
+   （`NODE_OPTIONS` 会被 `execSync → node → node --test` 三层原样继承，实测父设 4096 时孙进程也是 4288）；
+4. **低内存看门狗**：worker 每 3s 探一次可用内存（`vm_stat` 的 free+inactive+speculative），
+   跌破 512 MB 立刻 `worker.terminate()` 并把该 worker 的变异记「崩了」——
+   判定无效可以重跑，整机死机不能。
+
+5. **显式 `--workers` 同样受闸**（自审轮补）：它是绕过 `defaultWorkers` 的唯一入口，
+   放任 `--workers 8` 就等于闸门形同虚设；超上限时明确打印「已夹到 N」，不静默改数。
+
+修后实测：整轮 gate **163s**（旧约 4 min）、峰值可用内存 **≥ 3498 MB**、152 条变异 0 崩 / 152 抓 / 0 幸存。
+
+**踩过的坑（别再走一遍）**：
+
+- **别用 `os.freemem()` 当水位**：macOS 上它只数 `Pages free`（实测 1546 MB，而 free+inactive 是 5319 MB），
+  空闲内存大半躺在 inactive/file cache ⇒ 看门狗在套件刚起步时就误触发，实测把 138 条全判成「崩了」。
+- **`execSync` 的超时只杀直接子进程**（实测 `ETIMEDOUT` 后孙进程树立刻消失，不算孤儿进程），
+  但**超时那次 `node --test` 已经跑掉的变异不会被重跑** —— 超时是判据失效，不是「没发生」。
+
+**判据**：`tests/mutation-runner.test.mjs` 的「宿主资源闸」一条钉住四处锚点
+（`--test-concurrency=`、摘继承堆上限、`HOST_FLOOR_MB`、`defaultWorkers` 存在），
+并禁止退回固定 `os.cpus().length - 2`。
+
 ---
 
 ## 二、测试与夹具

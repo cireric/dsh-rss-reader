@@ -113,6 +113,14 @@ const liveCleanups = []
 
 async function mountReader({ items = [], feeds, article, holdArticle } = {}) {
   const { JSDOM, React, jsxRuntime, createRoot } = STACK
+  // P3（gate 调优轮）：挂载前拍全局快照，cleanup 时还原 —— 此前每个 mount 都把
+  // window/document/fetch/ResizeObserver 覆盖成新 JSDOM 的桩且从不还原，跨用例的桩污染面
+  // 与未决 handle 泄漏叠加，是「runner 内部挂死」的放大器（还原救不了已挂死的用例，
+  // 但消灭了「前一条用例的桩污染下一条」这半个失效面）。
+  const globalSnapshot = {}
+  for (const key of ['window', 'document', 'HTMLElement', 'Element', 'Node', 'KeyboardEvent', 'ResizeObserver', 'fetch']) {
+    globalSnapshot[key] = globalThis[key]
+  }
   const dom = new JSDOM('<!DOCTYPE html><html><body><div id="root"></div></body></html>', { pretendToBeVisual: true })
   const win = dom.window
   // 真实 React 需要这些全局；测试进程里逐个覆盖，跑完由 node:test 的进程隔离兜底
@@ -255,6 +263,9 @@ async function mountReader({ items = [], feeds, article, holdArticle } = {}) {
   const cleanup = () => {
     try { rootRef.unmount() } catch { /* 已卸载 */ }
     try { dom.window.close() } catch { /* 已关 */ }
+    for (const key of Object.keys(globalSnapshot)) {
+      try { globalThis[key] = globalSnapshot[key] } catch { /* 还原失败不掩盖用例结果 */ }
+    }
   }
   // 登记到模块级收尾表：afterEach 统一调用（用例无需逐一改）
   liveCleanups.push(cleanup)

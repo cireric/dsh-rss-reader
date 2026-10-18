@@ -56,8 +56,11 @@ const MUTATIONS = [
   { id: 'discover-只认 rel=alternate', file: 'lib/feed/discover.js',
     judges: ['discover.test.mjs'],
     from: 'if (!/\\balternate\\b/i.test(rel))', to: 'if (false)' },
+  // ⚠️ 2026-10-18：judges 从 client-bundle 改到 keyboard-routing —— 那条变异锚的是 CLIENT 里的
+  // 按键路由（`if (view === "list") store.setLayout("expanded")`）。旧 judges 指的 client-bundle 只走
+  // 假 React 夹具，从不按 1 键 ⇒ 变异长期「幸存」。按键路由层的判据住在 tests/keyboard-routing.test.mjs。
   { id: 'client-1 键切展开视图', file: 'lib/client.js',
-    judges: ['client-bundle.test.mjs'],
+    judges: ['keyboard-routing.test.mjs'],
     from: 'setLayout("expanded")', to: 'setLayout("list")' },
   { id: 'retention-星标保护', file: 'lib/retention.js',
     judges: ['refresh.test.mjs', 'retention.test.mjs'],
@@ -1155,8 +1158,11 @@ const MUTATIONS = [
   { id: 'client-probe-isContentEditable', file: 'lib/client.js',
     judges: ['keyboard-routing.test.mjs'],
     from: 'target.isContentEditable', to: 'false' },
+  // ⚠️ 2026-10-18：judges 从 scroll-dom 改到 client-bundle —— 实测该变异下 scroll-dom 全绿、
+  // client-bundle 翻红 7 条（「未读筛选下打开条目…」那一族）。judges 指错文件不报错，
+  // 只会让这条变异被**别的**文件判「幸存」。
   { id: 'client-probe-sticky 选中', file: 'lib/client.js',
-    judges: ['scroll-dom.test.mjs'],
+    judges: ['client-bundle.test.mjs'],
     from: 'if (item.id === selectedId) return true', to: 'return inScope(item)' },
   { id: 'client-probe-openArticle 视图守卫', file: 'lib/client.js',
     judges: ['keyboard-routing.test.mjs'],
@@ -1184,11 +1190,54 @@ const MUTATIONS = [
 const SUITE_TIMEOUT_MS = 120_000        // 单次套件墙钟上限（正常 ≈7s；超时 ⇒ 判定无效记「套件超时」）
 const WORKER_BUDGET_MS = 15 * 60_000    // 单个 worker 总预算（正常全量 ≈4min；超时强制回收并 sweep）
 
+// ── 宿主资源闸（2026-10-18 整机死机排障轮）────────────────────────────────────────
+// 为什么：这条门槛的**进程数**从来没有上限，而它是本仓库唯一会把整机拖垮的东西。
+// 实测（M4 / 16 GB / 10 核）：K=6 时峰值 ≈ 1 主进程 + 6 worker 线程 +
+// 6 × (1 runner + node --test 的文件级并发上限 availableParallelism()=10) ≈ 60 个 node 进程；
+// 每个测试子进程默认堆上限 4288 MB（NODE_OPTIONS 有没有都一样），而本机 vm.swapusage = 0
+// （/System/Volumes/VM 无 swapfile）⇒ 需求一旦超过物理内存就是直接进 compressor 争抢，
+// 没有磁盘缓冲垫。历史现场：2026-10-16 一晚 14 个 JetsamEvent（reason=vm-compressor-space-shortage、
+// largestProcess=node），紧接 00:24 一次 panic + shutdown stall。
+// ⇒ 三道闸，都只压「上限」不压「按需」（单套件实测峰值仅 332 MB，正常路径完全够用）：
+//   ① worker 数随核数与内存收敛（不再固定 6）；
+//   ② 套件内的文件级并发封顶（默认 10 降到 3，实测单套件 7s→8s，可忽略）；
+//   ③ 每个套件子进程带堆上限 —— 超限由 V8 自己 abort（可诊断、可重跑），
+//      而不是让它一路涨到整机 compressor 崩掉（那才是「死机」的形态）。
+const HOST_CPUS = os.availableParallelism()
+const HOST_GB = os.totalmem() / 1024 ** 3
+const SUITE_CONCURRENCY = Math.max(2, Math.min(4, Math.floor(HOST_CPUS / 3)))
+const SUITE_HEAP_MB = 1024
+// 低内存看门狗：可用内存低于此值即强制回收全部 worker（宁可本轮判定无效，也不让整机进死亡螺旋）
+const HOST_FLOOR_MB = 512
+function defaultWorkers() {
+  return Math.max(1, Math.min(6, Math.floor(HOST_CPUS / 3), Math.floor(HOST_GB / 4)))
+}
+// 可用内存（MB）。⚠️ 不能用 os.freemem()：macOS 上它只数 Pages free（实测 1546 MB，
+// 而 free+inactive 是 5319 MB）—— 空闲内存大半躺在 inactive/file cache 里，
+// 按 Pages free 设水位会在套件刚起步时就误触发（实测首轮门真的把 138 条全判成「崩了」）。
+function hostFreeMB() {
+  try {
+    const stat = execSync('vm_stat', { encoding: 'utf8', timeout: 5000 })
+    const pageSize = Number(/page size of (\d+)/.exec(stat)?.[1] ?? 16384)
+    const pages = (label) => Number(new RegExp(label + ':\\s+(\\d+)').exec(stat)?.[1]?.replace(/\./g, '') ?? 0)
+    return Math.round((pages('Pages free') + pages('Pages inactive') + pages('Pages speculative')) * pageSize / 1048576)
+  } catch {
+    // vm_stat 起不来（非 macOS / 沙箱拒绝）⇒ 无从判断水位，退回「不干预」：宁可少一道闸，
+    // 也不许把整轮判定误伤成「崩了」。
+    return Number.POSITIVE_INFINITY
+  }
+}
+
 // 「跑一次套件」。root 参数化（隔离副本跑副本、源目录跑基线）；files 省缺 = 全量内环 glob。
 function runSuite(root, files) {
   const spec = files === undefined ? 'tests/*.test.mjs' : files.join(' ')
+  // 子进程显式带上堆上限：NODE_OPTIONS 会被 execSync → node → node --test 三层原样继承
+  // （实测：父设 512 时孙进程 heap_size_limit 也是 704 MB）。继承来的堆上限必须先**摘掉**再追加——
+  // 只靠「后面的覆盖前面的」虽然实测有效（4096+1024 ⇒ 1216 MB），但那依赖 V8 的取值次序，太脆。
+  const inherited = (process.env.NODE_OPTIONS ?? '').replace(/--max-old-space-size=\d+/g, '').trim()
+  const nodeOptions = (inherited + ' --max-old-space-size=' + SUITE_HEAP_MB).trim()
   try {
-    const out = execSync('node --test ' + spec + ' 2>&1', { cwd: root, encoding: 'utf8', maxBuffer: 128 * 1024 * 1024, timeout: SUITE_TIMEOUT_MS })
+    const out = execSync('node --test --test-concurrency=' + SUITE_CONCURRENCY + ' ' + spec + ' 2>&1', { cwd: root, encoding: 'utf8', maxBuffer: 128 * 1024 * 1024, timeout: SUITE_TIMEOUT_MS, env: { ...process.env, NODE_OPTIONS: nodeOptions } })
     return { ok: true, out: out }
   } catch (error) {
     // 超时（SIGTERM 杀）也是「判定无效」：分类器见 timeout 标志记 crashed——红 ≠ 被抓住。
@@ -1214,7 +1263,7 @@ function classify(res, m) {
 
 // 崩溃错误名（打印用，与 classify 同一条错误行正则）。
 function crashName(res) {
-  if (res.timeout) return '套件超时'
+  if (res.timeout) return res.deterministic === true ? '套件超时（确定性：重试仍超时）' : '套件超时'
   const hit = res.out.split('\n').find((line) => /^\s+(ReferenceError|SyntaxError):/.test(line))
   return (hit && hit.match(/\b(ReferenceError|SyntaxError)\b/) || [])[1] || '未知'
 }
@@ -1280,7 +1329,7 @@ function partitionMutations(mutations, n) {
 function buildWorkerScript(workerRoot, mutations) {
   return `
 const { execSync } = require('node:child_process')
-const { readFileSync, writeFileSync } = require('node:fs')
+const { readFileSync, writeFileSync, existsSync } = require('node:fs')
 const path = require('node:path')
 const { parentPort } = require('node:worker_threads')
 const root = ${JSON.stringify(workerRoot)}
@@ -1288,6 +1337,8 @@ const root = ${JSON.stringify(workerRoot)}
 // 被 runSuite 的 try/catch 吞成 ok:false ⇒ 基线卫兵判「副本基线红」——卫兵拦下了它，但不能靠它兜）
 const SUITE_TIMEOUT_MS = ${JSON.stringify(SUITE_TIMEOUT_MS)}
 const WORKER_BUDGET_MS = ${JSON.stringify(WORKER_BUDGET_MS)}
+const SUITE_CONCURRENCY = ${JSON.stringify(SUITE_CONCURRENCY)}
+const SUITE_HEAP_MB = ${JSON.stringify(SUITE_HEAP_MB)}
 const mutations = ${JSON.stringify(mutations)}
 const runSuite = ${runSuite.toString()}
 const classify = ${classify.toString()}
@@ -1296,6 +1347,17 @@ const judgesFromFails = ${judgesFromFails.toString()}
 const applyMutation = ${applyMutation.toString()}
 // 副本基线卫兵：副本不忠实（如 mtime 反超让 client-bundle:265 必红）⇒ 每条变异的套件必红 ⇒
 // 「幸存 0」就是空洞判据。基线红 ⇒ 本副本全部变异记 worker_error，主进程计入失败清单。
+// P1（gate 调优轮）：变异只被**它自己的 judges** 审 —— 与 fast 通道同一语义。
+// 为什么这是正解而不是优化：全量 glob 让「一条 judge 挂死/变慢」污染 worker 里全部变异的判定
+//（helpOpen/Esc 的 scroll-dom 挂死形态拖过 120s 悬崖的现场），也让 fast 绿 ≠ gate 绿。
+// 保守回落：judges 缺失（漂移）⇒ 回落全量 —— 判据变窄比判定无效更危险，漂移兜底交给
+// 主进程的「未应用」通道与 mutation:calibrate。
+function judgeFiles(m) {
+  const declared = [...new Set(m.judges ?? [])]
+  if (declared.length === 0) return undefined
+  const files = declared.filter((f) => existsSync(path.join(root, 'tests', f)))
+  return files.length === declared.length ? files.map((f) => 'tests/' + f) : undefined
+}
 const base = runSuite(root)
 if (!base.ok) {
   for (const m of mutations) parentPort.postMessage({ id: m.id, status: 'worker_error', crash: '副本基线红', fails: [], judges: [] })
@@ -1305,7 +1367,17 @@ if (!base.ok) {
     if (!applied.ok) { parentPort.postMessage({ id: m.id, status: 'unapplied' }); continue }
     let res
     const startedAt = Date.now()
-    try { res = runSuite(root) } finally { writeFileSync(path.join(root, m.file), applied.original) }
+    try {
+      res = runSuite(root, judgeFiles(m))
+      // P2（gate 调优轮）：超时重试一次 —— C4-a 实测过并行负载下的**偶发**假超时（2 条），
+      // 与 C4-b 的**确定性**超时（jsdom×runner 挂死）必须区分：偶发重试即愈，确定性连超 2 次
+      // 仍记 crashed 且文案标「确定性」，人工判读不再需要复跑排除。
+      if (res.timeout) {
+        console.log('  · ' + m.id.padEnd(26) + ' → 套件超时，重试一次…')
+        res = runSuite(root, judgeFiles(m))
+        if (res.timeout) res = { ...res, deterministic: true }
+      }
+    } finally { writeFileSync(path.join(root, m.file), applied.original) }
     const fails = res.out.split('\\n').filter((l) => /^\\s*✖/.test(l)).map((l) => l.trim().replace(/\\s*\\(\\d.*$/, ''))
     const judges = judgesFromFails(res.out)
     const verdict = classify(res, m)
@@ -1323,8 +1395,10 @@ function runWorker(workerRoot, mutations) {
   return new Promise((resolve) => {
     const worker = new Worker(buildWorkerScript(workerRoot, mutations), { eval: true })
     const results = []
+    let guardTimer
     const sweep = (why) => {
       clearTimeout(deadline)
+      clearInterval(guardTimer)
       // worker 本体崩了（eval 失败 / 未捕获异常 / 非零退出 / 超预算）：没回传结果的变异全部记 crashed，不许静默丢
       for (const m of mutations) {
         if (!results.some((r) => r.id === m.id)) results.push({ id: m.id, status: 'crashed', crash: why, fails: [] })
@@ -1333,19 +1407,38 @@ function runWorker(workerRoot, mutations) {
     }
     // worker 总预算（终审 C1 第二道网）：卡死的 worker 强制回收，由 sweep 收尾
     const deadline = setTimeout(() => { worker.terminate(); sweep('worker 超预算 ' + WORKER_BUDGET_MS + 'ms——强制回收') }, WORKER_BUDGET_MS)
+    // 宿主资源闸（2026-10-18）：可用内存跌破底线就整体收手 —— 判定无效(refund)远好过整机进 compressor 死亡螺旋。
+    // 为什么不在 runSuite 里判：单套件峰值实测仅 332 MB，真正会涨的是被留下继续跑的子进程树，
+    // 只有主进程看得到全局（worker 之间互相看不见）。
+    guardTimer = setInterval(() => {
+      const free = hostFreeMB()
+      if (free < HOST_FLOOR_MB) {
+        worker.terminate()
+        sweep('宿主可用内存 ' + free + 'MB < ' + HOST_FLOOR_MB + 'MB——强制回收保护整机')
+      }
+    }, 3000)
     worker.on('message', (r) => results.push(r))
     worker.on('error', (error) => sweep('worker 未捕获：' + error.message))
-    worker.on('exit', (code) => { if (code !== 0) sweep('worker exit ' + code); else { clearTimeout(deadline); resolve(results) } })
+    worker.on('exit', (code) => { if (code !== 0) sweep('worker exit ' + code); else { clearTimeout(deadline); clearInterval(guardTimer); resolve(results) } })
   })
 }
 
 function parseArgs(argv) {
-  // 默认 K=6：spec §3 实测的安全包线（8 并发曾在 100ms 级时序断言上翻红，I1 拆分前）；宁可保守
-  const args = { mode: 'gate', workers: Math.min(6, Math.max(1, os.cpus().length - 2)), dumpJudges: undefined, only: undefined }
+  // 默认 K 由宿主编译期约束算出（见 defaultWorkers）：旧口径固定 min(6, cpus-2) 在本机会给到 6，
+  // 叠加 node --test 的文件级并发 10 ⇒ 约 60 个 node 进程，16 GB 无 swap 的机器扛不住。
+  const args = { mode: 'gate', workers: defaultWorkers(), dumpJudges: undefined, only: undefined }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--mode') args.mode = argv[++i]
-    else if (a === '--workers') args.workers = Number(argv[++i])
+    // ⚠️ 显式 --workers 必须**同样受资源闸约束**：它是绕过 defaultWorkers 的唯一入口，
+    // 放任 `--workers 8` 就等于把整机重新推回「几十个 node × 4 GB 堆」的死亡螺旋。
+    // 不静默改数：超上限时明确打印夹到多少（2026-10-18 自审轮实测抓到的洞）。
+    else if (a === '--workers') {
+      const asked = Number(argv[++i])
+      const ceiling = defaultWorkers()
+      args.workers = Math.max(1, Math.min(Number.isFinite(asked) ? asked : 1, ceiling))
+      if (Number.isFinite(asked) && asked > ceiling) console.error('--workers ' + asked + ' 超过宿主资源闸上限 ' + ceiling + '，已夹到 ' + args.workers + '（保护整机）')
+    }
     else if (a === '--dump-judges') args.dumpJudges = argv[++i] ?? true
     else if (a === '--mutations') args.only = String(argv[++i]).split(',').map((s) => s.trim()).filter(Boolean)
     else { console.error('未知参数: ' + a); process.exit(2) }

@@ -291,6 +291,18 @@ test('C4-b 判定：正文视图里 V/openArticle 被视图守卫挡住', { skip
   assert.ok(!h.store.calls.some(([name]) => name === 'openArticle'), '正文页 V 不得再开正文（守卫删除时红）')
 })
 
+test('C4-b 判定：列表页按 1 切 expanded、按 2 切回 list（切错方向时红）', { skip }, () => {
+  // 2026-10-18：此前只测了「正文页/订阅页不接管」那半边守卫，**没有一条断言看着列表页真的切了布局**
+  // ⇒ 变异 'setLayout("expanded") → setLayout("list")' 长期幸存（scripts/mutation-test.mjs
+  // 的 'client-1 键切展开视图'）。这里按方向钉：切成什么会被直接看见。
+  const h = makeCtx({ state: { view: 'list' } })
+  if (h === undefined) return
+  routeKeyOf('1', h)
+  assert.deepEqual(h.store.calls.filter(([name]) => name === 'setLayout'), [['setLayout', 'expanded']], '列表页按 1 必须切到 expanded')
+  routeKeyOf('2', h)
+  assert.deepEqual(h.store.calls.filter(([name]) => name === 'setLayout'), [['setLayout', 'expanded'], ['setLayout', 'list']], '按 2 必须切回 list')
+})
+
 test('C4-b 判定：expandedView/listView 只在列表页切布局（正文/订阅管理不接管）', { skip }, () => {
   const article = makeCtx({ state: { view: 'article' } })
   if (article === undefined) return
