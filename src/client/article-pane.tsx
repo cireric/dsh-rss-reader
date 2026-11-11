@@ -17,7 +17,7 @@ import { edgeTopFor } from '../list-scroll.js'
  * 缩成可辨认尺寸，需要看细节时点「打开原站」。
  */
 const ARTICLE_IMAGE_MAX_HEIGHT = 640
-import type { ArticlePayload } from '../shared.js'
+import type { ItemView } from '../shared.js'
 import type { ArticleState } from './store.js'
 
 /**
@@ -50,7 +50,7 @@ function ArticleBlockView({ block }: { block: Record<string, unknown> }): ReactN
             maxHeight: ARTICLE_IMAGE_MAX_HEIGHT, objectFit: 'contain', borderRadius: 6,
           }} />
         {caption !== '' && (
-          <figcaption style={{ fontSize: 13, opacity: 0.65, marginTop: 6, textAlign: 'center' }}>{caption}</figcaption>
+          <figcaption className="dsh-rss-meta" style={{ marginTop: 8, textAlign: 'center' }}>{caption}</figcaption>
         )}
       </figure>
     )
@@ -60,7 +60,7 @@ function ArticleBlockView({ block }: { block: Record<string, unknown> }): ReactN
     return (
       <pre style={{
         margin: '0 0 1.1em', padding: '10px 12px', overflowX: 'auto',
-        borderRadius: 6, fontSize: 13, lineHeight: 1.6,
+        borderRadius: 6, fontSize: 13, lineHeight: 1.6, overflowWrap: 'normal',
         fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
         background: 'color-mix(in srgb, currentColor 6%, transparent)',
       }}>{text}</pre>
@@ -99,9 +99,9 @@ function ArticleBlockView({ block }: { block: Record<string, unknown> }): ReactN
   return <p style={{ margin: '0 0 1.05em' }}>{text}</p>
 }
 
-export function ArticleView({ article, link, onBack, scrollAttr, canPrev, canNext, onPrev, onNext }: {
+export function ArticleView({ article, item, onBack, scrollAttr, canPrev, canNext, onPrev, onNext }: {
   article: ArticleState | undefined
-  link: string | undefined
+  item: ItemView | undefined
   onBack: () => void
   /** 容器标记属性名：按键处理按它现取容器（取值集中在 list-scroll.ts 的 scrollSelectorFor） */
   scrollAttr: string
@@ -115,6 +115,9 @@ export function ArticleView({ article, link, onBack, scrollAttr, canPrev, canNex
   const blocks: Array<Record<string, unknown>> = article?.blocks !== undefined
     ? article.blocks
     : (article?.paragraphs ?? []).map((text) => ({ kind: 'p', text }))
+  const title = article?.title || item?.title
+  const publishedAt = item?.publishedAt
+  const link = item?.link
 
   /**
    * 本组件自己拿到滚动容器 —— 右下角那两个按钮要作用在它上面。
@@ -215,20 +218,21 @@ export function ArticleView({ article, link, onBack, scrollAttr, canPrev, canNex
     // position:relative 是给右下角那两个跳转按钮当地坐标系的：
     // 按钮不能放进滚动容器里（会跟着内容滚走），只能浮在它之上、由本层定位。
     <div style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 10, padding: '10px 20px',
-        borderBottom: '1px solid color-mix(in srgb, currentColor 12%, transparent)',
-      }}>
-        <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" onClick={onBack}>← 返回列表（Esc）</button>
-        <span style={{ flex: 1 }} />
-        {/* 上/下一条：与键盘同一套判定；详情页 j = 下一条、k = 上一条（n/p 是扫视，不换文章）。 */}
-        <button type="button" className="dsh-rss-btn" disabled={!canPrev}
-          title="上一条（k）" onClick={onPrev}>↑ 上一条</button>
-        <button type="button" className="dsh-rss-btn" disabled={!canNext}
-          title="下一条（j）" onClick={onNext}>↓ 下一条</button>
-        {link !== undefined && link !== '' && (
-          <a href={link} target="_blank" rel="noreferrer" style={{ fontSize: 12 }}>打开原站 ↗</a>
-        )}
+      <div className="dsh-rss-article-inset" style={{ borderBottom: '1px solid var(--rss-line)' }}>
+        <div className="dsh-rss-article-column dsh-rss-article-nav">
+          <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
+            title="返回列表（Esc）" onClick={onBack}>← 返回列表</button>
+          <div className="dsh-rss-actions">
+            {/* 与键盘共用判定，j/k 切文章，n/p 滚动当前文章。 */}
+            <button type="button" className="dsh-rss-btn" disabled={!canPrev}
+              title="上一条（k）" onClick={onPrev}>↑ 上一条</button>
+            <button type="button" className="dsh-rss-btn" disabled={!canNext}
+              title="下一条（j）" onClick={onNext}>↓ 下一条</button>
+            {link !== undefined && link !== '' && (
+              <a className="dsh-rss-btn dsh-rss-btn--ghost" href={link} target="_blank" rel="noreferrer">打开原站 ↗</a>
+            )}
+          </div>
+        </div>
       </div>
 
       {/*
@@ -237,24 +241,33 @@ export function ArticleView({ article, link, onBack, scrollAttr, canPrev, canNex
         * 而这两个状态恰恰是用户最容易反复按键的时候（在等正文出来）。容器先立着，
         * 里面画什么再按状态决定；没有可滚内容时滚动计算自然得到 0，不会乱动。
         */}
-      <div ref={attachBox} {...{ [scrollAttr]: 'article' }}
-        style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 24px 32px' }}>
-        {article === undefined || article.loading ? (
-          <div style={{ padding: '12px 22px', opacity: 0.7 }}>正在抓取并抽取原站正文…</div>
-        ) : article.failure !== undefined ? (
-          <div style={{ padding: '12px 22px', color: '#c0392b' }}>
-            没能取到正文：{article.failure}
-            <div style={{ opacity: 0.7, marginTop: 6, fontSize: 12 }}>可以按 Esc 回列表，或点右上角去原站阅读。</div>
-          </div>
-        ) : (
-          // 阅读视图：限宽 + 加大行高（长文可读性）；每种块由 ArticleBlockView 给语义化样式
-          <div style={{ maxWidth: 760, margin: '0 auto', fontSize: 16, lineHeight: 1.85 }}>
-            {article.title !== undefined && (
-              <div style={{ fontSize: 20, fontWeight: 600, lineHeight: 1.4, marginBottom: 18 }}>{article.title}</div>
-            )}
-            {blocks.map((block, index) => <ArticleBlockView key={index} block={block} />)}
-          </div>
-        )}
+      <div ref={attachBox} {...{ [scrollAttr]: 'article' }} className="dsh-rss-article-inset"
+        style={{ flex: 1, minHeight: 0, overflowY: 'auto', scrollbarGutter: 'stable both-edges', paddingBlock: '24px 40px' }}>
+        <article className="dsh-rss-article-column" style={{ fontSize: 16, lineHeight: 1.85 }}>
+          {title && (
+            <header style={{ marginBottom: 24 }}>
+              <h1 className="dsh-rss-article-title">{title}</h1>
+              {item !== undefined && (
+                <div className="dsh-rss-meta" style={{ marginTop: 8 }}>
+                  {item.feedTitle}
+                  {publishedAt !== undefined && (
+                    <> · <time dateTime={publishedAt}>{new Date(publishedAt).toLocaleDateString('zh-CN')}</time></>
+                  )}
+                </div>
+              )}
+            </header>
+          )}
+          {article === undefined || article.loading ? (
+            <p className="dsh-rss-meta" role="status">正在抓取原站正文…</p>
+          ) : article.failure !== undefined ? (
+            <div role="alert" style={{ color: 'var(--rss-error)' }}>
+              没能取到正文：{article.failure}
+              <div className="dsh-rss-meta" style={{ marginTop: 6 }}>
+                {link ? '可以返回列表，或打开原站阅读。' : '可以按 Esc 返回列表。'}
+              </div>
+            </div>
+          ) : blocks.map((block, index) => <ArticleBlockView key={index} block={block} />)}
+        </article>
       </div>
 
       {/*

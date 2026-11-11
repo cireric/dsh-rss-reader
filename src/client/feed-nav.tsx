@@ -49,11 +49,12 @@ export function FeedNav({ feeds, perFeedUnread, filter, navSelection, navCursor,
   const cursorFilter = navCursor.kind === 'filter' ? navCursor.filter : undefined
 
   return (
-    <div {...{ 'data-rss-nav': '' }} style={{
-      // 固定宽度而非 flex 比例：右栏是条目流，它的可用宽度不该随源名长短漂移
-      width: LEFT_NAV_WIDTH, flex: '0 0 auto', minWidth: 0,
+    <nav aria-label="订阅导航" {...{ 'data-rss-nav': '' }} style={{
+      // 窄窗口也要给右栏留出阅读空间。
+      width: `min(${LEFT_NAV_WIDTH}px, 34%)`, flex: '0 0 auto', minWidth: 0,
       display: 'flex', flexDirection: 'column',
-      borderRight: '1px solid color-mix(in srgb, currentColor 12%, transparent)',
+      boxSizing: 'border-box', padding: '10px 8px', gap: 2,
+      background: 'var(--rss-side)', borderInlineEnd: '1px solid var(--rss-line)',
       overflowY: 'auto', fontSize: 13,
     }}>
       {VIRTUAL_VIEWS.map((view) => {
@@ -75,13 +76,13 @@ export function FeedNav({ feeds, perFeedUnread, filter, navSelection, navCursor,
           onKeyDown={(event) => {
             if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelectFilter(view.key) }
           }}
-          style={{ ...ROW_STYLE, ...(selected ? SELECTED_STYLE : {}), ...(cursor ? CURSOR_STYLE : {}) }}>
+          style={ROW_STYLE}>
           <span style={LABEL_STYLE}>{view.label}</span>
         </div>
         )
       })}
 
-      <div style={{ height: 1, background: 'color-mix(in srgb, currentColor 12%, transparent)', margin: '6px 0' }} />
+      <div style={{ flex: '0 0 1px', background: 'var(--rss-line)', margin: '6px 8px' }} />
 
       {feeds.map((feed) => {
         // 键域 = feeds 表：0 未读的源也有键（宿主契约，src/shared.ts:58-65），故无条件读取
@@ -97,41 +98,23 @@ export function FeedNav({ feeds, perFeedUnread, filter, navSelection, navCursor,
             onKeyDown={(event) => {
               if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelectFeed(feed.id) }
             }}
-            style={{
-              ...ROW_STYLE,
-              ...(selectedFeedId === feed.id ? SELECTED_STYLE : {}),
-              ...(cursorFeedId === feed.id ? CURSOR_STYLE : {}),
-            }}>
-            <span style={LABEL_STYLE}>{feed.title ?? feed.id}</span>
+            style={ROW_STYLE}>
+            <span title={feed.title ?? feed.id} style={LABEL_STYLE}>{feed.title ?? feed.id}</span>
             {showUnread && (
-              <span style={{ flex: '0 0 auto', fontSize: 11, opacity: unread > 0 ? 0.75 : 0.45 }}>
+              <span style={{ flex: '0 0 auto', fontSize: 12, color: 'var(--rss-muted)', fontVariantNumeric: 'tabular-nums' }}>
                 {unread > 99 ? '99+' : unread}
               </span>
             )}
           </div>
         )
       })}
-    </div>
+    </nav>
   )
 }
 
 const ROW_STYLE = {
   display: 'flex', alignItems: 'center', gap: 8,
-  padding: '7px 14px', cursor: 'pointer',
-} as const
-
-const SELECTED_STYLE = {
-  background: 'color-mix(in srgb, currentColor 9%, transparent)',
-  fontWeight: 600,
-} as const
-
-/**
- * 光标行：**必须与「生效」看得见地区分**，否则读者按 shift+n 时看到的是「高亮在动但右栏没变」，
- * 无从判断是「移动生效了」还是「按键坏了」。
- * 用左侧竖条而不是背景：背景已经是「生效」的语言（SELECTED_STYLE），两种状态叠加时不能互相盖掉。
- */
-const CURSOR_STYLE = {
-  boxShadow: 'inset 3px 0 0 currentColor',
+  padding: '7px 10px', borderRadius: 6, cursor: 'pointer',
 } as const
 
 const LABEL_STYLE = {

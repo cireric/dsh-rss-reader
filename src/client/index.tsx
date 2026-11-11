@@ -64,8 +64,59 @@ const HELP_ATTR = 'data-rss-help'
  */
 const SLOW_LOADING_MS = 180
 
-/** 面板内自带的样式：只用带前缀的类名，不碰宿主视觉 token。 */
+/** 在面板内映射宿主主题，独立渲染时回落到浏览器系统色。 */
 const STYLE = `
+[data-dsh-rss-reader] {
+  --rss-bg: var(--dsw-alias-bg-base, Canvas);
+  --rss-fg: var(--dsw-alias-label-primary, CanvasText);
+  --rss-muted: var(--dsw-alias-label-secondary, color-mix(in srgb, var(--rss-fg) 68%, var(--rss-bg)));
+  --rss-accent: var(--dsw-alias-state-business-primary, LinkText);
+  --rss-line: var(--dsw-alias-border-l2, color-mix(in srgb, var(--rss-fg) 12%, transparent));
+  --rss-hover: var(--dsw-alias-interactive-bg-hover, color-mix(in srgb, var(--rss-fg) 6%, var(--rss-bg)));
+  --rss-selected: color-mix(in srgb, var(--rss-accent) 12%, var(--rss-bg));
+  --rss-side: var(--dsw-alias-bg-layer-1, color-mix(in srgb, var(--rss-fg) 4%, var(--rss-bg)));
+  --rss-error: var(--dsw-alias-state-error-primary, #c0392b);
+  background:var(--rss-bg); color:var(--rss-fg);
+}
+[data-dsh-rss-reader] :is(button, [role="button"], a, summary, input, select):focus-visible {
+  outline:2px solid var(--rss-accent); outline-offset:-2px;
+}
+[data-dsh-rss-reader] a { color:var(--rss-accent); text-underline-offset:.2em; }
+.dsh-rss-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:8px 16px;
+  padding:12px clamp(12px, 2vw, 28px); border-bottom:1px solid var(--rss-line); }
+.dsh-rss-toolbar-title { min-width:0; flex:1 1 140px; overflow-wrap:anywhere; }
+.dsh-rss-toolbar-title strong { display:block; font-size:16px; line-height:1.35; }
+.dsh-rss-meta { display:block; color:var(--rss-muted); font-size:12px; line-height:1.45; }
+.dsh-rss-counts { display:flex; flex-wrap:wrap; gap:2px 12px; margin-top:3px; }
+.dsh-rss-actions { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
+.dsh-rss-settings { position:relative; }
+.dsh-rss-settings > summary::-webkit-details-marker { display:none; }
+.dsh-rss-settings-panel { position:absolute; z-index:4; inset-inline-end:0; top:calc(100% + 6px);
+  display:grid; gap:10px; width:max-content; max-width:min(240px, 64vw); padding:12px;
+  border:1px solid var(--rss-line); border-radius:8px; background:var(--rss-bg);
+  box-shadow:0 8px 22px color-mix(in srgb, var(--rss-fg) 14%, transparent); font-size:13px; }
+.dsh-rss-settings-panel label { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.dsh-rss-status { padding:5px clamp(12px, 2vw, 28px); font-size:12px; color:var(--rss-muted);
+  border-bottom:1px solid var(--rss-line); overflow-wrap:anywhere; }
+.dsh-rss-status--error { color:var(--rss-error); }
+.dsh-rss-row { border-bottom:1px solid var(--rss-line); }
+.dsh-rss-row:hover, [data-rss-nav-row]:hover { background:var(--rss-hover); }
+.dsh-rss-row[data-rss-selected], [data-rss-nav-selected] { background:var(--rss-selected); }
+[data-rss-nav-selected] { font-weight:600; }
+[data-rss-nav-cursor] { box-shadow:inset 3px 0 0 var(--rss-accent); }
+.dsh-rss-row-main { display:flex; gap:10px; align-items:baseline; cursor:pointer;
+  padding:10px clamp(12px, 2vw, 28px); }
+.dsh-rss-dot { width:6px; height:6px; border-radius:50%; flex:none; background:transparent; }
+.dsh-rss-row[data-rss-unread] .dsh-rss-dot { background:var(--rss-accent); }
+.dsh-rss-row-title { display:block; font-size:14px; line-height:1.4; overflow-wrap:anywhere; }
+.dsh-rss-row[data-rss-unread] .dsh-rss-row-title { font-weight:650; }
+.dsh-rss-summary { display:block; max-width:760px; margin-top:8px;
+  font-size:14px; line-height:1.65; overflow-wrap:anywhere; }
+.dsh-rss-article-inset { padding-inline:clamp(24px, 4vw, 52px); }
+.dsh-rss-article-column { max-width:760px; margin-inline:auto; overflow-wrap:anywhere; }
+.dsh-rss-article-nav { display:flex; flex-wrap:wrap; align-items:center; gap:8px;
+  justify-content:space-between; padding-block:10px; }
+.dsh-rss-article-title { font-size:clamp(24px, 2.5vw, 32px); font-weight:700; line-height:1.35; margin:0; }
 .dsh-rss-btn { display:inline-flex; align-items:center; gap:6px; font:inherit; font-size:13px;
   padding:4px 10px; border-radius:6px; color:inherit; background:transparent; cursor:pointer;
   border:1px solid color-mix(in srgb, currentColor 22%, transparent);
@@ -108,6 +159,10 @@ const STYLE = `
   background:color-mix(in srgb, CanvasText 6%, transparent); }
 .dsh-rss-help-sum { min-width:0; }
 .dsh-rss-help-scope { font-size:11px; opacity:.5; white-space:nowrap; }
+@media (prefers-reduced-motion: reduce) {
+  .dsh-rss-spin, .dsh-rss-bar::after { animation:none; }
+  .dsh-rss-btn, [data-dsh-rss-reader] [data-rss-scroll] { transition:none !important; }
+}
 `
 
 /** 刷新图标：加载时整圈旋转，省掉额外的 spinner 元素。 */
@@ -287,6 +342,13 @@ export function createReader(store: ReaderStore): () => ReactNode {
     const failing = state.feeds.filter((feed) => feed.lastFailure)
     // 顶栏那组 filter 按钮与键盘导航的行序共用同一份定义（见 VIRTUAL_VIEWS 的注释）
     const filters = VIRTUAL_VIEWS
+    const { navSelection } = state
+    const selectedFeed = navSelection.kind === 'feed'
+      ? state.feeds.find((feed) => feed.id === navSelection.feedId)
+      : undefined
+    const activeArticle = state.view === 'article'
+      ? state.items.find((entry) => entry.id === state.article?.itemId)
+      : undefined
 
     return (
       <div ref={setRoot} tabIndex={0} {...{ [ROOT_ATTR]: '' }}
@@ -311,24 +373,18 @@ export function createReader(store: ReaderStore): () => ReactNode {
           />
         )}
         <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 20px', borderBottom: '1px solid color-mix(in srgb, currentColor 12%, transparent)' }}>
-          <strong>RSS 阅读器</strong>
-          {state.showUnread && <span style={{ opacity: 0.7 }}>{state.unread} 条未读 / {state.items.length} 条</span>}
-          {/* 「未读计数可隐藏」（规格 §5 不变量 8）：默认显示，勾掉即隐藏 —— 徽标也跟着消失 */}
-          <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, opacity: 0.85 }}>
-            <input type="checkbox" checked={state.showUnread} onChange={(event) => store.setShowUnread(event.target.checked)} />
-            显示未读计数
-          </label>
-          {/* 「全部标为已读」的时间范围（规格 §3.3 的 panic button）：默认全量，不选就等于没变 */}
-          <label style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 'auto', fontSize: 12, opacity: 0.85 }}>
-            A 键范围
-            <select value={state.markAllRange} onChange={(event) => store.setMarkAllRange(event.target.value as MarkAllRange)}>
-              <option value="all">全部</option>
-              <option value="day">早于 1 天</option>
-              <option value="week">早于 1 周</option>
-              <option value="month">早于 1 月</option>
-            </select>
-          </label>
+        <div className="dsh-rss-toolbar">
+          <div className="dsh-rss-toolbar-title">
+            <strong>{state.view === 'list'
+              ? selectedFeed?.title ?? filters.find((filter) => filter.key === state.filter)?.label
+              : 'RSS 阅读器'}</strong>
+            {state.view === 'list' && (
+              <div className="dsh-rss-meta dsh-rss-counts">
+                {state.showUnread && <span>全局 {state.unread} 条未读</span>}
+                <span>已加载 {state.items.length} 条</span>
+              </div>
+            )}
+          </div>
           {/* 过滤三连（全部/未读/星标）与左栏顶部那三行是**同一个状态**（都走 store.setFilter）。
               左栏可见时由左栏承担显示与切换 —— 同一状态摆两处，读者会问「哪边算数」（用户实测反馈）。
               左栏收起（u 键）时回落到顶栏，保证「收起导航」不会让过滤失去入口。 */}
@@ -346,7 +402,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
               ))}
             </span>
           )}
-          <span style={{ flex: 1 }} />
+          <div className="dsh-rss-actions">
           {/* 那行塞满键位的提示行于 2026-10-10 收进「?」帮助浮窗：它既挤，又必须与 keys.ts 逐字
               同步（本仓库为「标签与实现各说各话」付过两次学费）。浮窗现在逐行渲染 keys.ts 的
               READER_KEY_HELP —— 界面文案不再有第二份，同步这件事从「靠人记」变成「靠测试」。 */}
@@ -354,30 +410,50 @@ export function createReader(store: ReaderStore): () => ReactNode {
             title="订阅管理：导入/导出 OPML、加源、退订（F 键）"
             onClick={() => store.toggleFeeds()}>订阅</button>
           <button type="button" className="dsh-rss-btn" disabled={state.loading}
-            title="删除「已读且未星标」的旧条目（阈值可在 Config.cleanupAfterDays 调，默认 30 天）"
-            onClick={() => {
-              if (window.confirm('清理已读的旧条目？\n\n只删除「已读 + 未星标 + 早于阈值」的条目，星标与未读的都会保留。此操作不可撤销。')) {
-                void store.cleanup()
-              }
-            }}>清理旧条目</button>
-          <button type="button" className="dsh-rss-btn" disabled={state.loading}
-            title="重新抓取所有订阅源（受最小间隔节流）"
+            title="抓取本轮订阅源（受最小间隔节流）"
             onClick={() => { void store.load('refresh') }}>
             <RefreshIcon spinning={slowLoading} />
             {slowLoading ? '刷新中…' : '刷新'}
           </button>
+          <details className="dsh-rss-settings">
+            <summary className="dsh-rss-btn" onKeyDown={(event) => {
+              // 空格应打开原生折叠区，避免被文档级翻页快捷键接管。
+              if (event.key === ' ') event.stopPropagation()
+            }}>更多</summary>
+            <div className="dsh-rss-settings-panel">
+              <label>显示未读计数
+                <input type="checkbox" checked={state.showUnread} onChange={(event) => store.setShowUnread(event.target.checked)} />
+              </label>
+              <label>A 键范围
+                <select value={state.markAllRange} onChange={(event) => store.setMarkAllRange(event.target.value as MarkAllRange)}>
+                  <option value="all">全部</option>
+                  <option value="day">早于 1 天</option>
+                  <option value="week">早于 1 周</option>
+                  <option value="month">早于 1 月</option>
+                </select>
+              </label>
+              <button type="button" className="dsh-rss-btn" disabled={state.loading}
+                title="删除「已读且未星标」的旧条目（阈值可在 Config.cleanupAfterDays 调，默认 30 天）"
+                onClick={() => {
+                  if (window.confirm('清理已读的旧条目？\n\n只删除「已读 + 未星标 + 早于阈值」的条目，星标与未读的都会保留。此操作不可撤销。')) {
+                    void store.cleanup()
+                  }
+                }}>清理旧条目</button>
+            </div>
+          </details>
           {/* 帮助入口放最右端：它是「说明书」，与左边那三个动作按钮不是一类东西。
               点击与按 ? 键走同一个开关，不写第二份逻辑。 */}
           <button type="button" className="dsh-rss-btn" style={{ fontWeight: 600 }}
             title="快捷键帮助（?）" aria-label="快捷键帮助" aria-expanded={helpOpen}
             onClick={() => setHelpOpen((open) => !open)}>?</button>
+          </div>
         </div>
         {slowLoading && <div className="dsh-rss-bar" aria-hidden="true" />}
 
-        {state.error !== undefined && <div style={{ padding: '8px 20px', color: '#c0392b' }}>{state.error}</div>}
+        {state.error !== undefined && <div className="dsh-rss-status dsh-rss-status--error" role="alert">{state.error}</div>}
         {state.notice !== undefined && (
-          <div style={{ padding: '6px 20px', fontSize: 12, opacity: 0.8 }}>
-            {state.notice}
+          <div className="dsh-rss-status">
+            <span role="status">{state.notice}</span>
             <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
               style={{ marginLeft: 8 }} onClick={() => store.dismissNotice()}>知道了</button>
           </div>
@@ -411,7 +487,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
         {state.view === 'article' && (
           <ArticleView
             article={state.article}
-            link={state.items.find((entry) => entry.id === state.article?.itemId)?.link}
+            item={activeArticle}
             onBack={() => store.closeArticle()}
             // 不再传 setBox：阅读容器的滚动生命周期（换文章归零 / 内容长高贴底）已归 article-pane
             // 自己（2026-10-15 C2）；键盘那条路径按键时刻按 scrollAttr 现取容器，不需要跨组件 ref 桥接。
@@ -433,7 +509,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
         }}>
           {!state.loading && items.length === 0 && (
             <div style={{ padding: 20, opacity: 0.7 }}>
-              {state.filter === 'starred' ? '还没有星标条目。' : state.filter === 'unread' ? '没有未读条目。' : '还没有条目。订阅源以存储域为准；可在 Config.feeds 里给种子，或用 OPML 导入（M4）。'}
+              {state.filter === 'starred' ? '还没有星标条目。' : state.filter === 'unread' ? '没有未读条目。' : '还没有条目。可以在订阅管理中添加订阅源或导入 OPML。'}
             </div>
           )}
           {items.map((item) => {
@@ -442,29 +518,26 @@ export function createReader(store: ReaderStore): () => ReactNode {
             const unread = item.readAt === undefined
             const selected = state.selectedId === item.id
             return (
-              <div key={item.id} data-rss-row={item.id}
-                style={{ borderBottom: '1px solid color-mix(in srgb, currentColor 8%, transparent)' }}>
-                <div role="button" tabIndex={0}
+              <div key={item.id} className="dsh-rss-row" data-rss-row={item.id}
+                data-rss-unread={unread ? '' : undefined} data-rss-selected={selected ? '' : undefined}>
+                <div role="button" tabIndex={0} className="dsh-rss-row-main"
                   onClick={() => {
                     store.select(item.id)
                     setExpanded((current) => (current === item.id ? undefined : item.id))
                     void store.markRead(item.id)
                   }}
                   onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); store.select(item.id); setExpanded(item.id); void store.markRead(item.id) } }}
-                  style={{
-                    padding: '10px 20px', cursor: 'pointer', display: 'flex', gap: 10, alignItems: 'baseline',
-                    background: selected ? 'color-mix(in srgb, currentColor 7%, transparent)' : 'transparent',
-                  }}>
-                  <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', flex: '0 0 auto', marginTop: 6, background: unread ? 'currentColor' : 'transparent' }} />
+                  >
+                  <span aria-hidden="true" className="dsh-rss-dot" />
                   <span style={{ flex: 1, minWidth: 0 }}>
-                    <span style={{ display: 'block', fontWeight: unread ? 600 : 400, opacity: unread ? 1 : 0.7 }}>
+                    <span className="dsh-rss-row-title">
                       {item.starred ? '★ ' : ''}{item.keptUnread === true ? '⚑ ' : ''}{item.title || item.link || '(无标题)'}
                     </span>
-                    <span style={{ display: 'block', fontSize: 12, opacity: 0.6, marginTop: 2 }}>
-                      {item.feedTitle} · {relativeTime(recencyOf(item))}
+                    <span className="dsh-rss-meta" style={{ marginTop: 2 }}>
+                      {selectedFeed === undefined && item.feedTitle + ' · '}{relativeTime(recencyOf(item))}
                     </span>
                     {isOpen && (
-                      <span style={{ display: 'block', marginTop: 8, opacity: 0.85, fontSize: 13 }}>
+                      <span className="dsh-rss-summary">
                         {(() => {
                           const paragraphs = toParagraphs(item.summary)
                           const bodyText = paragraphs.join(' ').trim()

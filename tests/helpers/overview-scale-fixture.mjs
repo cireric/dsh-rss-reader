@@ -33,6 +33,10 @@ export const OVERVIEW_BUDGET_MS = 100
  * 「缺发布时间的行必须按抓取时间归位」），1/3 已读（考未读判据）。
  */
 export async function freshLargeStore(tag) {
+  // 基准数据代表近期条目，不能随日历推进落入清理测试的 30 天窗口之外。
+  const now = Date.now()
+  const publishedAt = new Date(now - 60 * 60 * 1000).toISOString()
+  const fetchedAt = new Date(now).toISOString()
   const dir = mkdtempSync(join(tmpdir(), 'rss-scale-' + tag + '-'))
   const db = openDatabase(join(dir, 'rss.db'))
   migrateSchema(db)
@@ -48,10 +52,10 @@ export async function freshLargeStore(tag) {
       insert.run(
         'item-' + f + '-' + i, feedIdOf(f), 't'.repeat(40) + '#' + f + '_' + i,
         'https://site' + f + '.example.com/post/' + i,
-        i % 3 === 0 ? null : '2026-10-11T09:00:00.000Z',
-        '2026-10-11T10:00:00.000Z',
+        i % 3 === 0 ? null : publishedAt,
+        fetchedAt,
         '摘要' + f + '_' + i,
-        i % 3 === 0 ? '2026-10-11T10:05:00.000Z' : null,
+        i % 3 === 0 ? fetchedAt : null,
         i % 7 === 0 ? 1 : 0,
       )
     }

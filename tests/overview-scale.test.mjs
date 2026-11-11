@@ -79,8 +79,8 @@ test('10 万行：cleanup 的候选集由 SQL 选（不再全表），且释放�
   const { store, db, dir } = await freshLargeStore('cleanup')
   try {
     const READ = '2026-10-11T10:05:00.000Z'
-    // 500 条 2020 年的已读旧条目：它们才是清理目标（合成数据的 recency 都在 2026-10-11，
-    // 落不进「早于 now-30 天」）。三条例外各自考 SQL 谓词的一个条件。
+    // 500 条 2020 年的已读旧条目才进入清理窗口，基准夹具中的条目是近期的。
+    // 下方三个特殊条目分别覆盖两种保护状态和正文释放量。
     for (let f = 0; f < 5; f += 1) {
       for (let i = 0; i < 100; i += 1) {
         await store.saveItem('old-' + f + '-' + i, {

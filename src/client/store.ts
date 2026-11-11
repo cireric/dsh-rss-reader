@@ -389,8 +389,8 @@ export function createReaderStore() {
         const stamp = overview.refreshedAt === undefined ? '' : '（上次完成于 ' + relativeTime(overview.refreshedAt) + '）'
         set({
           notice: overview.refreshed === true
-            ? '已重新抓取全部订阅源' + stamp
-            : '距上次抓取不足最小间隔，本次未抓取' + stamp + ' —— 间隔可在 Config.minRefreshIntervalMs 调整（默认 10 分钟）',
+            ? '本轮订阅源抓取已结束' + stamp
+            : '本次未发起新抓取' + stamp,
         })
       }
     } catch (failure) {
