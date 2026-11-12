@@ -338,7 +338,9 @@ test('writeConfigFile 原子写 + 0600，readConfigFile 逐字段回读（含条
     }
     writeConfigFile(configPath, value)
     assert.equal(statSync(configPath).mode & 0o777, 0o600, 'config.json 必须 0600')
-    assert.deepEqual(readConfigFile(configPath), value)
+    // 读侧把目录派生出来：没有 folders 字段的旧文件，现有订阅的非空分组就是目录。
+    // 这是「旧配置不丢分组」的读路径判据（写回后 folders 会落盘，见下面的 folders 用例）。
+    assert.deepEqual(readConfigFile(configPath), { ...value, folders: ['技术'] })
     assert.deepEqual(readdirSync(root), ['config.json'], '原子写不得留下临时文件')
 
     // 覆写：整份替换、权限不因替换而放宽、依旧不留残留
@@ -348,6 +350,7 @@ test('writeConfigFile 原子写 + 0600，readConfigFile 逐字段回读（含条
     assert.deepEqual(reread.feeds, {})
     assert.equal(reread.version, 1)
     assert.equal(reread.viewPreferences, undefined)
+    assert.deepEqual(reread.folders, [], '整份替换后目录也清空')
     assert.deepEqual(readdirSync(root), ['config.json'])
   } finally {
     rmSync(base, { recursive: true, force: true })

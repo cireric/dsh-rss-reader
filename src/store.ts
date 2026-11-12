@@ -6,6 +6,9 @@
  */
 import type { Domain } from '@deepseek-ai/dsh-storage-domain'
 import { readerDomain, feedRecordSchema, type CursorRecord, type FeedRecord, type ItemRecord } from './domain.js'
+import type { ReaderConfigFile } from './storage/config-file.js'
+import { addFolder, deleteFolder, folderViews, moveFeedToFolder, renameFolder } from './folders.js'
+import type { FolderView } from './shared.js'
 import { articleCharsOf, selectCleanup, type ArticleEntry, type CleanupRow } from './retention.js'
 import { applyFeedIntent, type FeedIntent } from './feed-intent.js'
 import { countUnreadPerFeed, recencyOf, sanitizeViewPreferences, type Cursor, type ViewPreferences } from './shared.js'
@@ -132,6 +135,22 @@ export interface ReaderStore {
   /** 全部订阅源（key 即归一化后的 URL）——订阅源以存储域为准，Config 只是种子 */
   listFeeds(): Array<[string, FeedRecord]>
   /**
+   * 文件夹目录（显式空目录 + 当前非空成员分组），成员按 config.json 的订阅顺序。
+   *
+   * 目录的**唯一真相是 config.json 的 `folders` 字段**（与订阅同住一份文件）：
+   * 只从 `feed.folder` 派生的话，空文件夹活不过一次重启。旧配置没有该字段时，
+   * 读取路径会从现有订阅派生 —— 这条规则在 src/storage/config-file.ts 一处实现。
+   */
+  listFolders(): FolderView[]
+  /** 创建文件夹（只改目录）。名称校验与冲突判断在 src/folders.ts。 */
+  createFolder(name: string): Promise<FolderView[]>
+  /** 改名：目录与所有成员归属同一次原子写盘；目标是已有名称时拒绝（同名除外）。 */
+  renameFolder(from: string, to: string): Promise<FolderView[]>
+  /** 删除文件夹：只解除分类，**不退订、不删条目**。返回解除分类的订阅数。 */
+  deleteFolder(name: string): Promise<{ folders: FolderView[]; detached: number }>
+  /** 移动订阅；`undefined` = 移到未分类（清除 feed.folder）。目标不存在明确失败。 */
+  moveFeedToFolder(feedId: string, folder: string | undefined): Promise<FolderView[]>
+  /**
    * 读上次记住的视图偏好（两列布局任务 7）。
    *
    * 返回的**保证是可信形状**（读侧一律过 sanitizeViewPreferences）：媒介里有坏值时诚实回落默认，
@@ -149,6 +168,28 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
   const cursors = domain.table('cursors')
   // global 是单例槽（不是表）：UI 偏好放在这里，域的表集合与 version 都不受影响
   const global = domain.global
+
+  /**
+   * 旧适配器的文件夹目录是**内存态**：这个适配器只服务测试里的「旧实现 ↔ 自持实现」同义性基线，
+   * 不在装载路径上，也没有 config.json 可写。显式空目录在这里随进程消失 —— 与生产实现的差别
+   * 只影响这个测试基线（生产判定严格走 createSqliteStore 的路径，由 tests/folder-storage 钉住）。
+   */
+  const explicitFolders = new Set<string>()
+  const folderFile = (): ReaderConfigFile => ({
+    version: 1,
+    feeds: Object.fromEntries(feeds.entries()),
+    folders: [...explicitFolders],
+  })
+  const applyFolderChange = async (change: (file: ReaderConfigFile) => ReaderConfigFile): Promise<FolderView[]> => {
+    const before = Object.fromEntries(feeds.entries())
+    const next = change(folderFile())
+    explicitFolders.clear()
+    for (const name of next.folders ?? []) explicitFolders.add(name)
+    for (const [feedId, record] of Object.entries(next.feeds)) {
+      if (before[feedId] !== record) await feeds.put(feedId, record)
+    }
+    return folderViews(next)
+  }
 
   return {
     feed: (feedId) => feeds.get(feedId),
@@ -253,6 +294,19 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
       return rows.filter((row) => doomed.has(row.id))
     },
     listFeeds: () => [...feeds.entries()],
+    listFolders: () => folderViews(folderFile()),
+    createFolder: async (name) => applyFolderChange((file) => addFolder(file, name)),
+    renameFolder: async (from, to) => applyFolderChange((file) => renameFolder(file, from, to)),
+    deleteFolder: async (name) => {
+      let detached = 0
+      const folders = await applyFolderChange((file) => {
+        const result = deleteFolder(file, name)
+        detached = result.detached
+        return result.file
+      })
+      return { folders, detached }
+    },
+    moveFeedToFolder: async (feedId, folder) => applyFolderChange((file) => moveFeedToFolder(file, feedId, folder).file),
     viewPreferences: () => sanitizeViewPreferences(global.get(), (feedId) => feeds.get(feedId) !== undefined),
     saveViewPreferences: async (preferences) => {
       // 写侧也过一遍校验：先把认不出的形状归一，再落库。否则坏值会被原样写进媒介，

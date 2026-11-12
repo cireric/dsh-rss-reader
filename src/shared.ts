@@ -27,6 +27,7 @@ export const ENDPOINT_NAMES = [
   'overview', 'refresh', 'markRead', 'unmarkRead', 'toggleStar', 'toggleKeepUnread', 'article', 'cleanup',
   'opmlExport', 'opmlImport', 'addFeed', 'removeFeed',
   'viewPreferences', 'saveViewPreferences', 'searchItems',
+  'listFolders', 'createFolder', 'renameFolder', 'deleteFolder', 'moveFeedToFolder',
 ] as const
 export type Endpoint = (typeof ENDPOINT_NAMES)[number]
 
@@ -36,9 +37,16 @@ export type RpcResult<T> =
   // 技能文档里的样板落后于源码，少了它 tsc 直接拒绝）
   | { ok: false; error: { code: string; message: string; details: object } }
 
+/** 文件夹目录的一条：名称 + 成员订阅 id（成员按 config.json 的订阅顺序）。 */
+export interface FolderView {
+  name: string
+  feedIds: string[]
+}
+
 export interface FeedView {
   id: string
   title: string
+  folder?: string
   /** ISO8601 UTC；从未成功抓取过则为 undefined */
   lastFetchedAt?: string
   /** 最近一次失败原因；成功后清空 */

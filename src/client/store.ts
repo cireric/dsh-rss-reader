@@ -31,7 +31,7 @@ export type NavSelection = { kind: 'virtual' } | { kind: 'feed'; feedId: string 
  *
  * 行序与左栏渲染逐行对应：虚拟视图三行在前、订阅源在后（见 navRowsOf）。
  */
-export type NavCursor = { kind: 'filter'; filter: Filter } | { kind: 'feed'; feedId: string }
+export type NavCursor = { kind: 'filter'; filter: Filter } | { kind: 'feed'; feedId: string } | { kind: 'folder'; folder: string }
 
 /**
  * 虚拟视图三行：全部 / 未读 / 星标。
@@ -51,15 +51,32 @@ export const VIRTUAL_VIEWS: ReadonlyArray<{ key: Filter; label: string }> = [
  * 顺序即**界面顺序**（feed-nav.tsx 自上而下渲染的就是它），键盘上下移动必须与眼睛看到的那一列
  * 同序 —— 换个顺序不影响单步移动，但会让「按一下 shift+n 跳到不相邻的那一行」。
  */
-export function navRowsOf(feeds: ReadonlyArray<Pick<FeedView, 'id'>>): NavCursor[] {
-  return [
-    ...VIRTUAL_VIEWS.map((view): NavCursor => ({ kind: 'filter', filter: view.key })),
-    ...feeds.map((feed): NavCursor => ({ kind: 'feed', feedId: feed.id })),
-  ]
+export function navRowsOf(
+  feeds: ReadonlyArray<Pick<FeedView, 'id' | 'folder'>>, foldedFolders: ReadonlySet<string>,
+): NavCursor[] {
+  const folders = new Map<string, string[]>()
+  const unfiled: NavCursor[] = []
+  for (const { id, folder } of feeds) {
+    if (!folder) {
+      unfiled.push({ kind: 'feed', feedId: id })
+      continue
+    }
+    const group = folders.get(folder)
+    if (group) group.push(id)
+    else folders.set(folder, [id])
+  }
+  const rows: NavCursor[] = VIRTUAL_VIEWS.map((view) => ({ kind: 'filter', filter: view.key }))
+  for (const [folder, ids] of folders) {
+    rows.push({ kind: 'folder', folder })
+    if (foldedFolders.has(folder)) continue
+    for (const feedId of ids) rows.push({ kind: 'feed', feedId })
+  }
+  return [...rows, ...unfiled]
 }
 
-/** 光标 → 行 id；与 feed-nav.tsx 的 `data-rss-nav-row` 逐字同构（`filter:<key>` / `feed:<id>`）。 */
+/** 光标和 DOM 使用同一行键，避免折叠后两者的行序分叉。 */
 export function navCursorKey(cursor: NavCursor): string {
+  if (cursor.kind === 'folder') return 'folder:' + cursor.folder
   return cursor.kind === 'filter' ? 'filter:' + cursor.filter : 'feed:' + cursor.feedId
 }
 
@@ -119,6 +136,7 @@ export interface ReaderState {
   navSelection: NavSelection
   /** 导航**光标**（左栏键盘高亮所在行）。与 navSelection 是两件事，见 NavCursor。 */
   navCursor: NavCursor
+  foldedFolders: ReadonlySet<string>
   /**
    * 每源未读数（feedId → 该源未读数），来自 Overview.perFeedUnread（左栏角标的数据来源）。
    *
@@ -194,6 +212,7 @@ export function createReaderStore() {
     // 光标初值 = 与初始 filter 一致的那一行（初始 filter 是 'all'，故就是「全部」那一行）：
     // 「我停在哪」与「此刻生效的是哪」在开局是同一行，之后才由 shift+n/p 与 shift+o 分开。
     navCursor: { kind: 'filter', filter: 'all' },
+    foldedFolders: new Set<string>(),
   }
   const listeners = new Set<() => void>()
   const emit = (): void => { for (const listener of listeners) listener() }
@@ -912,7 +931,7 @@ export function createReaderStore() {
    * 而不是静默不动 —— 停在一个不存在的行上会让之后每一键都毫无反应。
    */
   const moveNavCursor = (delta: 1 | -1): void => {
-    const rows = navRowsOf(state.feeds)
+    const rows = navRowsOf(state.feeds, state.foldedFolders)
     if (rows.length === 0) return
     const at = rows.findIndex((row) => navCursorKey(row) === navCursorKey(state.navCursor))
     const from = at < 0 ? 0 : at
@@ -930,8 +949,16 @@ export function createReaderStore() {
    * 选着源时两处都会变成「源 × filter 叠加」（规格 §2.1 / 任务 2 的裁决）。
    * 「等同点击」这句话要成立，键盘就不能比鼠标多做一步。
    */
+  const toggleFolder = (folder: string): void => {
+    const foldedFolders = new Set(state.foldedFolders)
+    if (foldedFolders.has(folder)) foldedFolders.delete(folder)
+    else foldedFolders.add(folder)
+    set({ foldedFolders, navCursor: { kind: 'folder', folder } })
+  }
+
   const openNavCursor = (): void => {
     const cursor = state.navCursor
+    if (cursor.kind === 'folder') { toggleFolder(cursor.folder); return }
     if (cursor.kind === 'feed') { selectNav({ kind: 'feed', feedId: cursor.feedId }); return }
     setFilter(cursor.filter)
   }
@@ -1028,7 +1055,7 @@ export function createReaderStore() {
     selectNav,
     moveNavCursor,
     openNavCursor,
-    toggleNav,
+    toggleNav, toggleFolder,
   }
 }
 

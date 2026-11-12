@@ -1,5 +1,5 @@
 /**
- * 浏览器半的读写通道：14 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
+ * 浏览器半的读写通道：20 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
  *
  * 原先这里是一个 switch：每臂各自手写 payload 解析、各自记得把未读账并进回包 ——
  * interface 的复杂度 ≈ implementation 的复杂度。现在「一个端点」是一个 module：
@@ -17,6 +17,7 @@ import { EXTRACTOR_REVISION, fetchArticle, blocksToText } from './article.js'
 import { rebuildItem, type ItemRecord } from './domain.js'
 import { selectCleanup } from './retention.js'
 import { buildOpml, parseOpml } from './opml.js'
+import { FolderError } from './folders.js'
 import { validateSubscriptions } from './subscribe.js'
 import type { ReaderStore } from './store.js'
 // 未读判据（isUnread / countUnreadPerFeed）不再由本文件在 JS 侧实现：Task 5 把它交给了存储侧，
@@ -85,6 +86,13 @@ const ARTICLE_REVISION = EXTRACTOR_REVISION
 const sumOf = (perFeedUnread: Record<string, number>): number =>
   Object.values(perFeedUnread).reduce((sum, count) => sum + count, 0)
 
+/**
+ * 文件夹操作的可预期失败 → 带 code 的失败信封（bad-request / conflict / not-found）。
+ * 其它异常**原样抛出**：读写文件失败是 internal，不能伪装成用户输入错误。
+ */
+const folderFailure = (error: unknown): RpcResult<never> | undefined =>
+  error instanceof FolderError ? fail(error.code, error.message) : undefined
+
 /** 读一次完整的未读账（总数 + 每源）。只读，不改任何条目。 */
 const accountOf = (target: ReaderStore): UnreadAccount => {
   // 键域与判据都走**存储侧那一份**实现：未读判据就是 shared.ts 的 isUnread（自持实现里写作
@@ -113,6 +121,7 @@ const buildOverview = (ctx: EndpointCtx, refreshed: boolean, cursor?: Cursor): O
   const feeds = target.listFeeds().map(([feedId, record]) => ({
     id: feedId,
     title: record.title ?? feedId,
+    ...(record.folder ? { folder: record.folder } : {}),
     lastFetchedAt: record.lastFetchedAt,
     lastFailure: record.lastFailure,
   }))
@@ -420,13 +429,18 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         // 已存在的源保留其 folder（用户可能在界面上改过），新源才写入 OPML 的分组。
         // 意图声明（H4）：调度痕迹（lastAttemptedAt）的保留规则在 feed-intent.ts 一处 ——
         // 不逐字段搬，「源刚试过一次」这个事实会被导入 OPML 抹掉，该源下一轮又被当「没试过」排到最前。
+        // **归属的合并判据在原子写入时做**（feed-intent.ts）：已存在的源一律保留本地 folder
+        //（包括本地未分类），只有新源才继承 OPML 分组。这里刻意不再读 `previous?.folder` 再回传 ——
+        //网络校验期间用户可能刚把源移出分组，用校验前的快照会把它盖回去。
         await ctx.store.updateFeed(result.url, {
           kind: 'upsert-subscription',
           url: result.url,
           title: result.title ?? subscription?.title ?? previous?.title,
-          folder: previous?.folder ?? subscription?.folder,
+          folder: subscription?.folder,
         })
-        accepted.push({ url: result.url, title: result.title ?? subscription?.title, folder: previous?.folder ?? subscription?.folder })
+        // 回包报告**实际落盘**的归属（写后重读），而不是 OPML 声明的那个。
+        const stored = ctx.store.feed(result.url)
+        accepted.push({ url: result.url, title: result.title ?? subscription?.title, folder: stored?.folder })
       }
 
       ctx.log('导入 OPML：新增 ' + added + ' 源，已存在 ' + existed + ' 源，校验失败 ' + failed.length +
@@ -452,13 +466,15 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         kind: 'upsert-subscription',
         url: result.url,
         title: result.title ?? previous?.title,
-        folder: previous?.folder,
+        // 新源保持未分类；已存在的源由 feed-intent 保留本地 folder（含「本地是未分类」）。
+        folder: undefined,
       })
+      const stored = ctx.store.feed(result.url)
       return ok({
         added: previous === undefined ? 1 : 0,
         existed: previous === undefined ? 0 : 1,
         failed: [], skipped: [],
-        accepted: [{ url: result.url, title: result.title, folder: previous?.folder }],
+        accepted: [{ url: result.url, title: result.title, folder: stored?.folder }],
       })
     },
   },
@@ -549,6 +565,82 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       // 交给 store 归一后再落库。认不出就回落默认，绝不抛错、绝不把垃圾写进域。
       const saved = await ctx.store.saveViewPreferences((payload as { preferences?: unknown } | null)?.preferences)
       return ok({ preferences: saved })
+    },
+  },
+
+  // ── 文件夹目录与变更接口（M2 02）────────────────────────────────────────
+  // 与订阅同住 config.json；每个变更都在**一次**读改写里完成（改名连带成员归属）。
+  // 名称规则与错误码归 src/folders.ts；这里只做 payload 形状校验与错误信封转换。
+  listFolders: {
+    to: async (_payload, ctx) => ok({ folders: ctx.store.listFolders() }),
+  },
+
+  createFolder: {
+    to: async (payload, ctx) => {
+      const name = (payload as { name?: unknown } | null)?.name
+      if (typeof name !== 'string') return fail('bad-request', 'createFolder 需要 name（字符串）')
+      try {
+        return ok({ folders: await ctx.store.createFolder(name) })
+      } catch (error) {
+        const failure = folderFailure(error)
+        if (failure !== undefined) return failure
+        throw error
+      }
+    },
+  },
+
+  renameFolder: {
+    to: async (payload, ctx) => {
+      const body = payload as { from?: unknown; to?: unknown } | null
+      if (typeof body?.from !== 'string' || typeof body?.to !== 'string') {
+        return fail('bad-request', 'renameFolder 需要 from 与 to（字符串）')
+      }
+      try {
+        return ok({ folders: await ctx.store.renameFolder(body.from, body.to) })
+      } catch (error) {
+        const failure = folderFailure(error)
+        if (failure !== undefined) return failure
+        throw error
+      }
+    },
+  },
+
+  deleteFolder: {
+    to: async (payload, ctx) => {
+      const name = (payload as { name?: unknown } | null)?.name
+      if (typeof name !== 'string') return fail('bad-request', 'deleteFolder 需要 name（字符串）')
+      try {
+        // 独立入口：只解除分类，绝不走 removeFeed（那会连带删条目）。判据在 tests/folder-storage。
+        return ok(await ctx.store.deleteFolder(name))
+      } catch (error) {
+        const failure = folderFailure(error)
+        if (failure !== undefined) return failure
+        throw error
+      }
+    },
+  },
+
+  moveFeedToFolder: {
+    to: async (payload, ctx) => {
+      const body = payload as { feedId?: unknown; folder?: unknown } | null
+      if (typeof body?.feedId !== 'string' || body.feedId === '') {
+        return fail('bad-request', 'moveFeedToFolder 需要 feedId（非空字符串）')
+      }
+      // folder 键**必须显式给出**：缺键 ≠ 移到未分类。少了这道判断，一个坏 payload 会把用户
+      // 刚归好的源静默移出分组。
+      if (body === null || !Object.hasOwn(body, 'folder')) {
+        return fail('bad-request', 'moveFeedToFolder 需要 folder（字符串或 null，null = 未分类）')
+      }
+      if (body.folder !== null && typeof body.folder !== 'string') {
+        return fail('bad-request', 'moveFeedToFolder 的 folder 必须是字符串或 null')
+      }
+      try {
+        return ok({ folders: await ctx.store.moveFeedToFolder(body.feedId, body.folder === null ? undefined : body.folder) })
+      } catch (error) {
+        const failure = folderFailure(error)
+        if (failure !== undefined) return failure
+        throw error
+      }
     },
   },
 

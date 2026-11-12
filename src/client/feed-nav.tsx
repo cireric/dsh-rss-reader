@@ -19,7 +19,7 @@
  * 「当前生效的是哪个视图」这条信息仍然由 selected 独立承载，没有丢。
  */
 import type { ReactNode } from 'react'
-import { VIRTUAL_VIEWS, type Filter } from './store.js'
+import { navCursorKey, navRowsOf, VIRTUAL_VIEWS, type Filter, type NavCursor } from './store.js'
 import type { FeedView } from '../shared.js'
 
 /**
@@ -30,16 +30,18 @@ import type { FeedView } from '../shared.js'
  */
 export const LEFT_NAV_WIDTH = 240
 
-export function FeedNav({ feeds, perFeedUnread, filter, navSelection, navCursor, showUnread, onSelectFilter, onSelectFeed }: {
+export function FeedNav({ feeds, perFeedUnread, filter, navSelection, navCursor, foldedFolders, showUnread, onSelectFilter, onSelectFeed, onToggleFolder }: {
   feeds: FeedView[]
   perFeedUnread: Record<string, number>
   filter: Filter
   navSelection: { kind: 'virtual' } | { kind: 'feed'; feedId: string }
   /** 键盘光标（左栏高亮所在行）。与 navSelection 是两件事，见 store.ts 的 NavCursor。 */
-  navCursor: { kind: 'filter'; filter: Filter } | { kind: 'feed'; feedId: string }
+  navCursor: NavCursor
+  foldedFolders: ReadonlySet<string>
   showUnread: boolean
   onSelectFilter: (filter: Filter) => void
   onSelectFeed: (feedId: string) => void
+  onToggleFolder: (folder: string) => void
 }): ReactNode {
   // 生效态有两条**正交**轴：源（navSelection）与过滤（filter）各自独立生效，两者相乘（见 store.ts 的
   // NavSelection 注释）。所以「选了源」并不意味着「过滤失效」—— 两者要各自显示自己的生效状态。
@@ -47,6 +49,12 @@ export function FeedNav({ feeds, perFeedUnread, filter, navSelection, navCursor,
   // 光标态与生效态各算各的：光标可以停在源那一行而生效的仍是虚拟视图（还没按 shift+o）
   const cursorFeedId = navCursor.kind === 'feed' ? navCursor.feedId : undefined
   const cursorFilter = navCursor.kind === 'filter' ? navCursor.filter : undefined
+  const byId = new Map(feeds.map((feed) => [feed.id, feed]))
+  const unreadByFolder = new Map<string, number>()
+  for (const feed of feeds) {
+    if (!feed.folder) continue
+    unreadByFolder.set(feed.folder, (unreadByFolder.get(feed.folder) ?? 0) + (perFeedUnread[feed.id] ?? 0))
+  }
 
   return (
     <nav aria-label="订阅导航" {...{ 'data-rss-nav': '' }} style={{
@@ -84,7 +92,29 @@ export function FeedNav({ feeds, perFeedUnread, filter, navSelection, navCursor,
 
       <div style={{ flex: '0 0 1px', background: 'var(--rss-line)', margin: '6px 8px' }} />
 
-      {feeds.map((feed) => {
+      {navRowsOf(feeds, foldedFolders).slice(VIRTUAL_VIEWS.length).map((row) => {
+        if (row.kind === 'folder') {
+          const total = unreadByFolder.get(row.folder) ?? 0
+          const expanded = !foldedFolders.has(row.folder)
+          return (
+            <button key={navCursorKey(row)} type="button" className="dsh-rss-btn dsh-rss-btn--ghost" aria-expanded={expanded}
+              {...{ 'data-rss-nav-row': navCursorKey(row) }}
+              {...(showUnread ? { 'data-rss-nav-badge': String(total) } : {})}
+              {...(navCursor.kind === 'folder' && navCursor.folder === row.folder ? { 'data-rss-nav-cursor': '' } : {})}
+              onClick={() => onToggleFolder(row.folder)}
+              onKeyDown={(event) => {
+                if (event.key === ' ') { event.preventDefault(); onToggleFolder(row.folder) }
+              }}
+              style={{ ...ROW_STYLE, textAlign: 'start' }}>
+              <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
+              <span title={row.folder} style={LABEL_STYLE}>{row.folder}</span>
+              {showUnread && <span style={BADGE_STYLE}>{total > 99 ? '99+' : total}</span>}
+            </button>
+          )
+        }
+        if (row.kind !== 'feed') return null
+        const feed = byId.get(row.feedId)
+        if (!feed) return null
         // 键域 = feeds 表：0 未读的源也有键（宿主契约，src/shared.ts:58-65），故无条件读取
         const unread = perFeedUnread[feed.id]
         return (
@@ -98,10 +128,10 @@ export function FeedNav({ feeds, perFeedUnread, filter, navSelection, navCursor,
             onKeyDown={(event) => {
               if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelectFeed(feed.id) }
             }}
-            style={ROW_STYLE}>
+            style={feed.folder ? { ...ROW_STYLE, paddingInlineStart: 24 } : ROW_STYLE}>
             <span title={feed.title ?? feed.id} style={LABEL_STYLE}>{feed.title ?? feed.id}</span>
             {showUnread && (
-              <span style={{ flex: '0 0 auto', fontSize: 12, color: 'var(--rss-muted)', fontVariantNumeric: 'tabular-nums' }}>
+              <span style={BADGE_STYLE}>
                 {unread > 99 ? '99+' : unread}
               </span>
             )}
@@ -119,4 +149,8 @@ const ROW_STYLE = {
 
 const LABEL_STYLE = {
   flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+} as const
+
+const BADGE_STYLE = {
+  flex: '0 0 auto', fontSize: 12, color: 'var(--rss-muted)', fontVariantNumeric: 'tabular-nums',
 } as const

@@ -17,11 +17,20 @@ import { closeSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, statS
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { feedRecordSchema, type FeedRecord } from '../domain.js'
+import { mergeFolderDirectory } from '../folders.js'
 
 /** config.json 的完整形状。版本是**硬相等**的契约（见 readConfigFile 的拒绝逻辑）。 */
 export interface ReaderConfigFile {
   /** feedId（归一化后的 URL）→ 完整订阅记录。0 订阅是合法的空对象。 */
   feeds: Record<string, FeedRecord>
+  /**
+   * 显式文件夹目录。**可为空**，空目录也必须留住（这是它不能只从 feed.folder 派生的原因）。
+   *
+   * 读取时返回的是「显式目录 ∪ 当前 feed.folder 的非空分组」；写入时同一份并集落盘。
+   * 首版沿用 v1 的可选字段：不认识它的旧写入者会把空目录丢掉（限制记录在 M2 02 的交付说明里），
+   * 但「读旧配置」不会丢 —— 没有这个字段时，现有订阅的 folder 就是目录。
+   */
+  folders?: string[]
   /** 视图偏好（两列布局的单例槽）。形状归一化在 src/shared.ts 的 sanitizeViewPreferences 做。 */
   viewPreferences?: unknown
   /** 文件格式版本。只认 1。 */
@@ -121,7 +130,33 @@ function validateConfig(parsed: unknown, path: string): ReaderConfigFile {
     }
     valid[feedId] = result.data
   }
-  return { version: CURRENT_CONFIG_VERSION, feeds: valid, viewPreferences: record.viewPreferences }
+  // 文件夹目录：显式项必须逐条是字符串；随后与当前非空成员分组取并集。
+  // 这一步放在读侧而不是只在写侧，是为了让「旧配置（没有 folders 字段）也能读出目录」成立。
+  const foldersRaw = record.folders
+  const explicitFolders: string[] = []
+  if (foldersRaw !== undefined) {
+    if (!Array.isArray(foldersRaw)) {
+      throw new Error(
+        `订阅文件 ${path} 的 folders 不是字符串数组（读到 ${describe(foldersRaw)}）：` +
+          '空目录必须由目录单独记录，拒绝把认不出的形状当成「没有目录」。',
+      )
+    }
+    for (const entry of foldersRaw) {
+      if (typeof entry !== 'string' || entry.trim() === '') {
+        throw new Error(
+          `订阅文件 ${path} 的 folders 里有非法名称（读到 ${describe(entry)}）：` +
+            '目录项必须是非空字符串；已有名称原样保留，不做规范化。',
+        )
+      }
+      explicitFolders.push(entry)
+    }
+  }
+  return {
+    version: CURRENT_CONFIG_VERSION,
+    feeds: valid,
+    viewPreferences: record.viewPreferences,
+    folders: mergeFolderDirectory(explicitFolders, valid),
+  }
 }
 
 /**
@@ -134,7 +169,10 @@ function validateConfig(parsed: unknown, path: string): ReaderConfigFile {
 export function writeConfigFile(path: string, value: ReaderConfigFile): void {
   const tmp = join(dirname(path), `.${randomUUID()}.tmp`)
   try {
-    const serialized = JSON.stringify(value, null, 2) + '\n'
+    // 写前过一遍与读侧**同一套**校验：保证「写得进必读得回」，且 folders 的并集语义在
+    // 每条写入路径上都成立（refresh / 订阅操作 / 偏好保存都不必各自记得带上目录）。
+    const normalized = validateConfig(value, path)
+    const serialized = JSON.stringify(normalized, null, 2) + '\n'
     // 'wx' + 0600：临时文件也必须是 0600，否则 rename 之后权限就放宽了
     const fd = openSync(tmp, 'wx', 0o600)
     try {

@@ -23,6 +23,14 @@ const ROOT = process.cwd()
  * 缺口。等价变异混进来会让这道门槛变成狼来了。
  */
 const MUTATIONS = [
+  // 渲染和键盘共用行序，折叠后仍生成子行会让导航无法跳过。
+  { id: 'folder-折叠隐藏订阅行', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    from: 'if (foldedFolders.has(folder)) continue;', to: 'if (false) continue;' },
+  // 文件夹计数必须保留同组前面各源的未读数。
+  { id: 'folder-未读汇总覆盖同组', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    from: '(unreadByFolder.get(feed.folder) ?? 0) + (perFeedUnread[feed.id] ?? 0)', to: '(perFeedUnread[feed.id] ?? 0)' },
   // 搜索刷新可能移动同一条目，跟随滚动必须响应新结果。
   { id: 'search-刷新后跟随同一选中项', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
@@ -780,8 +788,10 @@ const MUTATIONS = [
     // config.json 是用户订阅的**唯一**可备份副本：写偏好时若不先把旧文件读出来，
     // 一次「切了个 filter」就会把订阅列表清空 —— 且不抛错、不留痕。
     // 判据：tests/store-sqlite.test.mjs 的「写偏好不许动订阅映射」。
-    from: 'const current = readConfigFile(configPath);\n            writeConfigFile(configPath, { ...current, viewPreferences: safe });',
-    to: 'writeConfigFile(configPath, { feeds: {}, version: 1, viewPreferences: safe });' },
+    // 2026-11 M2 02：saveViewPreferences 改走 updateConfig（统一「读 → 改 → 原子写」），
+    // 旧锚串消失 ⇒ 照编译产物重锚；语义不变：把「带旧 feeds 的整份写回」改成「空 feeds」。
+    from: 'updateConfig(configPath, (current) => ({ ...current, viewPreferences: safe }));',
+    to: 'updateConfig(configPath, () => ({ feeds: {}, version: 1, viewPreferences: safe }));' },
   { id: 'store-缺席字段写成 undefined 键', file: 'lib/store-sqlite.js',
     judges: ['store-sqlite.test.mjs'],
     // readAt === undefined 是本仓库对「未读」的定义（src/shared.ts:62）。多一个 undefined 值
@@ -1193,6 +1203,50 @@ const MUTATIONS = [
   { id: 'client-probe-删 star', file: 'lib/client.js',
     judges: ['keyboard-routing.test.mjs'],
     from: 'case "star":', to: 'case "star_never":' },
+  // ── 文件夹目录与变更接口（M2 02）────────────────────────────────────────
+  // 病象：文件夹改名只改了目录、没改成员归属；删除文件夹顺手把订阅也删了；
+  // 旧配置读不出目录；OPML 重复导入把本地「未分类」重新套上分组 —— 这些都不会报错，
+  // 只会在下一次重启或下一次导入时悄悄改变用户的分类结果。
+  // 每条 from 均照**编译产物**的真实形状逐字抄（docs/pitfalls.md 一、1.4）。
+  { id: 'folder-新名称不去空白', file: 'lib/folders.js',
+    judges: ['folder-storage.test.mjs', 'folder-endpoints.test.mjs'],
+    from: 'const name = raw.trim();', to: 'const name = raw;' },
+  { id: 'folder-创建不拒重复', file: 'lib/folders.js',
+    judges: ['folder-storage.test.mjs', 'folder-endpoints.test.mjs'],
+    from: 'if (folders.includes(name)) {', to: 'if (false) {' },
+  { id: 'folder-创建空目录不落盘', file: 'lib/folders.js',
+    judges: ['folder-storage.test.mjs', 'folder-endpoints.test.mjs'],
+    from: 'return { ...file, folders: [...folders, name] };',
+    to: 'return { ...file, folders };' },
+  { id: 'folder-改名不拒碰撞', file: 'lib/folders.js',
+    judges: ['folder-storage.test.mjs', 'folder-endpoints.test.mjs'],
+    from: 'if (folders.includes(to)) {', to: 'if (false) {' },
+  { id: 'folder-改名不更新成员归属', file: 'lib/folders.js',
+    judges: ['folder-storage.test.mjs', 'folder-endpoints.test.mjs'],
+    from: 'feeds[feedId] = folderOf(feed) === from ? { ...feed, folder: to } : feed;',
+    to: 'feeds[feedId] = feed;' },
+  { id: 'folder-删除清掉所有归属', file: 'lib/folders.js',
+    judges: ['folder-storage.test.mjs', 'folder-endpoints.test.mjs'],
+    from: 'if (folderOf(feed) !== name) {', to: 'if (false) {' },
+  { id: 'folder-移出不清归属', file: 'lib/folders.js',
+    judges: ['folder-storage.test.mjs', 'folder-endpoints.test.mjs'],
+    from: 'if (target === undefined)\n        delete next.folder;\n    else\n        next.folder = target;',
+    to: 'if (target === undefined)\n        next.folder = current.folder;\n    else\n        next.folder = target;' },
+  { id: 'folder-旧配置不派生目录', file: 'lib/storage/config-file.js',
+    judges: ['folder-storage.test.mjs'],
+    from: 'folders: mergeFolderDirectory(explicitFolders, valid),',
+    to: 'folders: mergeFolderDirectory(explicitFolders, {}),' },
+  { id: 'folder-OPML已存在源套用分组', file: 'lib/feed-intent.js',
+    judges: ['folder-endpoints.test.mjs'],
+    from: 'folder: previous === undefined ? initialFolder : previous.folder,',
+    to: 'folder: initialFolder,' },
+  { id: 'folder-刷新写入丢目录', file: 'lib/store-sqlite.js',
+    judges: ['folder-storage.test.mjs'],
+    from: 'updateConfig(configPath, (current) => ({ ...current, feeds: change(current.feeds) }));',
+    to: 'updateConfig(configPath, (current) => ({ version: 1, feeds: change(current.feeds) }));' },
+  // ⚠️ 刻意没有「缺 folder 键当未分类」这条变异：它实测是**等价变异** —— 删掉缺键守卫后，
+  // 紧接着的「folder 必须是字符串或 null」同样拒绝 undefined（只是错误文案不同），
+  // 没有任何输入会改变可观察行为。等价变异不入门槛（AGENTS.md；判定方法同 pitfalls §1 的正文容器）。
 ]
 
 // ── 函数化 + 并行化（2026-10-15 变异测试提速，杠杆 B；spec docs/mutation-test-speedup-plan.md）──

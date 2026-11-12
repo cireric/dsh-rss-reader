@@ -1321,3 +1321,50 @@ test('刷新搜索后相同选中项移出视口时，列表跟随其新位置',
   assert.equal(list.querySelector('[data-rss-row="current"]'), row)
   assert.equal(h.scrollTop(list), 60)
 })
+
+test('文件夹展开与折叠同步键盘行序，汇总未读且保留订阅选择', skip, async () => {
+  const h = await mountReader({
+    items: [
+      item({ id: 'first', feedId: 'a' }),
+      item({ id: 'second', feedId: 'b' }),
+      item({ id: 'read', feedId: 'b', readAt: '2026-10-06T01:00:00.000Z' }),
+      item({ id: 'unfiled', feedId: 'c' }),
+    ],
+    feeds: [{ id: 'c', title: '未分类源' }, { id: 'a', title: '源 A', folder: '技术/工具' }, { id: 'b', title: '源 B', folder: '技术/工具' }],
+  })
+  const doc = h.win.document
+  const key = 'folder:技术/工具'
+  const folder = () => doc.querySelector('[data-rss-nav-row="' + key + '"]')
+  const rows = () => Array.from(doc.querySelectorAll('[data-rss-nav-row]'), (row) => row.getAttribute('data-rss-nav-row'))
+  const cursor = () => doc.querySelector('[data-rss-nav-cursor]')?.getAttribute('data-rss-nav-row')
+  const visible = () => h.store.visible().map(({ id }) => id)
+  const top = ['filter:all', 'filter:unread', 'filter:starred', key]
+  assert.deepEqual(rows(), [...top, 'feed:a', 'feed:b', 'feed:c'])
+  assert.equal(folder().getAttribute('data-rss-nav-badge'), '2')
+  assert.equal(folder().getAttribute('aria-expanded'), 'true')
+
+  h.store.selectNav({ kind: 'feed', feedId: 'a' })
+  assert.deepEqual(visible(), ['first'])
+  h.press('P', true)
+  await sleep(30)
+  assert.equal(cursor(), key)
+  h.press('O', true)
+  await sleep(30)
+  assert.deepEqual(rows(), [...top, 'feed:c'])
+  assert.equal(folder().getAttribute('aria-expanded'), 'false')
+  assert.equal(folder().getAttribute('data-rss-nav-badge'), '2')
+  h.press('N', true)
+  await sleep(30)
+  assert.equal(cursor(), 'feed:c')
+  assert.deepEqual(visible(), ['first'])
+
+  folder().click()
+  await sleep(30)
+  assert.deepEqual(rows(), [...top, 'feed:a', 'feed:b', 'feed:c'])
+  h.press('N', true)
+  await sleep(30)
+  assert.equal(cursor(), 'feed:a')
+  h.store.setShowUnread(false)
+  await sleep(30)
+  assert.equal(folder().hasAttribute('data-rss-nav-badge'), false)
+})

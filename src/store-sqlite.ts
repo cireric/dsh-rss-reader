@@ -39,6 +39,7 @@ import { sanitizeViewPreferences, type Cursor } from './shared.js'
 import type { CleanupCandidate, ReaderStore } from './store.js'
 import type { ArticleEntry } from './retention.js'
 import { applyFeedIntent, type FeedIntent } from './feed-intent.js'
+import { addFolder, deleteFolder, folderViews, moveFeedToFolder, renameFolder } from './folders.js'
 
 /** 事务里的保存点名。写成常量即可：db 是单连接，嵌套只发生在同一个连接上。 */
 const SAVEPOINT = 'rss_store_write'
@@ -373,13 +374,31 @@ function readFeeds(configPath: string): Record<string, FeedRecord> {
   return readConfigFile(configPath).feeds
 }
 
+/**
+ * 读 → 改 → 原子写回。**每次都要重读**，不缓存整份 config：内存副本一旦过期，刷新/订阅操作
+ * 就会把别的写者刚写进去的源或目录静默回退掉（文件夹改名与刷新并发是 M2 02 的显式回归项）。
+ */
+function updateConfig(configPath: string, change: (current: ReaderConfigFile) => ReaderConfigFile): void {
+  const current: ReaderConfigFile = readConfigFile(configPath)
+  writeConfigFile(configPath, change(current))
+}
+
 /** 整份订阅映射读出来后交 `change` 改，再原子写回；`change` 返回新的整份映射（删源就是删掉一个键）。 */
 function writeFeeds(
   configPath: string,
   change: (feeds: Record<string, FeedRecord>) => Record<string, FeedRecord>,
 ): void {
-  const current: ReaderConfigFile = readConfigFile(configPath)
-  writeConfigFile(configPath, { ...current, feeds: change(current.feeds) })
+  // `{ ...current }` 必须带上 folders：只写 feeds 会让目录（尤其空目录）在每次刷新/退订后消失。
+  updateConfig(configPath, (current) => ({ ...current, feeds: change(current.feeds) }))
+}
+
+/** 文件夹变更的统一收尾：写盘后**重读**目录，回包的是磁盘上的实际状态而不是内存里的预期值。 */
+function writeFolders(
+  configPath: string,
+  change: (current: ReaderConfigFile) => ReaderConfigFile,
+): ReturnType<typeof folderViews> {
+  updateConfig(configPath, change)
+  return folderViews(readConfigFile(configPath))
 }
 
 export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderStore {
@@ -737,6 +756,29 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
     listFeeds: () => Object.entries(readFeeds(configPath)),
 
     /**
+     * 文件夹目录。读侧已把「显式目录 ∪ 当前非空分组」并好（src/storage/config-file.ts 一处），
+     * 所以这里不再二次派生 —— 两份口径迟早分家。
+     */
+    listFolders: () => folderViews(readConfigFile(configPath)),
+
+    createFolder: async (name) => writeFolders(configPath, (current) => addFolder(current, name)),
+
+    renameFolder: async (from, to) => writeFolders(configPath, (current) => renameFolder(current, from, to)),
+
+    deleteFolder: async (name) => {
+      let detached = 0
+      const folders = writeFolders(configPath, (current) => {
+        const result = deleteFolder(current, name)
+        detached = result.detached
+        return result.file
+      })
+      return { folders, detached }
+    },
+
+    moveFeedToFolder: async (feedId, folder) =>
+      writeFolders(configPath, (current) => moveFeedToFolder(current, feedId, folder).file),
+
+    /**
      * 读视图偏好。**读侧一律过 sanitizeViewPreferences**（src/store.ts:41-45 的承诺）：
      * 媒介里可能是别的版本写的、也可能被改坏，把垃圾透给调用方去兜 —— 兜底散在调用方迟早漏一处。
      * 已退订的源由 isKnownFeed 判掉、回落虚拟视图而**不抛错**：面板打不开比丢一次记忆更糟。
@@ -749,8 +791,9 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
      */
     saveViewPreferences: async (preferences) => {
       const safe = sanitizeViewPreferences(preferences, isKnownFeed)
-      const current: ReaderConfigFile = readConfigFile(configPath)
-      writeConfigFile(configPath, { ...current, viewPreferences: safe })
+      // `{ ...current }` 带上 folders：保存视图偏好不是「重写整份订阅文件」，
+      // 空目录与订阅归属必须原样保留（M2 02 的显式回归项）。
+      updateConfig(configPath, (current) => ({ ...current, viewPreferences: safe }))
       return safe
     },
   }

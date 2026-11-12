@@ -26,8 +26,8 @@ const ITEM_ID = 'item-0001'
 const ROUND = '2026-10-11T09:00:00.000Z'
 
 test('端点名字表非空、无重复、全为非空字符串', () => {
-  assert.equal(ENDPOINT_NAMES.length, 15)
-  assert.equal(new Set(ENDPOINT_NAMES).size, 15)
+  assert.equal(ENDPOINT_NAMES.length, 20)
+  assert.equal(new Set(ENDPOINT_NAMES).size, 20)
   for (const name of ENDPOINT_NAMES) assert.equal(typeof name, 'string')
 })
 
@@ -40,7 +40,7 @@ function makeDispatch(overrides = {}) {
   const db = openDatabase(':memory:')
   migrateSchema(db)
   const feeds = {}
-  for (const id of [FEED_ID]) feeds[id] = { url: id, title: '源 0' }
+  for (const id of [FEED_ID]) feeds[id] = { url: id, title: '源 0', folder: overrides.folder }
   writeConfigFile(join(dir, 'config.json'), { version: 1, feeds })
   const store = createSqliteStore(db, join(dir, 'config.json'))
   const insert = db.prepare(
@@ -224,4 +224,13 @@ test('carriesAccount：每个标记的端点走成功路径都带回未读账', 
         name + ' 的每源账目必须以 feeds 表为键域（0 未读的源也留键）')
     } finally { h.cleanup() }
   }
+})
+test('overview 下发既有订阅文件夹和权威逐源未读数', async () => {
+  const h = makeDispatch({ items: [ITEM_ID, 'item-0002'], folder: '技术/工具' })
+  try {
+    const result = await h.dispatch('overview', {})
+    assert.equal(result.ok, true)
+    assert.equal(result.value.feeds[0].folder, '技术/工具')
+    assert.equal(result.value.perFeedUnread[FEED_ID], 2)
+  } finally { h.cleanup() }
 })

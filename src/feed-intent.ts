@@ -48,7 +48,13 @@ export type FeedIntent =
       reason: string
     }
   | {
-      /** 订阅落库（opmlImport / addFeed）：保留既有调度痕迹（lastAttemptedAt），title/folder 按声明合并。
+      /** 订阅落库（opmlImport / addFeed）：保留既有调度痕迹（lastAttemptedAt），title 按声明合并。
+       *
+       *  `folder` 只用于**新源**的初始分组；**已存在的源一律保留本地 `feed.folder`，包括本地是
+       *  「未分类」的情况**。为什么不能写成 `intent.folder ?? previous?.folder`：那会让「本地未分类 +
+       *  OPML 里有分组」的重复导入被套上 OPML 分组 —— 用户手动移出分类的归属会被一次导入悄悄改回去。
+       *  判据：tests/folder-endpoints.test.mjs 的 OPML 用例（重复导入本地未分类）。
+       *
        *  url 必带 —— upsert 的创建路径（新源）靠它，更新路径上它是幂等的同一个键。 */
       kind: 'upsert-subscription'
       url: string
@@ -111,18 +117,22 @@ export function applyFeedIntent(previous: FeedRecord | undefined, intent: FeedIn
         lastAttemptedAt: intent.stamp,
         lastFailure: intent.reason,
       }
-    case 'upsert-subscription':
-      // 已存在的源保留其 folder（用户可能在界面上改过）；title 按声明合并（OPML 有声明、addFeed 用抓到的）。
+    case 'upsert-subscription': {
+      // 已存在的源保留其 folder（用户可能在界面上改过，**包括改成未分类**）；title 按声明合并
+      //（OPML 有声明、addFeed 用抓到的）。新源才吃 OPML 的分组。空字符串按未分类处理 ——
+      // 与 buildOpml 把 '' 当未分类是同一口径，避免目录里出现一个空名项。
+      const initialFolder = intent.folder === undefined || intent.folder === '' ? undefined : intent.folder
       // 显式白名单：不逐字段搬，「源刚试过一次」这个事实会被导入 OPML 抹掉，该源下一轮又被当
       // 「没试过」排到最前（调度键见 refresh.ts 的 stalenessKey）。
       return {
         url: intent.url,
         title: intent.title ?? previous?.title,
-        folder: intent.folder ?? previous?.folder,
+        folder: previous === undefined ? initialFolder : previous.folder,
         etag: previous?.etag,
         lastModified: previous?.lastModified,
         lastFetchedAt: previous?.lastFetchedAt,
         lastAttemptedAt: previous?.lastAttemptedAt,
       }
+    }
   }
 }

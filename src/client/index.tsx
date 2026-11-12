@@ -367,9 +367,11 @@ export function createReader(store: ReaderStore): () => ReactNode {
             filter={state.filter}
             navSelection={state.navSelection}
             navCursor={state.navCursor}
+            foldedFolders={state.foldedFolders}
             showUnread={state.showUnread}
             onSelectFilter={(next) => store.setFilter(next)}
             onSelectFeed={(feedId) => store.selectNav({ kind: 'feed', feedId })}
+            onToggleFolder={store.toggleFolder}
           />
         )}
         <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
