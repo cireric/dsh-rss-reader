@@ -6,7 +6,7 @@
  * 列表、正文、订阅管理与键盘接线，任一改动都要动同一个文件。
  */
 import { useEffect, useState } from 'react'
-import { ROUTE_PATH, recencyOf, sanitizeViewPreferences, type ArticlePayload, type CleanupResult, type Endpoint, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult, type UnreadAccount, type ViewPreferences } from '../shared.js'
+import { ROUTE_PATH, recencyOf, sanitizeViewPreferences, type ArticlePayload, type CleanupResult, type Endpoint, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult, type SearchPage, type SearchQuery, type UnreadAccount, type ViewPreferences } from '../shared.js'
 import { createAccountMirror } from './account-mirror.js'
 
 export type Filter = 'all' | 'unread' | 'starred'
@@ -137,6 +137,8 @@ export interface ReaderState {
   nextCursor: string | undefined
   /** 续页在途（防连点堆请求：每次请求都要过一次 SQL + 一次 feeds 文件读）。 */
   loadingMore: boolean
+  search?: SearchQuery
+  searchRevision: number
 }
 
 /**
@@ -145,9 +147,10 @@ export interface ReaderState {
  * endpoint 收的是 shared.ts 的 Endpoint（= ENDPOINT_NAMES 派生）：拼错名字从「运行时收一个
  * unknown-endpoint」变成**编译错误**。这是本文件与宿主之间唯一的那条 seam，值得有类型。
  */
-async function callRpc<T>(endpoint: Endpoint, payload?: unknown): Promise<T> {
+async function callRpc<T>(endpoint: Endpoint, payload?: unknown, signal?: AbortSignal): Promise<T> {
   const response = await fetch(ROUTE_PATH, {
     method: 'POST',
+    ...(signal === undefined ? {} : { signal }),
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ endpoint, payload: payload ?? null }),
   })
@@ -187,7 +190,7 @@ export function createReaderStore() {
     view: 'list', layout: 'list', markAllRange: 'all', showUnread: true, article: undefined, notice: undefined,
     importReport: undefined, feedsBusy: false,
     navSelection: { kind: 'virtual' }, perFeedUnread: {}, navVisible: true,
-    nextCursor: undefined, loadingMore: false,
+    nextCursor: undefined, loadingMore: false, searchRevision: 0,
     // 光标初值 = 与初始 filter 一致的那一行（初始 filter 是 'all'，故就是「全部」那一行）：
     // 「我停在哪」与「此刻生效的是哪」在开局是同一行，之后才由 shift+n/p 与 shift+o 分开。
     navCursor: { kind: 'filter', filter: 'all' },
@@ -217,6 +220,79 @@ export function createReaderStore() {
     }, UNDO_WINDOW_MS)
   }
   const get = (): ReaderState => state
+  let listVersion = 0
+  let overviewVersion = 0
+  let searchRequest: AbortController | undefined
+  let searchPages = 0
+
+  const loadSearch = async (cursor?: string, pages = 1): Promise<void> => {
+    const search = state.search
+    if (!search) return
+    searchRequest?.abort()
+    const request = new AbortController()
+    searchRequest = request
+    const version = ++listVersion
+    const firstPage = cursor === undefined
+    set({ loading: firstPage, loadingMore: !firstPage, error: undefined })
+    const feedId = state.navSelection.kind === 'feed' ? state.navSelection.feedId : undefined
+    const read = state.filter === 'unread' ? 'unread' : search.read
+    const starred = state.filter === 'starred' || search.starred
+    const emptyScope = state.filter === 'unread' && search.read === 'read'
+    try {
+      const found: ItemView[] = []
+      const previous = firstPage ? [] : state.items
+      const existing = new Set(previous.map((item) => item.id))
+      let nextCursor = cursor
+      let received = 0
+      do {
+        const page: SearchPage = emptyScope ? { items: [] } : await callRpc<SearchPage>('searchItems', {
+          ...search, feedId, cursor: nextCursor, read, starred,
+        }, request.signal)
+        if (version !== listVersion) return
+        for (const item of page.items) {
+          if (existing.has(item.id)) continue
+          existing.add(item.id)
+          found.push(item)
+        }
+        nextCursor = page.nextCursor
+        received++
+      } while (nextCursor !== undefined && received < pages)
+
+      // 翻页期间可能已标读，追加时保留当前列表的修改。
+      const items = firstPage ? found : [...state.items, ...found]
+      const selectedId = items.some((item) => item.id === state.selectedId) ? state.selectedId : items[0]?.id
+      searchPages = firstPage ? received : searchPages + received
+      set({
+        items, selectedId, nextCursor, loading: false, loadingMore: false,
+        searchRevision: state.searchRevision + (firstPage ? 1 : 0),
+      })
+    } catch (error) {
+      if (version !== listVersion) return
+      set({ loading: false, loadingMore: false, error: error instanceof Error ? error.message : String(error) })
+    } finally {
+      if (searchRequest === request) searchRequest = undefined
+    }
+  }
+
+  const resetSearchPage = (): void => {
+    if (!state.search) return
+    searchPages = 0
+    set({ items: [], selectedId: undefined, nextCursor: undefined })
+    void loadSearch()
+  }
+
+  const submitSearch = (query?: SearchQuery): void => {
+    if (!query?.text.trim()) {
+      if (!state.search) return
+      ++listVersion
+      searchRequest?.abort()
+      set({ search: undefined, items: [], nextCursor: undefined, selectedId: undefined, loadingMore: false })
+      void load('overview')
+      return
+    }
+    set({ search: { ...query, text: query.text.trim() }, view: 'list', article: undefined })
+    resetSearchPage()
+  }
 
   /**
    * 当前过滤下的可见条目——A/j/k 都只作用于它。
@@ -237,8 +313,9 @@ export function createReaderStore() {
    */
   const inScope = (item: ItemView): boolean => {
     if (state.navSelection.kind === 'feed' && item.feedId !== state.navSelection.feedId) return false
-    if (state.filter === 'unread') return item.readAt === undefined
-    if (state.filter === 'starred') return item.starred
+    if ((state.filter === 'unread' || state.search?.read === 'unread') && item.readAt !== undefined) return false
+    if (state.search?.read === 'read' && item.readAt === undefined) return false
+    if ((state.filter === 'starred' || state.search?.starred) && !item.starred) return false
     return true
   }
 
@@ -269,6 +346,7 @@ export function createReaderStore() {
     set({ filter, navCursor: { kind: 'filter', filter } })
     relocateSelection()
     persistView()
+    resetSearchPage()
   }
 
   const applyOverview = (overview: Overview): void => {
@@ -375,14 +453,33 @@ export function createReaderStore() {
   }
 
   const load = async (endpoint: 'overview' | 'refresh'): Promise<void> => {
+    const version = ++overviewVersion
+    if (state.search) {
+      ++listVersion
+      searchRequest?.abort()
+      set({ nextCursor: undefined, loadingMore: false })
+    }
     set({ loading: true })
     try {
       // 恢复必须在 feeds 表到手之后生效（未知源要回落），所以**先读、后应用**：
       // 读一次拿到记忆，等 overview 落地再按在订的源校验。两次 load 并发时也只读一次。
       const preferences = viewRestored ? undefined : await readViewPreferences()
       const overview = await callRpc<Overview>(endpoint)
-      applyOverview(overview)
+      if (version !== overviewVersion) return
+      if (state.search) {
+        const nav = state.navSelection
+        const removed = nav.kind === 'feed' && !overview.feeds.some(({ id }) => id === nav.feedId)
+        set({
+          feeds: overview.feeds, unread: overview.unread, perFeedUnread: overview.perFeedUnread,
+          ...(removed ? { navSelection: { kind: 'virtual' }, navCursor: { kind: 'filter', filter: state.filter } } : {}),
+        })
+        if (removed) persistView()
+      } else {
+        applyOverview(overview)
+      }
       if (!viewRestored) applyRestoredView(preferences)
+      // 用新游标重查已加载的页数，刷新插入的新条目不会挤掉整个阅读窗口。
+      if (state.search) await loadSearch(undefined, Math.max(1, searchPages))
       // 「按了刷新没反应」是本插件最早的体验投诉：界面从不说明发生了什么。
       // 这里如实区分——真抓了 / 被最小间隔节流（附上次完成时间）。
       if (endpoint === 'refresh') {
@@ -394,7 +491,11 @@ export function createReaderStore() {
         })
       }
     } catch (failure) {
-      set({ loading: false, error: failure instanceof Error ? failure.message : String(failure) })
+      if (version !== overviewVersion) return
+      set({
+        ...(searchRequest === undefined ? { loading: false } : {}),
+        error: failure instanceof Error ? failure.message : String(failure),
+      })
     }
   }
 
@@ -433,15 +534,22 @@ export function createReaderStore() {
   const loadMore = async (): Promise<void> => {
     const cursor = state.nextCursor
     if (cursor === undefined || state.loadingMore) return
+    if (state.search) {
+      if (!state.loading) await loadSearch(cursor)
+      return
+    }
+    const version = listVersion
     set({ loadingMore: true })
     try {
       const overview = await callRpc<Overview>('overview', { cursor })
+      if (version !== listVersion) return
       // 追加拼在**当前** state 上（不是闭包里那份快照）：请求在途时用户可能已经标读/加星，
       // 用发请求前的 items 覆盖会把那些本地动作抹掉。
       set({ items: [...state.items, ...overview.items], nextCursor: overview.nextCursor })
       applyAccount(overview)
       set({ loadingMore: false, error: undefined })
     } catch (failure) {
+      if (version !== listVersion) return
       set({ loadingMore: false, error: failure instanceof Error ? failure.message : String(failure) })
     }
   }
@@ -790,6 +898,7 @@ export function createReaderStore() {
     }
     relocateSelection()
     persistView()
+    resetSearchPage()
   }
 
   /**
@@ -909,7 +1018,7 @@ export function createReaderStore() {
 
   return {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
-    get, visible, load, loadMore, markRead, selectRelative, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllRead, undoMarkAll,
+    get, visible, load, loadMore, submitSearch, markRead, selectRelative, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllRead, undoMarkAll,
     setLayout, setMarkAllRange, setShowUnread, refreshCount,
     openArticle, closeArticle, cleanup, stepArticle, canStepArticle,
     toggleFeeds, exportOpml, importOpml, addFeed, removeFeed,

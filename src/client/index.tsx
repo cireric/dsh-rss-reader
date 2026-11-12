@@ -302,7 +302,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
       const target = nextScrollTop(box.scrollTop, box.clientHeight, row.offsetTop, row.offsetHeight)
       if (target !== box.scrollTop) box.scrollTop = target
       // 依赖里没有 listBox：它现在是稳定句柄，变了也不该重跑（每次渲染都会变的话反而是噪音）
-    }, [state.selectedId, state.view])
+    }, [state.selectedId, state.view, state.searchRevision])
 
     // 换文章时的「归零阅读位置 + 解除钉底」已搬进 article-pane（2026-10-15 C2）：它与「内容长高时
     // 继续贴底」是同一个行为的两半，原先分居两文件、同一个 effect 键、改一次要动两个文件。
@@ -450,6 +450,44 @@ export function createReader(store: ReaderStore): () => ReactNode {
         </div>
         {slowLoading && <div className="dsh-rss-bar" aria-hidden="true" />}
 
+        {state.view === 'list' && (
+          <form key={state.search ? 'active' : 'idle'} className="dsh-rss-toolbar" role="search" onSubmit={(event) => {
+            event.preventDefault()
+            const form = new FormData(event.currentTarget)
+            const read = form.get('read')
+            const feedIds = form.getAll('feed').map(String)
+            store.submitSearch({
+              text: String(form.get('text') ?? ''),
+              from: String(form.get('from') || '') || undefined,
+              to: String(form.get('to') || '') || undefined,
+              read: read === 'read' || read === 'unread' ? read : undefined,
+              starred: form.has('starred'),
+              feedIds: feedIds.length ? feedIds : undefined,
+            })
+            root?.focus()
+          }}>
+            <input data-rss-search-input="" name="text" type="search" aria-label="搜索本地文章" placeholder="搜索本地文章" defaultValue={state.search?.text} />
+            <button type="submit" className="dsh-rss-btn">搜索</button>
+            {state.search && <button type="reset" className="dsh-rss-btn" onClick={() => store.submitSearch()}>退出搜索</button>}
+            <details>
+              <summary>搜索筛选</summary>
+              <label> 已读状态 <select name="read" defaultValue={state.search?.read ?? ''}>
+                <option value="">不限</option><option value="unread">未读</option><option value="read">已读</option>
+              </select></label>
+              <label><input name="starred" type="checkbox" defaultChecked={state.search?.starred} /> 仅星标</label>
+              <label> 起始日期 <input name="from" type="date" defaultValue={state.search?.from} /></label>
+              <label> 结束日期 <input name="to" type="date" defaultValue={state.search?.to} /></label>
+              {state.feeds.length > 1 && <fieldset>
+                <legend>订阅源</legend>
+                {state.feeds.map((feed) => <label key={feed.id} style={{ display: 'block' }}>
+                  <input name="feed" type="checkbox" value={feed.id} defaultChecked={state.search?.feedIds?.includes(feed.id)} /> {feed.title}
+                </label>)}
+              </fieldset>}
+            </details>
+            {state.search && <small className="dsh-rss-meta">正文仅搜索已缓存内容</small>}
+            {state.search && state.loading && <span role="status">正在搜索…</span>}
+          </form>
+        )}
         {state.error !== undefined && <div className="dsh-rss-status dsh-rss-status--error" role="alert">{state.error}</div>}
         {state.notice !== undefined && (
           <div className="dsh-rss-status">
@@ -507,9 +545,9 @@ export function createReader(store: ReaderStore): () => ReactNode {
           display: state.view === 'list' ? 'block' : 'none',
           opacity: slowLoading ? 0.6 : 1, transition: 'opacity 150ms ease',
         }}>
-          {!state.loading && items.length === 0 && (
+          {!state.loading && items.length === 0 && (!state.search || !state.error) && (
             <div style={{ padding: 20, opacity: 0.7 }}>
-              {state.filter === 'starred' ? '还没有星标条目。' : state.filter === 'unread' ? '没有未读条目。' : '还没有条目。可以在订阅管理中添加订阅源或导入 OPML。'}
+              {state.search ? '没有找到匹配的本地文章。' : state.filter === 'starred' ? '还没有星标条目。' : state.filter === 'unread' ? '没有未读条目。' : '还没有条目。可以在订阅管理中添加订阅源或导入 OPML。'}
             </div>
           )}
           {items.map((item) => {

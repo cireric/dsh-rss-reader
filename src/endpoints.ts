@@ -9,6 +9,9 @@
  *
  * 名字表与 dispatch 的 case 必须是同一份（曾经是两处手写、靠人记得同步）；现在缺失即编译错误。
  */
+import { createHash } from 'node:crypto'
+import { z } from 'zod'
+import type { createSearch } from './search.js'
 import type { Config } from './config.js'
 import { EXTRACTOR_REVISION, fetchArticle, blocksToText } from './article.js'
 import { rebuildItem, type ItemRecord } from './domain.js'
@@ -29,6 +32,7 @@ export interface EndpointDeps {
   readonly refreshNow: (options?: { force?: boolean; signal?: AbortSignal }) => Promise<boolean>
   /** 上次刷新完成时间（刷新状态留在 index.ts 那侧，这里只读） */
   readonly lastRefreshCompletedAt: () => number | undefined
+  readonly searchItems?: ReturnType<typeof createSearch>['run']
   readonly articleAttempts: Map<string, number>
 }
 
@@ -44,12 +48,14 @@ export interface EndpointDeps {
  * 「关库后仍被读到」从「返回空列表」变成「抛错 → internal 信封」，那是行为变更。
  */
 export interface EndpointCtx {
+  readonly signal?: AbortSignal
   readonly store: ReaderStore
   readonly ready: () => ReaderStore | undefined
   readonly config: Config
   readonly log: (message: string) => void
   readonly refreshNow: (options?: { force?: boolean; signal?: AbortSignal }) => Promise<boolean>
   readonly lastRefreshCompletedAt: () => number | undefined
+  readonly searchItems?: ReturnType<typeof createSearch>['run']
   readonly articleAttempts: Map<string, number>
 }
 
@@ -200,7 +206,40 @@ const buildOverview = (ctx: EndpointCtx, refreshed: boolean, cursor?: Cursor): O
  * 穷尽性由 `Record<Endpoint, EndpointSpec>` 保证 —— 名字表（shared.ts 的 ENDPOINT_NAMES）
  * 加了新端点而这里没跟上，编译就不过。这是本文件里唯一需要「加端点时改的地方」。
  */
+const searchDay = z.iso.date().optional()
+const searchQuerySchema = z.object({
+  text: z.string().trim().min(1).refine((text) => [...text].length <= 120),
+  feedId: z.string().optional(),
+  feedIds: z.array(z.string()).optional(),
+  read: z.enum(['read', 'unread']).optional(),
+  starred: z.boolean().optional(),
+  from: searchDay,
+  to: searchDay,
+  cursor: z.string().max(2048).optional(),
+}).refine(({ from, to }) => !from || !to || from <= to)
+
 export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
+  searchItems: {
+    to: async (payload, ctx) => {
+      const parsed = searchQuerySchema.safeParse(payload)
+      if (!parsed.success) return fail('bad-request', '搜索词、日期范围或分页游标无效')
+      if (!ctx.searchItems) return fail('not-ready', '搜索服务尚未就绪')
+      const query = parsed.data
+      const selected = query.feedIds === undefined ? undefined : new Set(query.feedIds)
+      const feeds: Array<[string, string]> = ctx.store.listFeeds()
+        .filter(([id]) => (query.feedId === undefined || query.feedId === id) && (selected?.has(id) ?? true))
+        .map(([id, feed]) => [id, feed.title ?? id])
+      const key = createHash('sha256').update(JSON.stringify([
+        query.text, query.read, query.starred === true, query.from, query.to, feeds.map(([id]) => id).sort(),
+      ])).digest('base64url') + ':'
+      const cursor = query.cursor?.slice(key.length)
+      if (query.cursor !== undefined && (!query.cursor.startsWith(key) || cursor === undefined || !decodeCursor(cursor))) {
+        return fail('bad-request', '分页游标与当前搜索不匹配，请重新搜索')
+      }
+      const page = await ctx.searchItems({ ...query, cursor, feedId: feeds.length === 1 ? feeds[0][0] : undefined }, feeds, 30, ctx.signal)
+      return ok({ ...page, nextCursor: page.nextCursor === undefined ? undefined : key + page.nextCursor })
+    },
+  },
   overview: {
     to: async (payload, ctx) => {
       // 续页游标**必须解码成功**才继续（Overview 的契约）。认不出时**响亮拒绝**：
@@ -535,10 +574,10 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
  *   ④ 按 carriesAccount 声明合并未读账
  * 异常一律兜成 internal 信封 —— 不把 throw 泄进通道（调用方要的是带 code 的失败信封）。
  */
-export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: unknown) => Promise<RpcResult<unknown>> {
-  const { config, log, ready, refreshNow, lastRefreshCompletedAt, articleAttempts } = deps
+export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: unknown, signal?: AbortSignal) => Promise<RpcResult<unknown>> {
+  const { config, log, ready, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems } = deps
 
-  const dispatch = async (endpoint: string, payload: unknown): Promise<RpcResult<unknown>> => {
+  const dispatch = async (endpoint: string, payload: unknown, signal?: AbortSignal): Promise<RpcResult<unknown>> => {
     try {
       const target = ready()
       if (!target) return fail('not-ready', '存储域尚未就绪，稍后重试')
@@ -551,7 +590,7 @@ export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: 
       if (spec === undefined) return fail('unknown-endpoint', '未知端点：' + endpoint)
 
       const ctx: EndpointCtx = {
-        store: target, ready, config, log, refreshNow, lastRefreshCompletedAt, articleAttempts,
+        store: target, ready, config, log, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, signal,
       }
       const result = await spec.to(payload, ctx)
       if (spec.carriesAccount === true && result.ok) {
@@ -560,6 +599,7 @@ export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: 
       }
       return result
     } catch (error) {
+      if (signal?.aborted) return fail('cancelled', '请求已取消')
       log('请求失败（' + endpoint + '）：' + String(error))
       return fail('internal', error instanceof Error ? error.message : String(error))
     }
@@ -598,7 +638,7 @@ async function readJsonBody(req: import('node:http').IncomingMessage): Promise<u
  * 那两条依赖 ctx，留在 index.ts。
  */
 export function createHttpHandler(
-  dispatch: (endpoint: string, payload: unknown) => Promise<RpcResult<unknown>>,
+  dispatch: (endpoint: string, payload: unknown, signal?: AbortSignal) => Promise<RpcResult<unknown>>,
   opts: {
     requestRejection: (req: import('node:http').IncomingMessage) => number | undefined
   },
@@ -623,10 +663,19 @@ export function createHttpHandler(
       const body = (await readJsonBody(req)) as { endpoint?: unknown; payload?: unknown } | undefined
       // 端点名一律过 String(...)：body 里的类型不可信，而 dispatch 的 interface 就是 string。
       // 缺省落成空串 ⇒ dispatch 回 unknown-endpoint（而不是把 undefined 传下去）。
-      result = await dispatch(String(body?.endpoint ?? ''), body?.payload)
+      const endpoint = String(body?.endpoint ?? '')
+      if (res.destroyed) return
+      if (endpoint === 'searchItems') {
+        const controller = new AbortController()
+        res.once('close', () => { if (!res.writableEnded) controller.abort() })
+        result = await dispatch(endpoint, body?.payload, controller.signal)
+      } else {
+        result = await dispatch(endpoint, body?.payload)
+      }
     } catch (error) {
       result = fail('bad-request', error instanceof Error ? error.message : String(error))
     }
+    if (res.destroyed) return
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
     res.end(JSON.stringify(result))
   }

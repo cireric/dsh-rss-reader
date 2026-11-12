@@ -26,7 +26,7 @@ export const ROUTE_PATH = '/rss-reader-api'
 export const ENDPOINT_NAMES = [
   'overview', 'refresh', 'markRead', 'unmarkRead', 'toggleStar', 'toggleKeepUnread', 'article', 'cleanup',
   'opmlExport', 'opmlImport', 'addFeed', 'removeFeed',
-  'viewPreferences', 'saveViewPreferences',
+  'viewPreferences', 'saveViewPreferences', 'searchItems',
 ] as const
 export type Endpoint = (typeof ENDPOINT_NAMES)[number]
 
@@ -118,6 +118,22 @@ export interface UnreadAccount {
   unread: number
   /** 键域 = feeds 表，见 countUnreadPerFeed */
   perFeedUnread: Record<string, number>
+}
+
+export interface SearchQuery {
+  text: string
+  feedId?: string
+  feedIds?: string[]
+  read?: 'read' | 'unread'
+  starred?: boolean
+  from?: string
+  to?: string
+  cursor?: string
+}
+
+export interface SearchPage {
+  items: ItemView[]
+  nextCursor?: string
 }
 
 export interface Overview extends UnreadAccount {

@@ -111,7 +111,7 @@ function overviewStub(items, feeds) {
 /** 本轮 mountReader 的收尾函数登记表：afterEach 统一清（消灭未决 handle ⇒ 变异不再拖死套件）。 */
 const liveCleanups = []
 
-async function mountReader({ items = [], feeds, article, holdArticle } = {}) {
+async function mountReader({ items = [], feeds, article, holdArticle, search } = {}) {
   const { JSDOM, React, jsxRuntime, createRoot } = STACK
   // P3（gate 调优轮）：挂载前拍全局快照，cleanup 时还原 —— 此前每个 mount 都把
   // window/document/fetch/ResizeObserver 覆盖成新 JSDOM 的桩且从不还原，跨用例的桩污染面
@@ -177,6 +177,7 @@ async function mountReader({ items = [], feeds, article, holdArticle } = {}) {
     // 回成 {changed,unread}，而面板挂载时走的就是 refresh（index.tsx:184），于是 overview 字段
     // 全是 undefined。这是夹具没守住契约，不是代码该容忍的形状。
     if (body.endpoint === 'overview' || body.endpoint === 'refresh') return ok(overviewStub(items, feeds))
+    if (body.endpoint === 'searchItems' && search) return ok(await search(body.payload))
     if (body.endpoint === 'article') {
       if (gate !== undefined) await gate
       return ok(article ?? { itemId: body.payload.itemId, title: 'ART', blocks: [{ kind: 'p', text: '正文' }], paragraphs: ['正文'] })
@@ -1300,4 +1301,23 @@ test('C4-b 判定：行高量不到（offsetHeight=0）时按列表兜底 48 滚
   h.press('n')
   await sleep(30)
   assert.equal(h.scrollTop(listBox), 48, '行高量到 0 必须走兜底 48（offsetHeight 判定取反时这条会按 0 滚而红）')
+})
+
+test('刷新搜索后相同选中项移出视口时，列表跟随其新位置', skip, async () => {
+  const current = item({ id: 'current' })
+  let hits = [current]
+  const h = await mountReader({ items: [current], search: () => ({ items: hits }) })
+  h.store.submitSearch({ text: '支付' })
+  await sleep(50)
+  assert.equal(h.store.get().selectedId, 'current')
+  const list = h.arm(h.box('list'), { clientHeight: 100 })
+  const row = list.querySelector('[data-rss-row="current"]')
+  Object.defineProperty(row, 'offsetTop', { get: () => Array.from(row.parentElement.children).indexOf(row) * 120 })
+  Object.defineProperty(row, 'offsetHeight', { value: 40 })
+  hits = [item({ id: 'new' }), current]
+  await h.store.load('refresh')
+  await sleep(50)
+  assert.equal(h.store.get().selectedId, 'current')
+  assert.equal(list.querySelector('[data-rss-row="current"]'), row)
+  assert.equal(h.scrollTop(list), 60)
 })

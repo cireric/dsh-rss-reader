@@ -1,0 +1,144 @@
+import assert from 'node:assert/strict'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+import { test } from 'node:test'
+import { setTimeout as delay } from 'node:timers/promises'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+
+const feed = 'https://example.test/v1'
+const time = '2026-10-20T12:00:00.000Z'
+const blocks = [{ kind: 'p', text: '旧版缓存正文里的支付' }]
+
+function snapshot(path, configPath) {
+  const db = new DatabaseSync(path, { readOnly: true })
+  try {
+    return {
+      version: db.prepare('PRAGMA user_version').get().user_version,
+      schema: db.prepare('SELECT type, name, sql FROM sqlite_schema ORDER BY name').all(),
+      items: db.prepare('SELECT * FROM items ORDER BY id').all(),
+      texts: db.prepare('SELECT * FROM texts ORDER BY item_id').all(),
+      cursors: db.prepare('SELECT * FROM cursors ORDER BY feed_id').all(),
+      config: JSON.parse(readFileSync(configPath, 'utf8')),
+    }
+  } finally {
+    db.close()
+  }
+}
+
+test('搜索直接使用旧版 v1 库，Worker 启动失败时仍可阅读且恢复后能重试', { timeout: 15_000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'rss-search-upgrade-'))
+  const oldHome = process.env.DSH_HOME
+  const stops = []
+  let server
+  try {
+    process.env.DSH_HOME = root
+    const storage = join(root, 'storages', 'rss-reader')
+    mkdirSync(storage, { recursive: true })
+    const path = join(storage, 'rss.db')
+    const configPath = join(storage, 'config.json')
+    const oldDb = new DatabaseSync(path)
+    try {
+      oldDb.exec(readFileSync(new URL('./fixtures/rss-storage-v1.sql', import.meta.url), 'utf8'))
+      oldDb.prepare('INSERT INTO items (id, feed_id, title, link, fetched_at, read_at, starred, kept_unread) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run('read', feed, '旧版已读星标', 'https://example.test/read', time, time, 1, 0)
+      oldDb.prepare('INSERT INTO items (id, feed_id, title, link, fetched_at, kept_unread) VALUES (?, ?, ?, ?, ?, ?)')
+        .run('unread', feed, '旧版保留未读', 'https://example.test/unread', time, 1)
+      oldDb.prepare('INSERT INTO texts (item_id, body, revision, frameable, title, fetched_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .run('read', JSON.stringify(blocks), 3, 0, '旧版缓存标题', time)
+      oldDb.prepare('INSERT INTO cursors (feed_id, seen, cursor_at) VALUES (?, ?, ?)')
+        .run(feed, JSON.stringify(['read', 'unread']), time)
+    } finally {
+      oldDb.close()
+    }
+    writeFileSync(configPath, JSON.stringify({ version: 1, feeds: { [feed]: { url: feed, title: '旧版订阅' } } }))
+    const before = snapshot(path, configPath)
+
+    // 只在临时插件副本里移走 Worker，模拟发布缺件且保留真实加载失败路径。
+    const lib = join(root, 'lib')
+    cpSync(fileURLToPath(new URL('../lib/', import.meta.url)), lib, { recursive: true })
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ type: 'module' }))
+    symlinkSync(fileURLToPath(new URL('../node_modules/', import.meta.url)), join(root, 'node_modules'), 'dir')
+    const { apply } = await import(pathToFileURL(join(lib, 'index.js')).href)
+    let handler
+    const lines = []
+    const ctx = {
+      logger: { info: (line) => lines.push(line), warn: (line) => lines.push(line) },
+      effect: (setup) => { stops.push(setup()) },
+      webServer: { register: (route) => {
+        handler = route.handler
+        return () => { handler = undefined }
+      } },
+      connection: { requestRejection: () => undefined },
+    }
+    server = createServer((req, res) => handler(req, res))
+    await new Promise((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', resolve)
+    })
+    const url = 'http://127.0.0.1:' + server.address().port + '/rss-reader-api'
+    const request = async (endpoint, payload = {}) => {
+      const response = await fetch(url, { method: 'POST', body: JSON.stringify({ endpoint, payload }), signal: AbortSignal.timeout(3000) })
+      assert.equal(response.status, 200)
+      return response.json()
+    }
+    const boot = async () => {
+      apply(ctx, { feeds: [], refreshOnStart: false })
+      for (let index = 0; index < 50; index++) {
+        const overview = await request('overview')
+        if (overview.ok) return overview.value
+        assert.equal(overview.error.code, 'not-ready')
+        await delay(10)
+      }
+      assert.fail('旧库未能启动')
+    }
+    const stop = async () => {
+      while (stops.length) await stops.pop()?.()
+    }
+
+    const overview = await boot()
+    assert.deepEqual(overview.feeds.map(({ title }) => title), ['旧版订阅'])
+    assert.deepEqual(overview.items.map(({ id, readAt, starred, keptUnread }) => [id, readAt, starred, keptUnread]), [
+      ['read', time, true, undefined], ['unread', undefined, false, true],
+    ])
+    const search = await request('searchItems', { text: '支付' })
+    assert.equal(search.ok, true)
+    assert.deepEqual(search.value.items.map(({ id }) => id), ['read'])
+    await stop()
+    assert.deepEqual(snapshot(path, configPath), before)
+
+    const worker = join(lib, 'search-worker.js')
+    renameSync(worker, worker + '.disabled')
+    await boot()
+    const failed = await request('searchItems', { text: '支付' })
+    assert.equal(failed.ok, false)
+    assert.equal(failed.error.code, 'internal')
+    assert.match(failed.error.message, /search-worker\.js/)
+    assert(lines.some((line) => line.includes('请求失败（searchItems）')))
+
+    const afterFailure = await request('overview')
+    assert.equal(afterFailure.ok, true)
+    assert.deepEqual(afterFailure.value.items, overview.items)
+    const article = await request('article', { itemId: 'read' })
+    assert.equal(article.ok, true)
+    assert.equal(article.value.cached, true)
+    assert.deepEqual(article.value.blocks, blocks)
+
+    renameSync(worker + '.disabled', worker)
+    const retry = await request('searchItems', { text: '支付' })
+    assert.deepEqual(retry, search)
+    await stop()
+    assert.deepEqual(snapshot(path, configPath), before)
+  } finally {
+    try {
+      while (stops.length) await stops.pop()?.()
+    } finally {
+      if (server?.listening) await new Promise((resolve) => server.close(resolve))
+      if (oldHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = oldHome
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+})

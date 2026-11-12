@@ -340,3 +340,11 @@ function routeKeyOfNav(label, h) {
   // 于是它落到 case 'o' → 'expand'，折叠态那条断言就红了）。
   routeKey(keyEvent(label.replace('Shift+', ''), { target: h.setup.document.body }), h.ctx)
 }
+test('列表按 / 聚焦本地搜索输入框', { skip }, () => {
+  const h = makeCtx()
+  const input = h.setup.document.createElement('input')
+  input.setAttribute('data-rss-search-input', '')
+  h.setup.panelRoot.appendChild(input)
+  routeKeyOf('/', h)
+  assert.equal(h.setup.document.activeElement, input)
+})

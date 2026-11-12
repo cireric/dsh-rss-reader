@@ -14,7 +14,7 @@ export type ReaderKeyAction =
   | 'expandedView' | 'listView'
   // ? = 快捷键帮助浮窗（GR spec §3.8 第 255 行「? | 快捷键帮助」）。它是**开关**语义，
   // 客户端按「开↔关」处理，所以只需要一个动作，不需要 up/down 两个。
-  | 'help'
+  | 'help' | 'search'
   // 左栏导航（GR spec §3.8）：导航内移动选中 / 打开导航选中项 / 左栏显隐。
   // 与 j/k 是两条不同的轴：j/k 动的是右栏文章列表的选中项，navNext/navPrev 动的是左栏那一列。
   | 'navNext' | 'navPrev' | 'navOpen' | 'toggleNav'
@@ -78,6 +78,7 @@ export function resolveReaderKey(key: string, shift = false): ReaderKeyAction {
     // ? = 打开/关闭快捷键帮助（GR §3.8 第 255 行）。浏览器在 shift+/ 时给的就是字面 '?'，
     // 所以这里写字符本身，不需要看 shift 标志。
     case '?': return 'help'
+    case '/': return 'search'
     default: return 'none'
   }
 }
@@ -132,10 +133,14 @@ export interface ReaderHelpSection {
  *       ② tests/keys.test.mjs 逐条反查 `resolveReaderKey(binding.key, binding.shift)` 是否真的返回
  *          这一行声明的动作 —— 实现偷偷改派键位、或绑定与实现脱钩，测试当场红；
  *       ③ 反向也查：keys.js 里能返回的动作，这张表必须都收进某一行。
- * 只列**本插件真实可用**的绑定：GR 里未实现的键（`/` 搜索、`g` 两段式、`-`/`=` 缩放、
+ * 只列**本插件真实可用**的绑定：GR 里未实现的键（`g` 两段式、`-`/`=` 缩放、
  * `l`/`shift-s` 社交）一律不出现 —— 列出来就是假标签。
  */
 export const READER_KEY_HELP: ReaderHelpSection[] = [
+  {
+    title: '搜索',
+    entries: [{ label: '/', summary: '聚焦本地文章搜索', scope: 'list', bindings: [{ key: '/', action: 'search' }] }],
+  },
   {
     title: '导航',
     entries: [

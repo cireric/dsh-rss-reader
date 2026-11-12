@@ -25,6 +25,7 @@ import type { Config as ConfigShape } from './config.js'
 export { Config }
 import { createDispatch, createHttpHandler } from './endpoints.js'
 import { createLifecycle } from './lifecycle.js'
+import { createSearch } from './search.js'
 import { ROUTE_PATH } from './shared.js'
 
 export const name = '@dsh-external/dsh-rss-reader'
@@ -98,13 +99,14 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
   // 生命周期：打开 → 刷新 → 关停。它与 ctx 无关，测试直接 start/stop（2026-10-15 H2）。
   const session = createLifecycle({ config, storagesRoot, configFile, log, summarize })
 
-  // 端点注册表：14 个端点一处声明（src/endpoints.ts）。
+  const search = createSearch(join(storagesRoot, 'rss.db'))
   const dispatch = createDispatch({
     config, log,
     ready: session.ready,
     refreshNow: session.refreshNow,
     lastRefreshCompletedAt: session.lastRefreshCompletedAt,
     articleAttempts: session.articleAttempts,
+    searchItems: search.run,
   })
 
   ctx.effect(() => {
@@ -137,7 +139,7 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
   ctx.effect(() => {
     const starting = session.start()
     return async () => {
-      await session.stop()
+      await Promise.all([search.close(), session.stop()])
       await starting
     }
   }, 'dsh-rss-reader: sqlite storage + start refresh')

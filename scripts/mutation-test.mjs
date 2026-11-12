@@ -23,6 +23,18 @@ const ROOT = process.cwd()
  * 缺口。等价变异混进来会让这道门槛变成狼来了。
  */
 const MUTATIONS = [
+  // 搜索刷新可能移动同一条目，跟随滚动必须响应新结果。
+  { id: 'search-刷新后跟随同一选中项', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    from: 'state.selectedId,\n\t\t\t\t\tstate.view,\n\t\t\t\t\tstate.searchRevision', to: 'state.selectedId, state.view' },
+  // 刷新要重查已加载的页，否则深页选中的文章会被替换成第一条。
+  { id: 'search-刷新保留已加载窗口', file: 'lib/client.js',
+    judges: ['nav-selection.test.mjs'],
+    from: 'await loadSearch(void 0, Math.max(1, searchPages))', to: 'await loadSearch()' },
+  // 限页前必须检查字面命中，否则无关文章会抢占搜索分页。
+  { id: 'search-只返回字面命中', file: 'lib/search-worker.js',
+    judges: ['search.test.mjs'],
+    from: 'THEN (${match}) ELSE 0 END', to: 'THEN (1) ELSE 0 END' },
   // article-view.ts 随原站视图整条删除（2026-10-08），那条变异的目标已不存在。
   // 换成守护本次修复的两条判定：装饰性小图过滤、同一图重复去重。
   { id: 'article-装饰性小图过滤', file: 'lib/article.js',
@@ -546,12 +558,12 @@ const MUTATIONS = [
   // 「后随 applyOverview」「后随 /**」「前随 set({ navVisible: … })」上（均实测 OCCURRENCES=1）。
   { id: 'persist-setFilter 不写盘', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs'],
-    from: 'relocateSelection();\n\t\t\t\tpersistView();\n\t\t\t};\n\t\t\tconst applyOverview',
-    to: 'relocateSelection();\n\t\t\t};\n\t\t\tconst applyOverview' },
+    from: 'relocateSelection();\n\t\t\t\tpersistView();\n\t\t\t\tresetSearchPage();\n\t\t\t};\n\t\t\tconst applyOverview',
+    to: 'relocateSelection();\n\t\t\t\tresetSearchPage();\n\t\t\t};\n\t\t\tconst applyOverview' },
   { id: 'persist-selectNav 不写盘', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs'],
-    from: 'relocateSelection();\n\t\t\t\tpersistView();\n\t\t\t};\n\t\t\t/**',
-    to: 'relocateSelection();\n\t\t\t};\n\t\t\t/**' },
+    from: 'relocateSelection();\n\t\t\t\tpersistView();\n\t\t\t\tresetSearchPage();\n\t\t\t};\n\t\t\t/**',
+    to: 'relocateSelection();\n\t\t\t\tresetSearchPage();\n\t\t\t};\n\t\t\t/**' },
   { id: 'persist-toggleNav 不写盘', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs'],
     from: 'set({ navVisible: !state.navVisible });\n\t\t\t\tpersistView();',

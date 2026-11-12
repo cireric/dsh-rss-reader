@@ -148,6 +148,10 @@ export function routeKey(event: KeyboardEvent, ctx: KeyRoutingCtx): void {
   const view = store.get().view
   const run = (act: () => void): void => { event.preventDefault(); act() }
   switch (action) {
+    case 'search':
+      if (view !== 'list') return
+      run(() => ctx.root?.querySelector<HTMLInputElement>('[data-rss-search-input]')?.focus())
+      break
     // 正文视图里 j/k 不移动：每次移动都意味着一次抓取，误按代价太高（Esc 回列表再移动）
     // j/k 按视图分流——同一个键始终是「换条目」，语义不因视图而变：
     //   列表页 → 移动选中（不标已读，用户 2026-10-06 定）

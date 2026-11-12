@@ -69,6 +69,7 @@ function loadExports(overview) {
     window: { __ModuleLoader__: { load: (entry) => { captured = entry } }, open: () => {} },
     console,
     HTMLElement: HTMLElementStub,
+    AbortController,
     setTimeout,
     clearTimeout,
     Date,
@@ -85,6 +86,11 @@ function loadExports(overview) {
   sandbox.fetch = async (_url, init) => {
     const body = JSON.parse(init.body)
     const ok = (value) => ({ ok: true, status: 200, json: async () => ({ ok: true, value }) })
+    if (body.endpoint === 'searchItems' && overview.search) return ok(await overview.search(body.payload, init.signal))
+    if (overview.request) {
+      const mocked = await overview.request(body.endpoint, body.payload)
+      if (mocked !== undefined) return ok(mocked)
+    }
     if (body.endpoint === 'overview') {
       const cursor = body.payload?.cursor
       pageCalls.push(cursor)
@@ -431,4 +437,157 @@ test('toggleNav 翻转左栏显隐（供任务 6 的 u 键接线，本任务不�
 
   store.toggleNav()
   assert.equal(store.get().navVisible, true, '第二次应当再展开')
+})
+
+test('搜索翻页、换词和退出共用阅读列表，迟到的旧回包不能覆盖当前结果', async () => {
+  const pending = []
+  const baseline = item('baseline')
+  const store = loadExports({
+    ...overviewOf([baseline]),
+    search: (query, signal) => new Promise((resolve) => pending.push({ query, signal, resolve })),
+  }).createReaderStore()
+  const settle = () => new Promise((resolve) => setImmediate(resolve))
+  const ids = () => Array.from(store.visible(), (entry) => entry.id)
+  await store.load('overview')
+  store.submitSearch({ text: '旧词' })
+  store.submitSearch({ text: '支付' })
+  assert.equal(pending[0].signal.aborted, true)
+  pending[1].resolve({ items: [item('first')], nextCursor: 'next' })
+  await settle()
+  assert.deepEqual(ids(), ['first'])
+  pending[0].resolve({ items: [item('stale')] })
+  await settle()
+  assert.deepEqual(ids(), ['first'])
+  const more = store.loadMore()
+  assert.equal(pending[2].query.cursor, 'next')
+  pending[2].resolve({ items: [item('second')] })
+  await more
+  assert.deepEqual(ids(), ['first', 'second'])
+  store.setFilter('starred')
+  assert.equal(pending[3].query.starred, true)
+  assert.equal(pending[3].query.cursor, undefined)
+  store.submitSearch()
+  assert.equal(pending[3].signal.aborted, true)
+  pending[3].resolve({ items: [item('stale-starred')] })
+  await settle()
+  assert.equal(store.get().search, undefined)
+  assert.deepEqual(Array.from(store.get().items, (entry) => entry.id), ['baseline'])
+})
+
+test('搜索刷新废弃旧续页，沿新游标恢复已加载窗口和选中项', async () => {
+  const pending = []
+  const settle = () => new Promise((resolve) => setImmediate(resolve))
+  const baseline = overviewOf([item('head')])
+  const store = loadExports({
+    ...baseline,
+    request: (endpoint) => endpoint === 'refresh' ? baseline : undefined,
+    search: (query, signal) => new Promise((resolve) => pending.push({ query, signal, resolve })),
+  }).createReaderStore()
+  const ids = () => Array.from(store.visible(), ({ id }) => id)
+  await store.load('overview')
+  store.submitSearch({ text: '支付' })
+  pending[0].resolve({ items: [item('head')], nextCursor: 'p2' })
+  await settle()
+  const page = store.loadMore()
+  pending[1].resolve({ items: [item('selected')], nextCursor: 'p3' })
+  await page
+  store.select('selected')
+  const stalePage = store.loadMore()
+  const revision = store.get().searchRevision
+  const refresh = store.load('refresh')
+  assert.equal(pending[2].signal.aborted, true)
+  assert.equal(store.get().nextCursor, undefined)
+  pending[2].resolve({ items: [item('stale')], nextCursor: 'stale-cursor' })
+  await stalePage
+  assert.deepEqual(ids(), ['head', 'selected'])
+  await settle()
+  assert.equal(pending[3].query.cursor, undefined)
+  pending[3].resolve({ items: [item('new'), item('head')], nextCursor: 'new-p2' })
+  await settle()
+  assert.equal(pending[4]?.query.cursor, 'new-p2')
+  pending[4].resolve({ items: [item('selected')], nextCursor: 'new-p3' })
+  await refresh
+  assert.deepEqual(ids(), ['new', 'head', 'selected'])
+  assert.equal(store.get().selectedId, 'selected')
+  assert.equal(store.get().nextCursor, 'new-p3')
+  assert.equal(store.get().searchRevision, revision + 1)
+})
+
+test('搜索标读保留选中项至移开，退订和清理后重查并丢弃已删除结果', async () => {
+  const first = item('first')
+  const second = item('second')
+  const third = item('third', { feedId: 'feedB' })
+  const overview = overviewOf([first, second, third])
+  const queries = []
+  const settle = () => new Promise((resolve) => setImmediate(resolve))
+  let removed = false
+  let cleaned = false
+  const store = loadExports({
+    ...overview,
+    request: (endpoint) => {
+      if (endpoint === 'removeFeed') { removed = true; return { removed: 1, items: 2 } }
+      if (endpoint === 'cleanup') { cleaned = true; return { deleted: 1, freedChars: 12 } }
+      if (endpoint === 'overview' && cleaned) return { ...overviewOf([]), feeds: overviewOf([third]).feeds }
+      if (endpoint === 'overview' && removed) return overviewOf([third])
+      if (endpoint === 'markRead') return { changed: 1, unread: 2, perFeedUnread: { feedA: 1, feedB: 1 } }
+      return undefined
+    },
+    search: (query) => {
+      queries.push(query)
+      if (cleaned) return { items: [] }
+      return removed ? { items: [third], nextCursor: 'new-page' } : { items: [first, second], nextCursor: 'old-page' }
+    },
+  }).createReaderStore()
+  const ids = () => Array.from(store.visible(), ({ id }) => id)
+  await store.load('overview')
+  store.selectNav({ kind: 'feed', feedId: 'feedA' })
+  store.submitSearch({ text: '支付', read: 'unread' })
+  await settle()
+  assert.equal(queries.at(-1).feedId, 'feedA')
+  await store.markRead('first')
+  assert.deepEqual(ids(), ['first', 'second'])
+  store.selectRelative(1)
+  assert.deepEqual(ids(), ['second'])
+  assert.equal(store.get().selectedId, 'second')
+  await store.removeFeed('feedA')
+  assert.equal(queries.at(-1).cursor, undefined)
+  assert.equal(queries.at(-1).feedId, undefined)
+  assert.deepEqual(ids(), ['third'])
+  assert.equal(store.get().selectedId, 'third')
+  assert.equal(store.get().nextCursor, 'new-page')
+  await store.cleanup()
+  assert.equal(queries.at(-1).cursor, undefined)
+  assert.deepEqual(ids(), [])
+  assert.equal(store.get().selectedId, undefined)
+  assert.equal(store.get().nextCursor, undefined)
+})
+
+test('刷新途中换筛选时，刷新结果按新筛选重查并更新全局未读账', async () => {
+  const row = item('current')
+  const newRow = item('new', { starred: true })
+  const requests = []
+  let resolveRefresh
+  const refreshReply = new Promise((resolve) => { resolveRefresh = resolve })
+  const store = loadExports({
+    ...overviewOf([row]),
+    request: (endpoint) => endpoint === 'refresh' ? refreshReply : undefined,
+    search: (query) => {
+      requests.push(query)
+      return { items: query.starred ? [newRow] : [row], nextCursor: 'page' }
+    },
+  }).createReaderStore()
+  const settle = () => new Promise((resolve) => setImmediate(resolve))
+  await store.load('overview')
+  store.submitSearch({ text: '支付' })
+  await settle()
+  const refresh = store.load('refresh')
+  store.setFilter('starred')
+  await settle()
+  resolveRefresh(overviewOf([row, newRow]))
+  await refresh
+  assert.equal(requests.length, 3)
+  assert.equal(requests.at(-1).starred, true)
+  assert.equal(requests.at(-1).cursor, undefined)
+  assert.equal(store.get().unread, 2)
+  assert.deepEqual(Array.from(store.visible(), ({ id }) => id), ['new'])
 })
