@@ -56,10 +56,11 @@ function loadStack() {
     if (reactPath === undefined || reactDomPath === undefined) return undefined
     return {
       JSDOM: require_(jsdomPath).JSDOM,
-      React: require_(reactPath),
-      jsxRuntime: require_(join(reactPath, 'jsx-runtime')),
-      createRoot: require_(join(reactDomPath, 'client')).createRoot,
-      renderToString: require_(join(reactDomPath, 'server')).renderToString,
+      // 刻意**不在这里 require React**：React DOM 在模块加载时用 canUseDOM 决定是否走
+      // IE9 的 input 事件 polyfill（jsdom 下会炸在 attachEvent 上）。先建好 JSDOM、把
+      // window/document 装进全局，再 require，React 才会走正常的 input 事件路径。
+      reactPath,
+      reactDomPath,
     }
   } catch (error) {
     // 不静默：解析失败要能看出是环境问题还是路径写法过期（换 dsh 版本时 pnpm 目录名会变）
@@ -85,18 +86,30 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
  * @param items 条目表
  * @param feeds 订阅源表；不给则按 items 里出现过的 feedId 推导（此时两者恰好相等）
  */
-function overviewStub(items, feeds) {
+function overviewStub(items, feeds, folders, accountItems = items) {
   const table = feeds ?? [...new Set(items.map((entry) => entry.feedId))].map((feedId) => ({ id: feedId, title: feedId }))
+  // 显式传入的目录优先；否则从 feeds 的 folder 派生（空目录只能靠显式参数表达）。
+  const directory = folders ?? (() => {
+    const derived = []
+    for (const feed of table) {
+      if (feed.folder === undefined || feed.folder === '') continue
+      let folder = derived.find((entry) => entry.name === feed.folder)
+      if (folder === undefined) { folder = { name: feed.folder, feedIds: [] }; derived.push(folder) }
+      folder.feedIds.push(feed.id)
+    }
+    return derived
+  })()
   const perFeedUnread = {}
   // 先按 feeds 表铺 0：这一步是键域的全部要点，缺了它 0 未读的源就会丢键
   for (const feed of table) perFeedUnread[feed.id] = 0
-  for (const entry of items) {
+  // 账目按**全量**算（文件夹浏览时 items 已按成员过滤，但未读账仍是全局权威值）。
+  for (const entry of accountItems) {
     // 已退订源的条目可能仍在 items 里，但那种源不该出现在 map 中（契约：键域 = feeds 表）
     if (entry.readAt === undefined && entry.feedId in perFeedUnread) perFeedUnread[entry.feedId] += 1
   }
   return {
-    feeds: table, items,
-    unread: items.filter((entry) => entry.readAt === undefined).length,
+    feeds: table, items, folders: directory,
+    unread: accountItems.filter((entry) => entry.readAt === undefined).length,
     perFeedUnread,
     refreshed: false,
   }
@@ -111,8 +124,8 @@ function overviewStub(items, feeds) {
 /** 本轮 mountReader 的收尾函数登记表：afterEach 统一清（消灭未决 handle ⇒ 变异不再拖死套件）。 */
 const liveCleanups = []
 
-async function mountReader({ items = [], feeds, article, holdArticle, search } = {}) {
-  const { JSDOM, React, jsxRuntime, createRoot } = STACK
+async function mountReader({ items = [], feeds, folders, article, holdArticle, search, folderApi } = {}) {
+  const { JSDOM } = STACK
   // P3（gate 调优轮）：挂载前拍全局快照，cleanup 时还原 —— 此前每个 mount 都把
   // window/document/fetch/ResizeObserver 覆盖成新 JSDOM 的桩且从不还原，跨用例的桩污染面
   // 与未决 handle 泄漏叠加，是「runner 内部挂死」的放大器（还原救不了已挂死的用例，
@@ -146,6 +159,11 @@ async function mountReader({ items = [], feeds, article, holdArticle, search } =
   globalThis.ResizeObserver = ResizeObserverStub
   win.ResizeObserver = ResizeObserverStub
 
+  // 全局就位后再加载 React（见 loadStack 的注释：canUseDOM 在模块加载那一刻定值）。
+  const React = require_(STACK.reactPath)
+  const jsxRuntime = require_(join(STACK.reactPath, 'jsx-runtime'))
+  const createRoot = require_(join(STACK.reactDomPath, 'client')).createRoot
+
   const endpoints = []
   const ok = (value) => ({ ok: true, status: 200, json: async () => ({ ok: true, value }) })
   /**
@@ -156,7 +174,21 @@ async function mountReader({ items = [], feeds, article, holdArticle, search } =
    * 客户端会把 state.perFeedUnread 覆盖成 undefined，左栏角标当场崩、本组 10 条一起红。
    * 桩件必须守它模仿的那条契约，别指望作品代码替它兜（docs/pitfalls.md 二、2.5 / 2.6）。
    */
-  const account = overviewStub(items, feeds)
+  // 可变的宿主夹具：文件夹管理动作会改 feeds/folders，overview 必须反映改后的状态，
+  // 否则「操作后左栏和未读数更新」这条验收在 DOM 层根本表达不出来。
+  const serverFeeds = (feeds ?? [...new Set(items.map((entry) => entry.feedId))].map((feedId) => ({ id: feedId, title: feedId })))
+    .map((feed) => ({ ...feed }))
+  const serverFolders = (folders ?? (() => {
+    const derived = []
+    for (const feed of serverFeeds) {
+      if (feed.folder === undefined || feed.folder === '') continue
+      let folder = derived.find((entry) => entry.name === feed.folder)
+      if (folder === undefined) { folder = { name: feed.folder, feedIds: [] }; derived.push(folder) }
+      folder.feedIds.push(feed.id)
+    }
+    return derived
+  })()).map((folder) => ({ name: folder.name, feedIds: [...folder.feedIds] }))
+  const account = overviewStub(items, serverFeeds, serverFolders)
   const feedOf = new Map(items.map((entry) => [entry.id, entry.feedId]))
   const markReply = (endpoint, ids) => {
     const delta = endpoint === 'markRead' ? -1 : 1
@@ -170,14 +202,57 @@ async function mountReader({ items = [], feeds, article, holdArticle, search } =
   }
   let releaseArticle
   const gate = holdArticle === true ? new Promise((resolve) => { releaseArticle = resolve }) : undefined
+  const requests = []
   const fetchStub = async (_url, init) => {
     const body = JSON.parse(init.body)
     endpoints.push(body.endpoint)
+    requests.push({ endpoint: body.endpoint, payload: body.payload })
     // refresh 与 overview 都回完整 Overview（src/endpoints.ts:112-118）—— 桩件此前把 refresh
     // 回成 {changed,unread}，而面板挂载时走的就是 refresh（index.tsx:184），于是 overview 字段
     // 全是 undefined。这是夹具没守住契约，不是代码该容忍的形状。
-    if (body.endpoint === 'overview' || body.endpoint === 'refresh') return ok(overviewStub(items, feeds))
+    if (body.endpoint === 'overview' || body.endpoint === 'refresh') {
+      const folder = body.payload?.folder
+      const visibleItems = folder === undefined
+        ? items
+        : items.filter((entry) => serverFeeds.some((feed) => feed.id === entry.feedId && feed.folder === folder))
+      return ok(overviewStub(visibleItems, serverFeeds, serverFolders, items))
+    }
     if (body.endpoint === 'searchItems' && search) return ok(await search(body.payload))
+    if (folderApi !== undefined) {
+      const custom = await folderApi(body, { feeds: serverFeeds, folders: serverFolders, items })
+      if (custom !== undefined) return custom
+    }
+    if (body.endpoint === 'listFolders') return ok({ folders: serverFolders })
+    if (body.endpoint === 'createFolder') {
+      const name = String(body.payload?.name ?? '').trim()
+      serverFolders.push({ name, feedIds: [] })
+      return ok({ folders: serverFolders })
+    }
+    if (body.endpoint === 'renameFolder') {
+      const from = String(body.payload?.from ?? '')
+      const to = String(body.payload?.to ?? '').trim()
+      for (const folder of serverFolders) if (folder.name === from) folder.name = to
+      for (const feed of serverFeeds) if (feed.folder === from) feed.folder = to
+      return ok({ folders: serverFolders })
+    }
+    if (body.endpoint === 'deleteFolder') {
+      const name = String(body.payload?.name ?? '')
+      let detached = 0
+      for (let i = serverFolders.length - 1; i >= 0; i -= 1) if (serverFolders[i].name === name) serverFolders.splice(i, 1)
+      for (const feed of serverFeeds) if (feed.folder === name) { delete feed.folder; detached += 1 }
+      return ok({ folders: serverFolders, detached })
+    }
+    if (body.endpoint === 'moveFeedToFolder') {
+      const feedId = String(body.payload?.feedId ?? '')
+      const folder = body.payload?.folder
+      const feed = serverFeeds.find((entry) => entry.id === feedId)
+      if (feed !== undefined) {
+        if (folder === null || folder === undefined || folder === '') delete feed.folder
+        else feed.folder = String(folder)
+      }
+      for (const entry of serverFolders) entry.feedIds = serverFeeds.filter((f) => f.folder === entry.name).map((f) => f.id)
+      return ok({ folders: serverFolders })
+    }
     if (body.endpoint === 'article') {
       if (gate !== undefined) await gate
       return ok(article ?? { itemId: body.payload.itemId, title: 'ART', blocks: [{ kind: 'p', text: '正文' }], paragraphs: ['正文'] })
@@ -270,7 +345,7 @@ async function mountReader({ items = [], feeds, article, holdArticle, search } =
   }
   // 登记到模块级收尾表：afterEach 统一调用（用例无需逐一改）
   liveCleanups.push(cleanup)
-  return { store, win, endpoints, box, byLabel, arm, observeContent, userScroll, press, exports: exportsObj, release: () => { if (releaseArticle !== undefined) releaseArticle() }, scrollTop: (el) => (geometry.get(el) ?? (() => el.scrollTop))(), cleanup }
+  return { store, win, endpoints, requests, server: { feeds: serverFeeds, folders: serverFolders }, box, byLabel, arm, observeContent, userScroll, press, exports: exportsObj, release: () => { if (releaseArticle !== undefined) releaseArticle() }, scrollTop: (el) => (geometry.get(el) ?? (() => el.scrollTop))(), cleanup }
 }
 
 /** 一条最小可用条目。 */
@@ -280,6 +355,15 @@ function item(overrides = {}) {
     link: 'https://example.com/a', readAt: undefined, starred: false,
     fetchedAt: '2026-10-06T00:00:00.000Z', ...overrides,
   }
+}
+
+/** 把受控 input/select 的值设进去并派发 React 认的事件（原生 setter 绕过 React 的 value tracker）。 */
+function setControlValue(win, element, value) {
+  const proto = element.tagName === 'SELECT' ? win.HTMLSelectElement.prototype : win.HTMLInputElement.prototype
+  const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set
+  if (setter === undefined) throw new Error('找不到 ' + element.tagName + ' 的 value setter')
+  setter.call(element, value)
+  element.dispatchEvent(new win.Event(element.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true }))
 }
 
 const skip = STACK === undefined ? { skip: '环境缺真实 React/jsdom（见本文件顶部说明）' } : {}
@@ -1367,4 +1451,213 @@ test('文件夹展开与折叠同步键盘行序，汇总未读且保留订阅�
   h.store.setShowUnread(false)
   await sleep(30)
   assert.equal(folder().hasAttribute('data-rss-nav-badge'), false)
+})
+
+test('文件夹浏览：空目录可见，进入后只显示成员条目，空目录有明确空状态', skip, async () => {
+  const h = await mountReader({
+    items: [
+      item({ id: 'a1', feedId: 'a' }),
+      item({ id: 'b1', feedId: 'b' }),
+      item({ id: 'c1', feedId: 'c' }),
+    ],
+    feeds: [
+      { id: 'a', title: '源 A', folder: '技术' },
+      { id: 'b', title: '源 B', folder: '技术' },
+      { id: 'c', title: '源 C' },
+    ],
+    folders: [{ name: '技术', feedIds: ['a', 'b'] }, { name: '空文件夹', feedIds: [] }],
+  })
+  await h.store.load('overview')
+  await sleep(30)
+  const doc = h.win.document
+  const rows = () => Array.from(doc.querySelectorAll('[data-rss-nav-row]'), (row) => row.getAttribute('data-rss-nav-row'))
+
+  assert.ok(rows().includes('folder:技术'), '有成员的文件夹在左栏')
+  assert.ok(rows().includes('folder:空文件夹'), '空文件夹也必须出现在左栏（目录不是 feed.folder 的派生物）')
+  assert.equal(doc.querySelector('[data-rss-nav-row="folder:空文件夹"]').getAttribute('data-rss-nav-badge'), '0')
+
+  const openTech = doc.querySelector('[data-rss-folder-open="技术"]')
+  assert.ok(openTech, '进入文件夹必须有独立可聚焦按钮')
+  openTech.click()
+  await sleep(80)
+  assert.deepEqual(h.store.get().navSelection, { kind: 'folder', folder: '技术' })
+  assert.equal(doc.querySelector('.dsh-rss-toolbar-title strong').textContent, '技术', '标题切到文件夹名')
+  assert.deepEqual(h.store.visible().map((entry) => entry.id), ['a1', 'b1'], '只显示成员源的条目')
+  const lastOverview = [...h.requests].reverse().find((request) => request.endpoint === 'overview')
+  assert.equal(lastOverview.payload.folder, '技术', '宿主必须先按成员筛选再分页（请求带 folder）')
+
+  doc.querySelector('[data-rss-folder-open="空文件夹"]').click()
+  await sleep(80)
+  assert.deepEqual(h.store.visible(), [], '空文件夹没有条目')
+  assert.match(doc.querySelector('[data-rss-scroll="list"]').textContent, /这个文件夹还没有订阅源/)
+})
+
+test('文件夹搜索：范围取成员交集，续页回带查询绑定游标', skip, async () => {
+  const calls = []
+  const h = await mountReader({
+    items: [
+      item({ id: 'a1', feedId: 'a' }),
+      item({ id: 'b1', feedId: 'b' }),
+      item({ id: 'c1', feedId: 'c' }),
+    ],
+    feeds: [
+      { id: 'a', title: '源 A', folder: '技术' },
+      { id: 'b', title: '源 B', folder: '技术' },
+      { id: 'c', title: '源 C' },
+    ],
+    folders: [{ name: '技术', feedIds: ['a', 'b'] }],
+    search: async (payload) => {
+      calls.push(payload)
+      if (payload.cursor === undefined) return { items: [item({ id: 'a1', feedId: 'a' })], nextCursor: 'C1' }
+      return { items: [item({ id: 'b1', feedId: 'b' })] }
+    },
+  })
+  await h.store.load('overview')
+  await sleep(30)
+  h.store.selectNav({ kind: 'folder', folder: '技术' })
+  await sleep(60)
+  h.store.submitSearch({ text: '支付' })
+  await sleep(80)
+
+  assert.equal(calls.length, 1, '第一页一次搜索')
+  assert.deepEqual([...calls[0].feedIds], ['a', 'b'], '搜索范围收窄到文件夹成员')
+  assert.equal(calls[0].feedId, undefined, '文件夹范围不能退化成单源参数')
+  assert.deepEqual(h.store.visible().map((entry) => entry.id), ['a1'])
+
+  await h.store.loadMore()
+  await sleep(60)
+  assert.equal(calls[1].cursor, 'C1', '续页原样回带宿主游标')
+  assert.deepEqual(h.store.visible().map((entry) => entry.id), ['a1', 'b1'], '第二页追加而不是替换')
+})
+
+test('文件夹管理：创建、改名、移动、删除二次确认与焦点恢复', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a1', feedId: 'a' }), item({ id: 'b1', feedId: 'b' })],
+    feeds: [
+      { id: 'a', title: '源 A', folder: '旧文件夹' },
+      { id: 'b', title: '源 B' },
+    ],
+    folders: [{ name: '旧文件夹', feedIds: ['a'] }],
+  })
+  await h.store.load('overview')
+  await sleep(30)
+  h.press('f')
+  await sleep(50)
+  const doc = h.win.document
+
+  const newInput = doc.querySelector('[data-rss-folder-new]')
+  setControlValue(h.win, newInput, ' 新文件夹 ')
+  doc.querySelector('[data-rss-folder-create] button[type="submit"]').click()
+  await sleep(100)
+  assert.ok(doc.querySelector('[data-rss-folder-manage="新文件夹"]'), '创建后管理面板里出现空文件夹')
+
+  doc.querySelector('[data-rss-folder-rename="新文件夹"]').click()
+  await sleep(20)
+  const renameInput = doc.querySelector('[data-rss-folder-rename-input="新文件夹"]')
+  setControlValue(h.win, renameInput, '改名后')
+  doc.querySelector('[data-rss-folder-rename-save="新文件夹"]').click()
+  await sleep(100)
+  assert.ok(doc.querySelector('[data-rss-folder-manage="改名后"]'), '改名后目录项更新')
+
+  const moveSelectB = doc.querySelector('[data-rss-feed-folder="b"]')
+  setControlValue(h.win, moveSelectB, '改名后')
+  await sleep(100)
+  assert.equal(h.server.feeds.find((feed) => feed.id === 'b').folder, '改名后', '移动落到宿主状态')
+  const moveSelectA = doc.querySelector('[data-rss-feed-folder="a"]')
+  setControlValue(h.win, moveSelectA, '改名后')
+  await sleep(100)
+  assert.equal(h.server.feeds.find((feed) => feed.id === 'a').folder, '改名后', '已有成员也能移动')
+  assert.match(doc.querySelector('[data-rss-folder-manage="改名后"]').textContent, /2 个订阅/)
+
+  const deleteButton = doc.querySelector('[data-rss-folder-delete="改名后"]')
+  deleteButton.click()
+  await sleep(20)
+  assert.ok(doc.querySelector('[data-rss-folder-confirm="改名后"]'), '删除先出确认条')
+  assert.match(doc.querySelector('[data-rss-folder-confirm="改名后"]').textContent, /成员会变为未分类/)
+  doc.querySelector('[data-rss-folder-confirm-no="改名后"]').click()
+  await sleep(20)
+  assert.ok(doc.querySelector('[data-rss-folder-manage="改名后"]'), '取消删除不改变目录')
+  assert.equal(doc.activeElement, deleteButton, '取消后焦点回到触发删除的按钮')
+
+  deleteButton.click()
+  await sleep(20)
+  doc.querySelector('[data-rss-folder-confirm-yes="改名后"]').click()
+  await sleep(120)
+  assert.equal(doc.querySelector('[data-rss-folder-manage="改名后"]'), null, '确认后目录项消失')
+  assert.equal(h.server.feeds.find((feed) => feed.id === 'a').folder, undefined, '删除只解除分类（a）')
+  assert.equal(h.server.feeds.find((feed) => feed.id === 'b').folder, undefined, '删除只解除分类（b）')
+})
+
+test('当前浏览文件夹：改名迁移范围，删除回到跨源列表', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a1', feedId: 'a' }), item({ id: 'c1', feedId: 'c' })],
+    feeds: [
+      { id: 'a', title: '源 A', folder: '技术' },
+      { id: 'c', title: '源 C' },
+    ],
+    folders: [{ name: '技术', feedIds: ['a'] }],
+  })
+  await h.store.load('overview')
+  await sleep(30)
+  const doc = h.win.document
+  doc.querySelector('[data-rss-folder-open="技术"]').click()
+  await sleep(80)
+  assert.deepEqual(h.store.get().navSelection, { kind: 'folder', folder: '技术' })
+
+  h.press('f')
+  await sleep(50)
+  doc.querySelector('[data-rss-folder-rename="技术"]').click()
+  await sleep(20)
+  const input = doc.querySelector('[data-rss-folder-rename-input="技术"]')
+  setControlValue(h.win, input, '技术二')
+  doc.querySelector('[data-rss-folder-rename-save="技术"]').click()
+  await sleep(100)
+  assert.deepEqual(h.store.get().navSelection, { kind: 'folder', folder: '技术二' }, '改名后当前浏览范围跟着迁移')
+
+  doc.querySelector('[data-rss-folder-delete="技术二"]').click()
+  await sleep(20)
+  doc.querySelector('[data-rss-folder-confirm-yes="技术二"]').click()
+  await sleep(120)
+  assert.deepEqual(h.store.get().navSelection, { kind: 'virtual' }, '删除当前文件夹后回到跨源列表')
+  h.press('Escape')
+  await sleep(50)
+  assert.deepEqual(h.store.visible().map((entry) => entry.id), ['a1', 'c1'], '跨源列表恢复')
+})
+
+test('文件夹管理失败可恢复：创建失败保留原数据，重试成功后清掉错误', skip, async () => {
+  let failCreate = true
+  const h = await mountReader({
+    items: [item({ id: 'a1', feedId: 'a' })],
+    feeds: [{ id: 'a', title: '源 A', folder: '旧文件夹' }],
+    folders: [{ name: '旧文件夹', feedIds: ['a'] }],
+    folderApi: async (body) => {
+      if (body.endpoint !== 'createFolder' || !failCreate) return undefined
+      // 传输层成功、信封失败：callRpc 的两层判定要分开（否则只会得到 HTTP 200）。
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: false, error: { code: 'conflict', message: '文件夹已存在：重复名', details: {} } }),
+      }
+    },
+  })
+  await h.store.load('overview')
+  await sleep(30)
+  h.press('f')
+  await sleep(50)
+  const doc = h.win.document
+  const input = doc.querySelector('[data-rss-folder-new]')
+  setControlValue(h.win, input, '重复名')
+  doc.querySelector('[data-rss-folder-create] button[type="submit"]').click()
+  await sleep(80)
+
+  assert.match(h.store.get().error ?? '', /文件夹已存在/, '失败必须可见')
+  assert.ok(doc.querySelector('[data-rss-folder-manage="旧文件夹"]'), '失败不改变原有目录')
+  assert.equal(doc.querySelector('[data-rss-folder-manage="重复名"]'), null)
+
+  failCreate = false
+  setControlValue(h.win, doc.querySelector('[data-rss-folder-new]'), '重复名')
+  doc.querySelector('[data-rss-folder-create] button[type="submit"]').click()
+  await sleep(120)
+  assert.ok(doc.querySelector('[data-rss-folder-manage="重复名"]'), '重试成功后新目录出现')
+  assert.equal(h.store.get().error, undefined, '成功刷新后错误条被清掉')
 })

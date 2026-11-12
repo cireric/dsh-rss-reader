@@ -1,18 +1,33 @@
 /**
- * 订阅管理面板（2026-10-07 从 index.tsx 拆出）：OPML 导入导出、加源、退订。
+ * 订阅管理面板（2026-10-07 从 index.tsx 拆出；M2 03 加文件夹管理）：
+ * OPML 导入导出、加源、退订，以及文件夹的创建/改名/删除与订阅移动。
  * 纯展示 —— 动作全部由入口的 store 通过 props 传进来。
  */
-import { useState, type ReactNode } from 'react'
-import type { FeedView, OpmlExportResult, OpmlImportResult } from '../shared.js'
+import { useRef, useState, type ReactNode } from 'react'
+import type { FeedView, FolderView, OpmlExportResult, OpmlImportResult } from '../shared.js'
+
+/** 文件夹管理里一次改名草稿。 */
+interface RenameDraft {
+  name: string
+  draft: string
+}
 
 /**
- * 订阅管理视图：导入 OPML（逐源校验、坏源逐条列出）、导出、加源、退订。
+ * 订阅管理视图：导入 OPML（逐源校验、坏源逐条列出）、导出、加源、退订、文件夹管理。
  *
- * 设计取舍：**坏源报告必须逐条可读**（§3.1 要求「坏源单独标注」），而不是只报「3 个失败」——
- * 用户需要知道具体是哪个源、为什么失败，才能决定改 URL 还是放弃。
+ * 设计取舍：
+ *  - **坏源报告必须逐条可读**（§3.1 要求「坏源单独标注」），而不是只报「3 个失败」。
+ *  - **删除确认用行内确认条，而不是 window.confirm**：取消后要把焦点还给触发删除的按钮；
+ *    原生 confirm 的焦点行为不可控，也无法在真实 DOM 测试里钉住（M2 03 的验收项）。
+ *  - 输入框里的 Enter/Esc 自己处理并 stopPropagation：全局快捷键挂在 document 上，不能截走输入。
  */
-export function FeedsView({ feeds, busy, report, notice, onImport, onExport, onAdd, onRemove, onBack }: {
+export function FeedsView({
+  feeds, folders, busy, report, notice,
+  onImport, onExport, onAdd, onRemove,
+  onCreateFolder, onRenameFolder, onDeleteFolder, onMoveFeed, onBack,
+}: {
   feeds: FeedView[]
+  folders: FolderView[]
   busy: boolean
   report: OpmlImportResult | undefined
   notice: string | undefined
@@ -20,10 +35,19 @@ export function FeedsView({ feeds, busy, report, notice, onImport, onExport, onA
   onExport: () => void
   onAdd: (url: string) => void
   onRemove: (url: string) => void
+  onCreateFolder: (name: string) => void
+  onRenameFolder: (from: string, to: string) => void
+  onDeleteFolder: (name: string) => void
+  onMoveFeed: (feedId: string, folder: string | undefined) => void
   onBack: () => void
 }): ReactNode {
   const [draft, setDraft] = useState('')
   const [fileError, setFileError] = useState<string | undefined>(undefined)
+  const [folderDraft, setFolderDraft] = useState('')
+  const [renaming, setRenaming] = useState<RenameDraft | undefined>(undefined)
+  const [confirmingDelete, setConfirmingDelete] = useState<string | undefined>(undefined)
+  const renameButtons = useRef(new Map<string, HTMLButtonElement | null>())
+  const deleteButtons = useRef(new Map<string, HTMLButtonElement | null>())
 
   const pickFile = (event: { target: { files?: ArrayLike<File> | null; value?: string } }): void => {
     const file = event.target.files?.[0]
@@ -39,12 +63,24 @@ export function FeedsView({ feeds, busy, report, notice, onImport, onExport, onA
     reader.readAsText(file)
   }
 
+  const commitRename = (): void => {
+    const target = renaming
+    if (target === undefined) return
+    const name = target.draft.trim()
+    if (name === '') return
+    setRenaming(undefined)
+    onRenameFolder(target.name, name)
+    // 重命名按钮始终在 DOM 里（草稿输入在它下方），所以这里能同步把焦点还给它；
+    // 若等 React 重渲染再 focus，jsdom/真机上都会有一帧读到旧节点。
+    renameButtons.current.get(target.name)?.focus()
+  }
+
   return (
     <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '12px 22px 24px', fontSize: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
         <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" onClick={onBack}>← 返回列表（Esc）</button>
         <strong style={{ fontSize: 15 }}>订阅管理</strong>
-        <span style={{ opacity: 0.6, fontSize: 12 }}>{feeds.length} 个源</span>
+        <span style={{ opacity: 0.6, fontSize: 12 }}>{feeds.length} 个源 · {folders.length} 个文件夹</span>
       </div>
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginBottom: 10 }}>
@@ -65,9 +101,105 @@ export function FeedsView({ feeds, busy, report, notice, onImport, onExport, onA
               onAdd(draft.trim())
               setDraft('')
             }
+            if (event.key === 'Escape') {
+              event.stopPropagation()
+              setDraft('')
+            }
           }}
           style={{ flex: '0 1 320px', fontSize: 13, padding: '4px 8px' }} />
       </div>
+
+      <section style={{ marginBottom: 16 }} aria-label="文件夹管理">
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+          <strong style={{ fontSize: 13 }}>文件夹</strong>
+          <span style={{ opacity: 0.6, fontSize: 12 }}>空文件夹也会保留</span>
+        </div>
+        <form data-rss-folder-create="" style={{ display: 'flex', gap: 6, marginBottom: 8 }}
+          onSubmit={(event) => {
+            event.preventDefault()
+            const name = folderDraft.trim()
+            if (name === '') return
+            onCreateFolder(name)
+            setFolderDraft('')
+          }}>
+          <input data-rss-folder-new="" value={folderDraft} disabled={busy}
+            placeholder="新建文件夹名称（1–80 个字符）"
+            onChange={(event) => setFolderDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') { event.stopPropagation(); setFolderDraft('') }
+            }}
+            style={{ flex: '0 1 260px', fontSize: 13, padding: '4px 8px' }} />
+          <button type="submit" className="dsh-rss-btn" disabled={busy || folderDraft.trim() === ''}>新建文件夹</button>
+        </form>
+
+        {folders.length === 0 && <div style={{ padding: '4px 0', opacity: 0.7, fontSize: 12 }}>还没有文件夹。</div>}
+        {folders.map((folder) => (
+          <div key={folder.name} data-rss-folder-manage={folder.name} style={{ padding: '6px 0', borderTop: '1px solid color-mix(in srgb, currentColor 8%, transparent)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <span style={{ display: 'block' }}>{folder.name}</span>
+                <span style={{ display: 'block', fontSize: 11, opacity: 0.6 }}>{folder.feedIds.length} 个订阅</span>
+              </span>
+              <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
+                data-rss-folder-rename={folder.name}
+                ref={(node) => { renameButtons.current.set(folder.name, node) }}
+                disabled={busy}
+                onClick={() => setRenaming({ name: folder.name, draft: folder.name })}>重命名</button>
+              <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
+                data-rss-folder-delete={folder.name}
+                ref={(node) => { deleteButtons.current.set(folder.name, node) }}
+                disabled={busy}
+                onClick={() => setConfirmingDelete(folder.name)}>删除</button>
+            </div>
+
+            {renaming?.name === folder.name && (
+              <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                <input data-rss-folder-rename-input={folder.name} value={renaming.draft} autoFocus
+                  onChange={(event) => setRenaming({ name: folder.name, draft: event.target.value })}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); commitRename() }
+                    if (event.key === 'Escape') {
+                      event.preventDefault(); event.stopPropagation(); setRenaming(undefined)
+                      renameButtons.current.get(folder.name)?.focus()
+                    }
+                  }}
+                  style={{ flex: '0 1 240px', fontSize: 13, padding: '4px 8px' }} />
+                <button type="button" className="dsh-rss-btn" data-rss-folder-rename-save={folder.name}
+                  disabled={busy || renaming.draft.trim() === ''} onClick={commitRename}>保存</button>
+                <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" data-rss-folder-rename-cancel={folder.name}
+                  onClick={() => {
+                    setRenaming(undefined)
+                    renameButtons.current.get(folder.name)?.focus()
+                  }}>取消</button>
+              </div>
+            )}
+
+            {confirmingDelete === folder.name && (
+              <div role="alertdialog" aria-label={'删除文件夹 ' + folder.name} data-rss-folder-confirm={folder.name}
+                onKeyDown={(event) => {
+                  // 确认条里的 Esc = 取消，并把焦点还给触发删除的按钮（与输入框的 Esc 同一约定）。
+                  if (event.key === 'Escape') {
+                    event.preventDefault(); event.stopPropagation(); setConfirmingDelete(undefined)
+                    deleteButtons.current.get(folder.name)?.focus()
+                  }
+                }}
+                style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, marginTop: 6, padding: '6px 8px', background: 'color-mix(in srgb, currentColor 6%, transparent)', borderRadius: 6 }}>
+                <span style={{ flex: '1 1 260px', fontSize: 12 }}>
+                  删除「{folder.name}」？成员会变为未分类；不会退订，也不会删除文章。
+                </span>
+                <button type="button" className="dsh-rss-btn" data-rss-folder-confirm-yes={folder.name}
+                  autoFocus disabled={busy}
+                  onClick={() => { setConfirmingDelete(undefined); onDeleteFolder(folder.name) }}>确认删除</button>
+                <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" data-rss-folder-confirm-no={folder.name}
+                  onClick={() => {
+                    setConfirmingDelete(undefined)
+                    deleteButtons.current.get(folder.name)?.focus()
+                  }}>取消</button>
+              </div>
+            )}
+          </div>
+        ))}
+      </section>
 
       {busy && <div style={{ opacity: 0.75, marginBottom: 8 }}>正在逐源抓取校验…（并发受限，源多时需要一会儿）</div>}
       {fileError !== undefined && <div style={{ color: '#c0392b', marginBottom: 8 }}>{fileError}</div>}
@@ -109,9 +241,18 @@ export function FeedsView({ feeds, busy, report, notice, onImport, onExport, onA
             <span style={{ flex: 1, minWidth: 0 }}>
               <span style={{ display: 'block' }}>{feed.title ?? feed.id}</span>
               <span style={{ display: 'block', fontSize: 11, opacity: 0.6, wordBreak: 'break-all' }}>
-                {feed.id}{feed.lastFailure !== undefined ? ' · 上次失败：' + feed.lastFailure : ''}
+                {feed.id}{feed.folder !== undefined ? ' · 文件夹：' + feed.folder : ' · 未分类'}
+                {feed.lastFailure !== undefined ? ' · 上次失败：' + feed.lastFailure : ''}
               </span>
             </span>
+            <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 4 }}>
+              移动到
+              <select data-rss-feed-folder={feed.id} value={feed.folder ?? ''} disabled={busy}
+                onChange={(event) => onMoveFeed(feed.id, event.target.value === '' ? undefined : event.target.value)}>
+                <option value="">未分类</option>
+                {folders.map((folder) => <option key={folder.name} value={folder.name}>{folder.name}</option>)}
+              </select>
+            </label>
             <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
               title="退订并删除该源的全部条目（不可撤销）"
               onClick={() => {

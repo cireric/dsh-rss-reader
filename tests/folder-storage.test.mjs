@@ -323,3 +323,20 @@ test('config.json 的 folders 形状不对时响亮失败（不把坏目录当�
     }
   } finally { dispose(ctx) }
 })
+
+test('视图记忆可保存文件夹选中；文件夹删除后回落虚拟视图', async () => {
+  const feedId = 'https://a.example/feed.xml'
+  const ctx = fresh('folder-prefs', { [feedId]: { url: feedId, folder: '技术' } })
+  try {
+    await ctx.store.saveViewPreferences({
+      navSelection: { kind: 'folder', folder: '技术' }, filter: 'unread', navVisible: false,
+    })
+    assert.deepEqual(ctx.store.viewPreferences(), {
+      navSelection: { kind: 'folder', folder: '技术' }, filter: 'unread', navVisible: false,
+    }, '文件夹选中项必须能持久化并读回')
+
+    await ctx.store.deleteFolder('技术')
+    assert.deepEqual(ctx.store.viewPreferences().navSelection, { kind: 'virtual' },
+      '目录里已不存在的文件夹不能让记忆继续指向它')
+  } finally { dispose(ctx) }
+})

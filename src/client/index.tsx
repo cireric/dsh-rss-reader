@@ -346,6 +346,14 @@ export function createReader(store: ReaderStore): () => ReactNode {
     const selectedFeed = navSelection.kind === 'feed'
       ? state.feeds.find((feed) => feed.id === navSelection.feedId)
       : undefined
+    const selectedFolder = navSelection.kind === 'folder'
+      ? state.folders.find((folder) => folder.name === navSelection.folder)
+      : undefined
+    // 搜索表单里的「订阅源」多选只列当前范围（文件夹）内的源：范围外勾选与文件夹取交集恒为空，
+    // 摆出来只会让用户以为筛选坏了。
+    const searchScopeFeeds = navSelection.kind === 'folder'
+      ? state.feeds.filter((feed) => feed.folder === navSelection.folder)
+      : state.feeds
     const activeArticle = state.view === 'article'
       ? state.items.find((entry) => entry.id === state.article?.itemId)
       : undefined
@@ -363,6 +371,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
         {state.navVisible && (
           <FeedNav
             feeds={state.feeds}
+            folders={state.folders}
             perFeedUnread={state.perFeedUnread}
             filter={state.filter}
             navSelection={state.navSelection}
@@ -371,6 +380,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
             showUnread={state.showUnread}
             onSelectFilter={(next) => store.setFilter(next)}
             onSelectFeed={(feedId) => store.selectNav({ kind: 'feed', feedId })}
+            onSelectFolder={(folder) => store.selectNav({ kind: 'folder', folder })}
             onToggleFolder={store.toggleFolder}
           />
         )}
@@ -378,7 +388,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
         <div className="dsh-rss-toolbar">
           <div className="dsh-rss-toolbar-title">
             <strong>{state.view === 'list'
-              ? selectedFeed?.title ?? filters.find((filter) => filter.key === state.filter)?.label
+              ? selectedFeed?.title ?? selectedFolder?.name ?? filters.find((filter) => filter.key === state.filter)?.label
               : 'RSS 阅读器'}</strong>
             {state.view === 'list' && (
               <div className="dsh-rss-meta dsh-rss-counts">
@@ -479,9 +489,14 @@ export function createReader(store: ReaderStore): () => ReactNode {
               <label><input name="starred" type="checkbox" defaultChecked={state.search?.starred} /> 仅星标</label>
               <label> 起始日期 <input name="from" type="date" defaultValue={state.search?.from} /></label>
               <label> 结束日期 <input name="to" type="date" defaultValue={state.search?.to} /></label>
-              {state.feeds.length > 1 && <fieldset>
+              {navSelection.kind === 'folder' && (
+                <small className="dsh-rss-meta" data-rss-search-folder={navSelection.folder}>
+                  搜索范围：文件夹「{navSelection.folder}」
+                </small>
+              )}
+              {searchScopeFeeds.length > 1 && <fieldset>
                 <legend>订阅源</legend>
-                {state.feeds.map((feed) => <label key={feed.id} style={{ display: 'block' }}>
+                {searchScopeFeeds.map((feed) => <label key={feed.id} style={{ display: 'block' }}>
                   <input name="feed" type="checkbox" value={feed.id} defaultChecked={state.search?.feedIds?.includes(feed.id)} /> {feed.title}
                 </label>)}
               </fieldset>}
@@ -513,6 +528,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
         {state.view === 'feeds' && (
           <FeedsView
             feeds={state.feeds}
+            folders={state.folders}
             busy={state.feedsBusy}
             report={state.importReport}
             notice={state.notice}
@@ -520,6 +536,10 @@ export function createReader(store: ReaderStore): () => ReactNode {
             onExport={() => { void store.exportOpml() }}
             onAdd={(url) => { void store.addFeed(url) }}
             onRemove={(url) => { void store.removeFeed(url) }}
+            onCreateFolder={(name) => { void store.createFolder(name) }}
+            onRenameFolder={(from, to) => { void store.renameFolder(from, to) }}
+            onDeleteFolder={(name) => { void store.deleteFolder(name) }}
+            onMoveFeed={(feedId, folder) => { void store.moveFeedToFolder(feedId, folder) }}
             onBack={() => store.toggleFeeds()}
           />
         )}
@@ -549,7 +569,17 @@ export function createReader(store: ReaderStore): () => ReactNode {
         }}>
           {!state.loading && items.length === 0 && (!state.search || !state.error) && (
             <div style={{ padding: 20, opacity: 0.7 }}>
-              {state.search ? '没有找到匹配的本地文章。' : state.filter === 'starred' ? '还没有星标条目。' : state.filter === 'unread' ? '没有未读条目。' : '还没有条目。可以在订阅管理中添加订阅源或导入 OPML。'}
+              {state.search
+                ? '没有找到匹配的本地文章。'
+                : navSelection.kind === 'folder'
+                  ? (selectedFolder?.feedIds.length === 0
+                    ? '这个文件夹还没有订阅源。可以在订阅管理里把订阅移进来。'
+                    : state.filter === 'starred'
+                      ? '这个文件夹里还没有星标条目。'
+                      : state.filter === 'unread'
+                        ? '这个文件夹里没有未读条目。'
+                        : '这个文件夹里还没有条目。')
+                  : state.filter === 'starred' ? '还没有星标条目。' : state.filter === 'unread' ? '没有未读条目。' : '还没有条目。可以在订阅管理中添加订阅源或导入 OPML。'}
             </div>
           )}
           {items.map((item) => {

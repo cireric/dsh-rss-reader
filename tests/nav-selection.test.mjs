@@ -44,7 +44,7 @@ function overviewOf(items) {
     if (entry.readAt === undefined) perFeedUnread[entry.feedId] += 1
   }
   return {
-    feeds, items,
+    feeds, items, folders: [],
     unread: items.filter((entry) => entry.readAt === undefined).length,
     perFeedUnread,
     refreshed: false,
@@ -391,6 +391,7 @@ test('分页：每一页都以宿主回包为准整体覆盖账目，绝不在�
       base: { ...overviewOf(first), nextCursor: 'C2' },
       C2: {
         feeds: [{ id: 'feedA', title: '源 A' }],
+        folders: [],
         items: second,
         // 宿主按**全量表**记账：本地只看得见 3 条，账目却是 5
         unread: 5,

@@ -146,6 +146,8 @@ export interface SearchPage {
 
 export interface Overview extends UnreadAccount {
   feeds: FeedView[]
+  /** 文件夹目录（含空目录）。左栏渲染空文件夹与「进入文件夹」都以它为准，不能只从 feeds 派生。 */
+  folders: FolderView[]
   /** 跨源合并、按时间倒序（river of news） */
   items: ItemView[]
   /**
@@ -214,7 +216,7 @@ export interface OpmlImportResult {
  * 是瞬时的指向，而这里记的是「上次看到哪儿」；恢复时按既有规则把它落到生效的那一行即可。
  */
 export interface ViewPreferences {
-  navSelection: { kind: 'virtual' } | { kind: 'feed'; feedId: string }
+  navSelection: { kind: 'virtual' } | { kind: 'feed'; feedId: string } | { kind: 'folder'; folder: string }
   filter: 'all' | 'unread' | 'starred'
   navVisible: boolean
 }
@@ -238,11 +240,13 @@ const FILTERS: ReadonlyArray<ViewPreferences['filter']> = ['all', 'unread', 'sta
  * @param isKnownFeed - 可选的「这个源还在订吗」判据。给了它，指向已退订源的选中态才回落成虚拟视图。
  *   宿主侧给（它手上有 feeds 表）；客户端恢复时也给（用刚下发的 feeds 表）。
  *   **不给则只验形状** —— 客户端在 feeds 表到手之前空手校验会把正常记忆全吃掉。
+ * @param isKnownFolder - 可选的「这个文件夹还在目录里吗」判据；语义与 isKnownFeed 相同。
  * @returns 一定是新对象：校验没过的原值绝不能被引到 state 或写回存储里。
  */
 export function sanitizeViewPreferences(
   raw: unknown,
   isKnownFeed?: (feedId: string) => boolean,
+  isKnownFolder?: (folder: string) => boolean,
 ): ViewPreferences {
   const source = typeof raw === 'object' && raw !== null && !Array.isArray(raw)
     ? (raw as Record<string, unknown>)
@@ -258,6 +262,10 @@ export function sanitizeViewPreferences(
       && typeof selection['feedId'] === 'string' && selection['feedId'] !== ''
       && (isKnownFeed === undefined || isKnownFeed(selection['feedId']))) {
       navSelection = { kind: 'feed', feedId: selection['feedId'] }
+    } else if (selection['kind'] === 'folder'
+      && typeof selection['folder'] === 'string' && selection['folder'] !== ''
+      && (isKnownFolder === undefined || isKnownFolder(selection['folder']))) {
+      navSelection = { kind: 'folder', folder: selection['folder'] }
     }
   }
 

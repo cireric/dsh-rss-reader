@@ -107,16 +107,46 @@ const accountOf = (target: ReaderStore): UnreadAccount => {
 }
 
 /**
+ * 文件夹浏览的**范围键**：游标必须绑在「文件夹名 + 当前成员」上。
+ *
+ * 为什么成员也要进键：文件夹只是一个名字，成员可以在两页之间被移动。只绑名字时，
+ * 旧游标会拿着「第一页的成员快照」去查「第二页的新成员」，结果既不连续也不可解释；
+ * 绑上排序后的成员列表后，成员一变旧游标自然失配，客户端必须从第一页重来。
+ */
+interface OverviewScope {
+  readonly folder: string
+  readonly feedIds: readonly string[]
+  readonly key: string
+}
+
+const folderScopeKey = (folder: string, feedIds: readonly string[]): string =>
+  'folder:' + createHash('sha256').update(JSON.stringify([folder, [...feedIds].sort()])).digest('base64url')
+
+/** 从 overview/refresh 的 payload 里解析文件夹范围；失败时返回带 code 的信封。 */
+function overviewScopeOf(ctx: EndpointCtx, payload: unknown): { scope?: OverviewScope; failure?: RpcResult<never> } {
+  const body = payload as { folder?: unknown } | null
+  const raw = body?.folder
+  if (raw === undefined || raw === null) return {}
+  if (typeof raw !== 'string' || raw === '') {
+    return { failure: fail('bad-request', 'overview 的 folder 必须是非空字符串') }
+  }
+  const found = ctx.store.listFolders().find((folder) => folder.name === raw)
+  if (found === undefined) return { failure: fail('not-found', '文件夹不存在：' + raw) }
+  return { scope: { folder: raw, feedIds: found.feedIds, key: folderScopeKey(raw, found.feedIds) } }
+}
+
+/**
  * 一页列表 + 续页游标。
  *
  * @param refreshed 本次调用是否真的发起了抓取（refresh 端点用；overview 恒 false）
  * @param cursor    续页边界（keyset）；缺省 = 第一页。游标由 overview 端点解码后传入，
  *                  这里**不再判形状** —— 认不出的游标在那一层就被响亮拒了（见 ENDPOINTS.overview）
+ * @param scope     文件夹范围；缺省 = 普通跨源契约（逐字不变）。有它时列表在 SQL 侧先按成员过滤再限页。
  */
-const buildOverview = (ctx: EndpointCtx, refreshed: boolean, cursor?: Cursor): Overview => {
+const buildOverview = (ctx: EndpointCtx, refreshed: boolean, cursor?: Cursor, scope?: OverviewScope): Overview => {
   const refreshedAtMs = ctx.lastRefreshCompletedAt()
   const target = ctx.ready()
-  if (!target) return { feeds: [], items: [], unread: 0, perFeedUnread: {}, refreshed }
+  if (!target) return { feeds: [], folders: [], items: [], unread: 0, perFeedUnread: {}, refreshed }
 
   const feeds = target.listFeeds().map(([feedId, record]) => ({
     id: feedId,
@@ -125,6 +155,8 @@ const buildOverview = (ctx: EndpointCtx, refreshed: boolean, cursor?: Cursor): O
     lastFetchedAt: record.lastFetchedAt,
     lastFailure: record.lastFailure,
   }))
+  // 目录必须每次随 overview 下发：左栏要显示空文件夹，而 feeds 里没有它们的位置。
+  const folders = target.listFolders()
 
   // 「源 id → 标题」以 feeds 表为键域：只收「所属源还在」的条目，与原先由 listFeeds 驱动的
   // 语义保持一致（退订时条目本该连删除掉，见 removeFeed；这里挡的是残留/手工改库的情形）。
@@ -160,7 +192,7 @@ const buildOverview = (ctx: EndpointCtx, refreshed: boolean, cursor?: Cursor): O
   // 存储侧是否已给不出更多行（请求 window + 1 行却只拿到 ≤ window 行）
   let exhausted = false
   while (true) {
-    rows = target.listRecent(window + 1, cursor)
+    rows = target.listRecent(window + 1, cursor, scope?.feedIds)
     items = []
     lastDelivered = -1
     for (let index = 0; index < rows.length; index += 1) {
@@ -193,11 +225,13 @@ const buildOverview = (ctx: EndpointCtx, refreshed: boolean, cursor?: Cursor): O
   // 要么同一批里还有（lastDelivered 不是最后一个下标），要么存储侧还没给完（!exhausted）。
   // 两者都不成立 ⇒ 到底，nextCursor 缺省 —— 客户端据此停止翻页（Overview 契约）。
   const nextCursor = lastDelivered >= 0 && (lastDelivered + 1 < rows.length || !exhausted)
-    ? encodeCursor({ recency: recencyOf(items[items.length - 1]), id: items[items.length - 1].id })
+    ? (scope === undefined ? '' : scope.key + ':')
+      + encodeCursor({ recency: recencyOf(items[items.length - 1]), id: items[items.length - 1].id })
     : undefined
 
   return {
     feeds,
+    folders,
     items,
     ...(nextCursor === undefined ? {} : { nextCursor }),
     // 总数由每源账目**求和派生**，不再单独数一遍：两处各算一次时，截断/漂移截面下迟早对不上，
@@ -254,21 +288,38 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       // 续页游标**必须解码成功**才继续（Overview 的契约）。认不出时**响亮拒绝**：
       // 「解不出就从第一页开始」会让翻页永远翻不完 —— 每页都回同一批条目，界面无限追加重复行，
       // 而用户看到的是一份「永远滚不到底」的列表，不是一句报错。
+      const resolved = overviewScopeOf(ctx, payload)
+      if (resolved.failure !== undefined) return resolved.failure
+      const scope = resolved.scope
       const raw = (payload as { cursor?: unknown } | null)?.cursor
-      if (raw === undefined || raw === null) return ok(buildOverview(ctx, false))
+      if (raw === undefined || raw === null) return ok(buildOverview(ctx, false, undefined, scope))
       if (typeof raw !== 'string') return fail('bad-request', 'overview 的 cursor 必须是字符串')
-      const cursor = decodeCursor(raw)
+      let cursor: Cursor | undefined
+      if (scope === undefined) {
+        cursor = decodeCursor(raw)
+      } else {
+        // 有范围游标 = "<scopeKey>:<recency>|<id>"。前缀不符意味着文件夹成员变了、或调用方
+        // 拿别的范围/无范围游标来续页 —— 两种都必须响亮失败，绝不能静默从头开始。
+        const prefix = scope.key + ':'
+        if (!raw.startsWith(prefix)) {
+          return fail('bad-request', '分页游标与当前文件夹范围不匹配，请重新加载')
+        }
+        cursor = decodeCursor(raw.slice(prefix.length))
+      }
       if (cursor === undefined) {
         return fail('bad-request', '未知的续页游标（格式应为 "<recency>|<id>"）：' + raw)
       }
-      return ok(buildOverview(ctx, false, cursor))
+      return ok(buildOverview(ctx, false, cursor, scope))
     },
   },
 
   refresh: {
-    to: async (_payload, ctx) => {
+    to: async (payload, ctx) => {
+      // 在文件夹里点刷新时必须留在同一范围：否则列表会突然跳回跨源首页（用户会以为选中的文件夹丢了）。
+      const resolved = overviewScopeOf(ctx, payload)
+      if (resolved.failure !== undefined) return resolved.failure
       const refreshed = await ctx.refreshNow()
-      return ok(buildOverview(ctx, refreshed))
+      return ok(buildOverview(ctx, refreshed, undefined, resolved.scope))
     },
   },
 

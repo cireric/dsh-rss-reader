@@ -69,6 +69,18 @@ test('sanitizeViewPreferences：认不出的形状一律回落默认，绝不编
   assert.deepEqual(partial, { navSelection: { kind: 'feed', feedId: 'A' }, filter: 'all', navVisible: false })
 })
 
+test('sanitizeViewPreferences：文件夹选中按目录判据恢复，未知文件夹回落虚拟视图', () => {
+  const knownFolder = (folder) => folder === '技术'
+  assert.deepEqual(
+    sanitizeViewPreferences({ navSelection: { kind: 'folder', folder: '技术' } }, undefined, knownFolder).navSelection,
+    { kind: 'folder', folder: '技术' },
+  )
+  assert.deepEqual(
+    sanitizeViewPreferences({ navSelection: { kind: 'folder', folder: 'gone' } }, undefined, knownFolder).navSelection,
+    { kind: 'virtual' },
+  )
+})
+
 test('sanitizeViewPreferences：给了「源是否还在订」的判据时，未知 feedId 回落虚拟视图', () => {
   const known = (feedId) => feedId === 'A'
   assert.deepEqual(
@@ -205,6 +217,17 @@ function memoryStore() {
     listItems: (feedId) => [...items.entries()].filter(([, record]) => record.feedId === feedId),
     allItems: () => [...items.entries()],
     listFeeds: () => [...feeds.entries()],
+    // 文件夹目录（ReaderStore 契约，M2 03）：测试桩按订阅的 folder 派生；这些用例不涉及空目录。
+    listFolders: () => {
+      const folders = []
+      for (const [id, record] of feeds.entries()) {
+        if (record.folder === undefined || record.folder === '') continue
+        let folder = folders.find((entry) => entry.name === record.folder)
+        if (folder === undefined) { folder = { name: record.folder, feedIds: [] }; folders.push(folder) }
+        folder.feedIds.push(id)
+      }
+      return folders
+    },
     /**
      * 与自持实现同形（Task 5 的三条 SQL 取数方法）。
      *
@@ -324,7 +347,7 @@ function overviewOf(items) {
   const perFeedUnread = {}
   for (const feed of feeds) perFeedUnread[feed.id] = 0
   for (const entry of items) if (entry.readAt === undefined) perFeedUnread[entry.feedId] += 1
-  return { feeds, items, unread: items.filter((entry) => entry.readAt === undefined).length, perFeedUnread, refreshed: false }
+  return { feeds, items, folders: [], unread: items.filter((entry) => entry.readAt === undefined).length, perFeedUnread, refreshed: false }
 }
 
 /**

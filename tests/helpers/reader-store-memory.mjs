@@ -98,6 +98,17 @@ export function memoryStore() {
       return entries
     },
     listFeeds: () => [...feeds.entries()],
+    // 文件夹目录（ReaderStore 契约，M2 03）：测试桩按订阅的 folder 派生；这些用例不涉及空目录。
+    listFolders: () => {
+      const folders = []
+      for (const [id, record] of feeds.entries()) {
+        if (record.folder === undefined || record.folder === '') continue
+        let folder = folders.find((entry) => entry.name === record.folder)
+        if (folder === undefined) { folder = { name: record.folder, feedIds: [] }; folders.push(folder) }
+        folder.feedIds.push(id)
+      }
+      return folders
+    },
     /**
      * 与自持实现同形（Task 5 的三条 SQL 取数方法）。
      *

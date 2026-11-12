@@ -172,7 +172,7 @@ function overviewStub(items, feeds) {
     if (entry.readAt === undefined && entry.feedId in perFeedUnread) perFeedUnread[entry.feedId] += 1
   }
   return {
-    feeds: table, items,
+    feeds: table, items, folders: [],
     unread: items.filter((entry) => entry.readAt === undefined).length,
     perFeedUnread,
     refreshed: false,

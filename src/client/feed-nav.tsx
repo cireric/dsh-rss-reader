@@ -20,7 +20,7 @@
  */
 import type { ReactNode } from 'react'
 import { navCursorKey, navRowsOf, VIRTUAL_VIEWS, type Filter, type NavCursor } from './store.js'
-import type { FeedView } from '../shared.js'
+import type { FeedView, FolderView } from '../shared.js'
 
 /**
  * 左栏宽度（px）。
@@ -30,22 +30,26 @@ import type { FeedView } from '../shared.js'
  */
 export const LEFT_NAV_WIDTH = 240
 
-export function FeedNav({ feeds, perFeedUnread, filter, navSelection, navCursor, foldedFolders, showUnread, onSelectFilter, onSelectFeed, onToggleFolder }: {
+export function FeedNav({ feeds, folders, perFeedUnread, filter, navSelection, navCursor, foldedFolders, showUnread, onSelectFilter, onSelectFeed, onSelectFolder, onToggleFolder }: {
   feeds: FeedView[]
+  /** 文件夹目录（含空目录）；只从 feeds 派生会让空文件夹在左栏消失。 */
+  folders: FolderView[]
   perFeedUnread: Record<string, number>
   filter: Filter
-  navSelection: { kind: 'virtual' } | { kind: 'feed'; feedId: string }
+  navSelection: { kind: 'virtual' } | { kind: 'feed'; feedId: string } | { kind: 'folder'; folder: string }
   /** 键盘光标（左栏高亮所在行）。与 navSelection 是两件事，见 store.ts 的 NavCursor。 */
   navCursor: NavCursor
   foldedFolders: ReadonlySet<string>
   showUnread: boolean
   onSelectFilter: (filter: Filter) => void
   onSelectFeed: (feedId: string) => void
+  onSelectFolder: (folder: string) => void
   onToggleFolder: (folder: string) => void
 }): ReactNode {
   // 生效态有两条**正交**轴：源（navSelection）与过滤（filter）各自独立生效，两者相乘（见 store.ts 的
   // NavSelection 注释）。所以「选了源」并不意味着「过滤失效」—— 两者要各自显示自己的生效状态。
   const selectedFeedId = navSelection.kind === 'feed' ? navSelection.feedId : undefined
+  const selectedFolder = navSelection.kind === 'folder' ? navSelection.folder : undefined
   // 光标态与生效态各算各的：光标可以停在源那一行而生效的仍是虚拟视图（还没按 shift+o）
   const cursorFeedId = navCursor.kind === 'feed' ? navCursor.feedId : undefined
   const cursorFilter = navCursor.kind === 'filter' ? navCursor.filter : undefined
@@ -92,24 +96,43 @@ export function FeedNav({ feeds, perFeedUnread, filter, navSelection, navCursor,
 
       <div style={{ flex: '0 0 1px', background: 'var(--rss-line)', margin: '6px 8px' }} />
 
-      {navRowsOf(feeds, foldedFolders).slice(VIRTUAL_VIEWS.length).map((row) => {
+      {navRowsOf(feeds, foldedFolders, folders.map((folder) => folder.name)).slice(VIRTUAL_VIEWS.length).map((row) => {
         if (row.kind === 'folder') {
           const total = unreadByFolder.get(row.folder) ?? 0
           const expanded = !foldedFolders.has(row.folder)
+          const folderSelected = selectedFolder === row.folder
           return (
-            <button key={navCursorKey(row)} type="button" className="dsh-rss-btn dsh-rss-btn--ghost" aria-expanded={expanded}
-              {...{ 'data-rss-nav-row': navCursorKey(row) }}
-              {...(showUnread ? { 'data-rss-nav-badge': String(total) } : {})}
-              {...(navCursor.kind === 'folder' && navCursor.folder === row.folder ? { 'data-rss-nav-cursor': '' } : {})}
-              onClick={() => onToggleFolder(row.folder)}
-              onKeyDown={(event) => {
-                if (event.key === ' ') { event.preventDefault(); onToggleFolder(row.folder) }
-              }}
-              style={{ ...ROW_STYLE, textAlign: 'start' }}>
-              <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
-              <span title={row.folder} style={LABEL_STYLE}>{row.folder}</span>
-              {showUnread && <span style={BADGE_STYLE}>{total > 99 ? '99+' : total}</span>}
-            </button>
+            // 展开/折叠与「进入文件夹」是两个独立动作，各有一个可聚焦控件：
+            //   · data-rss-nav-row 的按钮 = 01 的展开/折叠（Shift+O 与鼠标点它都走这条）；
+            //   · data-rss-folder-open 的按钮 = 进入文件夹（Tab 可达、Enter 可开）。
+            // 共用同一个 row 键会让两个动作在 DOM 层分不开（03 的验收要求）。
+            <div key={navCursorKey(row)} style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+              <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" aria-expanded={expanded}
+                aria-label={(expanded ? '折叠文件夹 ' : '展开文件夹 ') + row.folder}
+                {...{ 'data-rss-nav-row': navCursorKey(row) }}
+                {...(showUnread ? { 'data-rss-nav-badge': String(total) } : {})}
+                {...(folderSelected ? { 'data-rss-nav-selected': '' } : {})}
+                {...(navCursor.kind === 'folder' && navCursor.folder === row.folder ? { 'data-rss-nav-cursor': '' } : {})}
+                onClick={() => onToggleFolder(row.folder)}
+                onKeyDown={(event) => {
+                  if (event.key === ' ') { event.preventDefault(); event.stopPropagation(); onToggleFolder(row.folder) }
+                }}
+                style={{ ...ROW_STYLE, flex: 1, minWidth: 0, textAlign: 'start' }}>
+                <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
+                <span title={row.folder} style={LABEL_STYLE}>{row.folder}</span>
+                {showUnread && <span style={BADGE_STYLE}>{total > 99 ? '99+' : total}</span>}
+              </button>
+              <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
+                data-rss-folder-open={row.folder}
+                aria-label={'打开文件夹 ' + row.folder}
+                title={'打开文件夹 ' + row.folder}
+                onClick={(event) => { event.stopPropagation(); onSelectFolder(row.folder) }}
+                onKeyDown={(event) => {
+                  // 空格在列表页被全局翻页键接管；这里必须自己拦下并完成「打开」。
+                  if (event.key === ' ') { event.preventDefault(); event.stopPropagation(); onSelectFolder(row.folder) }
+                }}
+                style={{ flex: '0 0 auto', paddingInline: 6 }}>↗</button>
+            </div>
           )
         }
         if (row.kind !== 'feed') return null

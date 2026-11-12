@@ -369,7 +369,7 @@ const MUTATIONS = [
   // 变成与 filter 并存的第二套过滤状态（本任务实现时第一遍就漏了后者，靠测试才抓到）。
   { id: 'client-再选同源不取消', file: 'lib/client.js',
     judges: ['nav-selection.test.mjs', 'scroll-dom.test.mjs'],
-    from: 'if (next.kind === "feed" && current.kind === "feed" && current.feedId === next.feedId || next.kind === "virtual") set({',
+    from: 'if (sameNavSelection(current, next) || next.kind === "virtual") set({',
     to: 'if (next.kind === "virtual") set({' },
   { id: 'client-virtual 不归位 filter', file: 'lib/client.js',
     judges: ['nav-selection.test.mjs'],
@@ -553,12 +553,12 @@ const MUTATIONS = [
   // ⑥ 宿主写侧不归一再落库 ⇒ 认不出的原值进媒介（存储里攒垃圾，只被读侧遮住）
   { id: 'persist-宿主写侧不归一', file: 'lib/store.js',
     judges: ['nav-persistence.test.mjs'],
-    from: 'const safe = sanitizeViewPreferences(preferences, (feedId) => feeds.get(feedId) !== undefined);',
+    from: 'const safe = sanitizeViewPreferences(preferences, (feedId) => feeds.get(feedId) !== undefined, isKnownFolder);',
     to: 'const safe = preferences;' },
   // ⑦ 宿主读侧不校验 ⇒ 媒介里的坏值被透出去（回落承诺的第二道闸失效）
   { id: 'persist-宿主读侧不校验', file: 'lib/store.js',
     judges: ['nav-persistence.test.mjs', 'overview-scale.test.mjs'],
-    from: 'viewPreferences: () => sanitizeViewPreferences(global.get(), (feedId) => feeds.get(feedId) !== undefined),',
+    from: 'viewPreferences: () => sanitizeViewPreferences(global.get(), (feedId) => feeds.get(feedId) !== undefined, isKnownFolder),',
     to: 'viewPreferences: () => global.get(),' },
   // ⑧⑨⑩ 三个关键动作各自写一次盘：**三个调用点各一条**，否则任一条漏写都会被另一条的
   // 整份写入盖过去（persistView 落的是整个 state）。判据在「记住上次选中的导航项…」里
@@ -570,8 +570,8 @@ const MUTATIONS = [
     to: 'relocateSelection();\n\t\t\t\tresetSearchPage();\n\t\t\t};\n\t\t\tconst applyOverview' },
   { id: 'persist-selectNav 不写盘', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs'],
-    from: 'relocateSelection();\n\t\t\t\tpersistView();\n\t\t\t\tresetSearchPage();\n\t\t\t};\n\t\t\t/**',
-    to: 'relocateSelection();\n\t\t\t\tresetSearchPage();\n\t\t\t};\n\t\t\t/**' },
+    from: 'relocateSelection();\n\t\t\t\tpersistView();\n\t\t\t\tresetSearchPage();\n\t\t\t\tif (!state.search && (current.kind === "folder" || next.kind === "folder")) load("overview");\n\t\t\t};',
+    to: 'relocateSelection();\n\t\t\t\tresetSearchPage();\n\t\t\t\tif (!state.search && (current.kind === "folder" || next.kind === "folder")) load("overview");\n\t\t\t};' },
   { id: 'persist-toggleNav 不写盘', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs'],
     from: 'set({ navVisible: !state.navVisible });\n\t\t\t\tpersistView();',
@@ -781,7 +781,7 @@ const MUTATIONS = [
     judges: ['nav-persistence.test.mjs', 'store-sqlite.test.mjs'],
     // src/store.ts:41-45 的承诺是「返回的保证是可信形状」；不校验就把媒介里的垃圾透给调用方去兜。
     // 判据：tests/store-sqlite.test.mjs 的「坏值逐字段回落」。
-    from: 'viewPreferences: () => sanitizeViewPreferences(readConfigFile(configPath).viewPreferences, isKnownFeed),',
+    from: 'viewPreferences: () => {\n            const current = readConfigFile(configPath);\n            const knownFeeds = new Set(Object.keys(current.feeds));\n            const knownFolders = new Set(current.folders ?? []);\n            return sanitizeViewPreferences(current.viewPreferences, (feedId) => knownFeeds.has(feedId), (folder) => knownFolders.has(folder));\n        },',
     to: 'viewPreferences: () => readConfigFile(configPath).viewPreferences,' },
   { id: 'store-写偏好覆盖掉订阅映射', file: 'lib/store-sqlite.js',
     judges: ['nav-persistence.test.mjs', 'store-sqlite.test.mjs'],
@@ -1038,7 +1038,7 @@ const MUTATIONS = [
     judges: ['client-bundle.test.mjs', 'nav-selection.test.mjs'],
     // 回了 undefined ⇒ 宿主当成第一页，列表原地重复同一批 300 条（用户看到重复而不是报错）。
     // 判据：tests/nav-selection.test.mjs 的「续页是追加…」里的 pageCalls 断言。
-    from: 'const overview = await callRpc("overview", { cursor });',
+    from: 'const overview = await callRpc("overview", {\n\t\t\t\t\t\tcursor,\n\t\t\t\t\t\t...state.navSelection.kind === "folder" ? { folder: state.navSelection.folder } : {}\n\t\t\t\t\t});',
     to: 'const overview = await callRpc("overview", {});' },
   { id: 'paging-在途不挡重复请求', file: 'lib/client.js',
     judges: ['nav-selection.test.mjs'],
@@ -1247,6 +1247,44 @@ const MUTATIONS = [
   // ⚠️ 刻意没有「缺 folder 键当未分类」这条变异：它实测是**等价变异** —— 删掉缺键守卫后，
   // 紧接着的「folder 必须是字符串或 null」同样拒绝 undefined（只是错误文案不同），
   // 没有任何输入会改变可观察行为。等价变异不入门槛（AGENTS.md；判定方法同 pitfalls §1 的正文容器）。
+  // ── M2 03：文件夹浏览 / 管理 / 搜索（2026-11）──────────────────────────
+  // 这一族的失效大半是「静默少几条 / 静默跳回跨源 / 静默套错范围」，不会报错。
+  // 每条 from 均照编译产物逐字抄，且用测试钉住可观察结果。
+  { id: 'folder-浏览忽略来源范围', file: 'lib/store-sqlite.js',
+    judges: ['folder-browse.test.mjs'],
+    from: 'const scoped = feedIds === undefined\n                ? undefined\n                : JSON.stringify([...new Set(feedIds)]);',
+    to: 'const scoped = undefined;' },
+  { id: 'folder-空范围回落全表', file: 'lib/endpoints.js',
+    judges: ['folder-browse.test.mjs'],
+    from: 'rows = target.listRecent(window + 1, cursor, scope?.feedIds);',
+    to: 'rows = target.listRecent(window + 1, cursor, scope?.feedIds.length ? scope.feedIds : undefined);' },
+  { id: 'folder-游标不校验范围', file: 'lib/endpoints.js',
+    judges: ['folder-browse.test.mjs'],
+    from: 'if (!raw.startsWith(prefix)) {', to: 'if (false) {' },
+  { id: 'folder-左栏不显示空目录', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    from: 'for (const name of folderNames) if (!folders.has(name)) folders.set(name, []);',
+    to: 'for (const name of []) if (!folders.has(name)) folders.set(name, []);' },
+  { id: 'folder-进入按钮变成折叠', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    // 第一个 onSelectFolder 是「进入文件夹」按钮的点击处理器；改成折叠后点击文件夹名不会切范围。
+    from: 'onSelectFolder(row.folder);', to: 'onToggleFolder(row.folder);' },
+  { id: 'folder-改名不迁移选中', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    from: 'const selected = state.navSelection.kind === "folder" && state.navSelection.folder === from;',
+    to: 'const selected = false;' },
+  { id: 'folder-删除当前不回落', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    from: 'if (selected) {\n\t\t\t\t\t\tset({\n\t\t\t\t\t\t\tnavSelection: { kind: "virtual" },',
+    to: 'if (false) {\n\t\t\t\t\t\tset({\n\t\t\t\t\t\t\tnavSelection: { kind: "virtual" },' },
+  { id: 'folder-搜索不按成员收窄', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    from: 'const scopedFeedIds = folderIds === void 0 ? search.feedIds : search.feedIds === void 0 ? folderIds : search.feedIds.filter((feedId) => folderIds.includes(feedId));',
+    to: 'const scopedFeedIds = search.feedIds;' },
+  { id: 'folder-删除确认不说明未分类', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    from: '"」？成员会变为未分类；不会退订，也不会删除文章。"',
+    to: '"」？确认删除。"' },
 ]
 
 // ── 函数化 + 并行化（2026-10-15 变异测试提速，杠杆 B；spec docs/mutation-test-speedup-plan.md）──

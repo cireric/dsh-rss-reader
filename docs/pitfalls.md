@@ -318,6 +318,22 @@ assert.equal(navPresent(), false, '折叠必须把左栏整个从 DOM 移除')
 一个讲「这条守卫根本没跑过」，一个讲「跑了，但被别的守卫代劳了」，都会得到一份
 看着覆盖、实际空转的套件。
 
+### 2.11 真实 React + jsdom 的受控输入：React 要在 jsdom 全局就位后再 require
+
+**病象**（实测，2026-11 M2 03 的 DOM 管理用例）：给受控 input 派发 input 事件时，
+React 抛 TypeError: activeElement.attachEvent is not a function，测试直接崩掉；换成 change
+事件则 React 的 onChange 根本不执行（输入框的受控值不更新）。
+
+**根因**：React DOM 在模块加载那一刻用 canUseDOM（全局有 window/document）决定
+是否走 IE9 的 propertychange polyfill。原来的夹具先在模块顶层 require(react)、之后才建
+JSDOM 并装全局，于是 React 记成「不支持 input 事件」；等到测试里派发 input 时，
+polyfill 去碰 jsdom 没有的 attachEvent。
+
+**修法**：tests/scroll-dom.test.mjs 的 loadStack() 只解析路径，不 require React；
+mountReader() 先建好 JSDOM、把 window/document 等装进全局，再 require React/ReactDOM。
+受控输入用原生 value setter 写值，再派发 input（文本）或 change（select）。判据是
+「文件夹管理：创建、改名、移动、删除二次确认与焦点恢复」在真 DOM 下通过。
+
 ---
 
 ## 三、客户端 / React

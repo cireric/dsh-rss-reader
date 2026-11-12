@@ -114,8 +114,12 @@ export interface ReaderStore {
    * ⚠️ 谓词**不许**写成行值比较 `(recency, id) < (?, ?)`：它按字典序展开成
    * `recency < r0 OR (recency = r0 AND id < id0)`，而同 recency 内我们要的是 `id > id0`
    * —— 方向反了（spec §10.3 `实测`：6 行每页 2 条时返回 `a d e f`，正确是 `c d e f`）。
+   *
+   * `feedIds`：可选的来源范围（文件夹浏览用）。**筛选必须发生在取数/分页之前**，
+   * 否则旧跨源首页之外的成员条目会被截断窗口挡掉（M2 03 的硬要求）。
+   * 传空数组 = 空结果，绝不回落成「无范围」。
    */
-  listRecent(limit: number, cursor?: Cursor): Array<[string, ItemRecord]>
+  listRecent(limit: number, cursor?: Cursor, feedIds?: readonly string[]): Array<[string, ItemRecord]>
   /**
    * 显式清理的候选行（Task 5；原先由调用方 allItems() 全表物化后再筛）。
    *
@@ -180,6 +184,8 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
     feeds: Object.fromEntries(feeds.entries()),
     folders: [...explicitFolders],
   })
+  const isKnownFolder = (folder: string): boolean => explicitFolders.has(folder)
+    || [...feeds.entries()].some(([, record]) => record.folder === folder)
   const applyFolderChange = async (change: (file: ReaderConfigFile) => ReaderConfigFile): Promise<FolderView[]> => {
     const before = Object.fromEntries(feeds.entries())
     const next = change(folderFile())
@@ -258,9 +264,13 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
      * 旧路径同样行为不变：全表按 recency 降序 + id 升序排完取前缀。
      * limit ≤ 0 短路成空列表（`slice(0, -1)` 会返回到倒数第二项，那是静默的错答案）。
      */
-    listRecent: (limit, cursor) => {
+    listRecent: (limit, cursor, feedIds) => {
       if (limit <= 0) return []
+      // 空数组 = 空结果：绝不能把「空范围」当成「没有范围」（那会让空文件夹查出全库）。
+      const allowed = feedIds === undefined ? undefined : new Set(feedIds)
+      if (allowed !== undefined && allowed.size === 0) return []
       const rows = [...items.entries()].filter(([itemId, record]) => {
+        if (allowed !== undefined && !allowed.has(record.feedId)) return false
         if (cursor === undefined) return true
         const recency = recencyOf(record)
         // 与自持实现的谓词逐字同义（recency 降序、同 recency 内 id 升序的「之后」）
@@ -307,11 +317,19 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
       return { folders, detached }
     },
     moveFeedToFolder: async (feedId, folder) => applyFolderChange((file) => moveFeedToFolder(file, feedId, folder).file),
-    viewPreferences: () => sanitizeViewPreferences(global.get(), (feedId) => feeds.get(feedId) !== undefined),
+    viewPreferences: () => sanitizeViewPreferences(
+      global.get(),
+      (feedId) => feeds.get(feedId) !== undefined,
+      isKnownFolder,
+    ),
     saveViewPreferences: async (preferences) => {
       // 写侧也过一遍校验：先把认不出的形状归一，再落库。否则坏值会被原样写进媒介，
       // 之后每次打开都要靠读侧再兜一次 —— 存储里攒着垃圾，只是被读侧遮住了。
-      const safe = sanitizeViewPreferences(preferences, (feedId) => feeds.get(feedId) !== undefined)
+      const safe = sanitizeViewPreferences(
+        preferences,
+        (feedId) => feeds.get(feedId) !== undefined,
+        isKnownFolder,
+      )
       await global.set(safe)
       return safe
     },

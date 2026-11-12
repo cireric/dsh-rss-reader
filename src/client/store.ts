@@ -6,7 +6,7 @@
  * 列表、正文、订阅管理与键盘接线，任一改动都要动同一个文件。
  */
 import { useEffect, useState } from 'react'
-import { ROUTE_PATH, recencyOf, sanitizeViewPreferences, type ArticlePayload, type CleanupResult, type Endpoint, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult, type SearchPage, type SearchQuery, type UnreadAccount, type ViewPreferences } from '../shared.js'
+import { ROUTE_PATH, recencyOf, sanitizeViewPreferences, type ArticlePayload, type CleanupResult, type Endpoint, type FeedView, type FolderView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult, type SearchPage, type SearchQuery, type UnreadAccount, type ViewPreferences } from '../shared.js'
 import { createAccountMirror } from './account-mirror.js'
 
 export type Filter = 'all' | 'unread' | 'starred'
@@ -17,7 +17,10 @@ export type Filter = 'all' | 'unread' | 'starred'
  * 与 Filter 是**两条正交的轴**且叠加生效（源 × 过滤），不是二选一 —— 所以这里不引入
  * 第四个「当前视图」概念：view 看面板、layout 看密度、filter 看全局过滤、navSelection 看导航选中。
  */
-export type NavSelection = { kind: 'virtual' } | { kind: 'feed'; feedId: string }
+export type NavSelection =
+  | { kind: 'virtual' }
+  | { kind: 'feed'; feedId: string }
+  | { kind: 'folder'; folder: string }
 
 /**
  * 导航**光标**：键盘在左栏那一列里现在停在哪一行。
@@ -52,9 +55,15 @@ export const VIRTUAL_VIEWS: ReadonlyArray<{ key: Filter; label: string }> = [
  * 同序 —— 换个顺序不影响单步移动，但会让「按一下 shift+n 跳到不相邻的那一行」。
  */
 export function navRowsOf(
-  feeds: ReadonlyArray<Pick<FeedView, 'id' | 'folder'>>, foldedFolders: ReadonlySet<string>,
+  feeds: ReadonlyArray<Pick<FeedView, 'id' | 'folder'>>,
+  foldedFolders: ReadonlySet<string>,
+  folderNames: readonly string[] = [],
 ): NavCursor[] {
+  // 显式目录先入表：空文件夹只能靠它出现（feeds 里没有成员可派生）。
   const folders = new Map<string, string[]>()
+  for (const name of folderNames) {
+    if (!folders.has(name)) folders.set(name, [])
+  }
   const unfiled: NavCursor[] = []
   for (const { id, folder } of feeds) {
     if (!folder) {
@@ -78,6 +87,25 @@ export function navRowsOf(
 export function navCursorKey(cursor: NavCursor): string {
   if (cursor.kind === 'folder') return 'folder:' + cursor.folder
   return cursor.kind === 'filter' ? 'filter:' + cursor.filter : 'feed:' + cursor.feedId
+}
+
+/** 「再选同一个 = 取消」的判据；folder 与 feed 各按自己的键比较。 */
+function sameNavSelection(a: NavSelection, b: NavSelection): boolean {
+  if (a.kind === 'virtual' || b.kind === 'virtual') return a.kind === b.kind
+  if (a.kind === 'feed' && b.kind === 'feed') return a.feedId === b.feedId
+  if (a.kind === 'folder' && b.kind === 'folder') return a.folder === b.folder
+  return false
+}
+
+/** 选中的源/文件夹是否还在刚下发的目录里；virtual 永远在。 */
+function selectionExists(
+  selection: NavSelection,
+  feeds: ReadonlyArray<Pick<FeedView, 'id'>>,
+  folders: ReadonlyArray<Pick<FolderView, 'name'>>,
+): boolean {
+  if (selection.kind === 'virtual') return true
+  if (selection.kind === 'feed') return feeds.some((feed) => feed.id === selection.feedId)
+  return folders.some((folder) => folder.name === selection.folder)
 }
 
 /**
@@ -106,6 +134,8 @@ export interface ArticleState {
 export interface ReaderState {
   items: ItemView[]
   feeds: FeedView[]
+  /** 文件夹目录（含空目录）。左栏行序、管理面板与文件夹范围都以它为准。 */
+  folders: FolderView[]
   unread: number
   filter: Filter
   selectedId: string | undefined
@@ -203,7 +233,7 @@ export function relativeTime(iso: string | undefined): string {
  */
 export function createReaderStore() {
   let state: ReaderState = {
-    items: [], feeds: [], unread: 0, filter: 'all',
+    items: [], feeds: [], folders: [], unread: 0, filter: 'all',
     selectedId: undefined, loading: true, error: undefined, undo: undefined,
     view: 'list', layout: 'list', markAllRange: 'all', showUnread: true, article: undefined, notice: undefined,
     importReport: undefined, feedsBusy: false,
@@ -253,10 +283,23 @@ export function createReaderStore() {
     const version = ++listVersion
     const firstPage = cursor === undefined
     set({ loading: firstPage, loadingMore: !firstPage, error: undefined })
-    const feedId = state.navSelection.kind === 'feed' ? state.navSelection.feedId : undefined
+    const nav = state.navSelection
+    const feedId = nav.kind === 'feed' ? nav.feedId : undefined
+    // 文件夹范围 = 当前成员 id；若搜索表单另选了订阅源，取交集（两者是不可分割的「范围」条件）。
+    const folderIds = nav.kind === 'folder'
+      ? state.feeds.filter((feed) => feed.folder === nav.folder).map((feed) => feed.id)
+      : undefined
+    const scopedFeedIds = folderIds === undefined
+      ? search.feedIds
+      : search.feedIds === undefined
+        ? folderIds
+        : search.feedIds.filter((feedId) => folderIds.includes(feedId))
     const read = state.filter === 'unread' ? 'unread' : search.read
     const starred = state.filter === 'starred' || search.starred
-    const emptyScope = state.filter === 'unread' && search.read === 'read'
+    // 空文件夹（或与源筛选交集为空）不发请求：worker 对空 feeds 本来也回空，但这里是
+    // 「范围就是空」而不是「忘了给范围」，失败形态必须区分开。
+    const emptyScope = (state.filter === 'unread' && search.read === 'read')
+      || (folderIds !== undefined && (scopedFeedIds?.length ?? 0) === 0)
     try {
       const found: ItemView[] = []
       const previous = firstPage ? [] : state.items
@@ -265,7 +308,10 @@ export function createReaderStore() {
       let received = 0
       do {
         const page: SearchPage = emptyScope ? { items: [] } : await callRpc<SearchPage>('searchItems', {
-          ...search, feedId, cursor: nextCursor, read, starred,
+          ...search,
+          ...(feedId === undefined ? {} : { feedId }),
+          ...(scopedFeedIds === undefined ? {} : { feedIds: scopedFeedIds }),
+          cursor: nextCursor, read, starred,
         }, request.signal)
         if (version !== listVersion) return
         for (const item of page.items) {
@@ -332,6 +378,10 @@ export function createReaderStore() {
    */
   const inScope = (item: ItemView): boolean => {
     if (state.navSelection.kind === 'feed' && item.feedId !== state.navSelection.feedId) return false
+    if (state.navSelection.kind === 'folder') {
+      const feed = state.feeds.find((entry) => entry.id === item.feedId)
+      if (feed?.folder !== state.navSelection.folder) return false
+    }
     if ((state.filter === 'unread' || state.search?.read === 'unread') && item.readAt !== undefined) return false
     if (state.search?.read === 'read' && item.readAt === undefined) return false
     if ((state.filter === 'starred' || state.search?.starred) && !item.starred) return false
@@ -371,9 +421,12 @@ export function createReaderStore() {
   const applyOverview = (overview: Overview): void => {
     const selected = state.selectedId
     const stillThere = selected !== undefined && overview.items.some((item) => item.id === selected)
+    // 文件夹可能在别的面板里被删/改名；选中项失效时回落虚拟视图，与「源被退订」同一条规则。
+    const missing = !selectionExists(state.navSelection, overview.feeds, overview.folders)
     set({
       items: overview.items,
       feeds: overview.feeds,
+      folders: overview.folders,
       unread: overview.unread,
       perFeedUnread: overview.perFeedUnread,
       // 第一页的游标由宿主给（缺省 = 这一页就是全部）。整份重取时它必须**跟着换掉**：
@@ -382,7 +435,11 @@ export function createReaderStore() {
       loading: false,
       error: undefined,
       selectedId: stillThere ? selected : undefined,
+      ...(missing
+        ? { navSelection: { kind: 'virtual' }, filter: 'all', navCursor: { kind: 'filter', filter: 'all' } }
+        : {}),
     })
+    if (missing) persistView()
     // 兜底走 relocateSelection 而不是「取 items[0]」：后者不含源条件，选源状态下按 r 刷新
     // 会把选中项送到源外（那一刻 visible() 里没有它，j/k 直接失灵）。
     if (!stillThere) relocateSelection()
@@ -415,15 +472,18 @@ export function createReaderStore() {
   const applyRestoredView = (raw: unknown): void => {
     viewRestored = true
     if (viewTouched) return
-    const known = new Set(state.feeds.map((feed) => feed.id))
-    const prefs = sanitizeViewPreferences(raw, (feedId) => known.has(feedId))
+    const knownFeeds = new Set(state.feeds.map((feed) => feed.id))
+    const knownFolders = new Set(state.folders.map((folder) => folder.name))
+    const prefs = sanitizeViewPreferences(raw, (feedId) => knownFeeds.has(feedId), (folder) => knownFolders.has(folder))
     set({
       navSelection: prefs.navSelection,
       filter: prefs.filter,
       navVisible: prefs.navVisible,
       navCursor: prefs.navSelection.kind === 'feed'
         ? { kind: 'feed', feedId: prefs.navSelection.feedId }
-        : { kind: 'filter', filter: prefs.filter },
+        : prefs.navSelection.kind === 'folder'
+          ? { kind: 'folder', folder: prefs.navSelection.folder }
+          : { kind: 'filter', filter: prefs.filter },
     })
     relocateSelection()
   }
@@ -441,7 +501,9 @@ export function createReaderStore() {
     const preferences: ViewPreferences = {
       navSelection: state.navSelection.kind === 'feed'
         ? { kind: 'feed', feedId: state.navSelection.feedId }
-        : { kind: 'virtual' },
+        : state.navSelection.kind === 'folder'
+          ? { kind: 'folder', folder: state.navSelection.folder }
+          : { kind: 'virtual' },
       filter: state.filter,
       navVisible: state.navVisible,
     }
@@ -483,16 +545,19 @@ export function createReaderStore() {
       // 恢复必须在 feeds 表到手之后生效（未知源要回落），所以**先读、后应用**：
       // 读一次拿到记忆，等 overview 落地再按在订的源校验。两次 load 并发时也只读一次。
       const preferences = viewRestored ? undefined : await readViewPreferences()
-      const overview = await callRpc<Overview>(endpoint)
+      // 文件夹浏览必须把范围带给宿主：由 SQL 先筛成员再限页，客户端拿到的才是这个文件夹的
+      // 一页，而不是「跨源首页里恰好属于成员的那几条」。
+      const overview = await callRpc<Overview>(endpoint,
+        state.navSelection.kind === 'folder' ? { folder: state.navSelection.folder } : undefined)
       if (version !== overviewVersion) return
       if (state.search) {
-        const nav = state.navSelection
-        const removed = nav.kind === 'feed' && !overview.feeds.some(({ id }) => id === nav.feedId)
+        const missing = !selectionExists(state.navSelection, overview.feeds, overview.folders)
         set({
-          feeds: overview.feeds, unread: overview.unread, perFeedUnread: overview.perFeedUnread,
-          ...(removed ? { navSelection: { kind: 'virtual' }, navCursor: { kind: 'filter', filter: state.filter } } : {}),
+          feeds: overview.feeds, folders: overview.folders,
+          unread: overview.unread, perFeedUnread: overview.perFeedUnread,
+          ...(missing ? { navSelection: { kind: 'virtual' }, filter: 'all', navCursor: { kind: 'filter', filter: 'all' } } : {}),
         })
-        if (removed) persistView()
+        if (missing) persistView()
       } else {
         applyOverview(overview)
       }
@@ -560,7 +625,10 @@ export function createReaderStore() {
     const version = listVersion
     set({ loadingMore: true })
     try {
-      const overview = await callRpc<Overview>('overview', { cursor })
+      const overview = await callRpc<Overview>('overview', {
+        cursor,
+        ...(state.navSelection.kind === 'folder' ? { folder: state.navSelection.folder } : {}),
+      })
       if (version !== listVersion) return
       // 追加拼在**当前** state 上（不是闭包里那份快照）：请求在途时用户可能已经标读/加星，
       // 用发请求前的 items 覆盖会把那些本地动作抹掉。
@@ -906,18 +974,22 @@ export function createReaderStore() {
    */
   const selectNav = (next: NavSelection): void => {
     const current = state.navSelection
-    const cancelled = next.kind === 'feed' && current.kind === 'feed' && current.feedId === next.feedId
+    const cancelled = sameNavSelection(current, next)
     if (cancelled || next.kind === 'virtual') {
-      // 退出源作用域时把光标带回「生效的那一行」：navSelection 变回 virtual、filter 归 'all'，
-      // 生效的就是「全部」，光标留在刚开过的那个源上会与左栏高亮自相矛盾
-      // （读者看到源行还停着光标，可右栏已经是聚合视图）。
+      // 退出源/文件夹作用域时把光标带回「生效的那一行」：navSelection 变回 virtual、filter 归 'all'，
+      // 生效的就是「全部」，光标留在刚开过的那个源/文件夹上会与左栏高亮自相矛盾。
       set({ navSelection: { kind: 'virtual' }, filter: 'all', navCursor: { kind: 'filter', filter: 'all' } })
-    } else {
+    } else if (next.kind === 'feed') {
       set({ navSelection: next, navCursor: { kind: 'feed', feedId: next.feedId } })
+    } else {
+      set({ navSelection: next, navCursor: { kind: 'folder', folder: next.folder } })
     }
     relocateSelection()
     persistView()
     resetSearchPage()
+    // 文件夹范围必须由宿主先筛再分页：进入/退出文件夹时重取一页（源选择仍是客户端过滤，
+    // 沿用既有行为，不额外发请求）。搜索态由 resetSearchPage 用新的成员范围重查。
+    if (!state.search && (current.kind === 'folder' || next.kind === 'folder')) void load('overview')
   }
 
   /**
@@ -931,7 +1003,7 @@ export function createReaderStore() {
    * 而不是静默不动 —— 停在一个不存在的行上会让之后每一键都毫无反应。
    */
   const moveNavCursor = (delta: 1 | -1): void => {
-    const rows = navRowsOf(state.feeds, state.foldedFolders)
+    const rows = navRowsOf(state.feeds, state.foldedFolders, state.folders.map((folder) => folder.name))
     if (rows.length === 0) return
     const at = rows.findIndex((row) => navCursorKey(row) === navCursorKey(state.navCursor))
     const from = at < 0 ? 0 : at
@@ -1043,6 +1115,75 @@ export function createReaderStore() {
     }
   }
 
+  /**
+   * 文件夹管理动作（M2 03）。所有动作都遵循同一条「错误可恢复」规则：
+   * 先等宿主确认，成功了才改 state；失败只写 error，原有选择/列表/输入一律不动。
+   */
+  const applyFolders = (folders: FolderView[]): void => { set({ folders }) }
+
+  const createFolder = async (name: string): Promise<void> => {
+    try {
+      const result = await callRpc<{ folders: FolderView[] }>('createFolder', { name })
+      applyFolders(result.folders)
+      set({ notice: '已创建文件夹「' + name.trim() + '」' })
+      await load('overview')
+    } catch (failure) {
+      set({ error: failure instanceof Error ? failure.message : String(failure) })
+    }
+  }
+
+  const renameFolder = async (from: string, to: string): Promise<void> => {
+    try {
+      const result = await callRpc<{ folders: FolderView[] }>('renameFolder', { from, to })
+      // 当前正在浏览这个文件夹：范围必须跟着迁移，否则右栏会变成一个不存在的名字。
+      const selected = state.navSelection.kind === 'folder' && state.navSelection.folder === from
+      applyFolders(result.folders)
+      if (selected) {
+        set({ navSelection: { kind: 'folder', folder: to.trim() }, navCursor: { kind: 'folder', folder: to.trim() } })
+        persistView()
+      }
+      set({ notice: '已把文件夹「' + from + '」改名为「' + to.trim() + '」' })
+      await load('overview')
+    } catch (failure) {
+      set({ error: failure instanceof Error ? failure.message : String(failure) })
+    }
+  }
+
+  const deleteFolder = async (name: string): Promise<void> => {
+    try {
+      const result = await callRpc<{ folders: FolderView[]; detached: number }>('deleteFolder', { name })
+      const selected = state.navSelection.kind === 'folder' && state.navSelection.folder === name
+      const cursorOnIt = state.navCursor.kind === 'folder' && state.navCursor.folder === name
+      applyFolders(result.folders)
+      if (selected) {
+        // 删除当前文件夹：回到跨源列表（与「源被退订」同一条回落规则）。
+        set({ navSelection: { kind: 'virtual' }, filter: 'all', navCursor: { kind: 'filter', filter: 'all' } })
+        persistView()
+      } else if (cursorOnIt) {
+        set({ navCursor: { kind: 'filter', filter: state.filter } })
+      }
+      set({ notice: '已删除文件夹「' + name + '」，' + result.detached + ' 个订阅变为未分类' })
+      await load('overview')
+    } catch (failure) {
+      set({ error: failure instanceof Error ? failure.message : String(failure) })
+    }
+  }
+
+  const moveFeedToFolder = async (feedId: string, folder: string | undefined): Promise<void> => {
+    try {
+      const result = await callRpc<{ folders: FolderView[] }>('moveFeedToFolder', {
+        feedId,
+        // 协议里 null 才是「移出到未分类」；undefined 会被 JSON 丢掉，宿主看不到这个键。
+        folder: folder ?? null,
+      })
+      applyFolders(result.folders)
+      set({ notice: folder === undefined ? '已把订阅移出分类' : '已把订阅移到「' + folder + '」' })
+      await load('overview')
+    } catch (failure) {
+      set({ error: failure instanceof Error ? failure.message : String(failure) })
+    }
+  }
+
   return {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
     get, visible, load, loadMore, submitSearch, markRead, selectRelative, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllRead, undoMarkAll,
@@ -1056,6 +1197,7 @@ export function createReaderStore() {
     moveNavCursor,
     openNavCursor,
     toggleNav, toggleFolder,
+    createFolder, renameFolder, deleteFolder, moveFeedToFolder,
   }
 }
 

@@ -138,6 +138,22 @@ const SELECT_ALL_ITEMS = ITEM_SELECT + ITEM_ORDER
 const SELECT_RECENT = ITEM_SELECT + ITEM_ORDER + ' LIMIT ?'
 
 /**
+ * 按来源范围取最近 N 条（文件夹浏览）。`json_each(?)` 只绑**一个**参数：
+ * 用 `IN (?,?,…)` 会让占位符数量随源数增长，撞上 SQLite 的参数上限时是运行期错误。
+ * 空数组**不在这里**处理（调用方必须先短路）：`IN (SELECT … WHERE value IN ())` 会退化成空集，
+ * 语义上正确，但把「空文件夹」与「无范围」混在 SQL 层不利于判据阅读。
+ */
+const SELECT_RECENT_IN_FEEDS = ITEM_SELECT
+  + ' WHERE i.feed_id IN (SELECT value FROM json_each(?))'
+  + ITEM_ORDER + ' LIMIT ?'
+
+/** 同上 + keyset 续页；谓词与无范围版本逐字同义，只是多了来源范围。 */
+const SELECT_RECENT_AFTER_IN_FEEDS = ITEM_SELECT
+  + ' WHERE i.feed_id IN (SELECT value FROM json_each(?))'
+  + ' AND (i.recency < ? OR (i.recency = ? AND i.id > ?))'
+  + ITEM_ORDER + ' LIMIT ?'
+
+/**
  * 续页（keyset 分页，Task 6）：**严格排在游标之后**的那批。
  *
  * ⚠️ 谓词**必须**写成 `recency < ? OR (recency = ? AND id > ?)`，**不许**用行值比较
@@ -531,6 +547,8 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
 
   /** 「这个源还在订吗」——视图偏好的选中态要用它。手上有订阅映射就是这里能给判据的唯一理由。 */
   const isKnownFeed = (feedId: string): boolean => readFeeds(configPath)[feedId] !== undefined
+  /** 「这个文件夹还在目录里吗」——与 isKnownFeed 同一条：失效的选中态必须回落虚拟视图。 */
+  const isKnownFolder = (folder: string): boolean => readConfigFile(configPath).folders?.includes(folder) === true
 
   return {
     /**
@@ -710,11 +728,20 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
      * 那是静默的性能悬崖（结果看着还挺对）。非整数上限交给 SQLite 响亮报
      * 「datatype mismatch」，不在这里悄悄取整。
      */
-    listRecent: (limit, cursor) => {
+    listRecent: (limit, cursor, feedIds) => {
       if (limit <= 0) return []
-      const rows = cursor === undefined
-        ? sql(SELECT_RECENT).all(limit)
-        : sql(SELECT_RECENT_AFTER).all(cursor.recency, cursor.recency, cursor.id, limit)
+      // 空范围 = 空结果，绝不回落成「无范围」：空文件夹若走全表会让用户看到别的源。
+      if (feedIds !== undefined && feedIds.length === 0) return []
+      const scoped = feedIds === undefined
+        ? undefined
+        : JSON.stringify([...new Set(feedIds)])
+      const rows = scoped === undefined
+        ? (cursor === undefined
+          ? sql(SELECT_RECENT).all(limit)
+          : sql(SELECT_RECENT_AFTER).all(cursor.recency, cursor.recency, cursor.id, limit))
+        : (cursor === undefined
+          ? sql(SELECT_RECENT_IN_FEEDS).all(scoped, limit)
+          : sql(SELECT_RECENT_AFTER_IN_FEEDS).all(scoped, cursor.recency, cursor.recency, cursor.id, limit))
       return rows.map((row) => {
         const itemId = requiredText(row.id, 'items.id')
         return [itemId, toItemRecord(row)] as [string, ItemRecord]
@@ -783,14 +810,23 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
      * 媒介里可能是别的版本写的、也可能被改坏，把垃圾透给调用方去兜 —— 兜底散在调用方迟早漏一处。
      * 已退订的源由 isKnownFeed 判掉、回落虚拟视图而**不抛错**：面板打不开比丢一次记忆更糟。
      */
-    viewPreferences: () => sanitizeViewPreferences(readConfigFile(configPath).viewPreferences, isKnownFeed),
+    viewPreferences: () => {
+      const current = readConfigFile(configPath)
+      const knownFeeds = new Set(Object.keys(current.feeds))
+      const knownFolders = new Set(current.folders ?? [])
+      return sanitizeViewPreferences(
+        current.viewPreferences,
+        (feedId) => knownFeeds.has(feedId),
+        (folder) => knownFolders.has(folder),
+      )
+    },
 
     /**
      * 写视图偏好。先把 config.json 读出来（读不出来就抛 —— **绝不能**拿一个空 feeds 覆盖它，
      * 那是用户仅有的订阅副本），再把归一后的偏好与文件的其余内容一起写回。
      */
     saveViewPreferences: async (preferences) => {
-      const safe = sanitizeViewPreferences(preferences, isKnownFeed)
+      const safe = sanitizeViewPreferences(preferences, isKnownFeed, isKnownFolder)
       // `{ ...current }` 带上 folders：保存视图偏好不是「重写整份订阅文件」，
       // 空目录与订阅归属必须原样保留（M2 02 的显式回归项）。
       updateConfig(configPath, (current) => ({ ...current, viewPreferences: safe }))
