@@ -19,7 +19,13 @@ import { DatabaseSync } from 'node:sqlite'
  * 与「条目/订阅的记录形状」无关，只描述**表结构本身**。任何破坏性改动都必须升它，
  * 而升它就必须同时想清楚老库怎么办 —— 本模块只会**拒绝**不认识的版本，不做原地迁移。
  */
-export const SCHEMA_VERSION = 1
+export const SCHEMA_VERSION = 2
+
+/**
+ * 本版**能打开并升级**的旧版本。v1 是 M2 05 之前的真实表形状（tests/fixtures/rss-storage-v1.sql）；
+ * 升级只加 tags/item_tags 两张表并盖 v2 章，不改 items/texts/cursors 的任何一行。
+ */
+const UPGRADABLE_VERSIONS = new Set([1])
 
 /** 出错时的消息尾巴：把「去找什么」写清楚，比只报 errno 有用。 */
 const errnoOf = (error: unknown): string =>
@@ -36,7 +42,7 @@ const errnoOf = (error: unknown): string =>
  * 版本不认识就**响亮抛错**：静默降级或重建库等于把用户的已读态、星标连同桌面上的订阅一起丢掉。
  *
  * @param path 库文件路径，或 `:memory:`（测试用）。
- * @throws 库的 `user_version` 既不是 0（全新）也不是 {@link SCHEMA_VERSION} 时，消息含路径。
+ * @throws 库的 `user_version` 既不是 0（全新）、可升级的 1，也不是 {@link SCHEMA_VERSION} 时，消息含路径。
  */
 export function openDatabase(path: string): DatabaseSync {
   const isMemory = path === ':memory:'
@@ -94,33 +100,22 @@ function configureDatabase(db: DatabaseSync, path: string): void {
     // 认不出就不猜：把「读不出来」当 0 会让下面的拒绝逻辑失效
     throw new Error(`读不出订阅数据库 ${path} 的格式版本（返回 ${JSON.stringify(row)}）`)
   }
-  if (onDisk !== 0 && onDisk !== SCHEMA_VERSION) {
+  if (onDisk !== 0 && onDisk !== SCHEMA_VERSION && !UPGRADABLE_VERSIONS.has(onDisk)) {
     throw new Error(
-      `订阅数据库 ${path} 的格式版本是 ${onDisk}，本版只能读 ${SCHEMA_VERSION}：` +
+      `订阅数据库 ${path} 的格式版本是 ${onDisk}，本版只能读 ${SCHEMA_VERSION}（或从 v1 升级）：` +
         '不会降级或重建（那会丢掉已读态与星标）。请升级插件，或从备份恢复后重试。',
     )
   }
 }
 
 /**
- * 建表并盖版本章。幂等：已经盖过章就直接返回（插件每次装载都会走一遍）。
- *
- * **只有全新库（`user_version = 0`）能进来**：其余非当前版本一律拒绝，理由同 {@link openDatabase}。
- * 建表与盖章在同一个事务里 —— 盖章是「布局完整」的断言，半建状态必须可重入。
+ * 在**一个事务**里执行 DDL 并盖版本章。失败必须把版本号与所有新建对象一起回滚 ——
+ * 「表建了一半、版本却盖了」会让下一次启动误以为库已完整，是最坏的半成品形态。
  */
-export function migrateSchema(db: DatabaseSync): void {
-  const row = db.prepare('PRAGMA user_version').get()
-  const onDisk = row?.user_version
-  if (onDisk === SCHEMA_VERSION) return
-  if (typeof onDisk !== 'number' || onDisk !== 0) {
-    throw new Error(
-      `订阅数据库的格式版本是 ${String(onDisk)}，不是空库（0）也不是当前版本 ${SCHEMA_VERSION}：` +
-        '拒绝建表，以免把不认识的库覆盖成半成品。',
-    )
-  }
+function applyDdl(db: DatabaseSync, label: string, ddl: string): void {
   db.exec('BEGIN')
   try {
-    db.exec(SCHEMA_DDL)
+    db.exec(ddl)
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
     db.exec('COMMIT')
   } catch (error) {
@@ -129,12 +124,55 @@ export function migrateSchema(db: DatabaseSync): void {
     } catch (rollbackError) {
       // 回滚失败会让库停在半建状态，必须与原始错误一起暴露；吞掉它等于留下一个说不清的坏库
       throw new Error(
-        `建表失败且回滚也失败：${String(error)}；回滚错误：${String(rollbackError)}`,
+        `${label}失败且回滚也失败：${String(error)}；回滚错误：${String(rollbackError)}`,
         { cause: error },
       )
     }
-    throw new Error(`建表失败（已回滚，库仍是未盖章的空库，可重试）：${String(error)}`, { cause: error })
+    throw new Error(`${label}失败（已回滚，版本号未变，可安全重试）：${String(error)}`, { cause: error })
   }
+}
+
+/** v1 的库必须真的具备三张基础表；否则宁可拒绝升级，也不把空壳盖成 v2。 */
+function assertV1Schema(db: DatabaseSync): void {
+  const names = new Set<string>()
+  for (const row of db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all()) {
+    if (typeof row.name === 'string') names.add(row.name)
+  }
+  const missing = ['items', 'texts', 'cursors'].filter((name) => !names.has(name))
+  if (missing.length > 0) {
+    throw new Error(
+      '订阅数据库自称是 v1，但缺少表 ' + missing.join(', ') + '：拒绝升级（不拿空壳盖版本章）。',
+    )
+  }
+}
+
+/**
+ * 建表/升级并盖版本章。幂等：已经盖过章就直接返回（插件每次装载都会走一遍）。
+ *
+ * 升级路径只有一条：**v1 → v2**（M2 05 加 tags / item_tags）。v1 的 items/texts/cursors
+ * 一行都不改，所以旧条目、正文缓存、订阅归属与阅读状态在升级中保持原样；升级后的库
+ * 不再能被旧版插件打开（旧版的版本闸只认 1），回滚路径是从备份恢复 rss.db。
+ */
+export function migrateSchema(db: DatabaseSync): void {
+  const row = db.prepare('PRAGMA user_version').get()
+  const onDisk = row?.user_version
+  if (onDisk === SCHEMA_VERSION) return
+  if (typeof onDisk !== 'number') {
+    throw new Error(`读不出订阅数据库的格式版本（返回 ${JSON.stringify(row)}）`)
+  }
+  if (onDisk === 0) {
+    applyDdl(db, '建表', SCHEMA_DDL)
+    return
+  }
+  if (onDisk === 1) {
+    assertV1Schema(db)
+    applyDdl(db, 'v1→v2 升级', TAGS_DDL)
+    return
+  }
+  throw new Error(
+    `订阅数据库的格式版本是 ${onDisk}，不是空库（0）、可升级的 v1 或当前版本 ${SCHEMA_VERSION}：` +
+      '拒绝建表/升级，以免把不认识的库覆盖成半成品。',
+  )
 }
 
 /**
@@ -160,7 +198,7 @@ export function migrateSchema(db: DatabaseSync): void {
  * - `cursors.seen` 存 id 窗口的 JSON 文本：窗口是每源 5000 个 id 的定长列表，
  *   没有按单个 id 查询的需求，拆成行只会换来百万行表（spec §2 的漏项表）。
  */
-const SCHEMA_DDL = `
+const BASE_SCHEMA_DDL = `
   CREATE TABLE items (
     id              TEXT PRIMARY KEY,
     feed_id         TEXT NOT NULL,
@@ -197,3 +235,31 @@ const SCHEMA_DDL = `
     cursor_at TEXT
   );
 `
+
+/**
+ * v2 新增的两张表（M2 05）。**v1→v2 只执行这一段**，因此升级不会碰旧表的任何一行。
+ *
+ * - tags.name 的唯一约束是**精确名称**（SQLite 默认 BINARY collation）：与创建时的 trim 规则
+ *   合起来，用户能预期「同名拒绝」；不做大小写折叠是首版可逆默认。
+ * - item_tags 的联合主键让重复关联天然幂等；两侧外键 ON DELETE CASCADE 分别覆盖
+ *   「文章被清理/退订删除」与「标签被删除」两条生命周期。
+ * - item_tags_by_tag 服务「按标签筛文章」的 JOIN（标签→文章方向）。
+ */
+const TAGS_DDL = `
+  CREATE TABLE tags (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE TABLE item_tags (
+    item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    tag_id  TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    PRIMARY KEY (item_id, tag_id)
+  );
+
+  CREATE INDEX item_tags_by_tag ON item_tags(tag_id, item_id);
+`
+
+/** 全新库一次建到当前版本；v1 升级只执行 TAGS_DDL（见 migrateSchema）。 */
+const SCHEMA_DDL = BASE_SCHEMA_DDL + TAGS_DDL

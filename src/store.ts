@@ -5,10 +5,12 @@
  * 去重、保留量裁剪与已读态保持，不必先起宿主。
  */
 import type { Domain } from '@deepseek-ai/dsh-storage-domain'
-import { readerDomain, feedRecordSchema, type CursorRecord, type FeedRecord, type ItemRecord } from './domain.js'
+import { randomUUID } from 'node:crypto'
+import { readerDomain, feedRecordSchema, tagRecordSchema, type CursorRecord, type FeedRecord, type ItemRecord, type TagRecord } from './domain.js'
 import type { ReaderConfigFile } from './storage/config-file.js'
 import { addFolder, deleteFolder, folderViews, moveFeedToFolder, renameFolder } from './folders.js'
-import type { FolderView } from './shared.js'
+import { normalizeTagIds, normalizeTagName, requireTagId, TagError } from './tags.js'
+import type { FolderView, TagView } from './shared.js'
 import { articleCharsOf, selectCleanup, type ArticleEntry, type CleanupRow } from './retention.js'
 import { applyFeedIntent, type FeedIntent } from './feed-intent.js'
 import { countUnreadPerFeed, recencyOf, sanitizeViewPreferences, type Cursor, type ViewPreferences } from './shared.js'
@@ -154,6 +156,23 @@ export interface ReaderStore {
   deleteFolder(name: string): Promise<{ folders: FolderView[]; detached: number }>
   /** 移动订阅；`undefined` = 移到未分类（清除 feed.folder）。目标不存在明确失败。 */
   moveFeedToFolder(feedId: string, folder: string | undefined): Promise<FolderView[]>
+  /** 标签目录（含 0 篇文章的空标签，按创建时间稳定排序）。 */
+  listTags(): TagView[]
+  /** 创建标签；名称 trim 后唯一，重复名称抛 TagError('conflict')。 */
+  createTag(name: string): Promise<TagRecord>
+  /** 改名只改 name；id 与所有文章关联保持不变。 */
+  renameTag(id: string, name: string): Promise<TagRecord>
+  /** 删除标签：只删标签与关联，文章、阅读状态不动。 */
+  deleteTag(id: string): Promise<void>
+  /** 某篇文章的标签（用于 06 的列表/正文编辑入口）。 */
+  itemTags(itemId: string): TagView[]
+  /** 幂等覆盖某篇文章的标签集合；空数组 = 清空。任一 id 不存在则整次失败。 */
+  setItemTags(itemId: string, tagIds: readonly string[]): Promise<TagView[]>
+  /**
+   * 身份合并用：把 keeper 的条目记录与 loser 的标签关联**在同一事务**里落盘，再删除 loser。
+   * 分两次写会让「删 loser 的级联」吞掉它身上的标签（M2 05 的硬要求）。
+   */
+  mergeItems(keeperId: string, loserIds: readonly string[], record: ItemRecord): Promise<void>
   /**
    * 读上次记住的视图偏好（两列布局任务 7）。
    *
@@ -186,6 +205,22 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
   })
   const isKnownFolder = (folder: string): boolean => explicitFolders.has(folder)
     || [...feeds.entries()].some(([, record]) => record.folder === folder)
+  /** 旧适配器的标签是内存态：只服务 ReaderStore 的结构比对与测试，不参与生产装载。 */
+  const tags = new Map<string, TagRecord>()
+  const itemTagIds = new Map<string, Set<string>>()
+  const tagViews = (): TagView[] => [...tags.values()]
+    .sort((a, b) => a.createdAt === b.createdAt ? a.id.localeCompare(b.id) : a.createdAt.localeCompare(b.createdAt))
+    .map((tag) => ({
+      id: tag.id,
+      name: tag.name,
+      createdAt: tag.createdAt,
+      itemCount: [...itemTagIds.values()].filter((ids) => ids.has(tag.id)).length,
+    }))
+  const itemTagViews = (itemId: string): TagView[] => {
+    const ids = itemTagIds.get(itemId) ?? new Set<string>()
+    return tagViews().filter((tag) => ids.has(tag.id)).map(({ itemCount: _count, ...tag }) => tag)
+  }
+
   const applyFolderChange = async (change: (file: ReaderConfigFile) => ReaderConfigFile): Promise<FolderView[]> => {
     const before = Object.fromEntries(feeds.entries())
     const next = change(folderFile())
@@ -317,6 +352,52 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
       return { folders, detached }
     },
     moveFeedToFolder: async (feedId, folder) => applyFolderChange((file) => moveFeedToFolder(file, feedId, folder).file),
+    listTags: () => tagViews(),
+    createTag: async (name) => {
+      const safe = normalizeTagName(name)
+      if ([...tags.values()].some((tag) => tag.name === safe)) throw new TagError('conflict', '标签已存在：' + safe)
+      const tag = { id: randomUUID(), name: safe, createdAt: new Date().toISOString() }
+      tags.set(tag.id, tag)
+      return tagRecordSchema.parse(tag)
+    },
+    renameTag: async (id, name) => {
+      const tagId = requireTagId(id)
+      const current = tags.get(tagId)
+      if (current === undefined) throw new TagError('not-found', '标签不存在：' + tagId)
+      const safe = normalizeTagName(name)
+      if ([...tags.values()].some((tag) => tag.id !== tagId && tag.name === safe)) {
+        throw new TagError('conflict', '标签已存在：' + safe)
+      }
+      const next = { ...current, name: safe }
+      tags.set(tagId, next)
+      return tagRecordSchema.parse(next)
+    },
+    deleteTag: async (id) => {
+      const tagId = requireTagId(id)
+      if (!tags.delete(tagId)) throw new TagError('not-found', '标签不存在：' + tagId)
+      for (const ids of itemTagIds.values()) ids.delete(tagId)
+    },
+    itemTags: (itemId) => {
+      if (items.get(itemId) === undefined) throw new TagError('not-found', '文章不存在：' + itemId)
+      return itemTagViews(itemId)
+    },
+    setItemTags: async (itemId, tagIds) => {
+      if (items.get(itemId) === undefined) throw new TagError('not-found', '文章不存在：' + itemId)
+      const ids = normalizeTagIds(tagIds)
+      for (const id of ids) if (!tags.has(id)) throw new TagError('not-found', '标签不存在：' + id)
+      itemTagIds.set(itemId, new Set(ids))
+      return itemTagViews(itemId)
+    },
+    mergeItems: async (keeperId, loserIds, record) => {
+      await items.put(keeperId, record)
+      const keeperTags = new Set(itemTagIds.get(keeperId) ?? [])
+      for (const loserId of loserIds) {
+        for (const tagId of itemTagIds.get(loserId) ?? []) keeperTags.add(tagId)
+        itemTagIds.delete(loserId)
+        await items.delete(loserId)
+      }
+      itemTagIds.set(keeperId, keeperTags)
+    },
     viewPreferences: () => sanitizeViewPreferences(
       global.get(),
       (feedId) => feeds.get(feedId) !== undefined,

@@ -28,6 +28,7 @@ export const ENDPOINT_NAMES = [
   'opmlExport', 'opmlImport', 'addFeed', 'removeFeed',
   'viewPreferences', 'saveViewPreferences', 'searchItems',
   'listFolders', 'createFolder', 'renameFolder', 'deleteFolder', 'moveFeedToFolder',
+  'listTags', 'createTag', 'renameTag', 'deleteTag', 'setItemTags',
 ] as const
 export type Endpoint = (typeof ENDPOINT_NAMES)[number]
 
@@ -41,6 +42,17 @@ export type RpcResult<T> =
 export interface FolderView {
   name: string
   feedIds: string[]
+}
+
+/**
+ * 标签的 wire 形状。`itemCount` 只在目录列表里有值（左栏角标/空标签可见性用）；
+ * 单篇文章的标签查询不需要它，保持缺省。
+ */
+export interface TagView {
+  id: string
+  name: string
+  createdAt: string
+  itemCount?: number
 }
 
 export interface FeedView {

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
+import { SCHEMA_VERSION } from '../lib/storage/db.js'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -99,6 +100,15 @@ test('搜索直接使用旧版 v1 库，Worker 启动失败时仍可阅读且恢
     }
 
     const overview = await boot()
+    // v1→v2 的迁移是 M2 05 的交付：旧库第一次装载就升级；条目/正文/游标/配置保持原样。
+    const upgraded = snapshot(path, configPath)
+    assert.equal(upgraded.version, SCHEMA_VERSION, '旧库应升级到当前物理版本')
+    assert.deepEqual(upgraded.items, before.items, '升级不改变旧条目')
+    assert.deepEqual(upgraded.texts, before.texts, '升级不改变旧正文缓存')
+    assert.deepEqual(upgraded.cursors, before.cursors, '升级不改变去重窗口')
+    assert.deepEqual(upgraded.config, before.config, '升级不改变 config.json')
+    assert.ok(upgraded.schema.some((row) => row.name === 'tags'), 'v2 必须建出 tags 表')
+    assert.ok(upgraded.schema.some((row) => row.name === 'item_tags'), 'v2 必须建出 item_tags 表')
     assert.deepEqual(overview.feeds.map(({ title }) => title), ['旧版订阅'])
     assert.deepEqual(overview.items.map(({ id, readAt, starred, keptUnread }) => [id, readAt, starred, keptUnread]), [
       ['read', time, true, undefined], ['unread', undefined, false, true],
@@ -107,7 +117,7 @@ test('搜索直接使用旧版 v1 库，Worker 启动失败时仍可阅读且恢
     assert.equal(search.ok, true)
     assert.deepEqual(search.value.items.map(({ id }) => id), ['read'])
     await stop()
-    assert.deepEqual(snapshot(path, configPath), before)
+    assert.deepEqual(snapshot(path, configPath), upgraded, '停止后库仍是升级后的稳定状态')
 
     const worker = join(lib, 'search-worker.js')
     renameSync(worker, worker + '.disabled')
@@ -130,7 +140,7 @@ test('搜索直接使用旧版 v1 库，Worker 启动失败时仍可阅读且恢
     const retry = await request('searchItems', { text: '支付' })
     assert.deepEqual(retry, search)
     await stop()
-    assert.deepEqual(snapshot(path, configPath), before)
+    assert.deepEqual(snapshot(path, configPath), upgraded, '第二次停止后也不该再改库')
   } finally {
     try {
       while (stops.length) await stops.pop()?.()

@@ -38,6 +38,11 @@ function memoryStore() {
     // 原子读改写（ReaderStore 契约的一部分）：fn 在写入槽位看到当前记录，见 src/store.ts 的注释
     updateItem: async (id, fn) => { items.set(id, fn(items.get(id))) },
     deleteItem: async (id) => { items.delete(id) },
+    // 身份合并的原子入口；这个桩没有标签表，只保条目语义（标签合并在 tag-storage 真库里测）。
+    mergeItems: async (keeperId, loserIds, record) => {
+      items.set(keeperId, record)
+      for (const loserId of loserIds) items.delete(loserId)
+    },
     listItems: (feedId) => [...items.entries()].filter(([, record]) => record.feedId === feedId),
     /**
      * 清算原料（src/store.ts 的契约）：只交出 { id, chars, fetchedAt }，正文不进清单。

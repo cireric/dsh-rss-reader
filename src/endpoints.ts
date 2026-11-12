@@ -1,5 +1,5 @@
 /**
- * 浏览器半的读写通道：20 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
+ * 浏览器半的读写通道：25 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
  *
  * 原先这里是一个 switch：每臂各自手写 payload 解析、各自记得把未读账并进回包 ——
  * interface 的复杂度 ≈ implementation 的复杂度。现在「一个端点」是一个 module：
@@ -18,6 +18,7 @@ import { rebuildItem, type ItemRecord } from './domain.js'
 import { selectCleanup } from './retention.js'
 import { buildOpml, parseOpml } from './opml.js'
 import { FolderError } from './folders.js'
+import { TagError } from './tags.js'
 import { validateSubscriptions } from './subscribe.js'
 import type { ReaderStore } from './store.js'
 // 未读判据（isUnread / countUnreadPerFeed）不再由本文件在 JS 侧实现：Task 5 把它交给了存储侧，
@@ -92,6 +93,10 @@ const sumOf = (perFeedUnread: Record<string, number>): number =>
  */
 const folderFailure = (error: unknown): RpcResult<never> | undefined =>
   error instanceof FolderError ? fail(error.code, error.message) : undefined
+
+/** 标签操作的同一套失败信封转换；其它异常原样抛给 dispatch 的 internal 兜底。 */
+const tagFailure = (error: unknown): RpcResult<never> | undefined =>
+  error instanceof TagError ? fail(error.code, error.message) : undefined
 
 /** 读一次完整的未读账（总数 + 每源）。只读，不改任何条目。 */
 const accountOf = (target: ReaderStore): UnreadAccount => {
@@ -689,6 +694,77 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         return ok({ folders: await ctx.store.moveFeedToFolder(body.feedId, body.folder === null ? undefined : body.folder) })
       } catch (error) {
         const failure = folderFailure(error)
+        if (failure !== undefined) return failure
+        throw error
+      }
+    },
+  },
+
+  // ── 标签持久化与变更接口（M2 05）────────────────────────────────────
+  // 标签只分类：这里没有「标读」语义，也不触碰 items.read_at。关联写入使用稳定 tag id，
+  // 名称可改而 id 不变；空标签由 listTags 的 LEFT JOIN 保留。
+  listTags: {
+    to: async (_payload, ctx) => ok({ tags: ctx.store.listTags() }),
+  },
+
+  createTag: {
+    to: async (payload, ctx) => {
+      const name = (payload as { name?: unknown } | null)?.name
+      if (typeof name !== 'string') return fail('bad-request', 'createTag 需要 name（字符串）')
+      try {
+        return ok({ tag: await ctx.store.createTag(name) })
+      } catch (error) {
+        const failure = tagFailure(error)
+        if (failure !== undefined) return failure
+        throw error
+      }
+    },
+  },
+
+  renameTag: {
+    to: async (payload, ctx) => {
+      const body = payload as { id?: unknown; name?: unknown } | null
+      if (typeof body?.id !== 'string' || typeof body?.name !== 'string') {
+        return fail('bad-request', 'renameTag 需要 id 与 name（字符串）')
+      }
+      try {
+        return ok({ tag: await ctx.store.renameTag(body.id, body.name) })
+      } catch (error) {
+        const failure = tagFailure(error)
+        if (failure !== undefined) return failure
+        throw error
+      }
+    },
+  },
+
+  deleteTag: {
+    to: async (payload, ctx) => {
+      const id = (payload as { id?: unknown } | null)?.id
+      if (typeof id !== 'string') return fail('bad-request', 'deleteTag 需要 id（字符串）')
+      try {
+        await ctx.store.deleteTag(id)
+        return ok({ deleted: true })
+      } catch (error) {
+        const failure = tagFailure(error)
+        if (failure !== undefined) return failure
+        throw error
+      }
+    },
+  },
+
+  setItemTags: {
+    to: async (payload, ctx) => {
+      const body = payload as { itemId?: unknown; tagIds?: unknown } | null
+      if (typeof body?.itemId !== 'string' || body.itemId === '') {
+        return fail('bad-request', 'setItemTags 需要 itemId（非空字符串）')
+      }
+      try {
+        // tagIds 的形状由 normalizeTagIds 统一判（非数组 / 非字符串都回 bad-request）；
+        // 这里不把 unknown 强转成 any，也不让一个坏 payload 走到 SQL。
+        const tags = await ctx.store.setItemTags(body.itemId, body.tagIds as readonly string[])
+        return ok({ itemId: body.itemId, tags })
+      } catch (error) {
+        const failure = tagFailure(error)
         if (failure !== undefined) return failure
         throw error
       }

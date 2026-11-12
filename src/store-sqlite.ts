@@ -23,23 +23,27 @@
  *   顺序颠倒若延迟到第一次写入才炸，症状是「插件装载成功、第一条订阅却存不进去」。
  * @param configPath `config.json` 的落点。订阅映射与视图偏好同在那一份文件里。
  */
+import { randomUUID } from 'node:crypto'
 import type { DatabaseSync, SQLOutputValue, StatementSync } from 'node:sqlite'
 import {
   cursorRecordSchema,
   feedRecordSchema,
   itemRecordSchema,
+  tagRecordSchema,
   type ArticleRecord,
   type CursorRecord,
   type FeedRecord,
   type ItemRecord,
+  type TagRecord,
 } from './domain.js'
 import { readConfigFile, writeConfigFile, type ReaderConfigFile } from './storage/config-file.js'
 import { SCHEMA_VERSION } from './storage/db.js'
-import { sanitizeViewPreferences, type Cursor } from './shared.js'
+import { sanitizeViewPreferences, type Cursor, type TagView } from './shared.js'
 import type { CleanupCandidate, ReaderStore } from './store.js'
 import type { ArticleEntry } from './retention.js'
 import { applyFeedIntent, type FeedIntent } from './feed-intent.js'
 import { addFolder, deleteFolder, folderViews, moveFeedToFolder, renameFolder } from './folders.js'
+import { normalizeTagIds, normalizeTagName, requireTagId, TagError } from './tags.js'
 
 /** 事务里的保存点名。写成常量即可：db 是单连接，嵌套只发生在同一个连接上。 */
 const SAVEPOINT = 'rss_store_write'
@@ -169,6 +173,24 @@ const SELECT_RECENT_AFTER_IN_FEEDS = ITEM_SELECT
  * 从 300 调到 3000，末页成本按比例放大，届时要重测（spec §10.3）。
  */
 const SELECT_RECENT_AFTER = ITEM_SELECT + ' WHERE i.recency < ? OR (i.recency = ? AND i.id > ?)' + ITEM_ORDER + ' LIMIT ?'
+
+// ── 标签（M2 05）────────────────────────────────────────────────────────
+const TAG_VIEWS = `SELECT t.id AS id, t.name AS name, t.created_at AS created_at,
+  COUNT(it.item_id) AS item_count
+  FROM tags t LEFT JOIN item_tags it ON it.tag_id = t.id
+  GROUP BY t.id ORDER BY t.created_at ASC, t.id ASC`
+const ITEM_TAG_VIEWS = `SELECT t.id AS id, t.name AS name, t.created_at AS created_at
+  FROM item_tags it JOIN tags t ON t.id = it.tag_id
+  WHERE it.item_id = ? ORDER BY t.created_at ASC, t.id ASC`
+const TAG_BY_ID = 'SELECT id, name, created_at FROM tags WHERE id = ?'
+const INSERT_TAG = 'INSERT INTO tags (id, name, created_at) VALUES (?, ?, ?)'
+const UPDATE_TAG_NAME = 'UPDATE tags SET name = ? WHERE id = ?'
+const DELETE_TAG_LINKS = 'DELETE FROM item_tags WHERE tag_id = ?'
+const DELETE_TAG = 'DELETE FROM tags WHERE id = ?'
+const DELETE_ITEM_TAGS = 'DELETE FROM item_tags WHERE item_id = ?'
+const INSERT_ITEM_TAG = 'INSERT OR IGNORE INTO item_tags (item_id, tag_id) VALUES (?, ?)'
+// 身份合并：把 loser 的关联复制到 keeper。INSERT OR IGNORE 让两侧同名关联天然去重。
+const COPY_ITEM_TAGS = 'INSERT OR IGNORE INTO item_tags (item_id, tag_id) SELECT ?, tag_id FROM item_tags WHERE item_id = ?'
 
 /**
  * 每源未读（Task 5）：`GROUP BY feed_id` + `COUNT(*)`，未读判据 `read_at IS NULL`。
@@ -417,6 +439,30 @@ function writeFolders(
   return folderViews(readConfigFile(configPath))
 }
 
+/** 行 → TagRecord。列名与 tagRecordSchema 的字段逐字对齐，strict 会把多带的列当场判死。 */
+function toTagRecord(row: Record<string, unknown>): TagRecord {
+  return tagRecordSchema.parse({
+    id: row.id,
+    name: row.name,
+    createdAt: row.created_at,
+  })
+}
+
+function toTagView(row: Record<string, unknown>): TagView {
+  const tag = toTagRecord(row)
+  // 目录查询带 item_count；单篇文章的标签查询不带。缺省不是 0 —— 不能把「没查」伪装成「0 篇」。
+  if (row.item_count === undefined) return tag
+  if (typeof row.item_count !== 'number') {
+    throw new Error('标签列表里的 item_count 不是数字（库被外部改动过？）')
+  }
+  return { ...tag, itemCount: row.item_count }
+}
+
+/** SQLite 的 UNIQUE 冲突只在 tags.name 上可能出现；其余错误原样抛出，不能伪装成输入错误。 */
+function isUniqueTagNameError(error: unknown): boolean {
+  return error instanceof Error && /UNIQUE constraint failed: tags\.name/.test(error.message)
+}
+
 export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderStore {
   // 版本握手：store 的每个方法都假定表在。顺序颠倒（先建 store、后 migrateSchema）若不在构造
   // 时就拦下，症状是「插件装载成功、第一次刷新才失败」——那时用户已经白等了一轮网络。
@@ -550,6 +596,9 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
   /** 「这个文件夹还在目录里吗」——与 isKnownFeed 同一条：失效的选中态必须回落虚拟视图。 */
   const isKnownFolder = (folder: string): boolean => readConfigFile(configPath).folders?.includes(folder) === true
 
+  /** 单篇文章的标签读取；itemCount 缺省（这条查询没带 count）。 */
+  const itemTagViews = (itemId: string): TagView[] => sql(ITEM_TAG_VIEWS).all(itemId).map(toTagView)
+
   return {
     /**
      * 读一条订阅。**config.json 读不出来时这里抛错**（readConfigFile 的既定语义）：
@@ -650,6 +699,9 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
       // 显式删两表，不把正确性押在 PRAGMA foreign_keys 的默认值上（spec §11.2 的注释同此意）。
       // 幂等：删一个不存在的键不是错误（旧实现同样是 no-op）。
       runInTransaction(() => {
+        // item_tags 的外键也带 ON DELETE CASCADE；仍显式删一次，与 texts 同一纪律：
+        // 不把用户标签关联的存亡押在某个连接的 PRAGMA 默认值上。
+        sql(DELETE_ITEM_TAGS).run(itemId)
         sql(DELETE_TEXT).run(itemId)
         sql(DELETE_ITEM).run(itemId)
       })
@@ -804,6 +856,79 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
 
     moveFeedToFolder: async (feedId, folder) =>
       writeFolders(configPath, (current) => moveFeedToFolder(current, feedId, folder).file),
+
+    listTags: () => sql(TAG_VIEWS).all().map(toTagView),
+
+    createTag: async (name) => {
+      const safeName = normalizeTagName(name)
+      const tag = { id: randomUUID(), name: safeName, createdAt: new Date().toISOString() }
+      try {
+        sql(INSERT_TAG).run(tag.id, tag.name, tag.createdAt)
+      } catch (error) {
+        if (isUniqueTagNameError(error)) throw new TagError('conflict', '标签已存在：' + safeName)
+        throw error
+      }
+      return tagRecordSchema.parse(tag)
+    },
+
+    renameTag: async (id, name) => {
+      const tagId = requireTagId(id)
+      const current = sql(TAG_BY_ID).get(tagId)
+      if (current === undefined) throw new TagError('not-found', '标签不存在：' + tagId)
+      const safeName = normalizeTagName(name)
+      try {
+        sql(UPDATE_TAG_NAME).run(safeName, tagId)
+      } catch (error) {
+        if (isUniqueTagNameError(error)) throw new TagError('conflict', '标签已存在：' + safeName)
+        throw error
+      }
+      return tagRecordSchema.parse({ ...toTagRecord(current), name: safeName })
+    },
+
+    deleteTag: async (id) => {
+      const tagId = requireTagId(id)
+      if (sql(TAG_BY_ID).get(tagId) === undefined) throw new TagError('not-found', '标签不存在：' + tagId)
+      runInTransaction(() => {
+        sql(DELETE_TAG_LINKS).run(tagId)
+        sql(DELETE_TAG).run(tagId)
+      })
+    },
+
+    itemTags: (itemId) => {
+      const target = requireTagId(itemId, '文章 ID')
+      if (sql(SELECT_ITEM).get(target) === undefined) throw new TagError('not-found', '文章不存在：' + target)
+      return itemTagViews(target)
+    },
+
+    setItemTags: async (itemId, tagIds) => {
+      const target = requireTagId(itemId, '文章 ID')
+      if (sql(SELECT_ITEM).get(target) === undefined) throw new TagError('not-found', '文章不存在：' + target)
+      const ids = normalizeTagIds(tagIds)
+      // 先把所有 id 验完再开事务：混合有效/无效请求不能留下「前几个已写入」的半截关联。
+      for (const tagId of ids) {
+        if (sql(TAG_BY_ID).get(tagId) === undefined) throw new TagError('not-found', '标签不存在：' + tagId)
+      }
+      runInTransaction(() => {
+        sql(DELETE_ITEM_TAGS).run(target)
+        for (const tagId of ids) sql(INSERT_ITEM_TAG).run(target, tagId)
+      })
+      return itemTagViews(target)
+    },
+
+    mergeItems: async (keeperId, loserIds, record) => {
+      const safe = itemRecordSchema.parse(record)
+      runInTransaction(() => {
+        writeItem(keeperId, safe)
+        for (const loserId of loserIds) {
+          if (loserId === keeperId) continue
+          // 先复制关联，再删 loser：顺序反了会让 loser 的级联删掉刚刚要保留的标签。
+          sql(COPY_ITEM_TAGS).run(keeperId, loserId)
+          sql(DELETE_ITEM_TAGS).run(loserId)
+          sql(DELETE_TEXT).run(loserId)
+          sql(DELETE_ITEM).run(loserId)
+        }
+      })
+    },
 
     /**
      * 读视图偏好。**读侧一律过 sanitizeViewPreferences**（src/store.ts:41-45 的承诺）：

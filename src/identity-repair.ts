@@ -105,8 +105,9 @@ export async function repairIdentities(store: ReaderStore): Promise<{ merged: nu
         merged += 1
       }
       groups += 1
-      await store.saveItem(keeperId, survivor)
-      for (const loserId of ids.slice(1)) await store.deleteItem(loserId)
+      // **一次事务**写幸存项 + 并标签 + 删旧项：先 saveItem 再 deleteItem 会让 loser 的
+      // ON DELETE CASCADE 在两步之间吞掉它身上的标签关联（M2 05 的硬要求）。
+      await store.mergeItems(keeperId, ids.slice(1), survivor)
     }
   }
   return { merged, groups }

@@ -54,7 +54,7 @@ npm run mutation:calibrate # 刷新 judges 快照（fast 的映射过期时重�
 
 | 文件 | 内容 |
 |---|---|
-| `rss.db` | 条目库（`node:sqlite`；DDL 在 `src/storage/db.ts`） |
+| `rss.db` | 条目库与标签关联（`node:sqlite`；DDL 在 `src/storage/db.ts`，v1 旧库启动时升级到 v2） |
 | `config.json` | 订阅源、文件夹目录与视图偏好 |
 | `reader-YYYY-MM-DD.log` | 刷新日志（按天分文件，保留 14 天；UTC 日期） |
 

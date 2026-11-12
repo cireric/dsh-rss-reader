@@ -63,6 +63,17 @@ export const feedRecordSchema = z.object({
 }).strict()
 export type FeedRecord = z.infer<typeof feedRecordSchema>
 
+/**
+ * 标签记录（M2 05）。id 是稳定主键：改名只改 name，文章关联始终指向 id。
+ * createdAt 用于标签列表的稳定顺序（同刻按 id 兜底），删空后重建同名标签会得到新 id。
+ */
+export const tagRecordSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  createdAt: z.string(),
+}).strict()
+export type TagRecord = z.infer<typeof tagRecordSchema>
+
 /** 抽取后的正文缓存（挂在条目上，与已读态一样只增不减）。 */
 export const articleRecordSchema = z.object({
   fetchedAt: z.string(),
