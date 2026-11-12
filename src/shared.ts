@@ -79,6 +79,8 @@ export interface ItemView {
   /** 「保持未读」（规格 §3.3）：为真时批量「全部标为已读」会跳过它 */
   keptUnread?: boolean
   summary?: string
+  /** 该文章的标签 id 列表（M2 06；目录/名称由 `tags` 目录解析）。 */
+  tagIds?: string[]
 }
 
 /**
@@ -144,6 +146,8 @@ export interface SearchQuery {
   text: string
   feedId?: string
   feedIds?: string[]
+  /** 单个标签筛选（M2 06）；和 feedIds/read/starred/日期取交集。 */
+  tagId?: string
   read?: 'read' | 'unread'
   starred?: boolean
   from?: string
@@ -160,6 +164,8 @@ export interface Overview extends UnreadAccount {
   feeds: FeedView[]
   /** 文件夹目录（含空目录）。左栏渲染空文件夹与「进入文件夹」都以它为准，不能只从 feeds 派生。 */
   folders: FolderView[]
+  /** 标签目录（含 0 篇文章的空标签；左栏筛选与管理面板共用）。 */
+  tags: TagView[]
   /** 跨源合并、按时间倒序（river of news） */
   items: ItemView[]
   /**

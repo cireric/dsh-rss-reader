@@ -20,7 +20,7 @@
  */
 import type { ReactNode } from 'react'
 import { navCursorKey, navRowsOf, VIRTUAL_VIEWS, type Filter, type NavCursor } from './store.js'
-import type { FeedView, FolderView } from '../shared.js'
+import type { FeedView, FolderView, TagView } from '../shared.js'
 
 /**
  * 左栏宽度（px）。
@@ -30,13 +30,15 @@ import type { FeedView, FolderView } from '../shared.js'
  */
 export const LEFT_NAV_WIDTH = 240
 
-export function FeedNav({ feeds, folders, perFeedUnread, filter, navSelection, navCursor, foldedFolders, showUnread, onSelectFilter, onSelectFeed, onSelectFolder, onToggleFolder }: {
+export function FeedNav({ feeds, folders, tags, perFeedUnread, filter, navSelection, navCursor, foldedFolders, showUnread, onSelectFilter, onSelectFeed, onSelectFolder, onSelectTag, onToggleFolder }: {
   feeds: FeedView[]
   /** 文件夹目录（含空目录）；只从 feeds 派生会让空文件夹在左栏消失。 */
   folders: FolderView[]
+  /** 标签目录（含空标签）；标签行排在源行之后，参与同一套光标行序。 */
+  tags: TagView[]
   perFeedUnread: Record<string, number>
   filter: Filter
-  navSelection: { kind: 'virtual' } | { kind: 'feed'; feedId: string } | { kind: 'folder'; folder: string }
+  navSelection: { kind: 'virtual' } | { kind: 'feed'; feedId: string } | { kind: 'folder'; folder: string } | { kind: 'tag'; tagId: string }
   /** 键盘光标（左栏高亮所在行）。与 navSelection 是两件事，见 store.ts 的 NavCursor。 */
   navCursor: NavCursor
   foldedFolders: ReadonlySet<string>
@@ -44,12 +46,14 @@ export function FeedNav({ feeds, folders, perFeedUnread, filter, navSelection, n
   onSelectFilter: (filter: Filter) => void
   onSelectFeed: (feedId: string) => void
   onSelectFolder: (folder: string) => void
+  onSelectTag: (tagId: string) => void
   onToggleFolder: (folder: string) => void
 }): ReactNode {
   // 生效态有两条**正交**轴：源（navSelection）与过滤（filter）各自独立生效，两者相乘（见 store.ts 的
   // NavSelection 注释）。所以「选了源」并不意味着「过滤失效」—— 两者要各自显示自己的生效状态。
   const selectedFeedId = navSelection.kind === 'feed' ? navSelection.feedId : undefined
   const selectedFolder = navSelection.kind === 'folder' ? navSelection.folder : undefined
+  const selectedTagId = navSelection.kind === 'tag' ? navSelection.tagId : undefined
   // 光标态与生效态各算各的：光标可以停在源那一行而生效的仍是虚拟视图（还没按 shift+o）
   const cursorFeedId = navCursor.kind === 'feed' ? navCursor.feedId : undefined
   const cursorFilter = navCursor.kind === 'filter' ? navCursor.filter : undefined
@@ -96,7 +100,7 @@ export function FeedNav({ feeds, folders, perFeedUnread, filter, navSelection, n
 
       <div style={{ flex: '0 0 1px', background: 'var(--rss-line)', margin: '6px 8px' }} />
 
-      {navRowsOf(feeds, foldedFolders, folders.map((folder) => folder.name)).slice(VIRTUAL_VIEWS.length).map((row) => {
+      {navRowsOf(feeds, foldedFolders, folders.map((folder) => folder.name), tags).slice(VIRTUAL_VIEWS.length).map((row) => {
         if (row.kind === 'folder') {
           const total = unreadByFolder.get(row.folder) ?? 0
           const expanded = !foldedFolders.has(row.folder)
@@ -132,6 +136,25 @@ export function FeedNav({ feeds, folders, perFeedUnread, filter, navSelection, n
                   if (event.key === ' ') { event.preventDefault(); event.stopPropagation(); onSelectFolder(row.folder) }
                 }}
                 style={{ flex: '0 0 auto', paddingInline: 6 }}>↗</button>
+            </div>
+          )
+        }
+        if (row.kind === 'tag') {
+          const tag = tags.find((entry) => entry.id === row.tagId)
+          if (tag === undefined) return null
+          return (
+            <div key={navCursorKey(row)} role="button" tabIndex={0}
+              {...{ 'data-rss-nav-row': navCursorKey(row) }}
+              {...(showUnread ? { 'data-rss-nav-badge': String(tag.itemCount ?? 0) } : {})}
+              {...(selectedTagId === tag.id ? { 'data-rss-nav-selected': '' } : {})}
+              {...(navCursor.kind === 'tag' && navCursor.tagId === tag.id ? { 'data-rss-nav-cursor': '' } : {})}
+              onClick={() => onSelectTag(tag.id)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelectTag(tag.id) }
+              }}
+              style={ROW_STYLE}>
+              <span title={tag.name} style={LABEL_STYLE}># {tag.name}</span>
+              {showUnread && <span style={BADGE_STYLE}>{(tag.itemCount ?? 0) > 99 ? '99+' : (tag.itemCount ?? 0)}</span>}
             </div>
           )
         }

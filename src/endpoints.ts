@@ -119,25 +119,39 @@ const accountOf = (target: ReaderStore): UnreadAccount => {
  * 绑上排序后的成员列表后，成员一变旧游标自然失配，客户端必须从第一页重来。
  */
 interface OverviewScope {
-  readonly folder: string
-  readonly feedIds: readonly string[]
+  readonly folder?: string
+  readonly feedIds?: readonly string[]
+  readonly tagId?: string
   readonly key: string
 }
 
 const folderScopeKey = (folder: string, feedIds: readonly string[]): string =>
   'folder:' + createHash('sha256').update(JSON.stringify([folder, [...feedIds].sort()])).digest('base64url')
 
-/** 从 overview/refresh 的 payload 里解析文件夹范围；失败时返回带 code 的信封。 */
+/** 从 overview/refresh 的 payload 里解析文件夹或标签范围；失败时返回带 code 的信封。 */
 function overviewScopeOf(ctx: EndpointCtx, payload: unknown): { scope?: OverviewScope; failure?: RpcResult<never> } {
-  const body = payload as { folder?: unknown } | null
-  const raw = body?.folder
-  if (raw === undefined || raw === null) return {}
-  if (typeof raw !== 'string' || raw === '') {
+  const body = payload as { folder?: unknown; tagId?: unknown } | null
+  const folder = body?.folder
+  const tagId = body?.tagId
+  if (folder !== undefined && folder !== null && tagId !== undefined && tagId !== null) {
+    return { failure: fail('bad-request', 'overview 不能同时按文件夹与标签筛选') }
+  }
+  if (tagId !== undefined && tagId !== null) {
+    if (typeof tagId !== 'string' || tagId === '') {
+      return { failure: fail('bad-request', 'overview 的 tagId 必须是非空字符串') }
+    }
+    const found = ctx.store.listTags().find((tag) => tag.id === tagId)
+    if (found === undefined) return { failure: fail('not-found', '标签不存在：' + tagId) }
+    // 标签 id 是稳定主键：改名不会让当前浏览范围失效；删除才会（listTags 找不到）。
+    return { scope: { tagId: found.id, key: 'tag:' + found.id } }
+  }
+  if (folder === undefined || folder === null) return {}
+  if (typeof folder !== 'string' || folder === '') {
     return { failure: fail('bad-request', 'overview 的 folder 必须是非空字符串') }
   }
-  const found = ctx.store.listFolders().find((folder) => folder.name === raw)
-  if (found === undefined) return { failure: fail('not-found', '文件夹不存在：' + raw) }
-  return { scope: { folder: raw, feedIds: found.feedIds, key: folderScopeKey(raw, found.feedIds) } }
+  const found = ctx.store.listFolders().find((entry) => entry.name === folder)
+  if (found === undefined) return { failure: fail('not-found', '文件夹不存在：' + folder) }
+  return { scope: { folder, feedIds: found.feedIds, key: folderScopeKey(folder, found.feedIds) } }
 }
 
 /**
@@ -151,7 +165,7 @@ function overviewScopeOf(ctx: EndpointCtx, payload: unknown): { scope?: Overview
 const buildOverview = (ctx: EndpointCtx, refreshed: boolean, cursor?: Cursor, scope?: OverviewScope): Overview => {
   const refreshedAtMs = ctx.lastRefreshCompletedAt()
   const target = ctx.ready()
-  if (!target) return { feeds: [], folders: [], items: [], unread: 0, perFeedUnread: {}, refreshed }
+  if (!target) return { feeds: [], folders: [], tags: [], items: [], unread: 0, perFeedUnread: {}, refreshed }
 
   const feeds = target.listFeeds().map(([feedId, record]) => ({
     id: feedId,
@@ -160,8 +174,9 @@ const buildOverview = (ctx: EndpointCtx, refreshed: boolean, cursor?: Cursor, sc
     lastFetchedAt: record.lastFetchedAt,
     lastFailure: record.lastFailure,
   }))
-  // 目录必须每次随 overview 下发：左栏要显示空文件夹，而 feeds 里没有它们的位置。
+  // 目录必须每次随 overview 下发：左栏要显示空文件夹/空标签，而 feeds 里没有它们的位置。
   const folders = target.listFolders()
+  const tags = target.listTags()
 
   // 「源 id → 标题」以 feeds 表为键域：只收「所属源还在」的条目，与原先由 listFeeds 驱动的
   // 语义保持一致（退订时条目本该连删除掉，见 removeFeed；这里挡的是残留/手工改库的情形）。
@@ -197,7 +212,7 @@ const buildOverview = (ctx: EndpointCtx, refreshed: boolean, cursor?: Cursor, sc
   // 存储侧是否已给不出更多行（请求 window + 1 行却只拿到 ≤ window 行）
   let exhausted = false
   while (true) {
-    rows = target.listRecent(window + 1, cursor, scope?.feedIds)
+    rows = target.listRecent(window + 1, cursor, scope?.feedIds, scope?.tagId)
     items = []
     lastDelivered = -1
     for (let index = 0; index < rows.length; index += 1) {
@@ -229,6 +244,10 @@ const buildOverview = (ctx: EndpointCtx, refreshed: boolean, cursor?: Cursor, sc
   // 续页游标 = 下发批次的**最后一行**（recency + id 一对值）。判据是「它后面还有行」：
   // 要么同一批里还有（lastDelivered 不是最后一个下标），要么存储侧还没给完（!exhausted）。
   // 两者都不成立 ⇒ 到底，nextCursor 缺省 —— 客户端据此停止翻页（Overview 契约）。
+  // 每页一次批量取标签 id（不能逐行 N+1）；ItemView 的 tagIds 是列表行标签与编辑器的数据源。
+  const tagIdsByItem = target.tagIdsForItems(items.map((item) => item.id))
+  items = items.map((item) => ({ ...item, tagIds: tagIdsByItem[item.id] ?? [] }))
+
   const nextCursor = lastDelivered >= 0 && (lastDelivered + 1 < rows.length || !exhausted)
     ? (scope === undefined ? '' : scope.key + ':')
       + encodeCursor({ recency: recencyOf(items[items.length - 1]), id: items[items.length - 1].id })
@@ -237,6 +256,7 @@ const buildOverview = (ctx: EndpointCtx, refreshed: boolean, cursor?: Cursor, sc
   return {
     feeds,
     folders,
+    tags,
     items,
     ...(nextCursor === undefined ? {} : { nextCursor }),
     // 总数由每源账目**求和派生**，不再单独数一遍：两处各算一次时，截断/漂移截面下迟早对不上，
@@ -249,7 +269,7 @@ const buildOverview = (ctx: EndpointCtx, refreshed: boolean, cursor?: Cursor, sc
   }
 }
 /**
- * 端点表：14 个端点一处声明。
+ * 端点表：25 个端点一处声明。
  *
  * 穷尽性由 `Record<Endpoint, EndpointSpec>` 保证 —— 名字表（shared.ts 的 ENDPOINT_NAMES）
  * 加了新端点而这里没跟上，编译就不过。这是本文件里唯一需要「加端点时改的地方」。
@@ -259,6 +279,7 @@ const searchQuerySchema = z.object({
   text: z.string().trim().min(1).refine((text) => [...text].length <= 120),
   feedId: z.string().optional(),
   feedIds: z.array(z.string()).optional(),
+  tagId: z.string().min(1).optional(),
   read: z.enum(['read', 'unread']).optional(),
   starred: z.boolean().optional(),
   from: searchDay,
@@ -278,7 +299,7 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         .filter(([id]) => (query.feedId === undefined || query.feedId === id) && (selected?.has(id) ?? true))
         .map(([id, feed]) => [id, feed.title ?? id])
       const key = createHash('sha256').update(JSON.stringify([
-        query.text, query.read, query.starred === true, query.from, query.to, feeds.map(([id]) => id).sort(),
+        query.text, query.read, query.starred === true, query.from, query.to, query.tagId, feeds.map(([id]) => id).sort(),
       ])).digest('base64url') + ':'
       const cursor = query.cursor?.slice(key.length)
       if (query.cursor !== undefined && (!query.cursor.startsWith(key) || cursor === undefined || !decodeCursor(cursor))) {
@@ -307,7 +328,7 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         // 拿别的范围/无范围游标来续页 —— 两种都必须响亮失败，绝不能静默从头开始。
         const prefix = scope.key + ':'
         if (!raw.startsWith(prefix)) {
-          return fail('bad-request', '分页游标与当前文件夹范围不匹配，请重新加载')
+          return fail('bad-request', '分页游标与当前范围不匹配，请重新加载')
         }
         cursor = decodeCursor(raw.slice(prefix.length))
       }

@@ -157,6 +157,15 @@ const SELECT_RECENT_AFTER_IN_FEEDS = ITEM_SELECT
   + ' AND (i.recency < ? OR (i.recency = ? AND i.id > ?))'
   + ITEM_ORDER + ' LIMIT ?'
 
+/** 标签范围的同一页查询；标签 id 稳定，改名不换范围。 */
+const SELECT_RECENT_BY_TAG = ITEM_SELECT
+  + ' WHERE i.id IN (SELECT item_id FROM item_tags WHERE tag_id = ?)'
+  + ITEM_ORDER + ' LIMIT ?'
+const SELECT_RECENT_AFTER_BY_TAG = ITEM_SELECT
+  + ' WHERE i.id IN (SELECT item_id FROM item_tags WHERE tag_id = ?)'
+  + ' AND (i.recency < ? OR (i.recency = ? AND i.id > ?))'
+  + ITEM_ORDER + ' LIMIT ?'
+
 /**
  * 续页（keyset 分页，Task 6）：**严格排在游标之后**的那批。
  *
@@ -189,6 +198,8 @@ const DELETE_TAG_LINKS = 'DELETE FROM item_tags WHERE tag_id = ?'
 const DELETE_TAG = 'DELETE FROM tags WHERE id = ?'
 const DELETE_ITEM_TAGS = 'DELETE FROM item_tags WHERE item_id = ?'
 const INSERT_ITEM_TAG = 'INSERT OR IGNORE INTO item_tags (item_id, tag_id) VALUES (?, ?)'
+const TAG_IDS_FOR_ITEMS = `SELECT item_id, tag_id FROM item_tags
+  WHERE item_id IN (SELECT value FROM json_each(?)) ORDER BY item_id, tag_id`
 // 身份合并：把 loser 的关联复制到 keeper。INSERT OR IGNORE 让两侧同名关联天然去重。
 const COPY_ITEM_TAGS = 'INSERT OR IGNORE INTO item_tags (item_id, tag_id) SELECT ?, tag_id FROM item_tags WHERE item_id = ?'
 
@@ -780,20 +791,24 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
      * 那是静默的性能悬崖（结果看着还挺对）。非整数上限交给 SQLite 响亮报
      * 「datatype mismatch」，不在这里悄悄取整。
      */
-    listRecent: (limit, cursor, feedIds) => {
+    listRecent: (limit, cursor, feedIds, tagId) => {
       if (limit <= 0) return []
       // 空范围 = 空结果，绝不回落成「无范围」：空文件夹若走全表会让用户看到别的源。
       if (feedIds !== undefined && feedIds.length === 0) return []
       const scoped = feedIds === undefined
         ? undefined
         : JSON.stringify([...new Set(feedIds)])
-      const rows = scoped === undefined
+      const rows = tagId !== undefined
         ? (cursor === undefined
-          ? sql(SELECT_RECENT).all(limit)
-          : sql(SELECT_RECENT_AFTER).all(cursor.recency, cursor.recency, cursor.id, limit))
-        : (cursor === undefined
-          ? sql(SELECT_RECENT_IN_FEEDS).all(scoped, limit)
-          : sql(SELECT_RECENT_AFTER_IN_FEEDS).all(scoped, cursor.recency, cursor.recency, cursor.id, limit))
+          ? sql(SELECT_RECENT_BY_TAG).all(tagId, limit)
+          : sql(SELECT_RECENT_AFTER_BY_TAG).all(tagId, cursor.recency, cursor.recency, cursor.id, limit))
+        : scoped === undefined
+          ? (cursor === undefined
+            ? sql(SELECT_RECENT).all(limit)
+            : sql(SELECT_RECENT_AFTER).all(cursor.recency, cursor.recency, cursor.id, limit))
+          : (cursor === undefined
+            ? sql(SELECT_RECENT_IN_FEEDS).all(scoped, limit)
+            : sql(SELECT_RECENT_AFTER_IN_FEEDS).all(scoped, cursor.recency, cursor.recency, cursor.id, limit))
       return rows.map((row) => {
         const itemId = requiredText(row.id, 'items.id')
         return [itemId, toItemRecord(row)] as [string, ItemRecord]
@@ -898,6 +913,18 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
       const target = requireTagId(itemId, '文章 ID')
       if (sql(SELECT_ITEM).get(target) === undefined) throw new TagError('not-found', '文章不存在：' + target)
       return itemTagViews(target)
+    },
+
+    tagIdsForItems: (itemIds) => {
+      const result: Record<string, string[]> = {}
+      for (const itemId of itemIds) result[itemId] = []
+      if (itemIds.length === 0) return result
+      for (const row of sql(TAG_IDS_FOR_ITEMS).all(JSON.stringify([...new Set(itemIds)]))) {
+        const itemId = requiredText(row.item_id, 'item_tags.item_id')
+        const tagId = requiredText(row.tag_id, 'item_tags.tag_id')
+        if (result[itemId] !== undefined) result[itemId].push(tagId)
+      }
+      return result
     },
 
     setItemTags: async (itemId, tagIds) => {

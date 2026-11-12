@@ -121,7 +121,7 @@ export interface ReaderStore {
    * 否则旧跨源首页之外的成员条目会被截断窗口挡掉（M2 03 的硬要求）。
    * 传空数组 = 空结果，绝不回落成「无范围」。
    */
-  listRecent(limit: number, cursor?: Cursor, feedIds?: readonly string[]): Array<[string, ItemRecord]>
+  listRecent(limit: number, cursor?: Cursor, feedIds?: readonly string[], tagId?: string): Array<[string, ItemRecord]>
   /**
    * 显式清理的候选行（Task 5；原先由调用方 allItems() 全表物化后再筛）。
    *
@@ -166,6 +166,8 @@ export interface ReaderStore {
   deleteTag(id: string): Promise<void>
   /** 某篇文章的标签（用于 06 的列表/正文编辑入口）。 */
   itemTags(itemId: string): TagView[]
+  /** 批量读取文章标签 id（列表/搜索页每行一次查询，不能逐条 N+1）。 */
+  tagIdsForItems(itemIds: readonly string[]): Record<string, string[]>
   /** 幂等覆盖某篇文章的标签集合；空数组 = 清空。任一 id 不存在则整次失败。 */
   setItemTags(itemId: string, tagIds: readonly string[]): Promise<TagView[]>
   /**
@@ -299,13 +301,14 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
      * 旧路径同样行为不变：全表按 recency 降序 + id 升序排完取前缀。
      * limit ≤ 0 短路成空列表（`slice(0, -1)` 会返回到倒数第二项，那是静默的错答案）。
      */
-    listRecent: (limit, cursor, feedIds) => {
+    listRecent: (limit, cursor, feedIds, tagId) => {
       if (limit <= 0) return []
       // 空数组 = 空结果：绝不能把「空范围」当成「没有范围」（那会让空文件夹查出全库）。
       const allowed = feedIds === undefined ? undefined : new Set(feedIds)
       if (allowed !== undefined && allowed.size === 0) return []
       const rows = [...items.entries()].filter(([itemId, record]) => {
         if (allowed !== undefined && !allowed.has(record.feedId)) return false
+        if (tagId !== undefined && !(itemTagIds.get(itemId)?.has(tagId) ?? false)) return false
         if (cursor === undefined) return true
         const recency = recencyOf(record)
         // 与自持实现的谓词逐字同义（recency 降序、同 recency 内 id 升序的「之后」）
@@ -380,6 +383,11 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
     itemTags: (itemId) => {
       if (items.get(itemId) === undefined) throw new TagError('not-found', '文章不存在：' + itemId)
       return itemTagViews(itemId)
+    },
+    tagIdsForItems: (itemIds) => {
+      const result: Record<string, string[]> = {}
+      for (const itemId of itemIds) result[itemId] = [...(itemTagIds.get(itemId) ?? [])]
+      return result
     },
     setItemTags: async (itemId, tagIds) => {
       if (items.get(itemId) === undefined) throw new TagError('not-found', '文章不存在：' + itemId)

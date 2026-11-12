@@ -73,6 +73,10 @@ function search({ query, feeds, limit, flag }: Job): SearchPage {
     where.push('i.feed_id IN (SELECT value FROM json_each(:feeds))')
     params.feeds = JSON.stringify([...titles.keys()])
   }
+  if (query.tagId !== undefined) {
+    where.push('EXISTS (SELECT 1 FROM item_tags it WHERE it.item_id = i.id AND it.tag_id = :tag)')
+    params.tag = query.tagId
+  }
   if (query.read === 'read') where.push('i.read_at IS NOT NULL')
   if (query.read === 'unread') where.push('i.read_at IS NULL')
   if (query.starred) where.push('i.starred = 1')
@@ -109,6 +113,20 @@ function search({ query, feeds, limit, flag }: Job): SearchPage {
       readAt: typeof read_at === 'string' ? read_at : undefined,
       summary: typeof summary === 'string' ? summary : undefined,
       starred: starred === 1, keptUnread: kept_unread === 1 || undefined })
+  }
+  // 列表行的标签编辑需要每行当前 tag id；一页一次批量查询，不在渲染路径逐条查。
+  if (items.length > 0) {
+    const tagMap = new Map<string, string[]>()
+    const tagRows = db.prepare(
+      'SELECT item_id, tag_id FROM item_tags WHERE item_id IN (SELECT value FROM json_each(?)) ORDER BY item_id, tag_id',
+    ).all(JSON.stringify(items.map((entry) => entry.id)))
+    for (const row of tagRows) {
+      if (typeof row.item_id !== 'string' || typeof row.tag_id !== 'string') throw new Error('标签关联格式无效')
+      const list = tagMap.get(row.item_id) ?? []
+      list.push(row.tag_id)
+      tagMap.set(row.item_id, list)
+    }
+    for (const item of items) item.tagIds = tagMap.get(item.id) ?? []
   }
   if (rows.length > limit) {
     const last = items[items.length - 1]

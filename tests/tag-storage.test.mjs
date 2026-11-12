@@ -151,6 +151,14 @@ test('标签 CRUD：空标签可见、改名保 id 与关联、删标签不影�
 
     const renamed = await store.renameTag(a.id, '甲改')
     assert.equal(renamed.id, a.id, '改名保留稳定 id')
+    const duplicate = await store.createTag('重复名')
+    await assert.rejects(
+      () => store.renameTag(a.id, '重复名'),
+      (error) => error instanceof TagError && error.code === 'conflict',
+      '改名撞已有名称同样必须 conflict',
+    )
+    assert.equal(store.listTags().find((tag) => tag.id === a.id).name, '甲改', '失败改名不改原名称')
+    await store.deleteTag(duplicate.id)
     await store.setItemTags('item-1', [a.id, b.id, a.id])
     let itemTags = await store.itemTags('item-1')
     assert.deepEqual(tagNames(itemTags), ['乙', '甲改'], '重复关联去重，改名后关联仍指向原 id')

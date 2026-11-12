@@ -125,6 +125,8 @@ export function memoryStore() {
       }
       return unread
     },
+    listTags: () => [],
+    tagIdsForItems: (itemIds) => Object.fromEntries(itemIds.map((id) => [id, []])),
     listRecent: (limit) => {
       if (limit <= 0) return []
       const rows = [...items.entries()]

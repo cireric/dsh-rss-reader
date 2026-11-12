@@ -95,3 +95,32 @@ test('setItemTags：重复去重、混合无效回滚、空数组清空，列表
     assert.deepEqual(result.value.tags, [], '空数组清空关联')
   } finally { h.cleanup() }
 })
+
+
+test('清理与退订生命周期：文章删除只清标签关联，标签本身保留', async () => {
+  const h = makeDispatch()
+  try {
+    const tag = (await h.dispatch('createTag', { name: '生命周期' })).value.tag
+    await h.dispatch('setItemTags', { itemId: ITEM, tagIds: [tag.id] })
+
+    await h.store.saveItem('old-item', {
+      feedId: FEED, title: '旧文章', link: 'https://tag-endpoint.example/old',
+      fetchedAt: '2000-01-01T00:00:00.000Z', readAt: '2000-01-01T00:00:00.000Z', starred: false,
+    })
+    await h.dispatch('setItemTags', { itemId: 'old-item', tagIds: [tag.id] })
+    const cleaned = await h.dispatch('cleanup', {})
+    assert.equal(cleaned.ok, true, JSON.stringify(cleaned))
+    assert.equal(cleaned.value.deleted, 1, '旧文章被清理')
+    assert.equal(h.store.item('old-item'), undefined)
+    assert.equal(h.store.listTags().find((entry) => entry.id === tag.id).itemCount, 1, '另一篇文章的关联仍在')
+
+    const removed = await h.dispatch('removeFeed', { url: FEED })
+    assert.equal(removed.ok, true, JSON.stringify(removed))
+    assert.equal(removed.value.items, 1)
+    assert.equal(h.store.item(ITEM), undefined, '退订连带删除文章')
+    const tags = await h.dispatch('listTags', {})
+    const survivor = tags.value.tags.find((entry) => entry.id === tag.id)
+    assert.ok(survivor, '标签本身保留（空标签可见）')
+    assert.equal(survivor.itemCount, 0, '退订后关联清零')
+  } finally { h.cleanup() }
+})

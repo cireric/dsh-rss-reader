@@ -6,7 +6,7 @@
  * 列表、正文、订阅管理与键盘接线，任一改动都要动同一个文件。
  */
 import { useEffect, useState } from 'react'
-import { ROUTE_PATH, recencyOf, sanitizeViewPreferences, type ArticlePayload, type CleanupResult, type Endpoint, type FeedView, type FolderView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult, type SearchPage, type SearchQuery, type UnreadAccount, type ViewPreferences } from '../shared.js'
+import { ROUTE_PATH, recencyOf, sanitizeViewPreferences, type ArticlePayload, type CleanupResult, type Endpoint, type FeedView, type FolderView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult, type SearchPage, type SearchQuery, type TagView, type UnreadAccount, type ViewPreferences } from '../shared.js'
 import { createAccountMirror } from './account-mirror.js'
 
 export type Filter = 'all' | 'unread' | 'starred'
@@ -21,6 +21,7 @@ export type NavSelection =
   | { kind: 'virtual' }
   | { kind: 'feed'; feedId: string }
   | { kind: 'folder'; folder: string }
+  | { kind: 'tag'; tagId: string }
 
 /**
  * 导航**光标**：键盘在左栏那一列里现在停在哪一行。
@@ -34,7 +35,11 @@ export type NavSelection =
  *
  * 行序与左栏渲染逐行对应：虚拟视图三行在前、订阅源在后（见 navRowsOf）。
  */
-export type NavCursor = { kind: 'filter'; filter: Filter } | { kind: 'feed'; feedId: string } | { kind: 'folder'; folder: string }
+export type NavCursor =
+  | { kind: 'filter'; filter: Filter }
+  | { kind: 'feed'; feedId: string }
+  | { kind: 'folder'; folder: string }
+  | { kind: 'tag'; tagId: string }
 
 /**
  * 虚拟视图三行：全部 / 未读 / 星标。
@@ -58,6 +63,7 @@ export function navRowsOf(
   feeds: ReadonlyArray<Pick<FeedView, 'id' | 'folder'>>,
   foldedFolders: ReadonlySet<string>,
   folderNames: readonly string[] = [],
+  tags: ReadonlyArray<Pick<TagView, 'id' | 'name'>> = [],
 ): NavCursor[] {
   // 显式目录先入表：空文件夹只能靠它出现（feeds 里没有成员可派生）。
   const folders = new Map<string, string[]>()
@@ -80,12 +86,14 @@ export function navRowsOf(
     if (foldedFolders.has(folder)) continue
     for (const feedId of ids) rows.push({ kind: 'feed', feedId })
   }
-  return [...rows, ...unfiled]
+  // 标签行排在最后：它们是跨源的分类轴，与「源行」同级但不参与文件夹折叠。
+  return [...rows, ...unfiled, ...tags.map((tag) => ({ kind: 'tag' as const, tagId: tag.id }))]
 }
 
 /** 光标和 DOM 使用同一行键，避免折叠后两者的行序分叉。 */
 export function navCursorKey(cursor: NavCursor): string {
   if (cursor.kind === 'folder') return 'folder:' + cursor.folder
+  if (cursor.kind === 'tag') return 'tag:' + cursor.tagId
   return cursor.kind === 'filter' ? 'filter:' + cursor.filter : 'feed:' + cursor.feedId
 }
 
@@ -94,6 +102,7 @@ function sameNavSelection(a: NavSelection, b: NavSelection): boolean {
   if (a.kind === 'virtual' || b.kind === 'virtual') return a.kind === b.kind
   if (a.kind === 'feed' && b.kind === 'feed') return a.feedId === b.feedId
   if (a.kind === 'folder' && b.kind === 'folder') return a.folder === b.folder
+  if (a.kind === 'tag' && b.kind === 'tag') return a.tagId === b.tagId
   return false
 }
 
@@ -102,9 +111,11 @@ function selectionExists(
   selection: NavSelection,
   feeds: ReadonlyArray<Pick<FeedView, 'id'>>,
   folders: ReadonlyArray<Pick<FolderView, 'name'>>,
+  tags: ReadonlyArray<Pick<TagView, 'id'>> = [],
 ): boolean {
   if (selection.kind === 'virtual') return true
   if (selection.kind === 'feed') return feeds.some((feed) => feed.id === selection.feedId)
+  if (selection.kind === 'tag') return tags.some((tag) => tag.id === selection.tagId)
   return folders.some((folder) => folder.name === selection.folder)
 }
 
@@ -136,6 +147,8 @@ export interface ReaderState {
   feeds: FeedView[]
   /** 文件夹目录（含空目录）。左栏行序、管理面板与文件夹范围都以它为准。 */
   folders: FolderView[]
+  /** 标签目录（含空标签）。左栏筛选与编辑器的名称来源。 */
+  tags: TagView[]
   unread: number
   filter: Filter
   selectedId: string | undefined
@@ -233,7 +246,7 @@ export function relativeTime(iso: string | undefined): string {
  */
 export function createReaderStore() {
   let state: ReaderState = {
-    items: [], feeds: [], folders: [], unread: 0, filter: 'all',
+    items: [], feeds: [], folders: [], tags: [], unread: 0, filter: 'all',
     selectedId: undefined, loading: true, error: undefined, undo: undefined,
     view: 'list', layout: 'list', markAllRange: 'all', showUnread: true, article: undefined, notice: undefined,
     importReport: undefined, feedsBusy: false,
@@ -285,6 +298,7 @@ export function createReaderStore() {
     set({ loading: firstPage, loadingMore: !firstPage, error: undefined })
     const nav = state.navSelection
     const feedId = nav.kind === 'feed' ? nav.feedId : undefined
+    const tagId = nav.kind === 'tag' ? nav.tagId : search.tagId
     // 文件夹范围 = 当前成员 id；若搜索表单另选了订阅源，取交集（两者是不可分割的「范围」条件）。
     const folderIds = nav.kind === 'folder'
       ? state.feeds.filter((feed) => feed.folder === nav.folder).map((feed) => feed.id)
@@ -311,6 +325,7 @@ export function createReaderStore() {
           ...search,
           ...(feedId === undefined ? {} : { feedId }),
           ...(scopedFeedIds === undefined ? {} : { feedIds: scopedFeedIds }),
+          ...(tagId === undefined ? {} : { tagId }),
           cursor: nextCursor, read, starred,
         }, request.signal)
         if (version !== listVersion) return
@@ -382,6 +397,7 @@ export function createReaderStore() {
       const feed = state.feeds.find((entry) => entry.id === item.feedId)
       if (feed?.folder !== state.navSelection.folder) return false
     }
+    if (state.navSelection.kind === 'tag' && !(item.tagIds ?? []).includes(state.navSelection.tagId)) return false
     if ((state.filter === 'unread' || state.search?.read === 'unread') && item.readAt !== undefined) return false
     if (state.search?.read === 'read' && item.readAt === undefined) return false
     if ((state.filter === 'starred' || state.search?.starred) && !item.starred) return false
@@ -422,11 +438,13 @@ export function createReaderStore() {
     const selected = state.selectedId
     const stillThere = selected !== undefined && overview.items.some((item) => item.id === selected)
     // 文件夹可能在别的面板里被删/改名；选中项失效时回落虚拟视图，与「源被退订」同一条规则。
-    const missing = !selectionExists(state.navSelection, overview.feeds, overview.folders)
+    const tags = overview.tags ?? []
+    const missing = !selectionExists(state.navSelection, overview.feeds, overview.folders, tags)
     set({
       items: overview.items,
       feeds: overview.feeds,
       folders: overview.folders,
+      tags,
       unread: overview.unread,
       perFeedUnread: overview.perFeedUnread,
       // 第一页的游标由宿主给（缺省 = 这一页就是全部）。整份重取时它必须**跟着换掉**：
@@ -547,13 +565,18 @@ export function createReaderStore() {
       const preferences = viewRestored ? undefined : await readViewPreferences()
       // 文件夹浏览必须把范围带给宿主：由 SQL 先筛成员再限页，客户端拿到的才是这个文件夹的
       // 一页，而不是「跨源首页里恰好属于成员的那几条」。
-      const overview = await callRpc<Overview>(endpoint,
-        state.navSelection.kind === 'folder' ? { folder: state.navSelection.folder } : undefined)
+      const scopePayload = state.navSelection.kind === 'folder'
+        ? { folder: state.navSelection.folder }
+        : state.navSelection.kind === 'tag'
+          ? { tagId: state.navSelection.tagId }
+          : undefined
+      const overview = await callRpc<Overview>(endpoint, scopePayload)
       if (version !== overviewVersion) return
       if (state.search) {
-        const missing = !selectionExists(state.navSelection, overview.feeds, overview.folders)
+        const tags = overview.tags ?? []
+        const missing = !selectionExists(state.navSelection, overview.feeds, overview.folders, tags)
         set({
-          feeds: overview.feeds, folders: overview.folders,
+          feeds: overview.feeds, folders: overview.folders, tags,
           unread: overview.unread, perFeedUnread: overview.perFeedUnread,
           ...(missing ? { navSelection: { kind: 'virtual' }, filter: 'all', navCursor: { kind: 'filter', filter: 'all' } } : {}),
         })
@@ -628,6 +651,7 @@ export function createReaderStore() {
       const overview = await callRpc<Overview>('overview', {
         cursor,
         ...(state.navSelection.kind === 'folder' ? { folder: state.navSelection.folder } : {}),
+        ...(state.navSelection.kind === 'tag' ? { tagId: state.navSelection.tagId } : {}),
       })
       if (version !== listVersion) return
       // 追加拼在**当前** state 上（不是闭包里那份快照）：请求在途时用户可能已经标读/加星，
@@ -981,15 +1005,18 @@ export function createReaderStore() {
       set({ navSelection: { kind: 'virtual' }, filter: 'all', navCursor: { kind: 'filter', filter: 'all' } })
     } else if (next.kind === 'feed') {
       set({ navSelection: next, navCursor: { kind: 'feed', feedId: next.feedId } })
-    } else {
+    } else if (next.kind === 'folder') {
       set({ navSelection: next, navCursor: { kind: 'folder', folder: next.folder } })
+    } else {
+      set({ navSelection: next, navCursor: { kind: 'tag', tagId: next.tagId } })
     }
     relocateSelection()
     persistView()
     resetSearchPage()
-    // 文件夹范围必须由宿主先筛再分页：进入/退出文件夹时重取一页（源选择仍是客户端过滤，
-    // 沿用既有行为，不额外发请求）。搜索态由 resetSearchPage 用新的成员范围重查。
-    if (!state.search && (current.kind === 'folder' || next.kind === 'folder')) void load('overview')
+    // 文件夹/标签范围必须由宿主先筛再分页：进入/退出/切换范围时重取一页。
+    const scopeChanged = current.kind === 'folder' || next.kind === 'folder'
+      || current.kind === 'tag' || next.kind === 'tag'
+    if (!state.search && scopeChanged) void load('overview')
   }
 
   /**
@@ -1003,7 +1030,7 @@ export function createReaderStore() {
    * 而不是静默不动 —— 停在一个不存在的行上会让之后每一键都毫无反应。
    */
   const moveNavCursor = (delta: 1 | -1): void => {
-    const rows = navRowsOf(state.feeds, state.foldedFolders, state.folders.map((folder) => folder.name))
+    const rows = navRowsOf(state.feeds, state.foldedFolders, state.folders.map((folder) => folder.name), state.tags)
     if (rows.length === 0) return
     const at = rows.findIndex((row) => navCursorKey(row) === navCursorKey(state.navCursor))
     const from = at < 0 ? 0 : at
@@ -1031,6 +1058,7 @@ export function createReaderStore() {
   const openNavCursor = (): void => {
     const cursor = state.navCursor
     if (cursor.kind === 'folder') { toggleFolder(cursor.folder); return }
+    if (cursor.kind === 'tag') { selectNav({ kind: 'tag', tagId: cursor.tagId }); return }
     if (cursor.kind === 'feed') { selectNav({ kind: 'feed', feedId: cursor.feedId }); return }
     setFilter(cursor.filter)
   }
@@ -1184,6 +1212,92 @@ export function createReaderStore() {
     }
   }
 
+  /** 标签写入串行队列：频繁点击时按点击顺序发 setItemTags，最后一次覆盖即为服务端结果。 */
+  let tagWrite: Promise<void> = Promise.resolve()
+  /** 失败代数：一次失败后，队列里尚未发送的旧快照必须作废，避免它们再把坏状态写一次。 */
+  let tagEpoch = 0
+
+  const createTag = async (name: string): Promise<void> => {
+    try {
+      const result = await callRpc<{ tag: TagView }>('createTag', { name })
+      set({ tags: [...state.tags, { ...result.tag, itemCount: 0 }], notice: '已创建标签「' + result.tag.name + '」' })
+    } catch (failure) {
+      set({ error: failure instanceof Error ? failure.message : String(failure) })
+    }
+  }
+
+  const renameTag = async (id: string, name: string): Promise<void> => {
+    try {
+      const result = await callRpc<{ tag: TagView }>('renameTag', { id, name })
+      // 改名不换 id：当前标签范围与文章关联都保持不变，只替换显示名。
+      set({
+        tags: state.tags.map((tag) => tag.id === id ? { ...tag, name: result.tag.name } : tag),
+        notice: '已把标签改名为「' + result.tag.name + '」',
+      })
+    } catch (failure) {
+      set({ error: failure instanceof Error ? failure.message : String(failure) })
+    }
+  }
+
+  const deleteTag = async (id: string): Promise<void> => {
+    try {
+      await callRpc<{ deleted: true }>('deleteTag', { id })
+      const selected = state.navSelection.kind === 'tag' && state.navSelection.tagId === id
+      set({
+        tags: state.tags.filter((tag) => tag.id !== id),
+        items: state.items.map((item) => ({ ...item, tagIds: (item.tagIds ?? []).filter((tagId) => tagId !== id) })),
+        ...(selected ? { navSelection: { kind: 'virtual' }, filter: 'all', navCursor: { kind: 'filter', filter: 'all' } } : {}),
+        notice: '已删除标签（文章与阅读状态不受影响）',
+      })
+      if (selected) {
+        persistView()
+        await load('overview')
+      }
+    } catch (failure) {
+      set({ error: failure instanceof Error ? failure.message : String(failure) })
+    }
+  }
+
+  /** 乐观切换一篇文章的标签；写盘串行化，迟到失败会回取当前页把可见状态拉回真相。 */
+  const toggleItemTag = (tagId: string): void => {
+    const itemId = state.selectedId
+    if (itemId === undefined) return
+    const item = state.items.find((entry) => entry.id === itemId)
+    const tag = state.tags.find((entry) => entry.id === tagId)
+    if (item === undefined || tag === undefined) return
+    const epoch = tagEpoch
+    const current = item.tagIds ?? []
+    const active = current.includes(tagId)
+    const nextIds = active ? current.filter((id) => id !== tagId) : [...current, tagId]
+    const delta = active ? -1 : 1
+    set({
+      items: state.items.map((entry) => entry.id === itemId ? { ...entry, tagIds: nextIds } : entry),
+      tags: state.tags.map((entry) => entry.id === tagId
+        ? { ...entry, itemCount: Math.max(0, (entry.itemCount ?? 0) + delta) }
+        : entry),
+    })
+    tagWrite = tagWrite.then(async () => {
+      if (epoch !== tagEpoch) return
+      try {
+        const result = await callRpc<{ itemId: string; tags: TagView[] }>('setItemTags', { itemId, tagIds: nextIds })
+        if (state.items.some((entry) => entry.id === itemId)) {
+          set({ error: undefined, items: state.items.map((entry) => entry.id === itemId
+            ? { ...entry, tagIds: result.tags.map((tag) => tag.id) }
+            : entry) })
+        }
+      } catch (failure) {
+        tagEpoch += 1
+        const message = failure instanceof Error ? failure.message : String(failure)
+        // 迟到/失败都不许把乐观状态留在界面上；重取当前页会把服务端真值带回。
+        await load('overview')
+        // load 成功会清 error；失败提示必须在回取之后重新挂上，否则用户只看到静默回滚。
+        set({ error: message })
+      }
+    }).catch((error: unknown) => {
+      console.error('标签写入队列异常', error)
+    })
+  }
+
   return {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
     get, visible, load, loadMore, submitSearch, markRead, selectRelative, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllRead, undoMarkAll,
@@ -1198,6 +1312,7 @@ export function createReaderStore() {
     openNavCursor,
     toggleNav, toggleFolder,
     createFolder, renameFolder, deleteFolder, moveFeedToFolder,
+    createTag, renameTag, deleteTag, toggleItemTag,
   }
 }
 

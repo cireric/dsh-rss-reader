@@ -86,7 +86,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
  * @param items 条目表
  * @param feeds 订阅源表；不给则按 items 里出现过的 feedId 推导（此时两者恰好相等）
  */
-function overviewStub(items, feeds, folders, accountItems = items) {
+function overviewStub(items, feeds, folders, accountItems = items, tags = []) {
   const table = feeds ?? [...new Set(items.map((entry) => entry.feedId))].map((feedId) => ({ id: feedId, title: feedId }))
   // 显式传入的目录优先；否则从 feeds 的 folder 派生（空目录只能靠显式参数表达）。
   const directory = folders ?? (() => {
@@ -108,7 +108,7 @@ function overviewStub(items, feeds, folders, accountItems = items) {
     if (entry.readAt === undefined && entry.feedId in perFeedUnread) perFeedUnread[entry.feedId] += 1
   }
   return {
-    feeds: table, items, folders: directory,
+    feeds: table, items, folders: directory, tags,
     unread: accountItems.filter((entry) => entry.readAt === undefined).length,
     perFeedUnread,
     refreshed: false,
@@ -124,7 +124,7 @@ function overviewStub(items, feeds, folders, accountItems = items) {
 /** 本轮 mountReader 的收尾函数登记表：afterEach 统一清（消灭未决 handle ⇒ 变异不再拖死套件）。 */
 const liveCleanups = []
 
-async function mountReader({ items = [], feeds, folders, article, holdArticle, search, folderApi } = {}) {
+async function mountReader({ items = [], feeds, folders, tags = [], article, holdArticle, search, folderApi } = {}) {
   const { JSDOM } = STACK
   // P3（gate 调优轮）：挂载前拍全局快照，cleanup 时还原 —— 此前每个 mount 都把
   // window/document/fetch/ResizeObserver 覆盖成新 JSDOM 的桩且从不还原，跨用例的桩污染面
@@ -178,6 +178,11 @@ async function mountReader({ items = [], feeds, folders, article, holdArticle, s
   // 否则「操作后左栏和未读数更新」这条验收在 DOM 层根本表达不出来。
   const serverFeeds = (feeds ?? [...new Set(items.map((entry) => entry.feedId))].map((feedId) => ({ id: feedId, title: feedId })))
     .map((feed) => ({ ...feed }))
+  let tagSeq = 0
+  const serverTags = tags.map((tag) => ({ ...tag }))
+  const tagDirectory = () => serverTags.map((tag) => ({
+    ...tag, itemCount: items.filter((entry) => (entry.tagIds ?? []).includes(tag.id)).length,
+  }))
   const serverFolders = (folders ?? (() => {
     const derived = []
     for (const feed of serverFeeds) {
@@ -212,15 +217,44 @@ async function mountReader({ items = [], feeds, folders, article, holdArticle, s
     // 全是 undefined。这是夹具没守住契约，不是代码该容忍的形状。
     if (body.endpoint === 'overview' || body.endpoint === 'refresh') {
       const folder = body.payload?.folder
-      const visibleItems = folder === undefined
+      const tagId = body.payload?.tagId
+      let visibleItems = folder === undefined
         ? items
         : items.filter((entry) => serverFeeds.some((feed) => feed.id === entry.feedId && feed.folder === folder))
-      return ok(overviewStub(visibleItems, serverFeeds, serverFolders, items))
+      if (tagId !== undefined) visibleItems = visibleItems.filter((entry) => (entry.tagIds ?? []).includes(tagId))
+      return ok(overviewStub(visibleItems, serverFeeds, serverFolders, items, tagDirectory()))
     }
     if (body.endpoint === 'searchItems' && search) return ok(await search(body.payload))
     if (folderApi !== undefined) {
       const custom = await folderApi(body, { feeds: serverFeeds, folders: serverFolders, items })
       if (custom !== undefined) return custom
+    }
+    if (body.endpoint === 'listTags') return ok({ tags: tagDirectory() })
+    if (body.endpoint === 'createTag') {
+      const name = String(body.payload?.name ?? '').trim()
+      const tag = { id: 'tag-' + (++tagSeq), name }
+      serverTags.push(tag)
+      return ok({ tag: { ...tag, itemCount: 0 } })
+    }
+    if (body.endpoint === 'renameTag') {
+      const tag = serverTags.find((entry) => entry.id === body.payload?.id)
+      if (tag === undefined) return ok({ tag: { id: body.payload?.id, name: body.payload?.name, itemCount: 0 } })
+      tag.name = String(body.payload?.name ?? '').trim()
+      return ok({ tag: { ...tag, itemCount: items.filter((entry) => (entry.tagIds ?? []).includes(tag.id)).length } })
+    }
+    if (body.endpoint === 'deleteTag') {
+      const id = String(body.payload?.id ?? '')
+      const index = serverTags.findIndex((entry) => entry.id === id)
+      if (index >= 0) serverTags.splice(index, 1)
+      for (const entry of items) entry.tagIds = (entry.tagIds ?? []).filter((tagId) => tagId !== id)
+      return ok({ deleted: true })
+    }
+    if (body.endpoint === 'setItemTags') {
+      const item = items.find((entry) => entry.id === body.payload?.itemId)
+      const ids = Array.isArray(body.payload?.tagIds) ? [...new Set(body.payload.tagIds)] : []
+      if (item !== undefined) item.tagIds = ids
+      const current = serverTags.filter((tag) => ids.includes(tag.id))
+      return ok({ itemId: body.payload?.itemId, tags: current })
     }
     if (body.endpoint === 'listFolders') return ok({ folders: serverFolders })
     if (body.endpoint === 'createFolder') {
@@ -1660,4 +1694,192 @@ test('文件夹管理失败可恢复：创建失败保留原数据，重试成�
   await sleep(120)
   assert.ok(doc.querySelector('[data-rss-folder-manage="重复名"]'), '重试成功后新目录出现')
   assert.equal(h.store.get().error, undefined, '成功刷新后错误条被清掉')
+})
+
+
+test('标签浏览与编辑：左栏行、空标签、列表/正文共用标签栏，频繁切换不高亮成已读', async () => {
+  const h = await mountReader({
+    items: [
+      item({ id: 'a1', feedId: 'a', title: '甲文章', tagIds: ['t1'] }),
+      item({ id: 'a2', feedId: 'a', title: '乙文章', tagIds: ['t1', 't2'] }),
+    ],
+    feeds: [{ id: 'a', title: '源 A' }],
+    tags: [{ id: 't1', name: '待读' }, { id: 't2', name: '参考' }, { id: 'empty', name: '空标签' }],
+  })
+  await h.store.load('overview')
+  await sleep(40)
+  const doc = h.win.document
+  assert.ok(doc.querySelector('[data-rss-nav-row="tag:t1"]'), '标签行进入左栏')
+  assert.ok(doc.querySelector('[data-rss-nav-row="tag:empty"]'), '空标签仍可见')
+  assert.equal(doc.querySelector('[data-rss-nav-row="tag:t1"]').textContent.includes('待读'), true)
+
+  doc.querySelector('[data-rss-nav-row="tag:t1"]').click()
+  await sleep(100)
+  assert.deepEqual(h.store.get().navSelection, { kind: 'tag', tagId: 't1' })
+  assert.deepEqual(h.store.visible().map((entry) => entry.id), ['a1', 'a2'], '标签范围只含成员')
+  assert.ok(doc.querySelector('[data-rss-tag-editor]'), '列表视图有共用标签栏')
+  assert.equal(doc.querySelector('[data-rss-tag-toggle="t1"]').getAttribute('aria-pressed'), 'true')
+  assert.equal(doc.querySelector('[data-rss-tag-toggle="t2"]').getAttribute('aria-pressed'), 'false')
+
+  // 标签芯片是编辑控件：Space 不能让 document 的翻页快捷键滚列表。
+  const list = h.arm(h.box('list'))
+  const chip = doc.querySelector('[data-rss-tag-toggle="t2"]')
+  chip.focus()
+  chip.dispatchEvent(new h.win.KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true }))
+  assert.equal(h.scrollTop(list), 0, '标签芯片上的空格被编辑控件拦下，不触发列表翻页')
+
+  // 频繁点击：先加 t2 再移除 t1；写入串行队列按点击后的快照覆盖，最后服务端与界面一致。
+  doc.querySelector('[data-rss-tag-toggle="t2"]').click()
+  doc.querySelector('[data-rss-tag-toggle="t1"]').click()
+  await sleep(150)
+  assert.deepEqual(h.store.visible().find((entry) => entry.id === 'a1').tagIds, ['t2'])
+  assert.ok(h.requests.filter((entry) => entry.endpoint === 'setItemTags').length >= 2)
+  assert.equal(h.requests.some((entry) => entry.endpoint === 'markRead'), false, '标签编辑不许标读')
+
+  // 正文视图复用同一个标签栏：打开 a1 后仍可编辑，且选区仍是 a1。
+  h.press('V', true)
+  for (let i = 0; i < 40 && h.store.get().view !== 'article'; i += 1) await sleep(20)
+  await sleep(60)
+  assert.equal(h.store.get().view, 'article')
+  assert.ok(doc.querySelector('[data-rss-tag-editor]'), '正文视图有同一标签栏')
+  assert.equal(doc.querySelector('[data-rss-tag-toggle="t2"]').getAttribute('aria-pressed'), 'true')
+  doc.querySelector('[data-rss-tag-toggle="t2"]').click()
+  await sleep(100)
+  assert.deepEqual(h.store.get().items.find((entry) => entry.id === 'a1').tagIds, [])
+})
+
+
+test('标签行纳入 Shift+N/P/O 的可见行序，空标签也可到达', async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a1', feedId: 'a', tagIds: ['t1'] })],
+    feeds: [{ id: 'a', title: '源 A' }],
+    tags: [{ id: 't1', name: '待读' }, { id: 'empty', name: '空标签' }],
+  })
+  await h.store.load('overview')
+  await sleep(30)
+  // 行序：全部 / 未读 / 星标 / 源 A / 标签 待读 / 标签 空标签。
+  h.press('N', true); await sleep(15)
+  h.press('N', true); await sleep(15)
+  h.press('N', true); await sleep(15)
+  h.press('N', true); await sleep(15)
+  assert.deepEqual(h.store.get().navCursor, { kind: 'tag', tagId: 't1' }, '标签行在统一行序里，Shift+N 能到达')
+  assert.equal(h.press('O', true), true, 'Shift+O 在标签行上被接管')
+  await sleep(60)
+  assert.deepEqual(h.store.get().navSelection, { kind: 'tag', tagId: 't1' })
+})
+
+test('标签管理：创建、改名、删除只清关联，不改文章与阅读状态', async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a1', feedId: 'a', title: '文章', readAt: '2026-10-06T00:00:00.000Z', tagIds: ['t1'] })],
+    feeds: [{ id: 'a', title: '源 A' }],
+    tags: [{ id: 't1', name: '旧标签' }],
+  })
+  await h.store.load('overview')
+  await sleep(30)
+  h.press('f')
+  await sleep(50)
+  const doc = h.win.document
+  setControlValue(h.win, doc.querySelector('[data-rss-tag-new]'), '新标签')
+  doc.querySelector('[data-rss-tag-create] button[type="submit"]').click()
+  await sleep(100)
+  assert.ok(h.store.get().tags.some((tag) => tag.name === '新标签'), '创建后目录出现新标签')
+
+  doc.querySelector('[data-rss-tag-rename="t1"]').click()
+  await sleep(20)
+  setControlValue(h.win, doc.querySelector('[data-rss-tag-rename-input="t1"]'), '改名后')
+  doc.querySelector('[data-rss-tag-rename-save="t1"]').click()
+  await sleep(100)
+  assert.equal(h.store.get().tags.find((tag) => tag.id === 't1').name, '改名后', '改名保留 id')
+
+  doc.querySelector('[data-rss-tag-delete="t1"]').click()
+  await sleep(20)
+  doc.querySelector('[data-rss-tag-confirm-yes="t1"]').click()
+  await sleep(120)
+  assert.equal(h.store.get().tags.some((tag) => tag.id === 't1'), false, '标签从目录移除')
+  assert.deepEqual(h.store.get().items.find((entry) => entry.id === 'a1').tagIds, [], '只清文章关联')
+  assert.equal(h.store.get().items.find((entry) => entry.id === 'a1').readAt, '2026-10-06T00:00:00.000Z', '阅读状态不变')
+})
+
+
+test('标签 + 搜索：搜索请求携带标签 id，结果仍按标签范围显示', async () => {
+  const h = await mountReader({
+    items: [
+      item({ id: 'a1', feedId: 'a', title: '甲文章', tagIds: ['t1'] }),
+      item({ id: 'a2', feedId: 'a', title: '乙文章', tagIds: ['t2'] }),
+    ],
+    feeds: [{ id: 'a', title: '源 A' }],
+    tags: [{ id: 't1', name: '待读' }, { id: 't2', name: '参考' }],
+    search: async (payload) => ({
+      items: payload.tagId === 't1' ? [item({ id: 'a1', feedId: 'a', title: '甲文章', tagIds: ['t1'] })] : [],
+      nextCursor: undefined,
+    }),
+  })
+  await h.store.load('overview')
+  await sleep(30)
+  h.win.document.querySelector('[data-rss-nav-row="tag:t1"]').click()
+  await sleep(80)
+  h.store.submitSearch({ text: '甲' })
+  await sleep(120)
+  const searchRequest = h.requests.filter((entry) => entry.endpoint === 'searchItems').at(-1)
+  assert.equal(searchRequest.payload.tagId, 't1', '标签范围随搜索请求下发，宿主先在 SQL 里取交集')
+  assert.deepEqual(h.store.visible().map((entry) => entry.id), ['a1'])
+})
+
+
+test('标签写入失败：乐观关联回滚、错误可见，重试成功后恢复', async () => {
+  let fail = true
+  const h = await mountReader({
+    items: [item({ id: 'a1', feedId: 'a', title: '文章', tagIds: [] })],
+    feeds: [{ id: 'a', title: '源 A' }],
+    tags: [{ id: 't1', name: '待读' }],
+    folderApi: async (body) => {
+      if (body.endpoint !== 'setItemTags' || !fail) return undefined
+      // 传输层成功、信封失败：模拟宿主写标签失败，而网络本身没断。
+      return { ok: true, status: 200, json: async () => ({ ok: false, error: { code: 'internal', message: '写标签失败' } }) }
+    },
+  })
+  await h.store.load('overview')
+  await sleep(40)
+  const doc = h.win.document
+  doc.querySelector('[data-rss-tag-toggle="t1"]').click()
+  await sleep(160)
+  assert.match(h.store.get().error ?? '', /写标签失败/, '失败必须可见')
+  assert.deepEqual(h.store.get().items.find((entry) => entry.id === 'a1').tagIds, [], '失败回取服务端真值，不留乐观脏状态')
+
+  fail = false
+  doc.querySelector('[data-rss-tag-toggle="t1"]').click()
+  await sleep(140)
+  assert.deepEqual(h.store.get().items.find((entry) => entry.id === 'a1').tagIds, ['t1'], '重试成功后关联落盘')
+  assert.equal(h.store.get().error, undefined, '成功路径清掉错误')
+})
+
+
+test('删除当前标签范围：回到跨源列表，标签从目录消失但文章保留', async () => {
+  const h = await mountReader({
+    items: [
+      item({ id: 'a1', feedId: 'a', title: '甲文章', tagIds: ['t1'] }),
+      item({ id: 'a2', feedId: 'a', title: '乙文章', tagIds: [] }),
+    ],
+    feeds: [{ id: 'a', title: '源 A' }],
+    tags: [{ id: 't1', name: '待读' }],
+  })
+  await h.store.load('overview')
+  await sleep(30)
+  const doc = h.win.document
+  doc.querySelector('[data-rss-nav-row="tag:t1"]').click()
+  await sleep(80)
+  assert.deepEqual(h.store.get().navSelection, { kind: 'tag', tagId: 't1' })
+
+  h.press('f')
+  await sleep(50)
+  doc.querySelector('[data-rss-tag-delete="t1"]').click()
+  await sleep(20)
+  doc.querySelector('[data-rss-tag-confirm-yes="t1"]').click()
+  await sleep(140)
+  assert.deepEqual(h.store.get().navSelection, { kind: 'virtual' }, '删除当前标签后回到跨源列表')
+  assert.equal(h.store.get().tags.some((tag) => tag.id === 't1'), false, '标签从目录消失')
+  assert.deepEqual(h.store.get().items.find((entry) => entry.id === 'a1').tagIds, [], '只清关联')
+  h.press('Escape')
+  await sleep(60)
+  assert.deepEqual(h.store.visible().map((entry) => entry.id).sort(), ['a1', 'a2'], '文章保留')
 })

@@ -37,6 +37,7 @@ export { LEFT_NAV_WIDTH } from './feed-nav.js'
 import { routeKey } from './keyboard-routing.js'
 import { FeedsView } from './feeds-view.js'
 import { FeedNav } from './feed-nav.js'
+import { TagEditor } from './tag-editor.js'
 import { ArticleView } from './article-pane.js'
 import { MIN_CONTENT_CHARS, recencyOf, ROUTE_PATH, type ArticlePayload, type CleanupResult, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult } from '../shared.js'
 import { htmlToText } from '../html-text.js'
@@ -349,6 +350,9 @@ export function createReader(store: ReaderStore): () => ReactNode {
     const selectedFolder = navSelection.kind === 'folder'
       ? state.folders.find((folder) => folder.name === navSelection.folder)
       : undefined
+    const selectedTag = navSelection.kind === 'tag'
+      ? state.tags.find((tag) => tag.id === navSelection.tagId)
+      : undefined
     // 搜索表单里的「订阅源」多选只列当前范围（文件夹）内的源：范围外勾选与文件夹取交集恒为空，
     // 摆出来只会让用户以为筛选坏了。
     const searchScopeFeeds = navSelection.kind === 'folder'
@@ -357,6 +361,9 @@ export function createReader(store: ReaderStore): () => ReactNode {
     const activeArticle = state.view === 'article'
       ? state.items.find((entry) => entry.id === state.article?.itemId)
       : undefined
+    const tagTarget = state.view === 'article'
+      ? activeArticle
+      : state.items.find((item) => item.id === state.selectedId)
 
     return (
       <div ref={setRoot} tabIndex={0} {...{ [ROOT_ATTR]: '' }}
@@ -372,6 +379,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
           <FeedNav
             feeds={state.feeds}
             folders={state.folders}
+            tags={state.tags}
             perFeedUnread={state.perFeedUnread}
             filter={state.filter}
             navSelection={state.navSelection}
@@ -381,6 +389,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
             onSelectFilter={(next) => store.setFilter(next)}
             onSelectFeed={(feedId) => store.selectNav({ kind: 'feed', feedId })}
             onSelectFolder={(folder) => store.selectNav({ kind: 'folder', folder })}
+            onSelectTag={(tagId) => store.selectNav({ kind: 'tag', tagId })}
             onToggleFolder={store.toggleFolder}
           />
         )}
@@ -388,7 +397,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
         <div className="dsh-rss-toolbar">
           <div className="dsh-rss-toolbar-title">
             <strong>{state.view === 'list'
-              ? selectedFeed?.title ?? selectedFolder?.name ?? filters.find((filter) => filter.key === state.filter)?.label
+              ? selectedFeed?.title ?? selectedFolder?.name ?? selectedTag?.name ?? filters.find((filter) => filter.key === state.filter)?.label
               : 'RSS 阅读器'}</strong>
             {state.view === 'list' && (
               <div className="dsh-rss-meta dsh-rss-counts">
@@ -494,6 +503,11 @@ export function createReader(store: ReaderStore): () => ReactNode {
                   搜索范围：文件夹「{navSelection.folder}」
                 </small>
               )}
+              {navSelection.kind === 'tag' && (
+                <small className="dsh-rss-meta" data-rss-search-tag={navSelection.tagId}>
+                  搜索范围：标签「{selectedTag?.name ?? navSelection.tagId}」
+                </small>
+              )}
               {searchScopeFeeds.length > 1 && <fieldset>
                 <legend>订阅源</legend>
                 {searchScopeFeeds.map((feed) => <label key={feed.id} style={{ display: 'block' }}>
@@ -525,6 +539,10 @@ export function createReader(store: ReaderStore): () => ReactNode {
           </div>
         )}
 
+        {(state.view === 'list' || state.view === 'article') && tagTarget !== undefined && (
+          <TagEditor tags={state.tags} activeIds={tagTarget.tagIds ?? []} onToggle={store.toggleItemTag} />
+        )}
+
         {state.view === 'feeds' && (
           <FeedsView
             feeds={state.feeds}
@@ -540,6 +558,10 @@ export function createReader(store: ReaderStore): () => ReactNode {
             onRenameFolder={(from, to) => { void store.renameFolder(from, to) }}
             onDeleteFolder={(name) => { void store.deleteFolder(name) }}
             onMoveFeed={(feedId, folder) => { void store.moveFeedToFolder(feedId, folder) }}
+            tags={state.tags}
+            onCreateTag={(name) => { void store.createTag(name) }}
+            onRenameTag={(id, name) => { void store.renameTag(id, name) }}
+            onDeleteTag={(id) => { void store.deleteTag(id) }}
             onBack={() => store.toggleFeeds()}
           />
         )}
@@ -579,7 +601,15 @@ export function createReader(store: ReaderStore): () => ReactNode {
                       : state.filter === 'unread'
                         ? '这个文件夹里没有未读条目。'
                         : '这个文件夹里还没有条目。')
-                  : state.filter === 'starred' ? '还没有星标条目。' : state.filter === 'unread' ? '没有未读条目。' : '还没有条目。可以在订阅管理中添加订阅源或导入 OPML。'}
+                  : navSelection.kind === 'tag'
+                    ? (selectedTag?.itemCount === 0
+                      ? '这个标签还没有文章。可以在列表或正文的标签栏里给它添加文章。'
+                      : state.filter === 'starred'
+                        ? '这个标签下还没有星标条目。'
+                        : state.filter === 'unread'
+                          ? '这个标签下没有未读条目。'
+                          : '这个标签下还没有条目。')
+                    : state.filter === 'starred' ? '还没有星标条目。' : state.filter === 'unread' ? '没有未读条目。' : '还没有条目。可以在订阅管理中添加订阅源或导入 OPML。'}
             </div>
           )}
           {items.map((item) => {

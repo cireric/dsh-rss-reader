@@ -4,11 +4,15 @@
  * 纯展示 —— 动作全部由入口的 store 通过 props 传进来。
  */
 import { useRef, useState, type ReactNode } from 'react'
-import type { FeedView, FolderView, OpmlExportResult, OpmlImportResult } from '../shared.js'
+import type { FeedView, FolderView, OpmlExportResult, OpmlImportResult, TagView } from '../shared.js'
 
 /** 文件夹管理里一次改名草稿。 */
 interface RenameDraft {
   name: string
+  draft: string
+}
+interface TagRenameDraft {
+  id: string
   draft: string
 }
 
@@ -24,7 +28,7 @@ interface RenameDraft {
 export function FeedsView({
   feeds, folders, busy, report, notice,
   onImport, onExport, onAdd, onRemove,
-  onCreateFolder, onRenameFolder, onDeleteFolder, onMoveFeed, onBack,
+  onCreateFolder, onRenameFolder, onDeleteFolder, onMoveFeed, tags, onCreateTag, onRenameTag, onDeleteTag, onBack,
 }: {
   feeds: FeedView[]
   folders: FolderView[]
@@ -39,6 +43,10 @@ export function FeedsView({
   onRenameFolder: (from: string, to: string) => void
   onDeleteFolder: (name: string) => void
   onMoveFeed: (feedId: string, folder: string | undefined) => void
+  tags: TagView[]
+  onCreateTag: (name: string) => void
+  onRenameTag: (id: string, name: string) => void
+  onDeleteTag: (id: string) => void
   onBack: () => void
 }): ReactNode {
   const [draft, setDraft] = useState('')
@@ -46,8 +54,12 @@ export function FeedsView({
   const [folderDraft, setFolderDraft] = useState('')
   const [renaming, setRenaming] = useState<RenameDraft | undefined>(undefined)
   const [confirmingDelete, setConfirmingDelete] = useState<string | undefined>(undefined)
+  const [tagDraft, setTagDraft] = useState('')
+  const [tagRenaming, setTagRenaming] = useState<TagRenameDraft | undefined>(undefined)
+  const [tagConfirmingDelete, setTagConfirmingDelete] = useState<string | undefined>(undefined)
   const renameButtons = useRef(new Map<string, HTMLButtonElement | null>())
   const deleteButtons = useRef(new Map<string, HTMLButtonElement | null>())
+  const tagRenameButtons = useRef(new Map<string, HTMLButtonElement | null>())
 
   const pickFile = (event: { target: { files?: ArrayLike<File> | null; value?: string } }): void => {
     const file = event.target.files?.[0]
@@ -195,6 +207,87 @@ export function FeedsView({
                     setConfirmingDelete(undefined)
                     deleteButtons.current.get(folder.name)?.focus()
                   }}>取消</button>
+              </div>
+            )}
+          </div>
+        ))}
+      </section>
+
+      <section style={{ marginBottom: 16 }} aria-label="标签管理">
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+          <strong style={{ fontSize: 13 }}>标签</strong>
+          <span style={{ opacity: 0.6, fontSize: 12 }}>只分类；删除标签不会删除文章</span>
+        </div>
+        <form data-rss-tag-create="" style={{ display: 'flex', gap: 6, marginBottom: 8 }}
+          onSubmit={(event) => {
+            event.preventDefault()
+            const name = tagDraft.trim()
+            if (name === '') return
+            onCreateTag(name)
+            setTagDraft('')
+          }}>
+          <input data-rss-tag-new="" value={tagDraft} disabled={busy}
+            placeholder="新建标签名称（1–80 个字符）"
+            onChange={(event) => setTagDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') { event.stopPropagation(); setTagDraft('') }
+            }}
+            style={{ flex: '0 1 260px', fontSize: 13, padding: '4px 8px' }} />
+          <button type="submit" className="dsh-rss-btn" disabled={busy || tagDraft.trim() === ''}>新建标签</button>
+        </form>
+
+        {tags.length === 0 && <div style={{ padding: '4px 0', opacity: 0.7, fontSize: 12 }}>还没有标签。</div>}
+        {tags.map((tag) => (
+          <div key={tag.id} data-rss-tag-manage={tag.id} style={{ padding: '6px 0', borderTop: '1px solid color-mix(in srgb, currentColor 8%, transparent)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <span style={{ display: 'block' }}># {tag.name}</span>
+                <span style={{ display: 'block', fontSize: 11, opacity: 0.6 }}>{tag.itemCount ?? 0} 篇文章</span>
+              </span>
+              <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
+                data-rss-tag-rename={tag.id}
+                ref={(node) => { tagRenameButtons.current.set(tag.id, node) }}
+                disabled={busy}
+                onClick={() => setTagRenaming({ id: tag.id, draft: tag.name })}>重命名</button>
+              <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
+                data-rss-tag-delete={tag.id} disabled={busy}
+                onClick={() => setTagConfirmingDelete(tag.id)}>删除</button>
+            </div>
+            {tagRenaming?.id === tag.id && (
+              <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                <input data-rss-tag-rename-input={tag.id} value={tagRenaming.draft} autoFocus
+                  onChange={(event) => setTagRenaming({ id: tag.id, draft: event.target.value })}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault(); event.stopPropagation()
+                      const name = tagRenaming.draft.trim()
+                      if (name !== '') { onRenameTag(tag.id, name); setTagRenaming(undefined); tagRenameButtons.current.get(tag.id)?.focus() }
+                    }
+                    if (event.key === 'Escape') {
+                      event.preventDefault(); event.stopPropagation(); setTagRenaming(undefined)
+                      tagRenameButtons.current.get(tag.id)?.focus()
+                    }
+                  }}
+                  style={{ flex: '0 1 240px', fontSize: 13, padding: '4px 8px' }} />
+                <button type="button" className="dsh-rss-btn" data-rss-tag-rename-save={tag.id}
+                  disabled={busy || tagRenaming.draft.trim() === ''}
+                  onClick={() => {
+                    const name = tagRenaming.draft.trim()
+                    if (name === '') return
+                    onRenameTag(tag.id, name); setTagRenaming(undefined); tagRenameButtons.current.get(tag.id)?.focus()
+                  }}>保存</button>
+                <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" data-rss-tag-rename-cancel={tag.id}
+                  onClick={() => { setTagRenaming(undefined); tagRenameButtons.current.get(tag.id)?.focus() }}>取消</button>
+              </div>
+            )}
+            {tagConfirmingDelete === tag.id && (
+              <div role="alertdialog" aria-label={'删除标签 ' + tag.name} data-rss-tag-confirm={tag.id}
+                style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, marginTop: 6, padding: '6px 8px', background: 'color-mix(in srgb, currentColor 6%, transparent)', borderRadius: 6 }}>
+                <span style={{ flex: '1 1 260px', fontSize: 12 }}>删除标签「{tag.name}」？只清除文章关联，不删除文章。</span>
+                <button type="button" className="dsh-rss-btn" data-rss-tag-confirm-yes={tag.id}
+                  disabled={busy} onClick={() => { setTagConfirmingDelete(undefined); onDeleteTag(tag.id) }}>确认删除</button>
+                <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" data-rss-tag-confirm-no={tag.id}
+                  onClick={() => setTagConfirmingDelete(undefined)}>取消</button>
               </div>
             )}
           </div>
