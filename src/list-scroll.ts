@@ -77,11 +77,15 @@ export function scrollSelectorFor(view: string): string | undefined {
  * 这与「滚动容器必须按键时刻现取」是同一条约束的两种表现：**按键路径上的判断只能依据这次
  * 事件/这次调用真正拿到的东西**，既不许捕获渲染期的值，也不许指望环境里恰好有什么。
  *
+ * ⚠️ **这里只回答「是不是元素节点」，不回答「是不是 HTMLElement」**：本文件要被 host 工程编译，
+ * 而 host 的 tsconfig 只有 Node 类型（没有 DOM lib）。DOM 类型收窄住在客户端侧的
+ * src/client/element-node.ts，它调用的仍是这一份运行时判定 —— 跨 realm 的判据只有一处。
+ *
  * ⚠️ nodeType === 1 也涵盖 SVG 等非 HTML 元素；调用点只用到 Element 级成员
  * （querySelector / offsetHeight / getClientRects / scrollTop）与 HTMLElement 的
  * isContentEditable，多认一个 SVG 元素对任何调用点都没有影响。
  */
-export function isElementNode(node: unknown): node is HTMLElement {
+export function isElementNode(node: unknown): boolean {
   return typeof node === 'object' && node !== null
     && (node as { nodeType?: unknown }).nodeType === 1
 }

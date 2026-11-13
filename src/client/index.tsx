@@ -43,10 +43,13 @@ import { MIN_CONTENT_CHARS, recencyOf, ROUTE_PATH, type ArticlePayload, type Cle
 import { htmlToText } from '../html-text.js'
 // resolveReaderKey 也搬去了（keyboard-routing.ts 第 1 层）；这里只留帮助浮窗要用的两张表。
 import { READER_KEY_HELP, READER_HELP_SCOPE_LABEL } from '../keys.js'
-// 只剩「跟随选中项滚动」那条 effect 用的三个（nextScrollTop / isElementNode / SCROLL_ATTR）；
+// 只剩「跟随选中项滚动」那条 effect 用的两个（nextScrollTop / SCROLL_ATTR）；
 // 扫视与翻页那几个（scanTop / pageTop / halfPageTop / scanStepFor / scrollSelectorFor / lineStepFrom）
 // 已随 141 行键盘路由搬进 keyboard-routing.ts（2026-10-15）。
-import { nextScrollTop, isElementNode, SCROLL_ATTR } from '../list-scroll.js'
+// isElementNode 的**类型收窄**住在客户端（./element-node.ts）：host 工程没有 DOM lib，
+// 收窄留在共享文件里会让 host 编译不过（2026-11-13 实测 tsc 7.0.2 TS2304）。
+import { nextScrollTop, SCROLL_ATTR } from '../list-scroll.js'
+import { isElementNode } from './element-node.js'
 
 export const inject = ['slots']
 

@@ -25,8 +25,9 @@
  */
 import { resolveReaderKey } from '../keys.js'
 import {
-  scanTop, pageTop, halfPageTop, scanStepFor, scrollSelectorFor, lineStepFrom, isElementNode,
+  scanTop, pageTop, halfPageTop, scanStepFor, scrollSelectorFor, lineStepFrom,
 } from '../list-scroll.js'
+import { isElementNode } from './element-node.js'
 import type { ReaderStore } from './store.js'
 
 export interface KeyRoutingCtx {
