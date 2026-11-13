@@ -6,7 +6,7 @@
  * 列表、正文、订阅管理与键盘接线，任一改动都要动同一个文件。
  */
 import { useEffect, useState } from 'react'
-import { ROUTE_PATH, recencyOf, sanitizeViewPreferences, type ArticlePayload, type CleanupResult, type DiscoveryResult, type Endpoint, type FeedView, type FolderView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult, type SearchPage, type SearchQuery, type TagView, type UnreadAccount, type ViewPreferences } from '../shared.js'
+import { DEFAULT_READING_PREFERENCES, ROUTE_PATH, recencyOf, sanitizeViewPreferences, type ArticlePayload, type CleanupResult, type DiscoveryResult, type Endpoint, type FeedView, type FolderView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult, type SearchPage, type SearchQuery, type TagView, type ReadingPreferences, type UnreadAccount, type ViewPreferences } from '../shared.js'
 import { createAccountMirror } from './account-mirror.js'
 
 export type Filter = 'all' | 'unread' | 'starred'
@@ -195,6 +195,11 @@ export interface ReaderState {
   /** 左栏显隐（任务 6 的 u 键接线用；默认显示，避免改动既有布局）。 */
   navVisible: boolean
   /**
+   * 正文排版（M5 01）：字号 / 栏宽 / 主题。与上面的视图记忆同住一份 viewPreferences ——
+   * 它是「上次看到哪儿」的同一族，不是另一套存储。
+   */
+  reading: ReadingPreferences
+  /**
    * 续页游标（Overview.nextCursor，keyset）：**原样**回带给下一次 overview 调用。
    *
    * 客户端不解释它的内容（格式 `"<recency>|<id>"` 由宿主定义，见 src/shared.ts 的 decodeCursor）——
@@ -256,6 +261,7 @@ export function createReaderStore() {
     view: 'list', layout: 'list', markAllRange: 'all', showUnread: true, article: undefined, notice: undefined,
     importReport: undefined, discovery: undefined, feedsBusy: false,
     navSelection: { kind: 'virtual' }, perFeedUnread: {}, navVisible: true,
+    reading: DEFAULT_READING_PREFERENCES,
     nextCursor: undefined, loadingMore: false, searchRevision: 0,
     // 光标初值 = 与初始 filter 一致的那一行（初始 filter 是 'all'，故就是「全部」那一行）：
     // 「我停在哪」与「此刻生效的是哪」在开局是同一行，之后才由 shift+n/p 与 shift+o 分开。
@@ -502,6 +508,7 @@ export function createReaderStore() {
       navSelection: prefs.navSelection,
       filter: prefs.filter,
       navVisible: prefs.navVisible,
+      reading: prefs.reading,
       navCursor: prefs.navSelection.kind === 'feed'
         ? { kind: 'feed', feedId: prefs.navSelection.feedId }
         : prefs.navSelection.kind === 'folder'
@@ -529,6 +536,7 @@ export function createReaderStore() {
           : { kind: 'virtual' },
       filter: state.filter,
       navVisible: state.navVisible,
+      reading: state.reading,
     }
     viewWriteChain = viewWriteChain
       .then(() => callRpc('saveViewPreferences', { preferences }))
@@ -537,6 +545,18 @@ export function createReaderStore() {
       .then(() => {}, (failure: unknown) => {
         set({ error: failure instanceof Error ? failure.message : String(failure) })
       })
+  }
+
+  /**
+   * 改正文排版偏好（M5 01）。
+   *
+   * 落的是**整份** state（persistView 的老规矩），不是只把 reading 发过去：写侧是「整份覆盖」，
+   * 只发一个字段会让 sanitize 把另外三项当作缺失而回落默认 —— 表现为「改完字号，选中的源和未读筛选没了」。
+   * 一次点击一次写：这些控件都是离散动作，与 setFilter 同族，不需要防抖定时器。
+   */
+  const setReading = (patch: Partial<ReadingPreferences>): void => {
+    set({ reading: { ...state.reading, ...patch } })
+    persistView()
   }
 
   /**
@@ -1333,7 +1353,7 @@ export function createReaderStore() {
   return {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
     get, visible, load, loadMore, submitSearch, markRead, selectRelative, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllRead, undoMarkAll,
-    setLayout, setMarkAllRange, setShowUnread, refreshCount,
+    setLayout, setMarkAllRange, setShowUnread, refreshCount, setReading,
     openArticle, closeArticle, cleanup, stepArticle, canStepArticle,
     toggleFeeds, exportOpml, importOpml, addFeed, removeFeed, discover, clearDiscovery,
     dismissNotice: (): void => { set({ notice: undefined }) },

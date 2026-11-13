@@ -664,6 +664,59 @@ test('用户自己滚走后就解除「贴底」：不该把读者硬拽回去',
  * 行的定位一律靠 `data-rss-nav-row`（一个稳定标记）而不是序号或文本：左栏上方是虚拟视图三行、
  * 下方是源列表，靠序号定位会让「往上面插一行」变成一次误导性的测试失败。
  */
+test('正文页阅读偏好：时长标「估算」、字号/栏宽落到正文、写盘发的是整份偏好', skip, async () => {
+  // 固定中英混合夹具：600 CJK 字 ÷ 300 字/分 = 2 分钟，再 + 200 词 ÷ 200 词/分 = 1 分钟，合计 3。
+  // 两个速率各占一半，任何一边失效（只数中文 / 只数英文）都会得到 2 而不是 3。
+  const payload = {
+    itemId: 'a', title: 'ART',
+    blocks: [
+      { kind: 'p', text: '中'.repeat(600) },
+      { kind: 'p', text: Array.from({ length: 200 }, (_, index) => 'word' + index).join(' ') },
+    ],
+  }
+  const h = await mountReader({ items: [item({ id: 'a' }), item({ id: 'b' })], article: payload })
+  await h.store.load('overview')
+  await sleep(30)
+  h.press('V', true)
+  for (let i = 0; i < 40 && h.store.get().view !== 'article'; i += 1) await sleep(20)
+  await sleep(80)
+
+  const badge = h.win.document.querySelector('[data-rss-reading-minutes]')
+  assert.ok(badge !== null, '正文页必须显示预计阅读时长')
+  assert.match(badge.textContent ?? '', /估算/, '必须标明这是估算值，而不是「阅读时间」那种确定口吻')
+  assert.equal(badge.getAttribute('data-rss-reading-minutes'), '3', '600 字 + 200 词应当是 3 分钟（中英两套速率各算一半）')
+
+  // 默认档位 = 改动前写死的排版（16px / 760px）：老用户升上来观感不变
+  const body = () => h.win.document.querySelector('article.dsh-rss-article-column')
+  assert.equal(body().style.fontSize, '16px')
+  assert.equal(body().style.maxWidth, '760px')
+
+  // 改字号：正文当场跟着变（不是只把值存起来），并且落盘的是**整份**偏好
+  const sizeSelect = h.win.document.querySelector('select[aria-label="正文字号"]')
+  assert.ok(sizeSelect !== null, '正文页要有字号选择')
+  setControlValue(h.win, sizeSelect, '20')
+  await sleep(80)
+  assert.equal(body().style.fontSize, '20px', '改字号必须当场生效')
+
+  const saved = h.requests.filter((entry) => entry.endpoint === 'saveViewPreferences').at(-1)
+  assert.ok(saved !== undefined, '改字号必须落盘（否则重开插件就白改了）')
+  const prefs = saved.payload.preferences
+  assert.deepEqual(prefs.reading, { fontSize: 20, lineWidth: 760, theme: 'auto' })
+  // 写侧是整份覆盖：只发 reading 的话这三项会缺席，宿主就会把它们回落默认
+  assert.deepEqual(prefs.navSelection, { kind: 'virtual' }, '写盘必须带上导航选中')
+  assert.equal(prefs.filter, 'all', '写盘必须带上 filter')
+  assert.equal(prefs.navVisible, true, '写盘必须带上左栏显隐')
+
+  // 改字号后键盘逐行翻页必须跟着新的「正文一行」走：20px × 1.85 = 37。
+  // 量不到正文元素时会退回 30 的兜底值 —— 两个数不同，所以这条能区分「真的量到了」。
+  const scroller = h.arm(h.box('article'))
+  assert.equal(h.press('n'), true, '正文页 n 仍应被接管')
+  assert.equal(h.scrollTop(scroller), 37, '逐行步长必须按新字号算（20 × 1.85）')
+
+  // 主题标记：auto 时不覆盖任何颜色（完全继承宿主）
+  assert.equal(h.box('article').getAttribute('data-rss-reading-theme'), 'auto')
+})
+
 test('左栏渲染：虚拟视图三行 + 每个订阅源一行', skip, async () => {
   // 三个源：一个未读 2 条、一个未读 1 条、一个 0 未读 —— 后者专门用来钉「键域 = feeds 表」：
   // 0 未读的源也必须有一行，且它的角标是 0 而不是空白（缺键在界面上就是「空白 vs 0」无从分辨）。

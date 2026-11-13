@@ -111,6 +111,29 @@ const MUTATIONS = [
     from: '" · 连续失败：" + (feed.failureCount === void 0 ? "次数未知" : feed.failureCount + " 次"),',
     to: '" · 连续失败：" + (feed.failureCount === void 0 ? "0 次" : feed.failureCount + " 次"),' },
 
+  // ── M5 01：阅读偏好与预计时长（2026-11-16）────────────────────────────────
+  // 归一化必须**放行档位内的值**：恒回落默认的实现会让「选了 20px，重开变回 16px」，
+  // 而这条在类型上完全合法。判据在 tests/nav-persistence.test.mjs（档位原样通过 + 重开恢复）。
+  { id: 'reading-字号档位恒回落', file: 'lib/shared.js',
+    judges: ['nav-persistence.test.mjs'],
+    from: "fontSize: READING_FONT_SIZES.includes(readingSource['fontSize'])\n            ? readingSource['fontSize']",
+    to: "fontSize: READING_FONT_SIZES.includes(readingSource['fontSize'])\n            ? DEFAULT_READING_PREFERENCES.fontSize" },
+  // 改字号必须落盘：setReading 漏掉 persistView 时界面当场是对的，只有「重开插件」才看得出。
+  // 判据是 nav-persistence 的客户端层用例（改字号 → 重开后排版仍恢复）。
+  { id: 'reading-改字号不落盘', file: 'lib/client.js',
+    judges: ['nav-persistence.test.mjs'],
+    from: "...patch\n\t\t\t\t} });\n\t\t\t\tpersistView();",
+    to: "...patch\n\t\t\t\t} });" },
+  // 时长必须中英各算一半：只数 CJK 时纯英文段落贡献 0 分钟（固定夹具里 200 词那一段就没了）。
+  { id: 'reading-时长不计英文', file: 'lib/shared.js',
+    judges: ['reading.test.mjs'],
+    from: "                if (WORD_PATTERN.test(token))\n                    words += 1;",
+    to: "                if (false)\n                    words += 1;" },
+  // 界面必须标「估算」：速率是整数近似值，写成确定口吻就是撒谎。判据在 DOM 层的文案断言。
+  { id: 'reading-时长不标估算', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    from: '" 分钟（估算）"',
+    to: '" 分钟"' },
   // M4 01：候选的相对链接必须按**重定向落点**解析。退回输入 URL 时，站点只要做过一次
   // 301（http→https、加斜杠、换域名），相对候选就被拼到错的 host 上；判据在 subscribe.test.mjs
   // 的「重定向后相对候选按最终页面 URL 解析」。OCCURRENCES 独立实测 = 1（lib/subscribe.js:142）。

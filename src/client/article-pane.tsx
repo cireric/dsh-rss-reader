@@ -17,7 +17,7 @@ import { edgeTopFor } from '../list-scroll.js'
  * 缩成可辨认尺寸，需要看细节时点「打开原站」。
  */
 const ARTICLE_IMAGE_MAX_HEIGHT = 640
-import type { ItemView } from '../shared.js'
+import { READING_FONT_SIZES, READING_LINE_WIDTHS, estimateReadingMinutes, type ItemView, type ReadingPreferences } from '../shared.js'
 import type { ArticleState } from './store.js'
 
 /**
@@ -60,7 +60,8 @@ function ArticleBlockView({ block }: { block: Record<string, unknown> }): ReactN
     return (
       <pre style={{
         margin: '0 0 1.1em', padding: '10px 12px', overflowX: 'auto',
-        borderRadius: 6, fontSize: 13, lineHeight: 1.6, overflowWrap: 'normal',
+        // em 而不是 px：正文字号可调（M5 01），写死 13px 会在 20px 正文下显得很小
+        borderRadius: 6, fontSize: '0.8125em', lineHeight: 1.6, overflowWrap: 'normal',
         fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
         background: 'color-mix(in srgb, currentColor 6%, transparent)',
       }}>{text}</pre>
@@ -69,7 +70,9 @@ function ArticleBlockView({ block }: { block: Record<string, unknown> }): ReactN
 
   if (kind === 'h') {
     const level = typeof block['level'] === 'number' ? block['level'] : 2
-    const size = level <= 1 ? 22 : level === 2 ? 19 : level === 3 ? 17 : 16
+    // em 而不是 px（22/19/17/16 都是 16px 基准下的原值）：字号可调之后，写死 px 会让 20px 正文
+    // 比 h4 还大 —— 标题必须跟着正文一起缩放，否则「放大字号」反而把层级弄反了
+    const size = level <= 1 ? '1.375em' : level === 2 ? '1.1875em' : level === 3 ? '1.0625em' : '1em'
     return (
       <div style={{ fontSize: size, fontWeight: 600, lineHeight: 1.4, margin: '1.4em 0 0.5em' }}>{text}</div>
     )
@@ -99,10 +102,13 @@ function ArticleBlockView({ block }: { block: Record<string, unknown> }): ReactN
   return <p style={{ margin: '0 0 1.05em' }}>{text}</p>
 }
 
-export function ArticleView({ article, item, onBack, scrollAttr, canPrev, canNext, onPrev, onNext }: {
+export function ArticleView({ article, item, onBack, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading }: {
   article: ArticleState | undefined
   item: ItemView | undefined
   onBack: () => void
+  /** 正文排版偏好（M5 01）：值归 store 所有，本组件只负责照着画、把用户的改动交回去 */
+  reading: ReadingPreferences
+  onReading: (patch: Partial<ReadingPreferences>) => void
   /** 容器标记属性名：按键处理按它现取容器（取值集中在 list-scroll.ts 的 scrollSelectorFor） */
   scrollAttr: string
   /** 上/下一条是否可切（与键盘共用同一判定，见 canStepArticle） */
@@ -118,6 +124,9 @@ export function ArticleView({ article, item, onBack, scrollAttr, canPrev, canNex
   const title = article?.title || item?.title
   const publishedAt = item?.publishedAt
   const link = item?.link
+  // 只按**已缓存的正文**估：加载中 / 抓取失败时 blocks 为空 ⇒ 0 ⇒ 界面不出现任何数字。
+  // 刻意不拿 summary 或源里的 excerpt 去凑 —— 那不是用户即将读的那段文本。
+  const readMinutes = estimateReadingMinutes(blocks)
 
   /**
    * 本组件自己拿到滚动容器 —— 右下角那两个按钮要作用在它上面。
@@ -231,6 +240,37 @@ export function ArticleView({ article, item, onBack, scrollAttr, canPrev, canNex
             {link !== undefined && link !== '' && (
               <a className="dsh-rss-btn dsh-rss-btn--ghost" href={link} target="_blank" rel="noreferrer">打开原站 ↗</a>
             )}
+            {/*
+              * 阅读偏好（M5 01）收在一个 <details> 里：三个 <select> 摊开摆会把这一行挤成两层，
+              * 而它们是「调一次就一直用」的东西，不值得占常驻版面。与顶栏「更多」同一个面板样式。
+              * 值一律走 store（onReading），本组件不持有状态 —— 否则重开插件就恢复不了。
+              */}
+            <details className="dsh-rss-settings">
+              <summary className="dsh-rss-btn" title="正文字号 / 栏宽 / 主题"
+                onKeyDown={(event) => { if (event.key === ' ') event.stopPropagation() }}>Aa</summary>
+              <div className="dsh-rss-settings-panel">
+                <label>字号
+                  <select value={reading.fontSize} aria-label="正文字号"
+                    onChange={(event) => onReading({ fontSize: Number(event.target.value) })}>
+                    {READING_FONT_SIZES.map((size) => <option key={size} value={size}>{size}px</option>)}
+                  </select>
+                </label>
+                <label>栏宽
+                  <select value={reading.lineWidth} aria-label="正文栏宽"
+                    onChange={(event) => onReading({ lineWidth: Number(event.target.value) })}>
+                    {READING_LINE_WIDTHS.map((width) => <option key={width} value={width}>{width}px</option>)}
+                  </select>
+                </label>
+                <label>主题
+                  <select value={reading.theme} aria-label="正文主题"
+                    onChange={(event) => onReading({ theme: event.target.value as ReadingPreferences['theme'] })}>
+                    <option value="auto">跟随宿主</option>
+                    <option value="light">浅色</option>
+                    <option value="dark">深色</option>
+                  </select>
+                </label>
+              </div>
+            </details>
           </div>
         </div>
       </div>
@@ -241,9 +281,11 @@ export function ArticleView({ article, item, onBack, scrollAttr, canPrev, canNex
         * 而这两个状态恰恰是用户最容易反复按键的时候（在等正文出来）。容器先立着，
         * 里面画什么再按状态决定；没有可滚内容时滚动计算自然得到 0，不会乱动。
         */}
-      <div ref={attachBox} {...{ [scrollAttr]: 'article' }} className="dsh-rss-article-inset"
+      <div ref={attachBox} {...{ [scrollAttr]: 'article' }} {...{ 'data-rss-reading-theme': reading.theme }}
+        className="dsh-rss-article-inset"
         style={{ flex: 1, minHeight: 0, overflowY: 'auto', scrollbarGutter: 'stable both-edges', paddingBlock: '24px 40px' }}>
-        <article className="dsh-rss-article-column" style={{ fontSize: 16, lineHeight: 1.85 }}>
+        {/* 字号/栏宽写在这一层：.dsh-rss-article-column 的 760px 只是默认值，行内 maxWidth 覆盖它 */}
+        <article className="dsh-rss-article-column" style={{ fontSize: reading.fontSize, lineHeight: 1.85, maxWidth: reading.lineWidth }}>
           {title && (
             <header style={{ marginBottom: 24 }}>
               <h1 className="dsh-rss-article-title">{title}</h1>
@@ -252,6 +294,10 @@ export function ArticleView({ article, item, onBack, scrollAttr, canPrev, canNex
                   {item.feedTitle}
                   {publishedAt !== undefined && (
                     <> · <time dateTime={publishedAt}>{new Date(publishedAt).toLocaleDateString('zh-CN')}</time></>
+                  )}
+                  {/* 「估算」两个字是承诺边界：速率是整数近似值，不许写成「阅读时间」那种确定口吻 */}
+                  {readMinutes > 0 && (
+                    <> · <span data-rss-reading-minutes={readMinutes}>约 {readMinutes} 分钟（估算）</span></>
                   )}
                 </div>
               )}

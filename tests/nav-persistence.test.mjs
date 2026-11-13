@@ -27,7 +27,7 @@ import { readerDomain } from '../lib/domain.js'
 import { createStore } from '../lib/store.js'
 import { openDatabase, migrateSchema } from '../lib/storage/db.js'
 import { createSqliteStore } from '../lib/store-sqlite.js'
-import { sanitizeViewPreferences, DEFAULT_VIEW_PREFERENCES } from '../lib/shared.js'
+import { sanitizeViewPreferences, DEFAULT_VIEW_PREFERENCES, DEFAULT_READING_PREFERENCES, READING_FONT_SIZES, READING_LINE_WIDTHS } from '../lib/shared.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const BUNDLE = join(ROOT, 'lib', 'client.js')
@@ -39,12 +39,14 @@ const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 /* ============================ ① 纯函数层：形状归一化 ============================ */
 
-test('sanitizeViewPreferences：形状合法时原样通过，且只留协议里的三个字段', () => {
+test('sanitizeViewPreferences：形状合法时原样通过，且只留协议里的四个字段', () => {
   const value = sanitizeViewPreferences({ navSelection: { kind: 'feed', feedId: 'A' }, filter: 'unread', navVisible: false })
-  assert.deepEqual(value, { navSelection: { kind: 'feed', feedId: 'A' }, filter: 'unread', navVisible: false })
+  assert.deepEqual(value, { navSelection: { kind: 'feed', feedId: 'A' }, filter: 'unread', navVisible: false, reading: DEFAULT_READING_PREFERENCES })
+  // M5 之前的配置里没有 reading 键：必须补默认值，而不是把它当成「整份记忆不可信」
+  assert.deepEqual(value.reading, DEFAULT_READING_PREFERENCES, '旧配置缺 reading 时补默认排版')
   // 未知键必须被丢掉：它会被原样写回存储，攒够一版就成历史包袱
   const extra = sanitizeViewPreferences({ navSelection: { kind: 'virtual' }, filter: 'all', navVisible: true, legacyJunk: 1 })
-  assert.deepEqual(Object.keys(extra).sort(), ['filter', 'navSelection', 'navVisible'])
+  assert.deepEqual(Object.keys(extra).sort(), ['filter', 'navSelection', 'navVisible', 'reading'])
   // 默认常量本身必须是合法形状（它同时是域里的 initial）
   assert.deepEqual(sanitizeViewPreferences(DEFAULT_VIEW_PREFERENCES), DEFAULT_VIEW_PREFERENCES)
 })
@@ -66,7 +68,32 @@ test('sanitizeViewPreferences：认不出的形状一律回落默认，绝不编
   }
   // 逐字段独立回落：filter 坏了不该把 navSelection 一起带走（否则一次坏值会抹掉更多记忆）
   const partial = sanitizeViewPreferences({ navSelection: { kind: 'feed', feedId: 'A' }, filter: 'bogus', navVisible: false })
-  assert.deepEqual(partial, { navSelection: { kind: 'feed', feedId: 'A' }, filter: 'all', navVisible: false })
+  assert.deepEqual(partial, { navSelection: { kind: 'feed', feedId: 'A' }, filter: 'all', navVisible: false, reading: DEFAULT_READING_PREFERENCES })
+})
+
+test('sanitizeViewPreferences：正文排版逐字段归一，档位外的值一律回落默认', () => {
+  // 界面能选的档位必须原样存回来（否则就会出现「选了 20px，重开变回 16px」）。
+  // 逐档遍历而不是只挑一个：加档位时最容易漏的地方就是「界面加了 option、归一化没跟上」。
+  for (const fontSize of READING_FONT_SIZES) {
+    for (const lineWidth of READING_LINE_WIDTHS) {
+      assert.deepEqual(
+        sanitizeViewPreferences({ reading: { fontSize, lineWidth, theme: 'dark' } }).reading,
+        { fontSize, lineWidth, theme: 'dark' },
+        '档位必须原样通过：' + fontSize + 'px / ' + lineWidth + 'px')
+    }
+  }
+  // 一个字段坏掉只带走它自己 —— 与上面三项同一条规则
+  const cases = [
+    [{ fontSize: 18.5, lineWidth: 640, theme: 'light' }, { fontSize: 16, lineWidth: 640, theme: 'light' }],
+    [{ fontSize: '18', lineWidth: 640, theme: 'light' }, { fontSize: 16, lineWidth: 640, theme: 'light' }],
+    [{ fontSize: 18, lineWidth: 100, theme: 'light' }, { fontSize: 18, lineWidth: 760, theme: 'light' }],
+    [{ fontSize: 18, lineWidth: 640, theme: 'sepia' }, { fontSize: 18, lineWidth: 640, theme: 'auto' }],
+    [null, DEFAULT_READING_PREFERENCES],
+    [{}, DEFAULT_READING_PREFERENCES],
+  ]
+  for (const [raw, expected] of cases) {
+    assert.deepEqual(sanitizeViewPreferences({ reading: raw }).reading, expected, 'raw = ' + JSON.stringify(raw))
+  }
 })
 
 test('sanitizeViewPreferences：文件夹选中按目录判据恢复，未知文件夹回落虚拟视图', () => {
@@ -136,7 +163,7 @@ test('真实 createStore：读侧校验坏值、写侧归一后才落库（生�
   // 写侧：未知源先归一再落库 —— 认不出的原值绝不许进媒介
   return store.saveViewPreferences({ navSelection: { kind: 'feed', feedId: 'gone' }, filter: 'unread', navVisible: false })
     .then((saved) => {
-      assert.deepEqual(saved, { navSelection: { kind: 'virtual' }, filter: 'unread', navVisible: false })
+      assert.deepEqual(saved, { navSelection: { kind: 'virtual' }, filter: 'unread', navVisible: false, reading: DEFAULT_READING_PREFERENCES })
       assert.deepEqual(readGlobal(), saved, '落库的必须是归一后的值')
       assert.deepEqual(store.viewPreferences(), saved, '读回来一致')
 
@@ -146,7 +173,7 @@ test('真实 createStore：读侧校验坏值、写侧归一后才落库（生�
 
       // 在订的源必须保住（回落不能把正常记忆也吃掉）
       writeGlobal({ navSelection: { kind: 'feed', feedId: 'A' }, filter: 'starred', navVisible: false })
-      assert.deepEqual(store.viewPreferences(), { navSelection: { kind: 'feed', feedId: 'A' }, filter: 'starred', navVisible: false })
+      assert.deepEqual(store.viewPreferences(), { navSelection: { kind: 'feed', feedId: 'A' }, filter: 'starred', navVisible: false, reading: DEFAULT_READING_PREFERENCES })
     })
 })
 
@@ -174,7 +201,7 @@ test('真实 createSqliteStore：读侧校验坏值、写侧归一后才落库�
 
     // 写侧：未知源先归一再落库 —— 认不出的原值绝不许进文件
     const saved = await store.saveViewPreferences({ navSelection: { kind: 'feed', feedId: 'gone' }, filter: 'unread', navVisible: false })
-    assert.deepEqual(saved, { navSelection: { kind: 'virtual' }, filter: 'unread', navVisible: false })
+    assert.deepEqual(saved, { navSelection: { kind: 'virtual' }, filter: 'unread', navVisible: false, reading: DEFAULT_READING_PREFERENCES })
     assert.deepEqual(JSON.parse(readFileSync(configPath, 'utf8')).viewPreferences, saved, '落盘的必须是归一后的值')
     assert.deepEqual(store.viewPreferences(), saved, '读回来一致')
 
@@ -186,7 +213,7 @@ test('真实 createSqliteStore：读侧校验坏值、写侧归一后才落库�
 
     // 在订的源必须保住（回落不能把正常记忆也吃掉）
     await store.saveViewPreferences({ navSelection: { kind: 'feed', feedId: 'A' }, filter: 'starred', navVisible: false })
-    assert.deepEqual(store.viewPreferences(), { navSelection: { kind: 'feed', feedId: 'A' }, filter: 'starred', navVisible: false })
+    assert.deepEqual(store.viewPreferences(), { navSelection: { kind: 'feed', feedId: 'A' }, filter: 'starred', navVisible: false, reading: DEFAULT_READING_PREFERENCES })
   } finally {
     db.close()
     rmSync(dir, { recursive: true, force: true })
@@ -303,7 +330,11 @@ async function callEndpoint(store, endpoint, payload) {
 test('端点：saveViewPreferences 存下偏好，viewPreferences 原样读回', async () => {
   const store = memoryStore()
   store.feeds.set('A', { url: 'A', title: 'A' })
-  const preferences = { navSelection: { kind: 'feed', feedId: 'A' }, filter: 'starred', navVisible: false }
+  // reading 刻意用非默认档位：默认值原样往返是测不出「字段有没有真的过端点」的
+  const preferences = {
+    navSelection: { kind: 'feed', feedId: 'A' }, filter: 'starred', navVisible: false,
+    reading: { fontSize: 20, lineWidth: 640, theme: 'dark' },
+  }
 
   const saved = await callEndpoint(store, 'saveViewPreferences', { preferences })
   assert.deepEqual(saved.preferences, preferences, '回带宿主实际存下的值')
@@ -318,7 +349,7 @@ test('端点：未知 feedId / 非法形状写进来时回落默认，不抛错�
   store.feeds.set('A', { url: 'A', title: 'A' })
 
   const unknownFeed = await callEndpoint(store, 'saveViewPreferences', { preferences: { navSelection: { kind: 'feed', feedId: 'gone' }, filter: 'unread', navVisible: false } })
-  assert.deepEqual(unknownFeed.preferences, { navSelection: { kind: 'virtual' }, filter: 'unread', navVisible: false },
+  assert.deepEqual(unknownFeed.preferences, { navSelection: { kind: 'virtual' }, filter: 'unread', navVisible: false, reading: DEFAULT_READING_PREFERENCES },
     '已退订的源要回落虚拟视图，而 filter / navVisible 这两条仍然保得住')
   assert.deepEqual(store.globalGet(), unknownFeed.preferences, '存进域的必须是回落后的值 —— 不许把认不出的原值原样塞进去')
 
@@ -431,19 +462,19 @@ test('记住上次选中的导航项、filter 与左栏显隐，重开后恢复'
   // 那么任何单个动作漏写都会被后一个动作的整份写入盖过去 —— 那条守卫就永远没人看。
   first.setFilter('unread')
   await flush()
-  assert.deepEqual(prefs.value, { navSelection: { kind: 'virtual' }, filter: 'unread', navVisible: true },
+  assert.deepEqual(prefs.value, { navSelection: { kind: 'virtual' }, filter: 'unread', navVisible: true, reading: DEFAULT_READING_PREFERENCES },
     'setFilter 自己就要写一次盘')
 
   first.selectNav({ kind: 'feed', feedId: 'B' })
   await flush()
-  assert.deepEqual(prefs.value, { navSelection: { kind: 'feed', feedId: 'B' }, filter: 'unread', navVisible: true },
+  assert.deepEqual(prefs.value, { navSelection: { kind: 'feed', feedId: 'B' }, filter: 'unread', navVisible: true, reading: DEFAULT_READING_PREFERENCES },
     'selectNav 自己就要写一次盘')
 
   first.toggleNav()
   await flush()
   assert.equal(prefs.writes.length, 3, '三个关键动作各写一次，不多不少')
-  assert.deepEqual(prefs.value, { navSelection: { kind: 'feed', feedId: 'B' }, filter: 'unread', navVisible: false },
-    '三个状态都必须落盘，且只落协议里的三个字段')
+  assert.deepEqual(prefs.value, { navSelection: { kind: 'feed', feedId: 'B' }, filter: 'unread', navVisible: false, reading: DEFAULT_READING_PREFERENCES },
+    '四个状态都必须落盘，且只落协议里的四个字段')
 
   // 重开面板：新 store 实例 + 同一份宿主 prefs
   const second = await openPanel({ items: twoFeeds(), prefs })
@@ -455,6 +486,36 @@ test('记住上次选中的导航项、filter 与左栏显隐，重开后恢复'
   // 光标刻意**不**持久化：恢复时按既有规则落到「生效的那一行」（见 src/client/store.ts 的注释）
   assert.deepEqual({ ...second.get().navCursor }, { kind: 'feed', feedId: 'B' },
     '光标落在生效的源那一行 —— 与鼠标点源、shift+o 打开源行同一规则')
+})
+
+test('改字号只动排版：导航、过滤与左栏显隐一项都不许被覆盖（重开后排版也恢复）', async () => {
+  // 病象是「调完字号，选中的源和未读筛选没了」——写侧是整份覆盖，只发 reading 就会让
+  // sanitizeViewPreferences 把另外三项当缺失而回落默认。判据 = 落库那一份的四个字段。
+  const prefs = { value: undefined, writes: [] }
+  const first = await openPanel({ items: twoFeeds(), prefs })
+  first.setFilter('unread')
+  first.selectNav({ kind: 'feed', feedId: 'B' })
+  first.toggleNav()                     // 左栏收起 = 布局偏好（navVisible 是它在本协议里的那一位）
+  await flush()
+
+  first.setReading({ fontSize: 20 })
+  await flush()
+  assert.deepEqual(prefs.value, {
+    navSelection: { kind: 'feed', feedId: 'B' }, filter: 'unread', navVisible: false,
+    reading: { fontSize: 20, lineWidth: 760, theme: 'auto' },
+  }, '写盘落的必须是整份 state：只发 reading 会让另外三项回落默认')
+
+  first.setReading({ theme: 'dark' })
+  await flush()
+  assert.deepEqual(prefs.value.reading, { fontSize: 20, lineWidth: 760, theme: 'dark' },
+    '同一份排版里改另一个字段时，前一次的选择必须留着（合并而不是覆盖）')
+
+  const second = await openPanel({ items: twoFeeds(), prefs })
+  // 展开一层再断言：store 对象活在 vm 沙箱的 realm 里，原型不同会让 deepEqual 形同虚设地红
+  assert.deepEqual({ ...second.get().reading }, { fontSize: 20, lineWidth: 760, theme: 'dark' }, '重开面板后字号与主题必须恢复')
+  assert.equal(second.get().navSelection.feedId, 'B', '重开后选中的源仍然是 B')
+  assert.equal(second.get().filter, 'unread', '重开后 filter 仍然是 unread')
+  assert.equal(second.get().navVisible, false, '重开后左栏仍然收着')
 })
 
 test('持久化值不可信时（未知 feedId / 非法 shape）回落默认值且不抛错', async () => {
@@ -483,6 +544,15 @@ test('持久化值不可信时（未知 feedId / 非法 shape）回落默认值�
   assert.equal(onlyFilterBad.get().filter, 'all', '非法 filter 回落 all')
   assert.equal(onlyFilterBad.get().navVisible, false, 'navVisible 合法则原样恢复')
   assert.equal(onlyFilterBad.get().navSelection.feedId, 'B', 'navSelection 合法则原样恢复')
+
+  // 排版的坏值同样只回落它自己：字号认不出时，导航那三项照常恢复
+  const badReading = await openPanel({
+    items: twoFeeds(),
+    prefs: { value: { navSelection: { kind: 'feed', feedId: 'B' }, filter: 'unread', navVisible: false, reading: { fontSize: 999, theme: 'neon' } }, writes: [] },
+  })
+  assert.deepEqual({ ...badReading.get().reading }, { fontSize: 16, lineWidth: 760, theme: 'auto' }, '档位外的排版值回落默认')
+  assert.equal(badReading.get().navSelection.feedId, 'B', '排版坏了不该带走导航记忆')
+  assert.equal(badReading.get().filter, 'unread', '排版坏了不该带走 filter')
 
   // 逐字段独立回落：坏掉一项不该把另外两项的记忆一起抹掉
   const partial = await openPanel({
@@ -529,7 +599,7 @@ test('恢复是异步的：用户在它到达之前的手势不会被旧记忆�
 
   assert.equal(store.get().navVisible, false, '恢复不得盖掉用户已经做过的手势')
   assert.equal(store.get().filter, 'all', '整份让位：手势那一刻的状态就是新的记忆（存储里也是它）')
-  assert.deepEqual(prefs.value, { navSelection: { kind: 'virtual' }, filter: 'all', navVisible: false },
+  assert.deepEqual(prefs.value, { navSelection: { kind: 'virtual' }, filter: 'all', navVisible: false, reading: DEFAULT_READING_PREFERENCES },
     '存储里必须是与界面一致的那份 —— 两者不一致才是真正的缺陷')
 })
 
@@ -547,13 +617,13 @@ test('写盘串行化：前一次慢、后一次快时，最终的记忆是「�
   await new Promise((resolve) => setTimeout(resolve, 120))
 
   assert.equal(prefs.writes.length, 2, '两次动作各写一次')
-  assert.deepEqual(prefs.value, { navSelection: { kind: 'feed', feedId: 'B' }, filter: 'unread', navVisible: true },
+  assert.deepEqual(prefs.value, { navSelection: { kind: 'feed', feedId: 'B' }, filter: 'unread', navVisible: true, reading: DEFAULT_READING_PREFERENCES },
     '最终记忆必须是最新动作那一份，而不是最后落地的那个请求')
-  assert.deepEqual(prefs.writes[0], { navSelection: { kind: 'virtual' }, filter: 'unread', navVisible: true },
+  assert.deepEqual(prefs.writes[0], { navSelection: { kind: 'virtual' }, filter: 'unread', navVisible: true, reading: DEFAULT_READING_PREFERENCES },
     '串行化：第一次写的是动作发生时的状态（当时还没选源）')
-  assert.deepEqual(prefs.writes[1], { navSelection: { kind: 'feed', feedId: 'B' }, filter: 'unread', navVisible: true })
+  assert.deepEqual(prefs.writes[1], { navSelection: { kind: 'feed', feedId: 'B' }, filter: 'unread', navVisible: true, reading: DEFAULT_READING_PREFERENCES })
   // 顺序即「按动作先后」，与 setFilter 里那句注释同一条判据
-  assert.deepEqual((() => { const s = store.get(); return { navSelection: s.navSelection.kind === 'feed' ? { kind: 'feed', feedId: s.navSelection.feedId } : { kind: 'virtual' }, filter: s.filter, navVisible: s.navVisible } })(), prefs.value,
+  assert.deepEqual((() => { const s = store.get(); return { navSelection: s.navSelection.kind === 'feed' ? { kind: 'feed', feedId: s.navSelection.feedId } : { kind: 'virtual' }, filter: s.filter, navVisible: s.navVisible, reading: { ...s.reading } } })(), prefs.value,
     '界面状态与存储里的记忆必须一致')
 })
 

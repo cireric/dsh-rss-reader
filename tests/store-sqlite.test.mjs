@@ -24,7 +24,7 @@ import { writeConfigFile } from '../lib/storage/config-file.js'
 import { createSqliteStore } from '../lib/store-sqlite.js'
 import { feedRecordSchema, itemRecordSchema } from '../lib/domain.js'
 import { articleCharsOf, selectCleanup } from '../lib/retention.js'
-import { countUnreadPerFeed, recencyOf } from '../lib/shared.js'
+import { countUnreadPerFeed, recencyOf, DEFAULT_READING_PREFERENCES } from '../lib/shared.js'
 import { freshStore, tempDir } from './helpers/reader-store-memory.mjs'
 import { applyFeedIntent } from '../lib/feed-intent.js'
 
@@ -620,7 +620,7 @@ test('viewPreferences 读侧一定给可信形状：坏值逐字段回落，已�
     })
     assert.deepEqual(
       store.viewPreferences(),
-      { navSelection: { kind: 'feed', feedId: 'https://a.example/feed.xml' }, filter: 'all', navVisible: true },
+      { navSelection: { kind: 'feed', feedId: 'https://a.example/feed.xml' }, filter: 'all', navVisible: true, reading: DEFAULT_READING_PREFERENCES },
       '认不出的 filter / navVisible 必须**逐字段**回落（一项坏不该抹掉另两项的记忆），且不许把 junk 透出去',
     )
 
@@ -632,12 +632,12 @@ test('viewPreferences 读侧一定给可信形状：坏值逐字段回落，已�
     })
     assert.deepEqual(
       store.viewPreferences(),
-      { navSelection: { kind: 'virtual' }, filter: 'unread', navVisible: false },
+      { navSelection: { kind: 'virtual' }, filter: 'unread', navVisible: false, reading: DEFAULT_READING_PREFERENCES },
       '退订的源必须回落虚拟视图，而不是让面板打不开（另两项记忆仍要保住）',
     )
 
     writeConfigFile(configPath, { version: 1, feeds: {}, viewPreferences: 'not-an-object' })
-    assert.deepEqual(store.viewPreferences(), { navSelection: { kind: 'virtual' }, filter: 'all', navVisible: true }, '垃圾一律给默认值，不抛错')
+    assert.deepEqual(store.viewPreferences(), { navSelection: { kind: 'virtual' }, filter: 'all', navVisible: true, reading: DEFAULT_READING_PREFERENCES }, '垃圾一律给默认值，不抛错')
   } finally {
     db.close()
     rmSync(dir, { recursive: true, force: true })
@@ -708,13 +708,19 @@ test('saveViewPreferences 写前校验并落 config.json，且不碰订阅映射
     })
     assert.deepEqual(
       saved,
-      { navSelection: { kind: 'feed', feedId: 'https://a.example/feed.xml' }, filter: 'starred', navVisible: false },
+      { navSelection: { kind: 'feed', feedId: 'https://a.example/feed.xml' }, filter: 'starred', navVisible: false, reading: DEFAULT_READING_PREFERENCES },
       '返回值必须是归一后的形状（调用方直接拿它进 state）',
     )
     const onDisk = JSON.parse(readFileSync(configPath, 'utf8'))
     assert.deepEqual(onDisk.viewPreferences, saved, '落库的也必须是归一后的形状（坏值攒在媒介里只是被读侧遮住了）')
     assert.equal(onDisk.version, 1)
     assert.deepEqual(Object.keys(onDisk.feeds), ['https://a.example/feed.xml'], '写偏好不许动订阅映射')
+
+    // 排版（M5 01）在**真实 config.json** 上过一次往返：归一化函数绿不等于落盘读回也绿
+    const withReading = await store.saveViewPreferences({ navSelection: { kind: 'virtual' }, filter: 'all', navVisible: true, reading: { fontSize: 18, lineWidth: 640, theme: 'dark' } })
+    assert.deepEqual(withReading.reading, { fontSize: 18, lineWidth: 640, theme: 'dark' })
+    assert.deepEqual(JSON.parse(readFileSync(configPath, 'utf8')).viewPreferences.reading, { fontSize: 18, lineWidth: 640, theme: 'dark' }, '落盘的 reading 必须是选中的档位，不是默认值')
+    assert.deepEqual(store.viewPreferences().reading, { fontSize: 18, lineWidth: 640, theme: 'dark' }, '读回来仍是同一份')
 
     // 指向已退订的源：归一成虚拟视图，而不是把无效选中写进媒介
     const again = await store.saveViewPreferences({ navSelection: { kind: 'feed', feedId: 'https://gone.example/feed.xml' }, filter: 'all', navVisible: true })

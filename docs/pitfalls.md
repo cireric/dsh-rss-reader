@@ -378,6 +378,20 @@ mountReader() 先建好 JSDOM、把 window/document 等装进全局，再 requir
 受控输入用原生 value setter 写值，再派发 input（文本）或 change（select）。判据是
 「文件夹管理：创建、改名、移动、删除二次确认与焦点恢复」在真 DOM 下通过。
 
+### 2.12 客户端层的断言：vm 沙箱里的对象跨 realm，`deepEqual` 会因原型不同而红
+
+**病象**（实测，2026-11-13 M5 01）：`assert.deepEqual(store.get().reading, { fontSize: 20, … })` 失败，
+而错误消息里 actual 与 expected **逐字段一模一样**。
+
+**根因**：`nav-persistence` / `client-bundle` 那一层用 `vm.createContext` 加载构建产物 ⇒ store 交出的对象
+原型是**沙箱 realm** 的 `Object.prototype`，而 `node:assert/strict` 的 `deepEqual` 比原型，于是同形也红。
+
+**修法**：断言前用对象字面量/展开把它重建到测试 realm：`assert.deepEqual({ ...store.get().reading }, expected)`。
+既有用例里那段看着多余的 `navSelection.kind === 'feed' ? { kind: 'feed', feedId } : …` 重建，正是同一个理由 ——
+别把它「简化」掉。
+
+**判据**：去掉展开 ⇒ 该条翻红且消息里两边长得一样（这是这条病象唯一的签名：看到它就别去查业务逻辑）。
+
 ---
 
 ## 三、客户端 / React
@@ -568,6 +582,12 @@ JSON 后端每次写整份原子重写。在 200 源 × 500 条（10 万条目�
 
 **判据**：一次性探针 dump `ctx.tools.schemas()` 的工具数 —— 重载前 55、强制重装后 56（多了 `rss_update_item`）。
 光看 reload 的输出永远看不出差别。
+
+**2026-11-13（M5 01）再补一条**：这三个注入器工具的参数名各不相同，传错名字的后果也不一样 ——
+`dev_reload_package` 认 `match`（传 `package:` **不报错**、照样打印装配清单，于是看起来像 reload 过了）、
+`dev_uninject_plugin` 认 `match`（传错会响亮报 `missing required property "match"`）、
+`dev_inject_plugin` 认 `dir`。判据仍然是行为：`~/.dsh/super-injector/reload-debug.log` 里有没有这一次的
+`reload match=…`（本次传错参数时，那条日志里一条都没有）。
 
 ---
 

@@ -297,7 +297,8 @@ export interface OpmlImportResult {
 /**
  * 视图记忆：面板重开后要恢复起来的那几项（两列布局任务 7）。
  *
- * 三份状态刻意**只列被记忆的**：navSelection（虚拟视图 / 某个源）、filter、navVisible。
+ * 四份状态刻意**只列被记忆的**：navSelection（虚拟视图 / 某个源）、filter、navVisible，
+ * 以及 M5 01 的正文排版 reading。
  * 特别**不含 navCursor**（键盘光标）—— 理由见客户端 store 的恢复注释：光标是「焦点在哪」，
  * 是瞬时的指向，而这里记的是「上次看到哪儿」；恢复时按既有规则把它落到生效的那一行即可。
  */
@@ -305,16 +306,56 @@ export interface ViewPreferences {
   navSelection: { kind: 'virtual' } | { kind: 'feed'; feedId: string } | { kind: 'folder'; folder: string }
   filter: 'all' | 'unread' | 'starred'
   navVisible: boolean
+  /** 正文排版（M5 01）。旧配置没有这个键 ⇒ 归一化时补默认值，不许因为缺字段就回落整份记忆。 */
+  reading: ReadingPreferences
 }
+
+/**
+ * 正文排版偏好（M5 01）：**只决定正文面怎么排**，不碰任何数据、排序或阅读状态。
+ *
+ * 为什么并进 viewPreferences 而不是另开一个存储槽：它是同一族界面记忆（「上次看到哪儿」），
+ * 已经有读侧唯一判定点（sanitizeViewPreferences）与独立的读写端点。再开一套只会让「恢复」
+ * 多一条路径，而本仓库为「同一条不变式两处各算一遍」付过的学费已经够多。
+ *
+ * 取值域刻意是**离散档位**而不是区间：界面就是几个 <option>，「归一化」只需要判「在不在档位里」，
+ * 不必再写一套夹边界的逻辑，界面能选的值与能存下的值也不会各说各话。
+ */
+export interface ReadingPreferences {
+  /** 正文字号（px），取值域见 READING_FONT_SIZES */
+  fontSize: number
+  /** 正文栏宽（px），打到 .dsh-rss-article-column 的 max-width */
+  lineWidth: number
+  /** auto = 完全继承宿主主题；light/dark 只覆盖正文面那一块 */
+  theme: 'auto' | 'light' | 'dark'
+}
+
+/** 字号档位（px）。界面与归一化读同一份常量。 */
+export const READING_FONT_SIZES: ReadonlyArray<number> = [14, 16, 18, 20]
+/** 栏宽档位（px）。760 是 M5 之前的写死值，留作默认 ⇒ 老用户升上来观感不变。
+ *  1080 / 1280 是给宽窗口的：max-width 只封顶，不会把小窗口撑宽，所以宽档在小屏上无害。 */
+export const READING_LINE_WIDTHS: ReadonlyArray<number> = [640, 760, 900, 1080, 1280]
+const READING_THEMES: ReadonlyArray<ReadingPreferences['theme']> = ['auto', 'light', 'dark']
+
+/** 首版默认：沿用改动前的固定排版（16px / 760px），主题跟随宿主。 */
+export const DEFAULT_READING_PREFERENCES: ReadingPreferences = { fontSize: 16, lineWidth: 760, theme: 'auto' }
 
 /** 没有任何记忆时的值。同时是存储域 global 槽的 initial（首次 set 才落盘）。 */
 export const DEFAULT_VIEW_PREFERENCES: ViewPreferences = {
   navSelection: { kind: 'virtual' },
   filter: 'all',
   navVisible: true,
+  reading: DEFAULT_READING_PREFERENCES,
 }
 
 const FILTERS: ReadonlyArray<ViewPreferences['filter']> = ['all', 'unread', 'starred']
+
+/** 两个阅读速率常量（见 estimateReadingMinutes 的注释：整数近似值，不是测量结果）。 */
+const CJK_CHARS_PER_MINUTE = 300
+const WORDS_PER_MINUTE = 200
+/** CJK 统一表意文字（含扩展 A）。shortcut: 假名/谚文不计入 CJK 速率（会被当成「词」，估算偏小），真有日文源再补范围 */
+const CJK_PATTERN = /[\u3400-\u4DBF\u4E00-\u9FFF]/g
+/** 「这一段算一个词」的判据：至少含一个字母或数字。纯标点/纯符号不算词。 */
+const WORD_PATTERN = /[\p{L}\p{N}]/u
 
 /**
  * 把「存储里读到的东西」归一成一份可信的视图记忆（**读侧唯一的判定点**）。
@@ -364,9 +405,61 @@ export function sanitizeViewPreferences(
     ? source['navVisible']
     : DEFAULT_VIEW_PREFERENCES.navVisible
 
-  // 只搬运点名的三个字段：认不出的键（历史版本留下的、或被别的写入者塞进来的）一律丢掉，
+  const readingRaw = source['reading']
+  const readingSource = typeof readingRaw === 'object' && readingRaw !== null && !Array.isArray(readingRaw)
+    ? (readingRaw as Record<string, unknown>)
+    : {}
+  // 三个字段各自回落 —— 与上面三项同一条规则：一次坏值只该抹掉它自己。
+  // 档位之外的值（含 18.5、'18'、null）一律回落默认，不做四舍五入也不做夹取：编造一个用户没选过的字号，
+  // 比回到默认更让人困惑。
+  const reading: ReadingPreferences = {
+    fontSize: READING_FONT_SIZES.includes(readingSource['fontSize'] as number)
+      ? readingSource['fontSize'] as number
+      : DEFAULT_READING_PREFERENCES.fontSize,
+    lineWidth: READING_LINE_WIDTHS.includes(readingSource['lineWidth'] as number)
+      ? readingSource['lineWidth'] as number
+      : DEFAULT_READING_PREFERENCES.lineWidth,
+    theme: READING_THEMES.includes(readingSource['theme'] as ReadingPreferences['theme'])
+      ? readingSource['theme'] as ReadingPreferences['theme']
+      : DEFAULT_READING_PREFERENCES.theme,
+  }
+
+  // 只搬运点名的四个字段：认不出的键（历史版本留下的、或被别的写入者塞进来的）一律丢掉，
   // 否则它们会被原样写回存储，攒够几版就成了没人敢删的历史包袱。
-  return { navSelection, filter, navVisible }
+  return { navSelection, filter, navVisible, reading }
+}
+
+/**
+ * 预计阅读时长（分钟，向上取整）。**估算是给人一个量级，不是承诺**，界面必须标「估算」。
+ *
+ * 中英混排按两套速率分别计：CJK 字 300/分、其余按空白分词 200 词/分，再各自相加后向上取整。
+ * 两个速率取的是常见阅读速度的**整数近似值**（不是本仓库的测量结果）——本机没有真人阅读实验，
+ * 所以这里不假装有精确值：真要调，只动这两个常量，判据在 tests/reading.test.mjs 的固定夹具上。
+ *
+ * 只吃块列表而不是拼好的字符串：正文块是客户端唯一拿到了缓存正文的地方（ArticlePayload.blocks），
+ * 图片没有文本、不计入；标题/列表/引用都算正文（它们确实要读）。
+ *
+ * @returns 分钟数；没有可读文本时返回 0（调用方据此不显示任何数字，而不是显示「约 0 分钟」）
+ */
+export function estimateReadingMinutes(blocks: ReadonlyArray<Record<string, unknown>>): number {
+  let cjk = 0
+  let words = 0
+  for (const block of blocks) {
+    if (block['kind'] === 'img') continue
+    const texts: string[] = []
+    if (typeof block['text'] === 'string') texts.push(block['text'])
+    if (Array.isArray(block['items'])) for (const entry of block['items']) texts.push(String(entry))
+    for (const text of texts) {
+      cjk += (text.match(CJK_PATTERN) ?? []).length
+      // 先把 CJK 抹成空白再按空白分词：否则「中文English混排」会被当成一个超长单词。
+      // 纯标点串必须丢掉 —— 「，」「。」不是词，算进去会让标点密集的中文文章系统性偏大
+      // （实测夹具：300 个逗号被数成 300 个假词，4 分钟估成 6 分钟）。
+      for (const token of text.replace(CJK_PATTERN, ' ').split(/\s+/)) {
+        if (WORD_PATTERN.test(token)) words += 1
+      }
+    }
+  }
+  return Math.ceil(cjk / CJK_CHARS_PER_MINUTE + words / WORDS_PER_MINUTE)
 }
 
 /**

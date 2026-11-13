@@ -118,6 +118,14 @@ const STYLE = `
   font-size:14px; line-height:1.65; overflow-wrap:anywhere; }
 .dsh-rss-article-inset { padding-inline:clamp(24px, 4vw, 52px); }
 .dsh-rss-article-column { max-width:760px; margin-inline:auto; overflow-wrap:anywhere; }
+/* 阅读主题（M5 01）：auto 不带任何覆盖 ⇒ 完全继承宿主。light/dark 只改**正文面滚动区**这一块，
+   顶栏是外壳、仍旧跟宿主走，否则一块面板里会出现两片底色。
+   必须连 --rss-muted / --rss-line / --rss-accent 一起写：自定义属性是按**声明处**求值后继承的，
+   只在子元素上改 --rss-fg 不会让根上算好的 --rss-line 回头重算。 */
+[data-rss-reading-theme="light"] { --rss-fg:#1a1a1a; --rss-bg:#ffffff; --rss-muted:#5c5c5c; --rss-line:#e3e3e3; --rss-accent:#0b62d6;
+  background:var(--rss-bg); color:var(--rss-fg); }
+[data-rss-reading-theme="dark"] { --rss-fg:#e4e4e4; --rss-bg:#16181c; --rss-muted:#9aa0a6; --rss-line:#2c2f36; --rss-accent:#7ab0ff;
+  background:var(--rss-bg); color:var(--rss-fg); }
 .dsh-rss-article-nav { display:flex; flex-wrap:wrap; align-items:center; gap:8px;
   justify-content:space-between; padding-block:10px; }
 .dsh-rss-article-title { font-size:clamp(24px, 2.5vw, 32px); font-weight:700; line-height:1.35; margin:0; }
@@ -582,6 +590,8 @@ export function createReader(store: ReaderStore): () => ReactNode {
             // 不再传 setBox：阅读容器的滚动生命周期（换文章归零 / 内容长高贴底）已归 article-pane
             // 自己（2026-10-15 C2）；键盘那条路径按键时刻按 scrollAttr 现取容器，不需要跨组件 ref 桥接。
             scrollAttr={SCROLL_ATTR}
+            reading={state.reading}
+            onReading={store.setReading}
             canPrev={store.canStepArticle(-1)}
             canNext={store.canStepArticle(1)}
             onPrev={() => { store.stepArticle(-1) }}
