@@ -127,6 +127,39 @@ kill reason 全为 `vm-compressor-space-shortage`；紧接 00:24 一次 panic + 
 （`--test-concurrency=`、摘继承堆上限、`HOST_FLOOR_MB`、`defaultWorkers` 存在），
 并禁止退回固定 `os.cpus().length - 2`。
 
+### 1.11 host / client 两个工程的类型边界：DOM 类型只能出现在 client 工程
+
+**病象**（2026-11-13 实测）：`npm run typecheck` 在 **tsc 7.0.2** 下红 ——
+`src/list-scroll.ts(84,55): error TS2304: Cannot find name 'HTMLElement'`；同一棵树换 **tsc 6.0.3**
+却是绿的。两个版本都在干净 HEAD 副本上复现过，所以不是「本次改动引入的」。
+
+**根因**：共享文件 `src/list-scroll.ts` 的类型谓词写成了 `node is HTMLElement`。host 工程的
+tsconfig 只有 Node 类型（`lib: ["ES2023"]`、`types: ["node"]`，没有 DOM），而这个文件同时被
+host 与 client 两个工程编译 —— 类型谓词必须引用 DOM 全局名，host 侧就必然解析不到。
+它同时违反该文件自己写下的不变量：「list-scroll.ts 之所以能被 host 编译，正是因为它刻意不碰 DOM」。
+
+**修法**：共享文件只保留**运行时**判定 `isElementNode(node): boolean`（判据仍是 `nodeType === 1`，
+不依赖环境全局 ⇒ 跨 realm / 跨 iframe 行为不变）；DOM 类型谓词移到
+`src/client/element-node.ts`，内部调同一份运行时判定 —— 判据仍然只有一处。
+**别用「给 host 加 DOM lib」绕过**：那会让 host 侧悄悄允许 `document`/`window`，是拆掉护栏而不是修边界。
+
+**判据**：两个编译器 × 两个工程四次编译全绿（`tsc -p tsconfig.json` 与 `-p tsconfig.client.json`，
+分别用 PATH 的 7.0.2 与 checkout 的 6.0.3）；`tests/list-scroll.test.mjs` 仍按布尔断言（运行时判据不变），
+`tests/scroll-dom.test.mjs` 的真实键盘用例全绿。**新代码改完两个编译器都要跑一遍** —— 只跑一个会漏掉这一类。
+
+### 1.12 `npm run build:client` 在本机需要一个不在 link 列表里的 tsdown
+
+**病象**（2026-11-13 实测）：`npm run build:client` 直接 `sh: tsdown: command not found`；
+跳过它则 `tests/client-bundle.test.mjs` 的「产物不能过期」当场翻红（那条守卫是对的，别去放宽它）。
+
+**根因**：仓库没有锁文件，依赖由 `scripts/build.sh` 从 DSH checkout 现链（见 §1.6），
+而 `link_pkg` 列表里**没有 tsdown** —— 它只活在 checkout 的 `node_modules/.bin` 里。
+
+**修法**：`PATH=<checkout>/node_modules/.bin:$PATH npm run build:client`。不要为这件事在仓库里
+装依赖或加锁文件（那是 §1.6 明确不做的方向）。
+
+**判据**：产物 mtime 晚于 `src/client/**`，且「产物不能过期」那条用例转绿。
+
 ---
 
 ## 二、测试与夹具
@@ -487,6 +520,23 @@ JSON 后端每次写整份原子重写。在 200 源 × 500 条（10 万条目�
 中途回退才仍然可能。但**死代码要留一条有名字的记号**（Task 4 在 `openDomainWithRetry`
 头上写了「已无调用方，Task 8 删」），否则下一个读代码的人会把它当成「还在用的退避机制」，
 下一个任务就可能顺手把它删在半路上，或反过来一直留着当并不存在的把手。
+
+### 4.10 没在 `inject` 里声明的服务，活体里就是 `undefined`（测试夹具会替你掩盖）
+
+**病象**（2026-11-13 实测）：M3 02 的三个工具**单测全绿**，活体宿主里一个都没注册 ——
+诊断探针 dump `ctx.tools.schemas()` 仍是 52 个，直到把探针工具面与源码逐个对账才看出少了三个。
+
+**根因**：`tools` 没写进 `inject`。未声明的服务经服务解析器求值得到 `undefined`，
+而插件里正好写成「取不到就 `return`」—— 于是**静默空转**。仓库的装载测试用的是**手写 ctx 对象**
+（`{logger, effect, webServer, connection}`），那里 `ctx.tools` 会被测试补上桩值 ⇒ 单测看不见这个洞。
+与 §1.9 同一条教训：**测试全绿只证明测试覆盖的那条路径**。
+
+**修法**：必需服务一律进 `inject`（`inject: ['connection', 'webServer', 'tools']`），
+插件代码直接用 `ctx.tools`，不要再写「取不到就返回」的软退化；装载测试夹具补
+`tools: { register: () => () => {} }` 让夹具与真实宿主同构。
+
+**判据**：活体工具面 52 → 55（探针 dump `ctx.tools.schemas()`），
+`dev_uninject_plugin` 后 55 → 52，重新注入后各一份回来。
 
 ---
 
