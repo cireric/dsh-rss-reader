@@ -540,6 +540,26 @@ JSON 后端每次写整份原子重写。在 200 源 × 500 条（10 万条目�
 
 ---
 
+### 4.11 注入器的自动重载会被「改到一半的源码」永久卡住，而手动 reload 可能什么都没做
+
+**病象**（2026-11-13 实测）：`src/tools.ts` 把导出从 `registerReadTools` 改名成 `registerAgentTools`、
+`src/index.ts` 还没同步时，注入器的自动重载预检失败；等两边都改好并 `npm run build` 之后，
+**活体工具面仍是旧的**（少一个工具），而 `dev_reload_package` 照样返回一大段「当前已装配插件」，
+看起来一切正常。
+
+**根因**：两条叠加。
+① 预检失败时注入器走 `watch-precheck-blocked`，**保持旧代码且不再自动重试** —— 之后源码修好也不会自己回来；
+② 手动 `dev_reload_package` 这一次没有落 `~/.dsh/super-injector/reload-debug.log`，
+即它**没有真的重载**，只是打印了装配清单。两条都不会报错，属于「静默跑旧代码」。
+
+**修法**：改完先看 `~/.dsh/super-injector/self-heal.log` 尾部有没有新的 `watch-precheck-blocked`；
+要强制生效用 **`dev_uninject_plugin` + `dev_inject_plugin`**（本次实测有效），不要相信 `dev_reload_package` 的返回值。
+
+**判据**：一次性探针 dump `ctx.tools.schemas()` 的工具数 —— 重载前 55、强制重装后 56（多了 `rss_update_item`）。
+光看 reload 的输出永远看不出差别。
+
+---
+
 ## 五、数据与解析
 
 ### 5.1 条目身份会「分叉」，且分叉是**写进存储的**
