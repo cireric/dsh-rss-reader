@@ -553,9 +553,12 @@ export function createReader(store: ReaderStore): () => ReactNode {
             busy={state.feedsBusy}
             report={state.importReport}
             notice={state.notice}
+            discovery={state.discovery}
             onImport={(text) => { void store.importOpml(text) }}
             onExport={() => { void store.exportOpml() }}
             onAdd={(url) => { void store.addFeed(url) }}
+            onDiscover={(url) => { void store.discover(url) }}
+            onClearDiscovery={() => { store.clearDiscovery() }}
             onRemove={(url) => { void store.removeFeed(url) }}
             onCreateFolder={(name) => { void store.createFolder(name) }}
             onRenameFolder={(from, to) => { void store.renameFolder(from, to) }}

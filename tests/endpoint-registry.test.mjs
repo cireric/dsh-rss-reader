@@ -26,8 +26,8 @@ const ITEM_ID = 'item-0001'
 const ROUND = '2026-10-11T09:00:00.000Z'
 
 test('端点名字表非空、无重复、全为非空字符串', () => {
-  assert.equal(ENDPOINT_NAMES.length, 25)
-  assert.equal(new Set(ENDPOINT_NAMES).size, 25)
+  assert.equal(ENDPOINT_NAMES.length, 26)
+  assert.equal(new Set(ENDPOINT_NAMES).size, 26)
   for (const name of ENDPOINT_NAMES) assert.equal(typeof name, 'string')
 })
 
@@ -59,7 +59,7 @@ function makeDispatch(overrides = {}) {
     articleAttempts: new Map(),
   })
   return {
-    dispatch, store, db,
+    dispatch, store, db, dir,
     cleanup: () => { db.close(); rmSync(dir, { recursive: true, force: true }) },
   }
 }
@@ -168,6 +168,57 @@ test('金标准：addFeed 的非法 URL 走 ok 的 failed 数组（不出网）'
     assert.equal(r.value.failed[0].reason, '不是合法 URL')
   } finally { h.cleanup() }
 })
+// ── M4 01：发现（只发现、不订阅）────────────────────────────────────────
+
+/**
+ * 发现的**零写入**判据：回候选之后，订阅表与 config.json 都必须一个字节都没变。
+ *
+ * 为什么要在端点层钉：discoverCandidates 本身不接 store（结构上就写不了），但「发现」最容易
+ * 被后来者顺手接成「顺便帮你把第一个候选订上」。那条改动的后果是「取消」变成事后回滚，
+ * 而回滚会丢用户已有数据 —— 这里直接用字节比对把它挡住。
+ *
+ * 出网用桩：地址故意挑**公网字面量**（不触发 DNS），fetch 换成回固定页面的桩。
+ */
+test('金标准：discoverFeeds 回候选但不写任何订阅（store 与 config.json 都不变）', async () => {
+  const h = makeDispatch()
+  const { readFileSync: read } = await import('node:fs')
+  const configPath = join(h.dir, 'config.json')
+  const before = read(configPath, 'utf8')
+  const feedsBefore = h.store.listFeeds()
+  const realFetch = globalThis.fetch
+  const page = '<html><head><link rel="alternate" type="application/rss+xml" href="/feed.xml"></head></html>'
+  const rss = '<?xml version="1.0"?><rss version="2.0"><channel><title>远端的源</title>'
+    + '<item><title>a</title><link>https://ex.test/a</link><guid>g1</guid></item></channel></rss>'
+  globalThis.fetch = async (url) => new Response(String(url).endsWith('/feed.xml') ? rss : page, { status: 200 })
+  try {
+    const r = await h.dispatch('discoverFeeds', { url: 'http://93.184.216.34/' })
+    assert.equal(r.ok, true)
+    assert.deepEqual(r.value.candidates.map((candidate) => candidate.url), ['http://93.184.216.34/feed.xml'])
+    assert.equal(r.value.candidates[0].title, '远端的源', '标题取的是 feed 自己声明的那个')
+    assert.deepEqual(r.value.warnings, [])
+    assert.deepEqual(h.store.listFeeds(), feedsBefore, '发现阶段不许写订阅表')
+    assert.equal(read(configPath, 'utf8'), before, '发现阶段不许改写 config.json（一个字节都不许）')
+  } finally {
+    globalThis.fetch = realFetch
+    h.cleanup()
+  }
+})
+
+test('金标准：discoverFeeds 的空与非法输入（不出网）', async () => {
+  const h = makeDispatch()
+  try {
+    const empty = await h.dispatch('discoverFeeds', { url: '   ' })
+    assert.equal(empty.ok, false)
+    assert.equal(empty.error.code, 'bad-request')
+    assert.match(empty.error.message, /discoverFeeds 需要 url/)
+    const bad = await h.dispatch('discoverFeeds', { url: 'not a url' })
+    assert.equal(bad.ok, true, '用户输入问题走 warnings，不是信封失败')
+    assert.deepEqual(bad.value.candidates, [])
+    assert.equal(bad.value.warnings.length, 1)
+    assert.match(bad.value.warnings[0].reason, /不是合法 URL/)
+  } finally { h.cleanup() }
+})
+
 // ── 客户端接缝（计划 Task 5）────────────────────────────────────────────
 
 /**

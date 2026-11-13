@@ -6,7 +6,7 @@
  * 列表、正文、订阅管理与键盘接线，任一改动都要动同一个文件。
  */
 import { useEffect, useState } from 'react'
-import { ROUTE_PATH, recencyOf, sanitizeViewPreferences, type ArticlePayload, type CleanupResult, type Endpoint, type FeedView, type FolderView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult, type SearchPage, type SearchQuery, type TagView, type UnreadAccount, type ViewPreferences } from '../shared.js'
+import { ROUTE_PATH, recencyOf, sanitizeViewPreferences, type ArticlePayload, type CleanupResult, type DiscoveryResult, type Endpoint, type FeedView, type FolderView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult, type SearchPage, type SearchQuery, type TagView, type UnreadAccount, type ViewPreferences } from '../shared.js'
 import { createAccountMirror } from './account-mirror.js'
 
 export type Filter = 'all' | 'unread' | 'starred'
@@ -170,6 +170,11 @@ export interface ReaderState {
   showUnread: boolean
   /** 最近一次导入的报告（坏源要逐条列出，不能只报总数） */
   importReport: OpmlImportResult | undefined
+  /**
+   * 最近一次「发现候选」的结果（undefined = 没在挑）。它是**待确认**状态：候选在这里只是
+   * 被展示，落库要等用户点某一条走 addFeed —— 取消就是清回 undefined，没有别的副作用。
+   */
+  discovery: DiscoveryResult | undefined
   /** 订阅管理里的忙碌标记（导入要逐源抓取，可能数秒） */
   feedsBusy: boolean
   /** 一次性提示（如清理结果）：显示后由用户下一个动作清掉，不设定时器 */
@@ -249,7 +254,7 @@ export function createReaderStore() {
     items: [], feeds: [], folders: [], tags: [], unread: 0, filter: 'all',
     selectedId: undefined, loading: true, error: undefined, undo: undefined,
     view: 'list', layout: 'list', markAllRange: 'all', showUnread: true, article: undefined, notice: undefined,
-    importReport: undefined, feedsBusy: false,
+    importReport: undefined, discovery: undefined, feedsBusy: false,
     navSelection: { kind: 'virtual' }, perFeedUnread: {}, navVisible: true,
     nextCursor: undefined, loadingMore: false, searchRevision: 0,
     // 光标初值 = 与初始 filter 一致的那一行（初始 filter 是 'all'，故就是「全部」那一行）：
@@ -1100,12 +1105,30 @@ export function createReaderStore() {
     }
   }
 
+  /**
+   * 只发现、不订阅：拿到候选清单后等用户挑（宿主侧零写入，见 endpoints.ts 的 discoverFeeds）。
+   * 失败只写 error —— 候选列表保持上一次的样子会让人以为「刚才那次没发生」，所以先清空再请求。
+   */
+  const discover = async (url: string): Promise<void> => {
+    set({ feedsBusy: true, discovery: undefined, importReport: undefined, error: undefined })
+    try {
+      const result = await callRpc<DiscoveryResult>('discoverFeeds', { url })
+      set({ feedsBusy: false, discovery: result })
+    } catch (failure) {
+      set({ feedsBusy: false, error: failure instanceof Error ? failure.message : String(failure) })
+    }
+  }
+
+  /** 取消挑选：清掉候选，不写任何订阅。 */
+  const clearDiscovery = (): void => { set({ discovery: undefined }) }
+
   /** 加单个源：同样先校验再落库，避免把网页当订阅。 */
   const addFeed = async (url: string): Promise<void> => {
     set({ feedsBusy: true, importReport: undefined })
     try {
       const report = await callRpc<OpmlImportResult>('addFeed', { url })
-      set({ importReport: report, feedsBusy: false })
+      // 落库成功即收掉候选清单：用户已经在清单里做过选择，留着它只会让人怀疑「到底加了没」。
+      set({ importReport: report, feedsBusy: false, discovery: undefined })
       await load('overview')
     } catch (failure) {
       set({ feedsBusy: false, error: failure instanceof Error ? failure.message : String(failure) })
@@ -1303,7 +1326,7 @@ export function createReaderStore() {
     get, visible, load, loadMore, submitSearch, markRead, selectRelative, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllRead, undoMarkAll,
     setLayout, setMarkAllRange, setShowUnread, refreshCount,
     openArticle, closeArticle, cleanup, stepArticle, canStepArticle,
-    toggleFeeds, exportOpml, importOpml, addFeed, removeFeed,
+    toggleFeeds, exportOpml, importOpml, addFeed, removeFeed, discover, clearDiscovery,
     dismissNotice: (): void => { set({ notice: undefined }) },
     setFilter,
     select: (itemId: string): void => { set({ selectedId: itemId }) },

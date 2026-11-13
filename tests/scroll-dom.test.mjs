@@ -1883,3 +1883,118 @@ test('删除当前标签范围：回到跨源列表，标签从目录消失但�
   await sleep(60)
   assert.deepEqual(h.store.visible().map((entry) => entry.id).sort(), ['a1', 'a2'], '文章保留')
 })
+
+
+/* ───────────────── M4 01：只发现、不订阅（真实 React + jsdom） ───────────────── */
+/**
+ * 为什么这三条必须落在这一层：候选清单是**渲染出来的**，「取消之后什么都没加」是一条
+ * 跨组件的行为（按钮 → store → 端点），假 React 夹具既测不了状态重渲染、也看不见 DOM 标记。
+ * 桩必须守宿主契约：discoverFeeds 回 {url,candidates,warnings}，addFeed 回 OpmlImportResult
+ * ——少给字段会让界面在渲染时读到 undefined（docs/pitfalls.md 二、2.6）。
+ */
+const DISCOVERY_CANDIDATES = [
+  { url: 'https://site.test/a.xml', title: '源 A 的 feed', format: 'rss2', itemCount: 3 },
+  { url: 'https://site.test/b.xml', format: 'atom', itemCount: 0 },
+]
+const ADD_FEED_REPORT = (url) => ({ added: 1, existed: 0, failed: [], skipped: [], accepted: [{ url }] })
+
+test('订阅发现：候选逐条列出、选中的那条走 addFeed、取消不添加任何源', async () => {
+  const report = { url: 'https://site.test/', candidates: DISCOVERY_CANDIDATES, warnings: [{ url: 'https://site.test/broken.xml', reason: '不是可识别的 feed（RSS 2.0 / RSS 1.0 / Atom 皆不匹配）' }] }
+  const h = await mountReader({
+    items: [item({ id: 'a1', feedId: 'a' })],
+    feeds: [{ id: 'a', title: '源 A' }],
+    folderApi: async (body) => {
+      if (body.endpoint === 'discoverFeeds') {
+        return { ok: true, status: 200, json: async () => ({ ok: true, value: report }) }
+      }
+      if (body.endpoint === 'addFeed') {
+        return { ok: true, status: 200, json: async () => ({ ok: true, value: ADD_FEED_REPORT(body.payload.url) }) }
+      }
+      return undefined
+    },
+  })
+  await h.store.load('overview')
+  await sleep(30)
+  h.press('f')
+  await sleep(50)
+  const doc = h.win.document
+  const input = doc.querySelector('[data-rss-add-input]')
+  setControlValue(h.win, input, 'https://site.test/')
+  await sleep(20)
+
+  doc.querySelector('[data-rss-discover]').click()
+  // 加载态：点下去当场进 busy —— 既有的「正在逐源抓取校验…」提示与各按钮的 disabled 都由这
+  // 一个标志驱动（这里只钉标志本身：按钮的 disabled 是渲染的派生结果，瞬时读 DOM 会读到上一帧）。
+  assert.equal(h.store.get().feedsBusy, true, '发现期间必须进入 busy 态（加载反馈的承重点）')
+  await sleep(100)
+  assert.equal(h.store.get().feedsBusy, false, '结果到达后退出 busy')
+  assert.deepEqual(h.requests.filter((request) => request.endpoint === 'discoverFeeds').map((request) => request.payload.url),
+    ['https://site.test/'], '发现请求带的是用户填的那个 URL')
+  const rows = () => Array.from(doc.querySelectorAll('[data-rss-candidate]'), (row) => row.getAttribute('data-rss-candidate'))
+  assert.deepEqual(rows(), ['https://site.test/a.xml', 'https://site.test/b.xml'], '候选逐条列出（保序）')
+  assert.match(doc.querySelector('[data-rss-candidate="https://site.test/a.xml"]').textContent, /源 A 的 feed/)
+  assert.match(doc.querySelector('[data-rss-discovery-warning]').textContent, /不是可识别的 feed/,
+    '校验失败的候选要显示原因，而不是只剩一个没有解释的空位')
+
+  // 取消：清单收起，且**一个源都没加**
+  doc.querySelector('[data-rss-discovery-cancel]').click()
+  await sleep(40)
+  assert.equal(doc.querySelector('[data-rss-discovery]'), null, '取消后候选清单消失')
+  assert.equal(h.requests.filter((request) => request.endpoint === 'addFeed').length, 0, '取消不添加任何源')
+
+  // 再发现一次，这次挑一条添加：只有被选中的那个 URL 落库
+  doc.querySelector('[data-rss-discover]').click()
+  await sleep(100)
+  doc.querySelector('[data-rss-candidate-add="https://site.test/a.xml"]').click()
+  await sleep(140)
+  assert.deepEqual(h.requests.filter((request) => request.endpoint === 'addFeed').map((request) => request.payload.url),
+    ['https://site.test/a.xml'], '只添加用户选中的那一条')
+  assert.equal(doc.querySelector('[data-rss-discovery]'), null, '选完清单收起')
+
+  // 手填入口仍在：回车 = 直接添加（既有语义，不强迫每个源都先发现一遍）
+  const inputAgain = doc.querySelector('[data-rss-add-input]')
+  setControlValue(h.win, inputAgain, 'https://direct.test/feed.xml')
+  await sleep(20)
+  inputAgain.dispatchEvent(new h.win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+  await sleep(140)
+  assert.deepEqual(h.requests.filter((request) => request.endpoint === 'addFeed').map((request) => request.payload.url),
+    ['https://site.test/a.xml', 'https://direct.test/feed.xml'], '输入框回车仍走既有的直接添加')
+})
+
+test('订阅发现：零候选与通道错误都有明确反馈（错误时不假装「没有候选」）', async () => {
+  let mode = 'empty'
+  const h = await mountReader({
+    items: [item({ id: 'a1', feedId: 'a' })],
+    feeds: [{ id: 'a', title: '源 A' }],
+    folderApi: async (body) => {
+      if (body.endpoint !== 'discoverFeeds') return undefined
+      if (mode === 'empty') {
+        const value = {
+          url: 'https://site.test/', candidates: [],
+          warnings: [{ url: 'https://site.test/', reason: '未发现公开声明的订阅源（页面里没有 link rel=alternate 的 RSS/Atom 声明）' }],
+        }
+        return { ok: true, status: 200, json: async () => ({ ok: true, value }) }
+      }
+      return { ok: true, status: 200, json: async () => ({ ok: false, error: { code: 'internal', message: '页面抓取失败' } }) }
+    },
+  })
+  await h.store.load('overview')
+  await sleep(30)
+  h.press('f')
+  await sleep(50)
+  const doc = h.win.document
+  setControlValue(h.win, doc.querySelector('[data-rss-add-input]'), 'https://site.test/')
+  await sleep(20)
+
+  doc.querySelector('[data-rss-discover]').click()
+  await sleep(100)
+  assert.match(doc.querySelector('[data-rss-discovery-empty]').textContent, /没有发现可订阅的源/,
+    '零候选要说清下一步（继续手填），而不是留白')
+  assert.match(doc.querySelector('[data-rss-discovery]').textContent, /未发现公开声明的订阅源/)
+
+  mode = 'fail'
+  doc.querySelector('[data-rss-discover]').click()
+  await sleep(100)
+  assert.equal(doc.querySelector('[data-rss-discovery]'), null, '失败时不许留着上一次的候选（那会让人以为刚才那次没发生）')
+  assert.match(doc.querySelector('.dsh-rss-status--error').textContent, /页面抓取失败/, '通道失败要可见')
+})

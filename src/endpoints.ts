@@ -19,7 +19,7 @@ import { selectCleanup } from './retention.js'
 import { buildOpml, parseOpml } from './opml.js'
 import { FolderError } from './folders.js'
 import { TagError } from './tags.js'
-import { validateSubscriptions } from './subscribe.js'
+import { discoverCandidates, validateSubscriptions } from './subscribe.js'
 import type { ReaderStore } from './store.js'
 // 未读判据（isUnread / countUnreadPerFeed）不再由本文件在 JS 侧实现：Task 5 把它交给了存储侧，
 // 自持实现里的 SQL `read_at IS NULL` 与 shared.ts 的 isUnread 是同一件事，两者的等价由
@@ -523,6 +523,28 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       ctx.log('导入 OPML：新增 ' + added + ' 源，已存在 ' + existed + ' 源，校验失败 ' + failed.length +
         ' 源，文件内跳过 ' + parsed.skipped.length + ' 项')
       return ok({ added, existed, failed, skipped: parsed.skipped, accepted })
+    },
+  },
+
+  /**
+   * **只发现、不订阅**（PRD §9）：回候选清单与逐条原因，一个字节都不写。
+   *
+   * 为什么单独一个端点而不是让 addFeed 回候选：addFeed 的语义是「校验并落库」，把它改成
+   * 「可能只回候选」会让客户端无法区分「加了」和「只是看了看」——而这两件事的后果完全不同
+   * （写盘 vs 零写入）。分开之后，取消 = 什么都不做，不需要任何回滚。
+   */
+  discoverFeeds: {
+    to: async (payload, ctx) => {
+      const raw = String((payload as { url?: unknown } | null)?.url ?? '').trim()
+      if (raw === '') return fail('bad-request', 'discoverFeeds 需要 url')
+      // 出网手势照 article 端点的先例留痕：发现不出现在刷新日志里，否则「点了没反应」无从排查。
+      ctx.log('发现订阅候选：' + raw)
+      const result = await discoverCandidates(raw, {
+        limits: { timeoutMs: ctx.config.timeoutMs, maxBytes: ctx.config.maxBytes, trustedTarget: true },
+        concurrency: 1,
+      })
+      ctx.log('发现结果：' + raw + ' → 已验证 ' + result.candidates.length + ' 个候选，' + result.warnings.length + ' 条警告')
+      return ok(result)
     },
   },
 

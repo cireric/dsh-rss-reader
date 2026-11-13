@@ -4,7 +4,7 @@
  * 纯展示 —— 动作全部由入口的 store 通过 props 传进来。
  */
 import { useRef, useState, type ReactNode } from 'react'
-import type { FeedView, FolderView, OpmlExportResult, OpmlImportResult, TagView } from '../shared.js'
+import type { DiscoveryResult, FeedView, FolderView, OpmlExportResult, OpmlImportResult, TagView } from '../shared.js'
 
 /** 文件夹管理里一次改名草稿。 */
 interface RenameDraft {
@@ -26,8 +26,8 @@ interface TagRenameDraft {
  *  - 输入框里的 Enter/Esc 自己处理并 stopPropagation：全局快捷键挂在 document 上，不能截走输入。
  */
 export function FeedsView({
-  feeds, folders, busy, report, notice,
-  onImport, onExport, onAdd, onRemove,
+  feeds, folders, busy, report, notice, discovery,
+  onImport, onExport, onAdd, onRemove, onDiscover, onClearDiscovery,
   onCreateFolder, onRenameFolder, onDeleteFolder, onMoveFeed, tags, onCreateTag, onRenameTag, onDeleteTag, onBack,
 }: {
   feeds: FeedView[]
@@ -35,9 +35,14 @@ export function FeedsView({
   busy: boolean
   report: OpmlImportResult | undefined
   notice: string | undefined
+  /** 发现结果（undefined = 没在挑选）。只展示候选，落库要等用户点「添加」走 onAdd。 */
+  discovery: DiscoveryResult | undefined
   onImport: (text: string) => void
   onExport: () => void
   onAdd: (url: string) => void
+  /** 只发现、不订阅：候选交给用户挑（宿主侧零写入） */
+  onDiscover: (url: string) => void
+  onClearDiscovery: () => void
   onRemove: (url: string) => void
   onCreateFolder: (name: string) => void
   onRenameFolder: (from: string, to: string) => void
@@ -103,7 +108,7 @@ export function FeedsView({
         </label>
         <button type="button" className="dsh-rss-btn" disabled={busy || feeds.length === 0} onClick={onExport}>导出 OPML</button>
         <span style={{ flex: 1 }} />
-        <input value={draft} placeholder="粘贴 feed 地址或站点首页（会自动发现 feed）后回车" disabled={busy}
+        <input data-rss-add-input="" value={draft} placeholder="粘贴 feed 地址或站点首页（会自动发现 feed）后回车" disabled={busy}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {
             // 本插件的全局快捷键挂在 document 上，输入框里的键不该被它截走；
@@ -119,7 +124,54 @@ export function FeedsView({
             }
           }}
           style={{ flex: '0 1 320px', fontSize: 13, padding: '4px 8px' }} />
+        {/* 「发现」与回车「直接添加」并存：回车保持既有语义（粘贴 feed 地址一步到位），
+            发现是显式的第二条路 —— 站点首页常常有多个声明，挑哪个只有用户知道。 */}
+        <button type="button" className="dsh-rss-btn" data-rss-discover=""
+          disabled={busy || draft.trim() === ''}
+          onClick={() => { onDiscover(draft.trim()) }}>发现候选</button>
       </div>
+
+      {discovery !== undefined && (
+        <section data-rss-discovery="" aria-label="发现的订阅候选"
+          style={{ marginBottom: 16, padding: '10px 12px', background: 'color-mix(in srgb, currentColor 6%, transparent)', borderRadius: 6 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+            <strong style={{ fontSize: 13 }}>订阅候选</strong>
+            <span style={{ opacity: 0.6, fontSize: 12, wordBreak: 'break-all' }}>
+              {discovery.candidates.length} 个已验证 · {discovery.url}
+            </span>
+            <span style={{ flex: 1 }} />
+            <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" data-rss-discovery-cancel=""
+              disabled={busy} onClick={onClearDiscovery}>取消</button>
+          </div>
+          {discovery.candidates.length === 0 && (
+            <div data-rss-discovery-empty="" style={{ fontSize: 12, opacity: 0.8 }}>
+              没有发现可订阅的源。可以继续用上面的输入框手动添加 feed 地址。
+            </div>
+          )}
+          {discovery.candidates.map((candidate) => (
+            <div key={candidate.url} data-rss-candidate={candidate.url}
+              style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderTop: '1px solid color-mix(in srgb, currentColor 8%, transparent)' }}>
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <span style={{ display: 'block' }}>{candidate.title ?? candidate.url}</span>
+                <span style={{ display: 'block', fontSize: 11, opacity: 0.6, wordBreak: 'break-all' }}>
+                  {candidate.url} · {candidate.format} · {candidate.itemCount} 条
+                </span>
+              </span>
+              <button type="button" className="dsh-rss-btn" data-rss-candidate-add={candidate.url}
+                disabled={busy} onClick={() => { onAdd(candidate.url) }}>添加</button>
+            </div>
+          ))}
+          {discovery.warnings.length > 0 && (
+            <div style={{ fontSize: 12, color: '#c0392b', marginTop: 4 }}>
+              {discovery.warnings.map((warning, index) => (
+                <div key={index} data-rss-discovery-warning="" style={{ wordBreak: 'break-all' }}>
+                  · {warning.url ?? discovery.url} —— {warning.reason}
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
 
       <section style={{ marginBottom: 16 }} aria-label="文件夹管理">
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>

@@ -25,7 +25,7 @@ export const ROUTE_PATH = '/rss-reader-api'
  */
 export const ENDPOINT_NAMES = [
   'overview', 'refresh', 'markRead', 'unmarkRead', 'toggleStar', 'toggleKeepUnread', 'article', 'cleanup',
-  'opmlExport', 'opmlImport', 'addFeed', 'removeFeed',
+  'opmlExport', 'opmlImport', 'addFeed', 'removeFeed', 'discoverFeeds',
   'viewPreferences', 'saveViewPreferences', 'searchItems',
   'listFolders', 'createFolder', 'renameFolder', 'deleteFolder', 'moveFeedToFolder',
   'listTags', 'createTag', 'renameTag', 'deleteTag', 'setItemTags',
@@ -53,6 +53,33 @@ export interface TagView {
   name: string
   createdAt: string
   itemCount?: number
+}
+
+/**
+ * 发现阶段的一条候选（**已验证**可订阅）。订阅身份就是 url 本身，用户选中后原样交给 addFeed。
+ */
+export interface FeedCandidate {
+  url: string
+  title?: string
+  /** 'rss2' | 'rss1' | 'atom' —— 解析器认出的格式，界面据此标注 */
+  format: string
+  itemCount: number
+}
+
+/**
+ * 发现阶段的一条警告：候选声明了但没通过校验（url = 那个候选），或整页没有任何声明（url 缺省）。
+ * 与候选分开是为了让「为什么没发现」能直接显示，而不是只剩一个空列表。
+ */
+export interface DiscoveryWarning {
+  url?: string
+  reason: string
+}
+
+export interface DiscoveryResult {
+  /** 用户输入归一化后的那个 URL（不是重定向落点） */
+  url: string
+  candidates: FeedCandidate[]
+  warnings: DiscoveryWarning[]
 }
 
 export interface FeedView {

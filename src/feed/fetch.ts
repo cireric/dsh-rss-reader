@@ -141,7 +141,14 @@ export interface FeedValidators {
 }
 
 export type FetchResult =
-  | { kind: 'ok'; body: string; etag?: string; lastModified?: string }
+  /**
+   * `finalUrl` = 跟完重定向后**真正取到内容**的那个地址（每跳都已过地址策略）。
+   *
+   * 为什么必须交出来：发现候选时页面里的相对链接要按**最终**页面 URL 解析。按用户输入的那个
+   * URL 解析，只要站点做过一次 301（http→https、加斜杠、换域名），候选就会被拼到错的 host 上。
+   * 它**不能**当订阅身份用：订阅身份仍是用户给的那个 URL（addFeed 的既有语义）。
+   */
+  | { kind: 'ok'; body: string; finalUrl: string; etag?: string; lastModified?: string }
   | { kind: 'not-modified' }
   | { kind: 'failed'; reason: string }
 
@@ -308,5 +315,5 @@ export async function fetchFeed(
   const bytes = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)))
   const etag = response.headers.get('etag') ?? undefined
   const lastModified = response.headers.get('last-modified') ?? undefined
-  return { kind: 'ok', body: decodeXmlBody(new Uint8Array(bytes)), etag, lastModified }
+  return { kind: 'ok', body: decodeXmlBody(new Uint8Array(bytes)), finalUrl: current, etag, lastModified }
 }

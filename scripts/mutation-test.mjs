@@ -69,10 +69,27 @@ const MUTATIONS = [
   { id: 'client-A 的范围阈值过滤', file: 'lib/client.js',
     judges: ['client-bundle.test.mjs'],
     from: 'recencyOf(item) < before', to: 'true' },
+  // ⚠️ 2026-11-13（M4 01）重锚：判据从 discoverAndValidate 收进 limitsForCandidate 之后，
+  // 「options.limits」变成了参数「limits」—— 旧 from 会报**未应用**（比幸存更隐蔽，pitfalls 二、2.7）。
+  // 语义不变，仍是「只要可信目标就全都继承」；覆盖面从 addFeed 的首个有效源**扩到**发现列表，
+  // 两个调用方共用这一处判据。
   { id: 'subscribe-信任不跨源传播', file: 'lib/subscribe.js',
     judges: ['subscribe.test.mjs'],
-    from: 'const inherited = options.limits.trustedTarget === true && isSameOrigin(candidate, pageUrl);',
-    to: 'const inherited = options.limits.trustedTarget === true;' },
+    from: 'const inherited = limits.trustedTarget === true && isSameOrigin(candidate, pageUrl);',
+    to: 'const inherited = limits.trustedTarget === true;' },
+  // M4 01：候选的相对链接必须按**重定向落点**解析。退回输入 URL 时，站点只要做过一次
+  // 301（http→https、加斜杠、换域名），相对候选就被拼到错的 host 上；判据在 subscribe.test.mjs
+  // 的「重定向后相对候选按最终页面 URL 解析」。OCCURRENCES 独立实测 = 1（lib/subscribe.js:142）。
+  { id: 'discover-候选按最终页面 URL 解析', file: 'lib/subscribe.js',
+    judges: ['subscribe.test.mjs'],
+    from: 'const declared = discoverFeedUrls(page.body, page.finalUrl);',
+    to: 'const declared = discoverFeedUrls(page.body, userUrl);' },
+  // 上面那条的**上游**：fetch 的成功回包必须真的交出落点（退回起始 URL 会让它永远拿到原地址）。
+  // 这条只能由 fetch.test.mjs 审 —— subscribe.test.mjs 的 fetchImpl 是桩，改不到抓取层。
+  { id: 'fetch-成功回包交出最终落点', file: 'lib/feed/fetch.js',
+    judges: ['fetch.test.mjs'],
+    from: 'finalUrl: current',
+    to: 'finalUrl: url' },
   { id: 'discover-只认 rel=alternate', file: 'lib/feed/discover.js',
     judges: ['discover.test.mjs'],
     from: 'if (!/\\balternate\\b/i.test(rel))', to: 'if (false)' },

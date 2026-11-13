@@ -150,6 +150,33 @@ test('出网策略：重定向的目标一律按不可信处理（哪怕起始�
   })
 })
 
+/**
+ * 成功回包必须交出**跟完重定向后的落点**（M4 01 的承重点）：发现候选要用它解析相对链接。
+ *
+ * 为什么这条不打本地桩服务器（本文件其余用例都打）：重定向目标**永远按不可信处理**，
+ * 127.0.0.1 会在第一跳就被地址策略拒掉 —— 想用本地服务复现「跟到落点」，得先拆掉那条安全边界。
+ * 这里改成换掉 globalThis.fetch：起点与落点都用**公网字面量**（不触发 DNS），一跳 302 到相对路径。
+ */
+test('成功回包交出最终落点：跟完重定向后是落点 URL，不是起始 URL', async () => {
+  const realFetch = globalThis.fetch
+  const seen = []
+  globalThis.fetch = async (url) => {
+    seen.push(String(url))
+    if (String(url).endsWith('/start')) {
+      return new Response(null, { status: 302, headers: { location: '/feed.xml' } })
+    }
+    return new Response('<rss version="2.0"><channel><title>t</title></channel></rss>', { status: 200 })
+  }
+  try {
+    const result = await fetchFeed('http://93.184.216.34/start', {}, { timeoutMs: 2000, maxBytes: 1_000_000, trustedTarget: true })
+    assert.equal(result.kind, 'ok')
+    assert.equal(result.finalUrl, 'http://93.184.216.34/feed.xml', '落点才是发现阶段解析相对候选的基准')
+    assert.deepEqual(seen, ['http://93.184.216.34/start', 'http://93.184.216.34/feed.xml'], '相对 location 按当前跳绝对化')
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
 test('出网策略：域名解析到内网地址也要拒（rebinding 的前置拦截）', async () => {
   const fakeLookup = async (host) => (host === 'evil.test' ? ['93.184.216.34', '169.254.169.254'] : ['93.184.216.34'])
   assert.match(String(await resolvedBlockedReason('http://evil.test/feed', false, fakeLookup)), /内网地址/)
