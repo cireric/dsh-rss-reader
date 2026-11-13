@@ -42,6 +42,7 @@ function assemble(home) {
       return dispose
     },
     webServer: { register: () => () => {} },
+    tools: { register: () => () => {} },
     connection: { requestRejection: () => undefined },
   }
   apply(ctx, { feeds: [], refreshOnStart: false })

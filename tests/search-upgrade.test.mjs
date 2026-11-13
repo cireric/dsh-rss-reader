@@ -72,6 +72,7 @@ test('搜索直接使用旧版 v1 库，Worker 启动失败时仍可阅读且恢
         handler = route.handler
         return () => { handler = undefined }
       } },
+      tools: { register: () => () => {} },
       connection: { requestRejection: () => undefined },
     }
     server = createServer((req, res) => handler(req, res))

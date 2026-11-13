@@ -33,6 +33,7 @@ test('apply：所有 ctx.effect 都在同步段登记完（登记时 apply 尚�
         return () => {}
       },
       webServer: { register: () => () => {} },
+      tools: { register: () => () => {} },
       connection: { requestRejection: () => 401 },
     }
     // 同步调用 apply（不 await）—— 若 apply 内部 await 过再登记 effect，这里的记录会暴露顺序
@@ -58,6 +59,7 @@ test('apply：同步返回（不是 promise）—— 依赖它的宿主按同步
       logger: { info: () => {}, warn: () => {} },
       effect: () => () => {},
       webServer: { register: () => () => {} },
+      tools: { register: () => () => {} },
       connection: { requestRejection: () => 401 },
     }
     const returned = apply(ctx, { feeds: [], timeoutMs: 1000 })

@@ -1340,7 +1340,66 @@ const MUTATIONS = [
     judges: ['scroll-dom.test.mjs'],
     from: 'if (!state.search && scopeChanged) load("overview");',
     to: 'if (false) load("overview");' },
+  // ── M3 02：只读模型工具（rss_search / rss_list_feeds / rss_read_article）──────
+  // 每条守一处**承重判定**，from 一律照 lib/tools.js 的编译形状写（docs/pitfalls.md 一、1.4），
+  // OCCURRENCES 均独立实测 = 1。判据全在 tests/tools.test.mjs。
+  // ① 上限夹取：PRD §8.2 的「硬上限 30」只在这里生效，去掉就是「调用方要多少给多少」。
+  { id: 'tools-搜索上限不夹取', file: 'lib/tools.js',
+    judges: ['tools.test.mjs'],
+    from: 'const limit = Math.min(typeof rawLimit === \'number\' ? rawLimit : SEARCH_DEFAULT_ITEMS, SEARCH_MAX_ITEMS);',
+    to: 'const limit = typeof rawLimit === \'number\' ? rawLimit : SEARCH_DEFAULT_ITEMS;' },
+  // ② 游标栅栏：没有它，换一组筛选条件后拿旧页游标续页会**静默**从别处接着翻。
+  { id: 'tools-游标不校验条件', file: 'lib/tools.js',
+    judges: ['tools.test.mjs'],
+    from: "if (supplied !== undefined && (!supplied.startsWith(key) || inner === undefined || decodeCursor(inner) === undefined)) {",
+    to: 'if (supplied !== undefined && inner === undefined) {' },
+  // ③ 片段截断：不截就是「一次搜索把整篇摘要灌进上下文」，PRD §8.2 的长度上限靠它兜。
+  { id: 'tools-片段不截断', file: 'lib/tools.js',
+    judges: ['tools.test.mjs'],
+    from: "return { text: chars.slice(0, max).join(''), truncated: true };",
+    to: 'return { text, truncated: false };' },
+  // ④ 正文缓存版本：不校验就会把**旧抽取器**抓的正文当成当前正文交给模型（影子内容）。
+  { id: 'tools-正文版本不校验', file: 'lib/tools.js',
+    judges: ['tools.test.mjs'],
+    from: 'if (article.revision !== EXTRACTOR_REVISION) {',
+    to: 'if (article.revision === -1) {' },
+  // ⑤ 未就绪：静默返回空列表会让模型把「存储没打开」当成「一条都没有」。
+  { id: 'tools-未就绪静默返回空', file: 'lib/tools.js',
+    judges: ['tools.test.mjs'],
+    from: "if (store === undefined)\n        throw new Error('RSS 阅读器尚未就绪（存储未打开），请稍后重试');",
+    to: 'if (store === undefined)\n        return { listFeeds: () => [], unreadPerFeed: () => ({}), listFolders: () => [], listTags: () => [], feed: () => undefined, item: () => undefined };' },
+  // ⑥ 未知源 id：不拒绝就等于允许模型用一个拼错的 id 搜索并拿到「空结果」。
+  { id: 'tools-未知源不拒绝', file: 'lib/tools.js',
+    judges: ['tools.test.mjs'],
+    from: 'if (feedId !== undefined && store.feed(feedId) === undefined) {',
+    to: 'if (false) {' },
+  // ⑦ 目录截断：源/文件夹/标签三个目录共用这一处判据，不截就是 300+ 条元数据一次灌进上下文。
+  { id: 'tools-目录不截断', file: 'lib/tools.js',
+    judges: ['tools.test.mjs'],
+    from: 'return { total: items.length, truncated: items.length > max, items: items.slice(0, max) };',
+    to: 'return { total: items.length, truncated: false, items };' },
+  // ⑧ 每源未读：退回常量 0 会让模型看到的「未读」永远是空账（左栏与工具口径分裂）。
+  { id: 'tools-每源未读恒零', file: 'lib/tools.js',
+    judges: ['tools.test.mjs'],
+    from: 'unread: unread[id] ?? 0,',
+    to: 'unread: 0,' },
+  // ⑨ 日期验真：只查正则的话 2026-02-30 会被 Date 悄悄滚成 3 月 2 日，查询会返回一批「合理」结果。
+  { id: 'tools-日期不验真', file: 'lib/tools.js',
+    judges: ['tools.test.mjs'],
+    from: 'return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;',
+    to: 'return true;' },
+  // ⑩ 订阅归属：退订只删源与游标，残留条目仍在 items 表；不挡就会把已退订来源的正文继续发给模型。
+  { id: 'tools-退订源残留照发', file: 'lib/tools.js',
+    judges: ['tools.test.mjs'],
+    from: 'if (!subscribed.has(record.feedId)) {',
+    to: 'if (false) {' },
+  // ⑪ 参数类型：退回「类型不对就当没传」，query/feedId 类型错时会静默变成全库查询。
+  { id: 'tools-参数类型静默回落', file: 'lib/tools.js',
+    judges: ['tools.test.mjs'],
+    from: "    if (typeof value !== 'string')\n        throw new Error(name + ' 必须是字符串');",
+    to: "    if (typeof value !== 'string')\n        return undefined;" },
 ]
+
 
 // ── 函数化 + 并行化（2026-10-15 变异测试提速，杠杆 B；spec docs/mutation-test-speedup-plan.md）──
 // 为什么：原实现是顶层直跑、串行 + 每次全量（138 条 ≈ 14.6min）。提速三杠杆（分层 perf gate /

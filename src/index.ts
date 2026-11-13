@@ -26,6 +26,7 @@ export { Config }
 import { createDispatch, createHttpHandler } from './endpoints.js'
 import { createLifecycle } from './lifecycle.js'
 import { createSearch } from './search.js'
+import { registerReadTools } from './tools.js'
 import { ROUTE_PATH } from './shared.js'
 
 export const name = '@dsh-external/dsh-rss-reader'
@@ -44,7 +45,7 @@ export const name = '@dsh-external/dsh-rss-reader'
  * 删掉那条 link 会让从零 build 直接 TS2307（实测）。存活的唯一消费者是旧适配器 `createStore`，
  * 它只被测试当同义性基线用（见 scripts/build.sh 的注释）。**别把这三处的删除当成一步**。
  */
-export const inject = ['connection', 'webServer']
+export const inject = ['connection', 'webServer', 'tools']
 
 /**
  * 刷新结果的人类可读摘要 —— **措辞归宿主**：生命周期只负责跑与记，摘要面向人。
@@ -108,6 +109,10 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
     articleAttempts: session.articleAttempts,
     searchItems: search.run,
   })
+
+  // M3 02 只读模型工具：**同步**注册（apply 必须同步，见上面的注释）。
+  // 走插件自己的 ctx ⇒ 随 fiber 卸载自动注销（M3 01 §2 实测过的唯一安全归属）。
+  registerReadTools(ctx, { ready: session.ready, searchItems: search.run })
 
   ctx.effect(() => {
     let dispose: (() => void) | undefined
