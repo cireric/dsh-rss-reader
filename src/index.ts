@@ -26,7 +26,7 @@ export { Config }
 import { createDispatch, createHttpHandler } from './endpoints.js'
 import { createLifecycle } from './lifecycle.js'
 import { createSearch } from './search.js'
-import { registerReadTools } from './tools.js'
+import { registerAgentTools } from './tools.js'
 import { ROUTE_PATH } from './shared.js'
 
 export const name = '@dsh-external/dsh-rss-reader'
@@ -110,9 +110,10 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
     searchItems: search.run,
   })
 
-  // M3 02 只读模型工具：**同步**注册（apply 必须同步，见上面的注释）。
+  // M3 02/03 的模型工具：**同步**注册（apply 必须同步，见上面的注释）。
   // 走插件自己的 ctx ⇒ 随 fiber 卸载自动注销（M3 01 §2 实测过的唯一安全归属）。
-  registerReadTools(ctx, { ready: session.ready, searchItems: search.run })
+  // 写工具的逐次审批也在同一个 ctx 上注册，卸载即撤闸。
+  registerAgentTools(ctx, { ready: session.ready, searchItems: search.run })
 
   ctx.effect(() => {
     let dispose: (() => void) | undefined

@@ -14,22 +14,40 @@ import { freshStore } from './helpers/reader-store-memory.mjs'
 import { EXTRACTOR_REVISION } from '../lib/article.js'
 import {
   ARTICLE_MAX_CHARS, FAILURE_MAX_CHARS, FEEDS_MAX, FOLDERS_MAX, LABEL_MAX_CHARS, SEARCH_DEFAULT_ITEMS,
-  SEARCH_MAX_ITEMS, SNIPPET_MAX_CHARS, TAGS_MAX, TITLE_MAX_CHARS, URL_MAX_CHARS, registerReadTools,
+  SEARCH_MAX_ITEMS, SNIPPET_MAX_CHARS, TAGS_MAX, TITLE_MAX_CHARS, URL_MAX_CHARS, registerAgentTools,
 } from '../lib/tools.js'
 
-/** 注册桩 ctx：只实现 tools.register，disposer 会真的把工具从表里摘掉。 */
+/**
+ * 注册桩 ctx：`tools.register` 会记住 disposer，`on` 会记住监听器。
+ * 返回值是「工具名 → 定义」的 Map，并额外挂 `disposers` / `listeners` 两个数组
+ * （Map 上挂属性是测试夹具的省事写法，不是生产契约）。
+ */
 function mount(deps) {
   const registered = new Map()
+  const disposers = []
+  const listeners = []
   const ctx = {
     tools: {
       register(definition) {
         assert.equal(registered.has(definition.name), false, '同名工具不得重复注册：' + definition.name)
         registered.set(definition.name, definition)
-        return () => { registered.delete(definition.name) }
+        const dispose = () => { registered.delete(definition.name) }
+        disposers.push(dispose)
+        return dispose
       },
     },
+    on(event, handler) {
+      const entry = { event, handler }
+      listeners.push(entry)
+      return () => {
+        const index = listeners.indexOf(entry)
+        if (index >= 0) listeners.splice(index, 1)
+      }
+    },
   }
-  registerReadTools(ctx, deps)
+  registerAgentTools(ctx, deps)
+  registered.disposers = disposers
+  registered.listeners = listeners
   return registered
 }
 
@@ -60,7 +78,7 @@ function searchStub(page = { items: [] }) {
 const signal = new AbortController().signal
 const exec = { signal }
 
-test('注册：三个工具挂在**传入的** ctx.tools 上，disposer 撤销后真的没了', () => {
+test('注册：四个工具挂在**传入的** ctx.tools 上，disposer 撤销后真的没了', () => {
   const { store } = freshStore('tools-reg')
   const registered = new Map()
   const disposers = []
@@ -74,10 +92,11 @@ test('注册：三个工具挂在**传入的** ctx.tools 上，disposer 撤销�
         return dispose
       },
     },
+    on: () => () => {},
   }
-  registerReadTools(ctx, { ready: () => store, searchItems: searchStub().run })
+  registerAgentTools(ctx, { ready: () => store, searchItems: searchStub().run })
 
-  assert.deepEqual([...registered.keys()].sort(), ['rss_list_feeds', 'rss_read_article', 'rss_search'])
+  assert.deepEqual([...registered.keys()].sort(), ['rss_list_feeds', 'rss_read_article', 'rss_search', 'rss_update_item'])
   for (const [name, definition] of [...registered]) {
     assert.equal(typeof definition.description, 'string', name + ' 必须有模型可见的描述')
     assert.ok(definition.description.length > 0, name + ' 的描述不能是空串')
@@ -89,13 +108,16 @@ test('注册：三个工具挂在**传入的** ctx.tools 上，disposer 撤销�
   }
 
   // 断言必须打到「撤销之后」这个状态：只断言注册过，等于没测注销。
-  assert.equal(disposers.length, 3, '三个工具都要把注册拿到的 disposer 交给宿主')
+  assert.equal(disposers.length, 4, '四个工具都要把注册拿到的 disposer 交给宿主')
   for (const dispose of disposers) dispose()
   assert.equal(registered.size, 0, 'disposer 撤销后注册表必须真的空掉')
 
   // 撤销后再注册一次仍成立（宿主热重载走的就是「先解绑再重绑」）
   const again = mount({ ready: () => store, searchItems: searchStub().run })
-  for (const name of ['rss_search', 'rss_list_feeds', 'rss_read_article']) {
+  // 写入的逐次审批监听器也在同一个 ctx 上：重新装载必须重新挂上，且只有一个（不留残余门禁）
+  assert.equal(again.listeners.length, 1)
+  assert.equal(again.listeners[0].event, 'tools/pre-execute')
+  for (const name of ['rss_search', 'rss_list_feeds', 'rss_read_article', 'rss_update_item']) {
     assert.equal(again.has(name), true, name + ' 注销后可以重新注册')
   }
 })
@@ -399,4 +421,84 @@ test('未就绪：store 还没打开时三个工具都响亮失败，不返回�
     const args = name === 'rss_read_article' ? { itemId: 'x' } : {}
     await assert.rejects(registered.get(name).execute(args, exec), /尚未就绪/, name + ' 必须报未就绪')
   }
+})
+
+test('rss_update_item：setRead / setStarred 显式动作生效，重复调用状态不变（幂等，不是 toggle）', async () => {
+  const { store } = freshStore('tools-write')
+  await store.saveFeed('https://feed.example/rss', { url: 'https://feed.example/rss', title: '探针源' })
+  await store.saveItem('i1', {
+    feedId: 'https://feed.example/rss', title: 't', link: 'https://feed.example/1', fetchedAt: '2026-11-01T00:00:00.000Z',
+    starred: false, keptUnread: true,
+    article: { fetchedAt: '2026-11-01T00:00:00.000Z', revision: EXTRACTOR_REVISION, blocks: [{ kind: 'p', text: '正文' }] },
+  })
+  const write = mount({ ready: () => store, searchItems: searchStub().run }).get('rss_update_item')
+
+  const read = await write.execute({ itemId: 'i1', setRead: true }, exec)
+  assert.equal(read.changed, true)
+  assert.equal(typeof read.readAt, 'string', 'setRead:true 必须落一个时间戳')
+  const stamped = store.item('i1')
+  assert.equal(stamped.keptUnread, undefined, '标为已读要按规格清掉 kept-unread')
+
+  // 幂等：再来一次不许刷新时间戳（重复请求状态一致）
+  const again = await write.execute({ itemId: 'i1', setRead: true }, exec)
+  assert.equal(again.changed, false, '已读条目再标已读必须是 no-op')
+  assert.equal(again.readAt, read.readAt, '时间戳不许被重写')
+
+  const starred = await write.execute({ itemId: 'i1', setStarred: true }, exec)
+  assert.equal(starred.starred, true)
+  assert.equal(store.item('i1').starred, true)
+
+  const unstar = await write.execute({ itemId: 'i1', setStarred: false }, exec)
+  assert.equal(unstar.starred, false, 'setStarred 是显式设值，不是反转')
+
+  const unread = await write.execute({ itemId: 'i1', setRead: false }, exec)
+  assert.equal(unread.readAt, null)
+  assert.equal(store.item('i1').readAt, undefined, '取消已读 = 去掉 readAt（不是写 null）')
+
+  // 正文缓存与其它字段必须原样还在
+  const after = store.item('i1')
+  assert.equal(after.article?.blocks?.[0]?.text, '正文', '写状态不许动正文缓存')
+  assert.equal(after.title, 't')
+})
+
+test('rss_update_item：无动作 / 非布尔 / 未知条目 / 退订源条目一律拒绝', async () => {
+  const { store } = freshStore('tools-write-bad')
+  await store.saveFeed('https://feed.example/rss', { url: 'https://feed.example/rss', title: '探针源' })
+  await store.saveItem('i1', { feedId: 'https://feed.example/rss', title: 't', link: 'https://l', fetchedAt: '2026-11-01T00:00:00.000Z', starred: false })
+  await store.saveItem('orphan', { feedId: 'https://gone.example/rss', title: 't', link: 'https://l', fetchedAt: '2026-11-01T00:00:00.000Z', starred: false })
+  const write = mount({ ready: () => store, searchItems: searchStub().run }).get('rss_update_item')
+
+  await assert.rejects(write.execute({ itemId: 'i1' }, exec), /至少提供 setRead 或 setStarred/)
+  await assert.rejects(write.execute({ itemId: 'i1', setRead: 'true' }, exec), /setRead 必须是布尔值/)
+  await assert.rejects(write.execute({ itemId: 'i1', setStarred: 1 }, exec), /setStarred 必须是布尔值/)
+  await assert.rejects(write.execute({ setRead: true }, exec), /itemId 必填/)
+  await assert.rejects(write.execute({ itemId: 42, setRead: true }, exec), /itemId 必须是字符串/)
+  await assert.rejects(write.execute({ itemId: 'nope', setRead: true }, exec), /条目不存在/)
+  await assert.rejects(write.execute({ itemId: 'orphan', setRead: true }, exec), /已退订/, '退订源的残留条目不许被写')
+  // 拒绝之后库里的状态一个字节都不该变
+  assert.equal(store.item('i1').readAt, undefined)
+  assert.equal(store.item('orphan').readAt, undefined)
+})
+
+test('写工具的逐次审批：pre-execute 只对本工具 ask，其它工具必须放行（waterfall 不许漏 next）', async () => {
+  const { store } = freshStore('tools-approval')
+  const registered = mount({ ready: () => store, searchItems: searchStub().run })
+  assert.equal(registered.listeners.length, 1, '审批钩子只有一个入口')
+  const listener = registered.listeners[0]
+  assert.equal(listener.event, 'tools/pre-execute')
+
+  let nextCalled = false
+  const ask = await listener.handler(
+    { name: 'rss_update_item', callId: 'c1', arguments: { itemId: 'i-42', setRead: true } },
+    () => { nextCalled = true; return Promise.resolve({ kind: 'allow' }) },
+  )
+  assert.equal(ask.kind, 'ask', '写工具每次调用都必须走 ask')
+  assert.match(ask.reason, /i-42/, '审批理由要带上是哪一条，人才知道自己在批什么')
+  assert.equal(nextCalled, false, 'ask 是短路，绝不能再去调 next()')
+
+  const pass = await listener.handler(
+    { name: 'rss_search', callId: 'c2', arguments: {} },
+    () => Promise.resolve({ kind: 'allow' }),
+  )
+  assert.deepEqual(pass, { kind: 'allow' }, '非写工具必须原样放行 —— 漏一句 next 就是全站工具闸死')
 })

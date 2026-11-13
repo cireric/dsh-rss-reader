@@ -9,6 +9,10 @@
  *     `article` 端点会抓原站（唯一会出网的用户手势），所以正文读取**不能复用它**，只读缓存。
  *  ③ **有界输出**。每个集合（源/文件夹/标签/搜索结果）都有条数预算，每个可变长字段都有字符预算；
  *     任何一处被截断都在结果里**如实标出来**，不静默丢。
+ *  ④ **写入是显式的、逐次审批的**（M3 03）。`rss_update_item` 只接受 `setRead` / `setStarred`
+ *     两个显式动作（PRD §8.2 禁用 toggle，避免重试反转状态），且每次调用都要过
+ *     `tools/pre-execute` 的 `ask` —— 没有审批通道时宿主会 fail-closed（M3 01 实测）。
+ *     审批钩子挂在**插件自己的 ctx** 上，随 fiber 卸载一起撤掉，不留残余门禁。
  *
  * 为什么不复用 ENDPOINTS：端点的契约是「回一份可直接渲染的 UI 包封 + 未读账」，
  * 其中 overview/article 两条会触发刷新/抓取。工具要的是「同一份查询、零副作用」，
@@ -18,6 +22,7 @@ import type { Context } from 'cordis'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { createHash } from 'node:crypto'
 import { EXTRACTOR_REVISION } from './article.js'
+import { rebuildItem } from './domain.js'
 import type { ItemRecord } from './domain.js'
 import type { ReaderStore } from './store.js'
 import { decodeCursor } from './shared.js'
@@ -376,16 +381,111 @@ function articleTool(deps: ReadToolDeps): ToolDefinition {
   }
 }
 
+/** `rss_update_item`：显式动作的写工具（setRead / setStarred），每次调用都要人点头。 */
+function updateTool(deps: ReadToolDeps): ToolDefinition {
+  return {
+    name: 'rss_update_item',
+    description:
+      'Change the read or starred state of exactly one stored item. Write tool: every call requires an explicit '
+      + 'human approval. Uses explicit actions (setRead / setStarred), never toggles, so a retry cannot flip state. '
+      + 'It never fetches the original page and never touches the cached article text.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        itemId: { type: 'string', description: 'Item id from rss_search.' },
+        setRead: { type: 'boolean', description: 'true = mark as read, false = mark as unread. Omit to leave unchanged.' },
+        setStarred: { type: 'boolean', description: 'true = star, false = unstar. Omit to leave unchanged.' },
+      },
+    },
+    output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
+    async execute(rawArgs) {
+      const store = requireStore(deps)
+      const args = (rawArgs ?? {}) as Record<string, unknown>
+
+      const rawItemId = args.itemId
+      if (rawItemId !== undefined && typeof rawItemId !== 'string') throw new Error('itemId 必须是字符串')
+      const itemId = String(rawItemId ?? '')
+      if (itemId === '') throw new Error('itemId 必填')
+
+      const setRead = optionalBoolean(args, 'setRead')
+      const setStarred = optionalBoolean(args, 'setStarred')
+      // 一个动作都没有 = 调用方以为自己在写但什么都不会发生。响亮拒绝，别回一个「成功」。
+      if (setRead === undefined && setStarred === undefined) {
+        throw new Error('至少提供 setRead 或 setStarred 之一（本工具不接受 toggle）')
+      }
+
+      const existing = store.item(itemId)
+      if (existing === undefined) throw new Error('条目不存在：' + itemId)
+      // 与只读工具同一条归属判据：退订源的残留条目不许被 Agent 改。
+      const subscribed = new Set(store.listFeeds().map(([id]) => id))
+      if (!subscribed.has(existing.feedId)) {
+        throw new Error('该条目所属订阅源已退订，不允许修改')
+      }
+
+      let changed = false
+      let next: ItemRecord | undefined
+      // **原子读改写**（store 契约）：fn 看到的是库里的当前值，并发窗口内不会互相覆盖。
+      await store.updateItem(itemId, current => {
+        const omit: Array<keyof ItemRecord> = []
+        const set: Partial<ItemRecord> = {}
+        if (setRead === true && current.readAt === undefined) {
+          // 与 markRead 端点同一语义：标为已读时同时清掉 kept-unread（规格 §3.3）
+          omit.push('keptUnread')
+          set.readAt = new Date().toISOString()
+        }
+        if (setRead === false && current.readAt !== undefined) {
+          // 只撤销 readAt；keptUnread 与正文缓存都不动（unmarkRead 的同一条教训）
+          omit.push('readAt')
+        }
+        if (setStarred !== undefined && current.starred !== setStarred) set.starred = setStarred
+        if (omit.length === 0 && Object.keys(set).length === 0) {
+          next = current
+          return current
+        }
+        changed = true
+        next = rebuildItem(current, { omit, set })
+        return next
+      })
+
+      const record = next ?? store.item(itemId)
+      if (record === undefined) throw new Error('写入后读不回条目：' + itemId)
+      return {
+        itemId,
+        readAt: record.readAt ?? null,
+        starred: record.starred,
+        changed,
+      }
+    },
+  }
+}
+
 /**
- * 在插件自己的 ctx 上注册三个只读工具（随 fiber 卸载自动注销；不要改成 `agent.ctx`）。
+ * 在插件自己的 ctx 上注册 Agent 工具（随 fiber 卸载自动注销；不要改成 `agent.ctx`）。
+ *
+ * 写入的**逐次审批**是 PRD §8.1 的硬要求，实现点只有下面这个 `tools/pre-execute`：
+ * `ask` 交给宿主审批服务，没有通道时宿主 fail-closed（M3 01 §5 实测的
+ * "requires approval, but no approval channel is available"）。
+ * 它是 **waterfall**：非本工具的调用必须 `next()` 放行，漏掉一句就等于把全站工具闸死。
  * @param ctx - 插件上下文，需已注入 `tools`。
  * @param deps - 取 store 与跑搜索的两个入口。
  */
-export function registerReadTools(ctx: Context, deps: ReadToolDeps): void {
+export function registerAgentTools(ctx: Context, deps: ReadToolDeps): void {
   // 必须 in inject 里声明过 `tools`：未声明的服务经服务解析器求值会得到 undefined，
   // 而这里若写成「取不到就返回」，插件在真机上会**静默**少掉三个工具（2026-11-13 实测踩到：
   // test 夹具里 ctx.tools 有值所以全绿，活体宿主里没有注入就是 undefined）。
   ctx.tools.register(searchTool(deps))
   ctx.tools.register(feedsTool(deps))
   ctx.tools.register(articleTool(deps))
+  ctx.tools.register(updateTool(deps))
+
+  // 逐次审批：挂插件自己的 ctx ⇒ 卸载时随 fiber 一起撤掉（不留残余门禁）。
+  ctx.on('tools/pre-execute', (exec, next) => {
+    if (exec.name !== 'rss_update_item') return next()
+    const args = (exec.arguments ?? {}) as { itemId?: unknown }
+    return Promise.resolve({
+      kind: 'ask' as const,
+      reason: 'rss_update_item 请求修改条目 ' + String(args.itemId ?? '(未知)') + ' 的阅读状态，请确认是否允许',
+    })
+  })
 }

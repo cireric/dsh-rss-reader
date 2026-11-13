@@ -1398,6 +1398,27 @@ const MUTATIONS = [
     judges: ['tools.test.mjs'],
     from: "    if (typeof value !== 'string')\n        throw new Error(name + ' 必须是字符串');",
     to: "    if (typeof value !== 'string')\n        return undefined;" },
+  // ── M3 03：写工具的授权与幂等 ─────────────────────────────────────────
+  // ⑫ 无动作调用：不拦就回一个「成功」，调用方以为写了、其实什么都没发生。
+  { id: 'tools-写工具无动作也放行', file: 'lib/tools.js',
+    judges: ['tools.test.mjs'],
+    from: 'if (setRead === undefined && setStarred === undefined) {',
+    to: 'if (false) {' },
+  // ⑬ 归属判据：退订源的残留条目不挡就会被 Agent 改写。
+  { id: 'tools-写工具不查订阅归属', file: 'lib/tools.js',
+    judges: ['tools.test.mjs'],
+    from: 'if (!subscribed.has(existing.feedId)) {',
+    to: 'if (false) {' },
+  // ⑭ 幂等：已读条目再标已读若刷新时间戳，重试就会改写「最近已读」。
+  { id: 'tools-已读重复写刷新时间戳', file: 'lib/tools.js',
+    judges: ['tools.test.mjs'],
+    from: 'if (setRead === true && current.readAt === undefined) {',
+    to: 'if (setRead === true) {' },
+  // ⑮ 逐次审批：钩子若对写工具也放行，等于写工具没有任何授权门槛。
+  { id: 'tools-写工具绕过审批', file: 'lib/tools.js',
+    judges: ['tools.test.mjs'],
+    from: "        if (exec.name !== 'rss_update_item')",
+    to: '        if (true)' },
 ]
 
 

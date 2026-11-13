@@ -705,6 +705,7 @@ async function withRealRefresh(feedsPerRound, run) {
       effect: (callback) => { const dispose = callback(); if (typeof dispose === 'function') disposers.push(dispose); return dispose },
       webServer: { register: (route) => { handler = route.handler; return () => { handler = undefined } } },
       tools: { register: () => () => {} },
+      on: () => () => {},
       connection: { requestRejection: () => undefined },
     }
     apply(ctx, {
@@ -878,6 +879,7 @@ test('真装配：1 个源恒 500 时，K=1 的轮转仍能摸到另外两个健
       effect: (callback) => { const dispose = callback(); if (typeof dispose === 'function') disposers.push(dispose); return dispose },
       webServer: { register: (route) => { handler = route.handler; return () => { handler = undefined } } },
       tools: { register: () => () => {} },
+      on: () => () => {},
       connection: { requestRejection: () => undefined },
     }
     // 失败源**放在最前**：它因此是「从未尝试过」那批里最靠前的，第一轮必然被选中并失败。
