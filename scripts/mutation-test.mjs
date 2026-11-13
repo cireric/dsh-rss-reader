@@ -77,6 +77,40 @@ const MUTATIONS = [
     judges: ['subscribe.test.mjs'],
     from: 'const inherited = limits.trustedTarget === true && isSameOrigin(candidate, pageUrl);',
     to: 'const inherited = limits.trustedTarget === true;' },
+  // ── M4 02：订阅健康（2026-11-13）────────────────────────────────────────────
+  // 连败计数必须**跨轮累计**：恒为 1 的实现会让「连续失败 5 次」永远显示 1，用户看不出源烂了多久。
+  // 判据在 tests/refresh.test.mjs（真 refreshFeeds 两轮失败 ⇒ 2）与 store-sqlite 的失败累计用例。
+  { id: 'health-连败不累计', file: 'lib/feed-intent.js',
+    judges: ['refresh.test.mjs', 'store-sqlite.test.mjs'],
+    from: 'failureCount: (previous?.failureCount ?? 0) + 1,',
+    to: 'failureCount: 1,' },
+  // 200 与 304 都必须**显式写 0**（省略 = 退回「历史未知」，界面会把刚成功的源显示成「次数未知」）。
+  // 两个分支各一条：它们是同一判定的两处实现，只改一处就只是半条规矩。
+  { id: 'health-200 不清连败', file: 'lib/feed-intent.js',
+    judges: ['store-sqlite.test.mjs'],
+    from: '                contentRevision: intent.contentRevision,\n                // 成功即清零（不是「省略这个字段」）：省略等于退回「历史未知」，而这里我们**知道**刚成功。\n                failureCount: 0,',
+    to: '                contentRevision: intent.contentRevision,\n                // 成功即清零（不是「省略这个字段」）：省略等于退回「历史未知」，而这里我们**知道**刚成功。\n                failureCount: previous?.failureCount,' },
+  { id: 'health-304 不清连败', file: 'lib/feed-intent.js',
+    judges: ['store-sqlite.test.mjs'],
+    from: '                // 304 也是成功（源说内容没变）：连败计数同样归零，与 lastFailure 清零同一条理由。\n                failureCount: 0,',
+    to: '                // 304 也是成功（源说内容没变）：连败计数同样归零，与 lastFailure 清零同一条理由。\n                failureCount: previous?.failureCount,' },
+  // 「把源重新加一遍 = 修好了」是 M4 02 明确要修掉的假象：订阅落库不是抓取结果，不许清失败历史。
+  { id: 'health-订阅落库抹掉失败历史', file: 'lib/feed-intent.js',
+    judges: ['store-sqlite.test.mjs'],
+    from: '                lastFailure: previous?.lastFailure,',
+    to: '                lastFailure: undefined,' },
+  // X 必须是「本轮实际尝试的源数」，不是订阅总数：退回 total 会让界面把「摸了 1/3」吹成「3/3」。
+  // 判据在 refresh.test.mjs 的真装配（K=1 / 3 源，断言端点回包的 refresh.attempted === 1）。
+  { id: 'health-X 报成订阅总数', file: 'lib/lifecycle.js',
+    judges: ['refresh.test.mjs'],
+    from: "return { outcome: 'ran', attempted: subscriptions.length, total };",
+    to: "return { outcome: 'ran', attempted: total, total };" },
+  // 「次数未知」不许写成「0 次」：老记录从来没记过计数，补 0 就是撒谎（domain.ts 的三态契约）。
+  { id: 'health-未知次数写成 0', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    from: '" · 连续失败：" + (feed.failureCount === void 0 ? "次数未知" : feed.failureCount + " 次"),',
+    to: '" · 连续失败：" + (feed.failureCount === void 0 ? "0 次" : feed.failureCount + " 次"),' },
+
   // M4 01：候选的相对链接必须按**重定向落点**解析。退回输入 URL 时，站点只要做过一次
   // 301（http→https、加斜杠、换域名），相对候选就被拼到错的 host 上；判据在 subscribe.test.mjs
   // 的「重定向后相对候选按最终页面 URL 解析」。OCCURRENCES 独立实测 = 1（lib/subscribe.js:142）。

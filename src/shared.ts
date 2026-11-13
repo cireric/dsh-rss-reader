@@ -88,8 +88,46 @@ export interface FeedView {
   folder?: string
   /** ISO8601 UTC；从未成功抓取过则为 undefined */
   lastFetchedAt?: string
+  /** ISO8601 UTC；上次**尝试**（成功/304/失败都盖）；从未试过则为 undefined。调度排序键，也是「最近尝试」的展示源 */
+  lastAttemptedAt?: string
   /** 最近一次失败原因；成功后清空 */
   lastFailure?: string
+  /** 连续失败次数。undefined = **历史未知**（升级前的老记录），0 = 真实零连败，见 domain.ts 的三态注释 */
+  failureCount?: number
+}
+
+/**
+ * 源的健康状态（PRD §10.1 的三个值）**只在这里定义一次**：宿主把它派生成 FeedView 的原始字段，
+ * 客户端与管理页用本函数判断，避免两处各写一套 if。
+ *
+ * 判定顺序是承重的：**从未成功**优先于**有告警** —— 一个从没成功过、每次都在失败的源，
+ * 说它「有告警」会让人以为它曾经好过；有告警专指「上次是成功的、最近这次失败」。
+ */
+export type FeedHealth = 'ok' | 'warn' | 'never'
+
+export function feedHealthOf(feed: Pick<FeedView, 'lastFetchedAt' | 'lastFailure'>): FeedHealth {
+  if (feed.lastFetchedAt === undefined) return 'never'
+  return feed.lastFailure === undefined ? 'ok' : 'warn'
+}
+
+/**
+ * 一轮刷新**实际发生了什么**（M4 02）。四个分支互斥，界面据 outcome 决定措辞 ——
+ * 这是「节流 / 并入在途」不许伪装成新一轮的承重点：只有 ran 才带 attempted/total。
+ *
+ * - ran：真发起了一轮。attempted = 本轮实际尝试的源数（= selectStalestFeeds 选中的数量），
+ *   total = **本轮开始时**的已订阅源数（分母是这一轮的起点，不是抓完之后又变了的值）。
+ * - throttled：距上次完成不足 minRefreshIntervalMs，一个请求都没发；waitMs 是还要等多久。
+ * - in-flight：已有一轮在跑，本次只是等它结束，没有发起新的。
+ * - not-ready：插件未就绪（关停中 / 装载未完成）。
+ */
+export interface RefreshRun {
+  outcome: 'ran' | 'throttled' | 'in-flight' | 'not-ready'
+  /** 本轮实际尝试的源数（只有 ran 有意义；其余恒 0 —— 没发起就是 0，不是「全抓了」） */
+  attempted: number
+  /** 本轮开始时的已订阅源数 */
+  total: number
+  /** 仅 throttled：还需等待的毫秒数 */
+  waitMs?: number
 }
 
 export interface ItemView {
@@ -205,6 +243,9 @@ export interface Overview extends UnreadAccount {
   nextCursor?: string
   /** 本次调用是否真的发起了抓取（被节流或并入在途刷新时为 false） */
   refreshed: boolean
+  /** 本轮刷新的明细（只有 refresh 端点会给；overview 恒缺省）。与 refreshed 同时给出：
+   *  refreshed 是布尔概况，refresh 说明「为什么是 false」以及 X/Y 各是多少 */
+  refresh?: RefreshRun
   /** 上次抓取完成时间（ISO）；undefined = 本次进程内还没成功抓过 */
   refreshedAt?: string
 }

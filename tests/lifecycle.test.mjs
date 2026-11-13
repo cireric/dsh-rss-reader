@@ -81,13 +81,13 @@ test('Review Focus 4：stop 重复调用是安全的空操作（不放宽断言�
   } finally { h.clean() }
 })
 
-test('Review Focus 3：stop 之后 refreshNow 直接 false，不许拿一个正在关的 store', async () => {
+test('Review Focus 3：stop 之后 refreshNow 报 not-ready，不许拿一个正在关的 store', async () => {
   const h = make('refresh-after-stop')
   try {
     await h.lc.start()
     await h.lc.stop()
-    assert.equal(await h.lc.refreshNow(), false, '已关停 ⇒ refresh 不得发起')
-    assert.equal(await h.lc.refreshNow({ force: true }), false, 'force 也不许越过就绪判定')
+    assert.equal((await h.lc.refreshNow()).outcome, 'not-ready', '已关停 ⇒ refresh 不得发起')
+    assert.equal((await h.lc.refreshNow({ force: true })).outcome, 'not-ready', 'force 也不许越过就绪判定')
   } finally { h.clean() }
 })
 
@@ -179,11 +179,18 @@ test('缺口 ①：refreshNow 的节流往返 —— 第二轮被拦且记下「
     await h.lc.start()
     // 第一轮：无源可抓（feeds 为空）也会**真的发起**一轮并盖上完成时间戳
     h.lines.length = 0
-    assert.equal(await h.lc.refreshNow(), true, '第一轮应当真的发起抓取（并盖完成时间戳）')
+    const first = await h.lc.refreshNow()
+    assert.equal(first.outcome, 'ran', '第一轮应当真的发起抓取（并盖完成时间戳）')
+    // X/Y 的口径（M4 02）：X = 本轮实际尝试的源数，Y = 本轮开始时的已订阅数。夹具里恰好一个源。
+    assert.equal(first.attempted, 1, 'X 必须是本轮真的尝试过的源数')
+    assert.equal(first.total, 1, 'Y 必须是本轮开始时的已订阅数')
 
     // 第二轮：不带 force ⇒ 被 minRefreshIntervalMs 拦下
     const second = await h.lc.refreshNow()
-    assert.equal(second, false, '第二轮必须被节流拦下（恒不触发的变异会让它变 true）')
+    assert.equal(second.outcome, 'throttled', '第二轮必须被节流拦下（恒不触发的变异会让它变 ran）')
+    assert.equal(second.attempted, 0, '被节流时一个请求都没发 ⇒ X 必须是 0（不是「全抓了」）')
+    assert.equal(second.total, 1, '被节流也要给分母：0/0 会让人以为订阅表空了')
+    assert.ok(typeof second.waitMs === 'number' && second.waitMs > 0, '节流要能说出「还需等多久」')
     assert.ok(h.lines.some((line) => line.includes('刷新被节流')),
       '被节流必须留痕 —— 否则界面上只表现为「点了没反应」，用户与 agent 都无法区分“没抓”和“抓了没新内容”：\n' + h.lines.join('\n'))
   } finally { h.clean() }

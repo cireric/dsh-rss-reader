@@ -538,7 +538,9 @@ export function createReader(store: ReaderStore): () => ReactNode {
         )}
         {failing.length > 0 && (
           <div style={{ padding: '6px 20px', opacity: 0.75, fontSize: 12 }}>
-            {failing.length} 个源抓取失败：{failing.map((feed) => feed.title + '（' + feed.lastFailure + '）').join('；')}
+            {/* 连败次数缺失（老记录）时写「次数未知」，不补 0：把「不知道」写成「0 次失败」是撒谎 */}
+            {failing.length} 个源抓取失败：{failing.map((feed) => feed.title
+              + '（' + (feed.failureCount === undefined ? '次数未知' : '连续 ' + feed.failureCount + ' 次') + '：' + feed.lastFailure + '）').join('；')}
           </div>
         )}
 

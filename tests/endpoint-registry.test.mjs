@@ -40,7 +40,7 @@ function makeDispatch(overrides = {}) {
   const db = openDatabase(':memory:')
   migrateSchema(db)
   const feeds = {}
-  for (const id of [FEED_ID]) feeds[id] = { url: id, title: '源 0', folder: overrides.folder }
+  for (const id of [FEED_ID]) feeds[id] = { url: id, title: '源 0', folder: overrides.folder, ...(overrides.feedRecord ?? {}) }
   writeConfigFile(join(dir, 'config.json'), { version: 1, feeds })
   const store = createSqliteStore(db, join(dir, 'config.json'))
   const insert = db.prepare(
@@ -54,7 +54,7 @@ function makeDispatch(overrides = {}) {
     config: Config({}),
     log: () => {},
     ready: overrides.ready ?? (() => store),
-    refreshNow: overrides.refreshNow ?? (async () => false),
+    refreshNow: overrides.refreshNow ?? (async () => ({ outcome: 'not-ready', attempted: 0, total: 0 })),
     lastRefreshCompletedAt: () => undefined,
     articleAttempts: new Map(),
   })
@@ -217,6 +217,51 @@ test('金标准：discoverFeeds 的空与非法输入（不出网）', async () 
     assert.equal(bad.value.warnings.length, 1)
     assert.match(bad.value.warnings[0].reason, /不是合法 URL/)
   } finally { h.cleanup() }
+})
+
+// ── M4 02：订阅健康与本轮刷新统计 ──────────────────────────────────────
+
+test('M4 02：overview 透出每源健康字段（最近尝试/上次成功/原因/连败次数），但不带本轮统计', async () => {
+  const h = makeDispatch({
+    feedRecord: {
+      lastFetchedAt: '2026-11-13T09:00:00.000Z',
+      lastAttemptedAt: '2026-11-13T10:00:00.000Z',
+      lastFailure: 'HTTP 502',
+      failureCount: 2,
+    },
+  })
+  try {
+    const r = await h.dispatch('overview', {})
+    assert.equal(r.ok, true)
+    const feed = r.value.feeds[0]
+    assert.deepEqual(
+      { lastAttemptedAt: feed.lastAttemptedAt, lastFetchedAt: feed.lastFetchedAt, lastFailure: feed.lastFailure, failureCount: feed.failureCount },
+      { lastAttemptedAt: '2026-11-13T10:00:00.000Z', lastFetchedAt: '2026-11-13T09:00:00.000Z', lastFailure: 'HTTP 502', failureCount: 2 },
+      '源级的四个健康字段必须原样透出（客户端据此算状态与「次数未知」）',
+    )
+    assert.equal(r.value.refreshed, false, 'overview 恒不发起抓取')
+    assert.equal(r.value.refresh, undefined, 'overview 不带「本轮」统计：那属于 refresh 端点')
+  } finally { h.cleanup() }
+})
+
+test('M4 02：refresh 回本轮 X/Y 与原因；被节流时 X=0 但分母仍是订阅数', async () => {
+  const ran = makeDispatch({ refreshNow: async () => ({ outcome: 'ran', attempted: 2, total: 5 }) })
+  try {
+    const r = await ran.dispatch('refresh', {})
+    assert.equal(r.ok, true)
+    assert.equal(r.value.refreshed, true, '真抓了 ⇒ refreshed 为真（既有字段语义不变）')
+    assert.deepEqual(r.value.refresh, { outcome: 'ran', attempted: 2, total: 5 }, 'X/Y 原样回给界面')
+  } finally { ran.cleanup() }
+
+  const throttled = makeDispatch({ refreshNow: async () => ({ outcome: 'throttled', attempted: 0, total: 5, waitMs: 125000 }) })
+  try {
+    const r = await throttled.dispatch('refresh', {})
+    assert.equal(r.value.refreshed, false, '没发起 ⇒ refreshed 仍是假')
+    assert.equal(r.value.refresh.outcome, 'throttled')
+    assert.equal(r.value.refresh.attempted, 0, '一个请求都没发 ⇒ X=0')
+    assert.equal(r.value.refresh.total, 5, '分母照样是订阅数（0/0 会被读成「订阅表空了」）')
+    assert.equal(r.value.refresh.waitMs, 125000, '还要等多久必须能说出口')
+  } finally { throttled.cleanup() }
 })
 
 // ── 客户端接缝（计划 Task 5）────────────────────────────────────────────

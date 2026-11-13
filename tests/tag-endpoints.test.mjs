@@ -28,7 +28,7 @@ function makeDispatch() {
     .run(ITEM, FEED, '文章', 'https://tag-endpoint.example/1', TIME)
   const dispatch = createDispatch({
     config: Config({}), log: () => {}, ready: () => store,
-    refreshNow: async () => false, lastRefreshCompletedAt: () => undefined, articleAttempts: new Map(),
+    refreshNow: async () => ({ outcome: 'not-ready', attempted: 0, total: 0 }), lastRefreshCompletedAt: () => undefined, articleAttempts: new Map(),
   })
   return { dispatch, store, cleanup: () => { db.close(); rmSync(dir, { recursive: true, force: true }) } }
 }

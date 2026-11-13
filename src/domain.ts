@@ -60,6 +60,18 @@ export const feedRecordSchema = z.object({
   contentRevision: z.number().optional(),
   /** 最近一次失败原因；成功后清掉（单源降级，不阻断其余源） */
   lastFailure: z.string().optional(),
+  /**
+   * **连续**失败次数（M4 02）。
+   *
+   * 三种取值各有含义，**不能合并**：
+   *  - 缺省（undefined）= **历史未知** —— 老记录只存过 lastFailure，从没记过计数。把它读成 0
+   *    会让升级后的第一个界面撒谎（「连续失败 0 次」而源其实已经坏了很久）；
+   *  - 0 = 真实的「零连败」：最近一次抓取是成功的（200 / 304 都算）；
+   *  - n > 0 = 连续失败了 n 次。
+   * 累计与清零的规则**只在 feed-intent.ts 一处**（成功清 0、失败 +1），调用方不自己算。
+   * 判据在 tests/store-sqlite.test.mjs（含 undefined ≠ 0）与 tests/refresh.test.mjs 的真装配。
+   */
+  failureCount: z.number().int().min(0).optional(),
 }).strict()
 export type FeedRecord = z.infer<typeof feedRecordSchema>
 

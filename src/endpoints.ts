@@ -24,14 +24,14 @@ import type { ReaderStore } from './store.js'
 // 未读判据（isUnread / countUnreadPerFeed）不再由本文件在 JS 侧实现：Task 5 把它交给了存储侧，
 // 自持实现里的 SQL `read_at IS NULL` 与 shared.ts 的 isUnread 是同一件事，两者的等价由
 // tests/store-sqlite.test.mjs 的「同一夹具上逐键对账」钉住。shared.ts 仍是那条规则的定义处。
-import { decodeCursor, encodeCursor, fail, ok, recencyOf, sanitizeViewPreferences, type Cursor, type Endpoint, type ItemView, type Overview, type RpcResult, type UnreadAccount } from './shared.js'
+import { decodeCursor, encodeCursor, fail, ok, recencyOf, sanitizeViewPreferences, type Cursor, type Endpoint, type ItemView, type Overview, type RefreshRun, type RpcResult, type UnreadAccount } from './shared.js'
 
 /** 端点需要的运行时依赖（显式传入，不靠闭包）。 */
 export interface EndpointDeps {
   readonly config: Config
   readonly log: (message: string) => void
   readonly ready: () => ReaderStore | undefined
-  readonly refreshNow: (options?: { force?: boolean; signal?: AbortSignal }) => Promise<boolean>
+  readonly refreshNow: (options?: { force?: boolean; signal?: AbortSignal }) => Promise<RefreshRun>
   /** 上次刷新完成时间（刷新状态留在 index.ts 那侧，这里只读） */
   readonly lastRefreshCompletedAt: () => number | undefined
   readonly searchItems?: ReturnType<typeof createSearch>['run']
@@ -55,7 +55,7 @@ export interface EndpointCtx {
   readonly ready: () => ReaderStore | undefined
   readonly config: Config
   readonly log: (message: string) => void
-  readonly refreshNow: (options?: { force?: boolean; signal?: AbortSignal }) => Promise<boolean>
+  readonly refreshNow: (options?: { force?: boolean; signal?: AbortSignal }) => Promise<RefreshRun>
   readonly lastRefreshCompletedAt: () => number | undefined
   readonly searchItems?: ReturnType<typeof createSearch>['run']
   readonly articleAttempts: Map<string, number>
@@ -157,22 +157,32 @@ function overviewScopeOf(ctx: EndpointCtx, payload: unknown): { scope?: Overview
 /**
  * 一页列表 + 续页游标。
  *
- * @param refreshed 本次调用是否真的发起了抓取（refresh 端点用；overview 恒 false）
+ * @param run       本轮刷新的明细（refresh 端点用；overview 缺省 ⇒ 回包不带 refresh 字段、
+ *                  refreshed 恒 false）。X/Y、节流与并入在途的区别全在这一个值里（M4 02）。
  * @param cursor    续页边界（keyset）；缺省 = 第一页。游标由 overview 端点解码后传入，
  *                  这里**不再判形状** —— 认不出的游标在那一层就被响亮拒了（见 ENDPOINTS.overview）
  * @param scope     文件夹范围；缺省 = 普通跨源契约（逐字不变）。有它时列表在 SQL 侧先按成员过滤再限页。
  */
-const buildOverview = (ctx: EndpointCtx, refreshed: boolean, cursor?: Cursor, scope?: OverviewScope): Overview => {
+const buildOverview = (ctx: EndpointCtx, run?: RefreshRun, cursor?: Cursor, scope?: OverviewScope): Overview => {
   const refreshedAtMs = ctx.lastRefreshCompletedAt()
+  // refreshed 是布尔概况（客户端历史上就靠它），refresh 说明细节 —— 两者由同一个 run 派生，
+  // 不允许各自算一遍：否则「refreshed=true 而 outcome=throttled」这种自相矛盾迟早出现。
+  const refreshed = run?.outcome === 'ran'
   const target = ctx.ready()
-  if (!target) return { feeds: [], folders: [], tags: [], items: [], unread: 0, perFeedUnread: {}, refreshed }
+  if (!target) {
+    return { feeds: [], folders: [], tags: [], items: [], unread: 0, perFeedUnread: {}, refreshed, ...(run === undefined ? {} : { refresh: run }) }
+  }
 
   const feeds = target.listFeeds().map(([feedId, record]) => ({
     id: feedId,
     title: record.title ?? feedId,
     ...(record.folder ? { folder: record.folder } : {}),
     lastFetchedAt: record.lastFetchedAt,
+    lastAttemptedAt: record.lastAttemptedAt,
     lastFailure: record.lastFailure,
+    // failureCount 原样透出：undefined（历史未知）与 0（真实零连败）在 wire 上必须能区分，
+    // 补一个 0 就会把「不知道」谎报成「没失败过」（M4 02）。
+    failureCount: record.failureCount,
   }))
   // 目录必须每次随 overview 下发：左栏要显示空文件夹/空标签，而 feeds 里没有它们的位置。
   const folders = target.listFolders()
@@ -264,6 +274,7 @@ const buildOverview = (ctx: EndpointCtx, refreshed: boolean, cursor?: Cursor, sc
     unread: sumOf(perFeedUnread),
     perFeedUnread,
     refreshed,
+    ...(run === undefined ? {} : { refresh: run }),
     // 让界面能说明「上次到底什么时候抓过」——否则「按住刷新没反应」无从判断
     refreshedAt: refreshedAtMs === undefined ? undefined : new Date(refreshedAtMs).toISOString(),
   }
@@ -318,7 +329,7 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       if (resolved.failure !== undefined) return resolved.failure
       const scope = resolved.scope
       const raw = (payload as { cursor?: unknown } | null)?.cursor
-      if (raw === undefined || raw === null) return ok(buildOverview(ctx, false, undefined, scope))
+      if (raw === undefined || raw === null) return ok(buildOverview(ctx, undefined, undefined, scope))
       if (typeof raw !== 'string') return fail('bad-request', 'overview 的 cursor 必须是字符串')
       let cursor: Cursor | undefined
       if (scope === undefined) {
@@ -335,7 +346,7 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       if (cursor === undefined) {
         return fail('bad-request', '未知的续页游标（格式应为 "<recency>|<id>"）：' + raw)
       }
-      return ok(buildOverview(ctx, false, cursor, scope))
+      return ok(buildOverview(ctx, undefined, cursor, scope))
     },
   },
 
@@ -344,8 +355,8 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       // 在文件夹里点刷新时必须留在同一范围：否则列表会突然跳回跨源首页（用户会以为选中的文件夹丢了）。
       const resolved = overviewScopeOf(ctx, payload)
       if (resolved.failure !== undefined) return resolved.failure
-      const refreshed = await ctx.refreshNow()
-      return ok(buildOverview(ctx, refreshed, undefined, resolved.scope))
+      const run = await ctx.refreshNow()
+      return ok(buildOverview(ctx, run, undefined, resolved.scope))
     },
   },
 

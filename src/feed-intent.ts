@@ -92,6 +92,8 @@ export function applyFeedIntent(previous: FeedRecord | undefined, intent: FeedIn
         // 调度排序键同样要盖：200 是一次成功的尝试
         lastAttemptedAt: intent.stamp,
         contentRevision: intent.contentRevision,
+        // 成功即清零（不是「省略这个字段」）：省略等于退回「历史未知」，而这里我们**知道**刚成功。
+        failureCount: 0,
       }
     case 'refresh-not-modified':
       // 304：保留既有 etag/lastModified（源没给新的），写回 contentRevision 避免每轮重试；
@@ -105,6 +107,8 @@ export function applyFeedIntent(previous: FeedRecord | undefined, intent: FeedIn
         lastFetchedAt: intent.stamp,
         lastAttemptedAt: intent.stamp,
         contentRevision: intent.contentRevision,
+        // 304 也是成功（源说内容没变）：连败计数同样归零，与 lastFailure 清零同一条理由。
+        failureCount: 0,
       }
     case 'refresh-failure':
       // ⚠️ 失败也要盖 lastAttemptedAt（调度排序键），但**不**盖 lastFetchedAt（那是「上次成功」）。
@@ -116,6 +120,9 @@ export function applyFeedIntent(previous: FeedRecord | undefined, intent: FeedIn
         url: intent.url,
         lastAttemptedAt: intent.stamp,
         lastFailure: intent.reason,
+        // 累计在这里算，调用方只声明「失败了一次」。previous.failureCount 缺省 = 历史未知，
+        // 从这次开始数（1）—— 不假装知道之前的次数（见 domain.ts 的三态注释）。
+        failureCount: (previous?.failureCount ?? 0) + 1,
       }
     case 'upsert-subscription': {
       // 已存在的源保留其 folder（用户可能在界面上改过，**包括改成未分类**）；title 按声明合并
@@ -132,6 +139,12 @@ export function applyFeedIntent(previous: FeedRecord | undefined, intent: FeedIn
         lastModified: previous?.lastModified,
         lastFetchedAt: previous?.lastFetchedAt,
         lastAttemptedAt: previous?.lastAttemptedAt,
+        // 订阅落库（重复添加 / OPML 重导）**不是一次抓取结果**，所以它既不能清失败历史，
+        // 也不能改计数：清了就等于「把源重新加一遍 = 修好了」，而源其实还是坏的（M4 02 的验收项）。
+        // ⚠️ 这条在 2026-11-13 之前是反的（白名单不含 lastFailure ⇒ 落库会抹掉它），属**语义修正**，
+        // 判据从「抹掉」翻成「保留」，见 tests/store-sqlite.test.mjs 的 H4 族。
+        lastFailure: previous?.lastFailure,
+        failureCount: previous?.failureCount,
       }
     }
   }

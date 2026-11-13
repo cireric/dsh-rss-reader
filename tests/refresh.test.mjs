@@ -784,6 +784,12 @@ test('refreshNow 每轮只抓 refreshFeedsPerRound 个源，且下一轮换一�
     // 所以它返回时这一轮已经落完库，hits 是稳定的。
     const response = await requestRefresh(handler)
     assert.equal(response.status, 200, 'refresh 端点应当正常返回')
+    // M4 02 的 X/Y 口径：这一轮只摸了 3 个源里的 1 个。断言写在**端点回包**上而不是从 hits 推，
+    // 因为界面看到的就是这个数 —— 把它写成 total（=3）会让人以为一轮抓完了全部源。
+    const envelope = JSON.parse(response.body)
+    assert.deepEqual(envelope.value.refresh, { outcome: 'ran', attempted: 1, total: 3 },
+      '本轮尝试 X/Y：X 是本轮选中的源数（K=1），Y 是本轮开始时的订阅数（3）')
+    assert.equal(envelope.value.refreshed, true, '真抓了 ⇒ refreshed 为真')
     assert.deepEqual(hits, [1, 2],
       '第二轮必须抓**另一个**源（第一轮抓过的已不再最旧）；' +
       '若这里变成 [1,1,1] 就是「总是抓同一个源」，与本任务的不变式正相反')
@@ -915,3 +921,40 @@ test('真装配：1 个源恒 500 时，K=1 的轮转仍能摸到另外两个健
   }
 })
 
+
+
+/* ──────────────────── M4 02：连败计数与恢复（真编排） ──────────────────── */
+/**
+ * 判据落在`refreshFeeds`这一层而不是`applyFeedIntent`单测里，因为「累计」是**跨轮次**的事实：
+ * 单测只能证明一次合并的算术，证明不了「第二轮真的读到了第一轮存下的计数」。
+ */
+test('M4 02：连续两轮失败累计到 2，恢复成功后清零并清掉横幅', async () => {
+  const store = memoryStore()
+  const url = 'https://flaky.example/feed.xml'
+  await store.saveFeed(url, { url })
+  let mode = 'fail'
+  const fetchFeedImpl = async () => (mode === 'fail'
+    ? { kind: 'failed', reason: 'HTTP 502' }
+    : { kind: 'ok', finalUrl: url, body: rss([{ title: 'a', link: 'https://ex.test/a', guid: 'g1', date: 'Mon, 01 Jan 2024 00:00:00 GMT' }]) })
+  const options = { ...BASE_OPTIONS, fetchFeedImpl }
+
+  await refreshFeeds([url], store, options)
+  assert.equal(store.feed(url).failureCount, 1, '第一次失败记 1')
+  assert.equal(store.feed(url).lastFailure, 'HTTP 502', '原因如实记录')
+  assert.equal(store.feed(url).lastFetchedAt, undefined, '一直失败 ⇒ 从未成功')
+
+  await refreshFeeds([url], store, options)
+  assert.equal(store.feed(url).failureCount, 2, '连续失败必须累计（恒为 1 的实现要被抓住）')
+
+  mode = 'ok'
+  await refreshFeeds([url], store, options)
+  const recovered = store.feed(url)
+  assert.equal(recovered.failureCount, 0, '成功（200）必须清零连败')
+  assert.equal(recovered.lastFailure, undefined, '成功必须清掉横幅')
+  assert.equal(typeof recovered.lastFetchedAt, 'string', '成功之后才有「上次成功」时间')
+
+  // 再坏一次：从 0 重新数到 1（清零不是「永久免疫」）
+  mode = 'fail'
+  await refreshFeeds([url], store, options)
+  assert.equal(store.feed(url).failureCount, 1, '清零后再失败从 1 开始数')
+})

@@ -289,7 +289,7 @@ const deps = (store) => ({
   config: Config({}),
   log: () => {},
   ready: () => store,
-  refreshNow: async () => false,
+  refreshNow: async () => ({ outcome: 'not-ready', attempted: 0, total: 0 }),
   lastRefreshCompletedAt: () => undefined,
   articleAttempts: new Map(),
 })

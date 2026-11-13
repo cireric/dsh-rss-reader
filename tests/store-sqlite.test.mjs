@@ -828,13 +828,14 @@ test('texts.fetched_at 声明 NOT NULL：NULL 写不进去，且读路径确实�
  * 不被订阅落库抹掉」（opmlImport/addFeed 侧此前零覆盖——C4-b 查证轮发现）。 */
 const H4_FEED_ID = 'https://h4.example.com/atom.xml'
 
-test('H4：upsert-subscription 保留调度与抓取痕迹，不抹 lastAttemptedAt / lastFetchedAt / lastFailure（此前零覆盖）', async () => {
+test('M4 02：upsert-subscription 保留失败历史 —— 重复添加 / OPML 重导不得清掉 lastFailure 与连败计数', async () => {
   const { store, db, dir } = freshStore('h4-upsert')
   try {
-    // 既有源：抓取过一次且失败过（痕迹三件套齐）
+    // 既有源：抓取过一次且连败过（痕迹四件套齐）
     await store.saveFeed(H4_FEED_ID, {
       url: H4_FEED_ID, title: '旧标题', folder: '旧分组', etag: '"e1"', lastModified: '2026-10-11T08:00:00.000Z',
-      lastFetchedAt: '2026-10-11T09:00:00.000Z', lastAttemptedAt: '2026-10-11T09:00:00.000Z', lastFailure: 'HTTP 502',
+      lastFetchedAt: '2026-10-11T09:00:00.000Z', lastAttemptedAt: '2026-10-11T09:00:00.000Z',
+      lastFailure: 'HTTP 502', failureCount: 3,
     })
     await store.updateFeed(H4_FEED_ID, { kind: 'upsert-subscription', url: H4_FEED_ID, title: '新标题', folder: undefined })
     const after = store.feed(H4_FEED_ID)
@@ -842,11 +843,50 @@ test('H4：upsert-subscription 保留调度与抓取痕迹，不抹 lastAttempte
     assert.equal(after.folder, '旧分组', 'folder 保留既有（用户可能在界面上改过）')
     assert.equal(after.lastAttemptedAt, '2026-10-11T09:00:00.000Z', '调度痕迹不许被落库抹掉——否则下一轮又把没试过的源排最前')
     assert.equal(after.lastFetchedAt, '2026-10-11T09:00:00.000Z', '上次成功同样保留')
-    // ⚠️ 与旧白名单逐字等价：旧实现的 opmlImport/addFeed 白名单**不含 lastFailure** ⇒ 落库会抹掉它。
-    // 这是不是合理语义是**产品决定**（抹掉=失败横幅消失但源仍坏；保留=横幅更诚实）——本轮是等价收拢，
-    // 不顺手改语义；疑似缺陷已记 HANDOFF 待拍板。
-    assert.equal(after.lastFailure, undefined, '旧白名单语义：订阅落库抹掉 lastFailure（等价收拢不改语义——疑似缺陷另记）')
+    // ⚠️ 语义修正（M4 02，2026-11-13）：旧白名单**不含 lastFailure** ⇒ 落库会把它抹掉，于是
+    // 「把坏源重新加一遍」看起来像修好了（横幅消失、连败归零），而源其实还是坏的。现在两条都保留，
+    // 判据从「抹掉」翻成「保留」——这是一次**有意的行为变更**，不是等价收拢。
+    assert.equal(after.lastFailure, 'HTTP 502', '订阅落库不是一次抓取结果，不许清失败原因')
+    assert.equal(after.failureCount, 3, '连败计数同样不许被落库重置')
     assert.equal(after.etag, '"e1"', '条件请求凭据保留')
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('M4 02：失败累计 1→2，200 与 304 都清零；undefined（历史未知）与 0（零连败）不得混为一谈', async () => {
+  const { store, db, dir } = freshStore('m4-failure-count')
+  try {
+    // ① 老记录：只有 lastFailure，没有 failureCount ⇒ 历史未知
+    await store.saveFeed(H4_FEED_ID, { url: H4_FEED_ID, lastFailure: 'HTTP 500' })
+    assert.equal(store.feed(H4_FEED_ID).failureCount, undefined, '前置条件：老记录没有计数（历史未知）')
+
+    // ② 第一次失败：从这次开始数 ⇒ 1（不假装知道之前失败过几次）
+    await store.updateFeed(H4_FEED_ID, { kind: 'refresh-failure', url: H4_FEED_ID, stamp: '2026-10-12T10:00:00.000Z', reason: 'HTTP 500' })
+    assert.equal(store.feed(H4_FEED_ID).failureCount, 1, '失败一次记 1')
+
+    // ③ 第二次失败：累计
+    await store.updateFeed(H4_FEED_ID, { kind: 'refresh-failure', url: H4_FEED_ID, stamp: '2026-10-12T10:05:00.000Z', reason: 'HTTP 500' })
+    assert.equal(store.feed(H4_FEED_ID).failureCount, 2, '连续失败必须累计，不能恒为 1')
+
+    // ④ 304（源说没变 = 成功）：清零并清原因
+    await store.updateFeed(H4_FEED_ID, { kind: 'refresh-not-modified', url: H4_FEED_ID, stamp: '2026-10-12T10:10:00.000Z', contentRevision: 2 })
+    assert.equal(store.feed(H4_FEED_ID).failureCount, 0, '304 也是成功 —— 连败必须归零（不是省略字段）')
+    assert.equal(store.feed(H4_FEED_ID).lastFailure, undefined, '304 同样要清掉横幅')
+
+    // ⑤ 再失败一次 ⇒ 从 0 重新数到 1；随后 200 再清零
+    await store.updateFeed(H4_FEED_ID, { kind: 'refresh-failure', url: H4_FEED_ID, stamp: '2026-10-12T10:15:00.000Z', reason: '超时' })
+    assert.equal(store.feed(H4_FEED_ID).failureCount, 1, '清零后再失败从 1 开始')
+    await store.updateFeed(H4_FEED_ID, {
+      kind: 'refresh-success', url: H4_FEED_ID, stamp: '2026-10-12T10:20:00.000Z',
+      title: 'T', etag: '"v2"', lastModified: undefined, contentRevision: 2,
+    })
+    assert.equal(store.feed(H4_FEED_ID).failureCount, 0, '200 成功同样清零')
+
+    // ⑥ 「真实 0 次失败」与「历史未知」是两种状态：前者必须出现在记录里，后者必须在
+    //    **从未抓过的源**上保持缺省（不能靠读时补 0 —— 那会把「不知道」谎报成「没失败过」）
+    const fresh = 'https://never.example.com/atom.xml'
+    await store.saveFeed(fresh, { url: fresh })
+    assert.equal(store.feed(fresh).failureCount, undefined, '从未抓过的源：连败历史未知，不是 0')
+    assert.equal(store.feed(fresh).lastFetchedAt, undefined, '从未成功')
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }) }
 })
 
@@ -866,6 +906,8 @@ test('H4：refresh-success 清 lastFailure 且盖双时间戳（与旧白名单�
       etag: '"v2"', lastModified: '2026-10-12T09:00:00.000Z',
       lastFetchedAt: '2026-10-12T10:00:00.000Z', lastAttemptedAt: '2026-10-12T10:00:00.000Z',
       contentRevision: 2,
+      // M4 02：连败计数必须写成**显式 0**（省略 = 退回「历史未知」，会让界面把刚成功的源显示成「次数未知」）
+      failureCount: 0,
     }
     for (const [key, value] of Object.entries(expected)) {
       assert.equal(after[key], value, '等价性：' + key + ' 必须与旧白名单输出一致')

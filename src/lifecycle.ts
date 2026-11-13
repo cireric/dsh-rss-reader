@@ -27,6 +27,7 @@ import { normalizeFeedUrl, refreshFeeds, selectStalestFeeds, type FeedOutcome } 
 import { repairIdentities } from './identity-repair.js'
 import type { Config } from './config.js'
 import type { ReaderStore } from './store.js'
+import type { RefreshRun } from './shared.js'
 import type { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
 
@@ -55,8 +56,13 @@ export interface Lifecycle {
   stop(): Promise<void>
   /** 未就绪或已关停时返回 undefined */
   ready(): ReaderStore | undefined
-  /** 刷新全部源；返回「本次是否真的发起了抓取」（被节流或并入在途刷新时为 false） */
-  refreshNow(options?: { force?: boolean; signal?: AbortSignal }): Promise<boolean>
+  /**
+   * 刷新订阅源；返回**这一轮到底发生了什么**（RefreshRun）。
+   *
+   * 为什么不只回 boolean：界面要显示「本轮尝试 X/Y 个源」，还要把「被节流」「并入在途」与
+   * 「真抓了但一条都没新增」区分开 —— 一个布尔值分不出这三件事（M4 02 的验收项）。
+   */
+  refreshNow(options?: { force?: boolean; signal?: AbortSignal }): Promise<RefreshRun>
   /** 上次刷新完成时刻（从未完成过 = undefined）—— 端点的 refreshedAt 读它 */
   lastRefreshCompletedAt(): number | undefined
   /** 正文抓取尝试时刻（内存态，每代一份；重启后允许再抓一次） */
@@ -140,24 +146,28 @@ export function createLifecycle(deps: LifecycleDeps): Lifecycle {
   }
 
   /**
-   * 刷新全部订阅源；受最小间隔节流。
-   * @returns 本次是否真的发起了抓取（被节流或并入在途刷新时为 false）
+   * 刷新订阅源；受最小间隔节流。
+   * @returns 这一轮发生了什么（见 RefreshRun）：真抓了 / 被节流 / 并入在途 / 未就绪
    */
-  const refreshNow = async (options: { force?: boolean; signal?: AbortSignal } = {}): Promise<boolean> => {
+  const refreshNow = async (options: { force?: boolean; signal?: AbortSignal } = {}): Promise<RefreshRun> => {
     const target = ready()
-    if (!target) return false
+    if (!target) return { outcome: 'not-ready', attempted: 0, total: 0 }
+    // Y（分母）= **本轮开始时**的已订阅数。三条「没发起」的路径也要带真值：否则界面上的
+    // X/Y 会变成 0/0，看起来像订阅表空了 —— 而那正是最需要说清楚「这轮没抓」的时刻。
+    const total = target.listFeeds().length
     // 已有在途刷新：等它结束即可，不叠加第二次网络风暴
     if (inFlight) {
       await inFlight
-      return false
+      return { outcome: 'in-flight', attempted: 0, total }
     }
     if (!options.force && lastCompletedAt !== undefined
       && Date.now() - lastCompletedAt < config.minRefreshIntervalMs) {
       // 被节流时把「还剩多久」记进日志：否则界面上只表现为「点了没反应」，
       // 用户与 agent 都无法区分「没抓」和「抓了没新内容」。
-      const waitSec = Math.ceil((config.minRefreshIntervalMs - (Date.now() - lastCompletedAt)) / 1000)
+      const waitMs = config.minRefreshIntervalMs - (Date.now() - lastCompletedAt)
+      const waitSec = Math.ceil(waitMs / 1000)
       log('刷新被节流：距上次完成不足 ' + Math.round(config.minRefreshIntervalMs / 1000) + 's（还需等 ' + waitSec + 's）')
-      return false
+      return { outcome: 'throttled', attempted: 0, total, waitMs }
     }
     // 取源：不是全量，而是最旧的 K 个（纯函数，见 refresh.ts）。一轮的时长与源数脱钩，
     // 而「没被选中的下一轮最旧」（按**上次尝试**排序，失败的尝试也算）保证谁都不饿死。
@@ -181,7 +191,8 @@ export function createLifecycle(deps: LifecycleDeps): Lifecycle {
       // 节流的目的是「别捶网络」，而这一轮确实捶了 K 次；反过来「全失败就不节流」会让一个坏源
       // 被连续快节奏重试。
       lastCompletedAt = Date.now()
-      return true
+      // X = **实际尝试**的源数（本轮选中的那批），不是订阅总数：X/Y 的意义正是「这一轮摸了几个」。
+      return { outcome: 'ran', attempted: subscriptions.length, total }
     } finally {
       inFlight = undefined
     }

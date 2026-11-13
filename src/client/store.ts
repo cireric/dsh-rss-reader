@@ -596,10 +596,19 @@ export function createReaderStore() {
       // 这里如实区分——真抓了 / 被最小间隔节流（附上次完成时间）。
       if (endpoint === 'refresh') {
         const stamp = overview.refreshedAt === undefined ? '' : '（上次完成于 ' + relativeTime(overview.refreshedAt) + '）'
+        const run = overview.refresh
+        // 「本轮尝试 X/Y」只在这一轮**真的发起**时才说。被节流 / 并入在途各有各的说法：
+        // 把它们说成「本轮 0/Y」会让人以为订阅全挂了（M4 02 的验收项：不能显示成新一轮）。
         set({
-          notice: overview.refreshed === true
-            ? '本轮订阅源抓取已结束' + stamp
-            : '本次未发起新抓取' + stamp,
+          notice: run === undefined
+            ? (overview.refreshed === true ? '本轮订阅源抓取已结束' + stamp : '本次未发起新抓取' + stamp)
+            : run.outcome === 'ran'
+              ? '本轮尝试 ' + run.attempted + '/' + run.total + ' 个源' + stamp
+              : run.outcome === 'throttled'
+                ? '本轮未发起抓取：距上次完成不足最小间隔' + (run.waitMs === undefined ? '' : '，还需等 ' + Math.ceil(run.waitMs / 1000) + ' 秒') + stamp
+                : run.outcome === 'in-flight'
+                  ? '已有一轮刷新在跑，本次并入等它结束（没有发起新一轮）'
+                  : '插件尚未就绪，本次未刷新',
         })
       }
     } catch (failure) {

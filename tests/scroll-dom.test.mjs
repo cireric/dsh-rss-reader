@@ -1998,3 +1998,35 @@ test('订阅发现：零候选与通道错误都有明确反馈（错误时不�
   assert.equal(doc.querySelector('[data-rss-discovery]'), null, '失败时不许留着上一次的候选（那会让人以为刚才那次没发生）')
   assert.match(doc.querySelector('.dsh-rss-status--error').textContent, /页面抓取失败/, '通道失败要可见')
 })
+
+
+/* ──────────────── M4 02：管理页的健康信息（真实 DOM） ──────────────── */
+test('M4 02：管理页显示健康、连败次数、最近尝试与上次成功；历史未知写成「次数未知」而不是 0', skip, async () => {
+  const hourAgo = new Date(Date.now() - 3600 * 1000).toISOString()
+  const minuteAgo = new Date(Date.now() - 60 * 1000).toISOString()
+  const h = await mountReader({
+    items: [item({ id: 'a1', feedId: 'a' })],
+    feeds: [
+      { id: 'a', title: '源 A', lastFetchedAt: hourAgo, lastAttemptedAt: minuteAgo, lastFailure: 'HTTP 502', failureCount: 3 },
+      { id: 'b', title: '源 B' },
+    ],
+  })
+  await h.store.load('overview')
+  await sleep(30)
+  h.press('f')
+  await sleep(60)
+  const doc = h.win.document
+
+  const a = doc.querySelector('[data-rss-feed-health="a"]')
+  assert.ok(a, '每个源都要有一行健康信息')
+  assert.match(a.textContent, /健康：有告警/, '成功过、最近失败 ⇒ 有告警')
+  assert.match(a.textContent, /连续失败：3 次/, '连败次数要显示')
+  assert.match(a.textContent, /最近尝试：1 分钟前/, '最近尝试来自 lastAttemptedAt')
+  assert.match(a.textContent, /上次成功：1 小时前/, '上次成功来自 lastFetchedAt')
+  assert.match(a.textContent, /最近错误：HTTP 502/, '原因要显示')
+
+  const b = doc.querySelector('[data-rss-feed-health="b"]')
+  assert.match(b.textContent, /健康：从未成功/, '没成功过 ⇒ 从未成功（不是「正常」）')
+  assert.match(b.textContent, /连续失败：次数未知/, '老记录没有计数 ⇒ 未知，不许写成 0')
+  assert.doesNotMatch(b.textContent, /连续失败：0 次/)
+})

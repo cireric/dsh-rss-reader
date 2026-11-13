@@ -4,7 +4,8 @@
  * 纯展示 —— 动作全部由入口的 store 通过 props 传进来。
  */
 import { useRef, useState, type ReactNode } from 'react'
-import type { DiscoveryResult, FeedView, FolderView, OpmlExportResult, OpmlImportResult, TagView } from '../shared.js'
+import { feedHealthOf, type DiscoveryResult, type FeedView, type FolderView, type OpmlExportResult, type OpmlImportResult, type TagView } from '../shared.js'
+import { relativeTime } from './store.js'
 
 /** 文件夹管理里一次改名草稿。 */
 interface RenameDraft {
@@ -14,6 +15,12 @@ interface RenameDraft {
 interface TagRenameDraft {
   id: string
   draft: string
+}
+
+/** 健康状态的三个人话标签（判据在 shared.ts 的 feedHealthOf，这里只负责措辞）。 */
+function feedHealthLabel(feed: FeedView): string {
+  const health = feedHealthOf(feed)
+  return health === 'ok' ? '正常' : health === 'warn' ? '有告警' : '从未成功'
 }
 
 /**
@@ -387,7 +394,15 @@ export function FeedsView({
               <span style={{ display: 'block' }}>{feed.title ?? feed.id}</span>
               <span style={{ display: 'block', fontSize: 11, opacity: 0.6, wordBreak: 'break-all' }}>
                 {feed.id}{feed.folder !== undefined ? ' · 文件夹：' + feed.folder : ' · 未分类'}
-                {feed.lastFailure !== undefined ? ' · 上次失败：' + feed.lastFailure : ''}
+              </span>
+              {/* 健康信息（M4 02）：状态 / 连败次数 / 最近尝试 / 上次成功 / 最近错误。
+                  连败次数缺失时写「次数未知」而不是 0 —— 老记录从来没记过计数（见 domain.ts 的三态）。 */}
+              <span data-rss-feed-health={feed.id} style={{ display: 'block', fontSize: 11, opacity: 0.75, wordBreak: 'break-all' }}>
+                {'健康：' + feedHealthLabel(feed)}
+                {' · 连续失败：' + (feed.failureCount === undefined ? '次数未知' : feed.failureCount + ' 次')}
+                {' · 最近尝试：' + (feed.lastAttemptedAt === undefined ? '从未' : relativeTime(feed.lastAttemptedAt))}
+                {' · 上次成功：' + (feed.lastFetchedAt === undefined ? '从未' : relativeTime(feed.lastFetchedAt))}
+                {feed.lastFailure !== undefined ? ' · 最近错误：' + feed.lastFailure : ''}
               </span>
             </span>
             <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 4 }}>

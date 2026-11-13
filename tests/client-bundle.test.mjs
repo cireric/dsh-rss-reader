@@ -102,7 +102,7 @@ function loadClientBundle() {
  * 「接线」上（按键没接上、动作漏了副作用），不是算法上。这一层让「按 v 打开时是否
  * 真的调了 markRead」这类问题变成可断言的，而不是靠读代码确认。
  */
-async function driveStore({ items = [], article, hostTruth, failEndpoints = [], shouldFail } = {}) {
+async function driveStore({ items = [], article, hostTruth, failEndpoints = [], shouldFail, refreshRun } = {}) {
   const { exports, sandbox, opened } = loadClientBundle()
   const endpoints = []
   // calls 是加法式的：给「请求体本身也要断言」的用例用（例如 markRead 的 skipKept）
@@ -132,7 +132,12 @@ async function driveStore({ items = [], article, hostTruth, failEndpoints = [], 
     // refresh（index.tsx:184），桩件若把 refresh 回成 {changed,unread}，applyOverview 会拿到
     // 一堆 undefined。这是夹具要守的契约，不是代码该容忍的形状。
     if (body.endpoint === 'overview' || body.endpoint === 'refresh') {
-      return ok(overviewStub(items))
+      // refreshRun（M4 02）：「本轮尝试 X/Y」与节流/并入在途的措辞由**回包里的 refresh 字段**驱动，
+      // 桩件必须能表达它；缺省不带 = overview 的契约（overview 不给本轮统计）。
+      const stub = overviewStub(items)
+      return ok(refreshRun === undefined
+        ? stub
+        : { ...stub, refresh: refreshRun, refreshed: refreshRun.outcome === 'ran' })
     }
     if (body.endpoint === 'article') return ok(article ?? { itemId: body.payload.itemId, cached: false, paragraphs: ['正文'] })
     if (body.endpoint === 'markRead' || body.endpoint === 'unmarkRead') {
@@ -768,4 +773,24 @@ test('未读计数可隐藏（规格不变量 8）：默认显示，隐藏只动
   store.setShowUnread(false)
   assert.equal(store.get().showUnread, false)
   assert.equal(store.get().unread, 1, '隐藏只是呈现，计数本身不该被改掉')
+})
+
+
+/* ──────────────── M4 02：刷新反馈的措辞（X/Y vs 节流 vs 并入在途） ──────────────── */
+test('M4 02：刷新提示区分「本轮尝试 X/Y」与「被节流 / 并入在途」，后两者不许显示成新一轮', async () => {
+  const ran = await driveStore({ items: [item()], refreshRun: { outcome: 'ran', attempted: 1, total: 3 } })
+  await ran.store.load('refresh')
+  assert.match(ran.store.get().notice, /本轮尝试 1\/3 个源/, '真抓了才给 X/Y')
+
+  const throttled = await driveStore({ items: [item()], refreshRun: { outcome: 'throttled', attempted: 0, total: 3, waitMs: 125000 } })
+  await throttled.store.load('refresh')
+  const throttledNotice = throttled.store.get().notice
+  assert.match(throttledNotice, /未发起抓取/, '被节流要说清「没抓」')
+  assert.match(throttledNotice, /还需等 125 秒/, '要说清还要等多久（否则只表现为「点了没反应」）')
+  assert.doesNotMatch(throttledNotice, /本轮尝试/, '被节流不许显示成新一轮：0/3 会让人以为订阅全挂了')
+
+  const inFlight = await driveStore({ items: [item()], refreshRun: { outcome: 'in-flight', attempted: 0, total: 3 } })
+  await inFlight.store.load('refresh')
+  assert.match(inFlight.store.get().notice, /并入/, '并入在途要说清没有发起新一轮')
+  assert.doesNotMatch(inFlight.store.get().notice, /本轮尝试/)
 })
