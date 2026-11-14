@@ -675,12 +675,12 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
     carriesAccount: true,
     to: async (_payload, ctx) => {
       // 显式清理（用户点按钮触发，**不设定时器**——验收项之一就是不残留定时器）。
-      // 判据刻意保守：已读 + 未星标 + 早于阈值，三个条件缺一不可（见 retention.ts 注释）。
+      // 判据刻意保守：已读 + 未星标 + 未保持未读 + 早于阈值，四个条件缺一不可（见 retention.ts 注释）。
       //
       // **候选集由存储侧一条 SQL 选出**（Task 5）：原先这里 `allItems()` 把整张 items 表
       // （10 万行）物化到 JS 再筛 —— 「点一次清理 = 一次全表遍历」，而 spec §3.1 只把清理记在
       // accountOf 名下，漏了这一处（计划的定稿加固已记账）。
-      // 判据的**唯一裁决者**是 retention.ts 的 selectCleanup。存储侧的 SQL（SELECT_CLEANUP_IDS）
+      // 判据的**唯一裁决者**是 retention.ts 的 selectCleanup。存储侧的 SQL（SELECT_CLEANUP_ROWS）
       // 只负责「不用把整张 items 表搬进 JS」—— 它只筛「已读 + 够旧」，连星标与保持未读也不筛。
       // 所以喂回来的候选**可能比判定集宽**（受保护的旧条目也在里面），这里必须复跑判据：
       // 删掉这一句 = 让 SQL 的宽容度决定「用户说别动」的条目命不命，2026-11-14 之前的形态。

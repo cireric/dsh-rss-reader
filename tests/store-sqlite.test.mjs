@@ -193,7 +193,7 @@ test('listRecent：按 recency 降序 + id 升序取前 N 条，与 allItems 的
   }
 })
 
-test('listCleanupCandidates：候选集由 SQL 选出，且与 selectCleanup 的判据对得上（唯一口径不漂）', async () => {
+test('listCleanupCandidates：SQL 只做成本筛选，判定由 selectCleanup 做出（候选 ⊇ 判定集）', async () => {
   const { store, db, dir } = freshStore('cleanup-candidates')
   try {
     const read = '2026-10-11T12:00:00.000Z'
@@ -298,8 +298,9 @@ test('listRecent / unreadPerFeed / listCleanupCandidates 的排序、聚合与�
     const cleanupSql = reads.find((text) => /read_at IS NOT NULL/.test(text) && /recency < \?/.test(text))
     assert.ok(cleanupSql !== undefined,
       '清理候选必须有 SQL 侧的成本筛选（否则「点一次清理 = 一次全表遍历」原样留下）：' + JSON.stringify(reads))
-    assert.ok(!/starred\s*=\s*0/.test(cleanupSql) && !/kept_unread\s*=\s*0/.test(cleanupSql),
-      '保护条款不许回到 SQL：星标与保持未读只能由 selectCleanup 裁决（判据是唯一裁决者）')
+    // 刻意**不**加「SQL 里不许出现 starred = 0 / kept_unread = 0」这类负向断言：那是在钉实现细节
+    // （AGENTS.md 的测试原则）。同一件事已有行为断言：候选集里必须含受保护的两条（本文件上面那条），
+    // 删除集里不许有它们（overview-scale / overview-paging）。保护谓词真回到 SQL 时，行为断言先红。
   } finally {
     db.close()
     rmSync(dir, { recursive: true, force: true })

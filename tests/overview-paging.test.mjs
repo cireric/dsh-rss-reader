@@ -141,7 +141,8 @@ test('overview 续页：边界行随后被删掉也不影响翻页（游标是�
  *
  * 为什么两处都要钉：Ruling P-7 把游标加在 **listRecent 这个接口**上 ⇒ 两份实现都得守同一条契约。
  * 只钉自持实现的话，两份谓词哪天分家（改了一处忘了另一处）不会有任何断言翻红 —— 本仓库的
- * selectCleanup 就是靠「SQL 是第二实现、有对账用例」这句话活下来的（见 store.ts 的契约注释）。
+ * selectCleanup 就走过这条路：它曾把「SQL 是第二实现、有对账用例」当作保证，直到 2026-11-14
+ * 发现那次复跑在生产路径上恒等（见 .scratch/cleanup-criterion/issues/01-cleanup-criterion-ownership.md）。
  * 生产早已是 createSqliteStore，但「不用的那份可以悄悄坏掉」不是一条能接受的约定。
  */
 function legacyStoreWith(rows) {

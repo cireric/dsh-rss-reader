@@ -1081,7 +1081,7 @@ const MUTATIONS = [
     from: 'unread[feedId] = 0;',
     to: ';' },
   // ⚠️ 2026-11-14 撤掉两条（原 id：cleanup-保持未读不再受保护 / cleanup-星标不再受保护）：
-  // 保护条款已从 SELECT_CLEANUP_IDS 搬进 retention.ts 的 selectCleanup，谓词里不再有
+  // 保护条款已从 SELECT_CLEANUP_ROWS 搬进 retention.ts 的 selectCleanup，谓词里不再有
   // `starred = 0` / `kept_unread = 0` 两串 —— 旧锚会报**未应用**（比幸存更隐蔽，pitfalls §2.7）。
   // 同一个缺陷现在由下面三条守：retention-清理的星标保护 / retention-清理的保持未读保护 /
   // cleanup-候选行的保持未读按谓词回填。按 AGENTS.md「等价变异不入门槛」，这里不补 SQL 谓词的宽容度变异：

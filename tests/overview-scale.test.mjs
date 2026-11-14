@@ -92,7 +92,7 @@ test('10 万行：cleanup 的候选集由 SQL 选（不再全表），且释放�
           summary: 's'.repeat(10),
           readAt: READ,
           starred: false,
-          // 只给这两条开保护位：星标由 SQL 谓词挡（starred = 0），保持未读多守一条
+          // 只给这两条开保护位：它们会进候选（SQL 只做成本筛选），由 selectCleanup 挡回去
           ...(f === 0 && i === 0 ? { starred: true } : {}),
           ...(f === 0 && i === 1 ? { keptUnread: true } : {}),
           // 带正文的那一条考 freedChars 的「正文也算进释放量」
@@ -114,8 +114,8 @@ test('10 万行：cleanup 的候选集由 SQL 选（不再全表），且释放�
 
     // 500 条候选减去 2 条受保护的（星标 / 保持未读）
     assert.equal(result.deleted, 498, '删除数必须是 SQL 候选里真正该删的那批')
-    assert.notEqual(store.item('old-0-0'), undefined, '星标条目必须活下来（SQL 谓词里的 starred = 0）')
-    assert.notEqual(store.item('old-0-1'), undefined, '「保持未读」必须活下来（谓词多守的一条，比 selectCleanup 更保守）')
+    assert.notEqual(store.item('old-0-0'), undefined, '星标条目必须活下来（由判据挡回去，不是 SQL 谓词）')
+    assert.notEqual(store.item('old-0-1'), undefined, '「保持未读」必须活下来（同上：保护条款只在判据里）')
     assert.equal(store.item('old-1-0'), undefined, '带正文的普通旧条目要被删掉')
     // 释放量 = 498 × 10（摘要）+ 100（带正文那条的正文）
     assert.equal(result.freedChars, 498 * 10 + 100, 'freedChars 必须把正文与摘要都算进去（如实汇报）')

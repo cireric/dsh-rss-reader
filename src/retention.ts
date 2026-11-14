@@ -6,7 +6,7 @@
  * 三条规则（2026-10-06 用户确认）：
  *   ① 按源保留 maxItemsPerFeed 条：先删未读，再删已读，**星标永不自动删**；
  *   ② 按需正文缓存有**全局**字符上限（全部源共摊），超限时从最旧的开始清缓存（条目本身保留）；
- *   ③ 显式清理：只删「已读 + 未星标 + 早于阈值」的条目（按钮触发，不设定时器）。
+ *   ③ 显式清理：只删「已读 + 未星标 + 未保持未读 + 早于阈值」的条目（按钮触发，不设定时器）。
  */
 
 /** 一条记录在保留策略里被用到的字段。 */
@@ -112,7 +112,7 @@ export interface CleanupRow extends RetentionRow {
  * ⚠️ **本函数是这条判据唯一的裁决者**（2026-11-14 收口；来由见 `.scratch/cleanup-criterion/issues/01-cleanup-criterion-ownership.md`）。
  *
  * 自持存储为了不把整张 items 表物化到 JS，仍会在 SQL 里先筛一遍
- * （`src/store-sqlite.ts` 的 `SELECT_CLEANUP_IDS`）。但那份 SQL 只被允许做**成本筛选**
+ * （`src/store-sqlite.ts` 的 `SELECT_CLEANUP_ROWS`）。但那份 SQL 只被允许做**成本筛选**
  * （`read_at IS NOT NULL AND recency < ?`），**不许替本函数决定保护条款**：星标与「保持未读」
  * 的过滤已从谓词里撤掉，改由这里裁决。
  *

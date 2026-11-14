@@ -133,7 +133,7 @@ export interface ReaderStore {
    *     （回填会让判据看不见真实状态，2026-11-14 的隔离实验实测过这条路径）。
    * 调用方的最终删除集 = `selectCleanup(候选)`（`endpoints.ts` 的 `cleanup` 就这么做）。
    * 自持实现因此只筛「已读 + 够旧」两项成本条件，星标与保持未读交给判据 —— 见
-   * `store-sqlite.ts` 的 `SELECT_CLEANUP_IDS` 注释。
+   * `store-sqlite.ts` 的 `SELECT_CLEANUP_ROWS` 注释。
    */
   listCleanupCandidates(cutoffIso: string): CleanupCandidate[]
   /** 全部订阅源（key 即归一化后的 URL）——订阅源以存储域为准，Config 只是种子 */

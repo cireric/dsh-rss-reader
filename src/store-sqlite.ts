@@ -265,7 +265,7 @@ const SELECT_ARTICLE_CACHE_ENTRIES =
  * 这三列**照 items 行直接读**（不 JOIN texts）：texts 的读列只用于释放量，
  * 而清理的候选往往几千条，正文是不该在这一步就搬进内存的那部分（那是「按需读行」的全部意义）。
  */
-const SELECT_CLEANUP_IDS = [
+const SELECT_CLEANUP_ROWS = [
   'SELECT i.id AS id, i.read_at AS read_at, i.starred AS starred, i.kept_unread AS kept_unread'
   + ' FROM items i WHERE i.read_at IS NOT NULL AND i.recency < ?',
 ].join('')
@@ -879,7 +879,7 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
      * 库里只存 blocks 形态，parse 失败会被 SQLite/json 响亮抛出，不编造 0）。
      */
     listCleanupCandidates: (cutoffIso) => {
-      const rows = sql(SELECT_CLEANUP_IDS).all(cutoffIso)
+      const rows = sql(SELECT_CLEANUP_ROWS).all(cutoffIso)
       return rows.map((row) => {
         const id = requiredText(row.id, 'items.id')
         const chars = sql(SELECT_ITEM_CHARS).get(id)
