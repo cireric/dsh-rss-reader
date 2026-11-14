@@ -7,7 +7,7 @@
  * 「打开原站 ↗」在新标签页看——那是浏览器自己的上下文，没有沙箱折衷。
  */
 import { useCallback, useEffect, useRef, type ReactNode } from 'react'
-import { edgeTopFor } from '../list-scroll.js'
+import { edgeTopFor, readingRatioOf, restoreTopFor } from '../list-scroll.js'
 
 /**
  * 正文图片的最大显示高度（像素）。
@@ -102,10 +102,12 @@ function ArticleBlockView({ block }: { block: Record<string, unknown> }): ReactN
   return <p style={{ margin: '0 0 1.05em' }}>{text}</p>
 }
 
-export function ArticleView({ article, item, onBack, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading }: {
+export function ArticleView({ article, item, onBack, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress }: {
   article: ArticleState | undefined
   item: ItemView | undefined
   onBack: () => void
+  /** 记一次阅读进度（M5 02）：只在切换 / 关闭 / 卸载时调，滚动本身不写盘 */
+  onSaveProgress: (itemId: string, contentVersion: string, ratio: number) => void
   /** 正文排版偏好（M5 01）：值归 store 所有，本组件只负责照着画、把用户的改动交回去 */
   reading: ReadingPreferences
   onReading: (patch: Partial<ReadingPreferences>) => void
@@ -151,6 +153,13 @@ export function ArticleView({ article, item, onBack, scrollAttr, canPrev, canNex
   const pinnedRef = useRef(false)
   /** 我们自己写进去的 scrollTop：滚动事件里的值与它不一致 ⇒ 说明是用户滚的。 */
   const expectedTopRef = useRef(0)
+  /**
+   * 卸载时 ref 回调会先用 null 覆盖 boxRef，而被动 effect 的 cleanup 跑在那之后 ——
+   * 所以「离开这篇时读到哪儿」必须另存一个**只增不删**的节点引用（节点被摘掉后 scrollTop 仍在）。
+   */
+  const lastBoxRef = useRef<HTMLDivElement | null>(null)
+  /** 待恢复的比例（M5 02）：内容长高时按它重算位置，直到用户自己滚走。 */
+  const restoreRatioRef = useRef<number | undefined>(undefined)
 
   /** 贴到底部，并记下这次是我们写的（供 handleScroll 区分用户滚动）。 */
   const pinToBottom = useCallback((box: HTMLDivElement): void => {
@@ -162,14 +171,21 @@ export function ArticleView({ article, item, onBack, scrollAttr, canPrev, canNex
     const box = boxRef.current
     if (box === null) return
     // 容差 2px：滚动位置是小数、浏览器也可能做亚像素取整，不该因这点偏差误判成用户滚动
-    if (Math.abs(box.scrollTop - expectedTopRef.current) > 2) pinnedRef.current = false
+    if (Math.abs(box.scrollTop - expectedTopRef.current) > 2) {
+      pinnedRef.current = false
+      // 用户自己滚了就不再按比例纠正：恢复只在「他还没动过」的那一小段时间里补正
+      restoreRatioRef.current = undefined
+    }
   }, [])
 
   const attachBox = useCallback((node: HTMLDivElement | null): void => {
     const previous = boxRef.current
     if (previous !== null && previous !== node) previous.removeEventListener('scroll', handleScroll)
     boxRef.current = node
-    if (node !== null) node.addEventListener('scroll', handleScroll)
+    if (node !== null) {
+      lastBoxRef.current = node
+      node.addEventListener('scroll', handleScroll)
+    }
   }, [handleScroll])
 
   /** 跳到文章一端。容器量不到时什么都不做 —— 没有容器就没得滚，不该抛错。 */
@@ -200,9 +216,50 @@ export function ArticleView({ article, item, onBack, scrollAttr, canPrev, canNex
    */
   useEffect(() => {
     pinnedRef.current = false
+    restoreRatioRef.current = undefined
     const box = boxRef.current
     if (box !== null) box.scrollTop = 0
   }, [article?.itemId])
+
+  /**
+   * 恢复上次读到的位置（M5 02）。
+   *
+   * 时机是「正文真的画出来了」这一刻：加载中容器里只有一行占位文字，那时量到的 scrollHeight 是假的。
+   * 比例来自宿主（只有内容版本对得上才会给），所以这里不做版本判断 —— 判据只有一处。
+   *
+   * ⚠️ 不能并进上面那条 itemId 的 effect：换文章时 payload 还没到（loading: true），
+   * 那一刻 article.restoreRatio 还是 undefined。
+   */
+  useEffect(() => {
+    const box = boxRef.current
+    if (box === null || article === undefined) return
+    if (article.loading === true || article.failure !== undefined) return
+    const ratio = article.restoreRatio
+    if (ratio === undefined || ratio <= 0) return
+    const top = restoreTopFor(ratio, box.scrollHeight, box.clientHeight)
+    box.scrollTop = top
+    expectedTopRef.current = top
+    // 图片还没进场时内容更矮：记住这个比例，长高时按它补正（用户一动就解除，见 handleScroll）
+    restoreRatioRef.current = ratio
+  }, [article?.itemId, article?.loading, article?.failure, article?.restoreRatio])
+
+  /**
+   * 离开这篇时把「读到哪儿」写回去（M5 02）。
+   *
+   * 用 effect 的 cleanup 而不是「切换那一刻调一次」：卸载路径（Esc 回列表、关面板）与
+   * 切换路径（j/k、点上一条）在这里是**同一件事**，分开写必然漏掉一条。
+   * 滚动过程本身不写盘 —— 判据在 tests/scroll-dom.test.mjs：滚多少次都不产生 saveReadingProgress。
+   */
+  useEffect(() => {
+    const itemId = article?.itemId
+    const contentVersion = article?.contentVersion
+    if (itemId === undefined || contentVersion === undefined) return undefined
+    return () => {
+      const box = boxRef.current ?? lastBoxRef.current
+      if (box === null) return
+      onSaveProgress(itemId, contentVersion, readingRatioOf(box.scrollTop, box.scrollHeight, box.clientHeight))
+    }
+  }, [article?.itemId, article?.contentVersion, onSaveProgress])
 
   /**
    * 内容长高时继续贴底。
@@ -217,7 +274,15 @@ export function ArticleView({ article, item, onBack, scrollAttr, canPrev, canNex
     if (box === null || content === null) return undefined
     // 没有 ResizeObserver 就退化成「点击那一下到底」—— 与本插件对缺失全局的一贯处理一致
     if (typeof ResizeObserver === 'undefined') return undefined
-    const observer = new ResizeObserver(() => { if (pinnedRef.current) pinToBottom(box) })
+    const observer = new ResizeObserver(() => {
+      if (pinnedRef.current) { pinToBottom(box); return }
+      const ratio = restoreRatioRef.current
+      if (ratio === undefined) return
+      // 按比例补正：图片进场把内容撑高时，比例不变意味着「还是那一段文字」
+      const top = restoreTopFor(ratio, box.scrollHeight, box.clientHeight)
+      box.scrollTop = top
+      expectedTopRef.current = top
+    })
     observer.observe(content)
     return () => { observer.disconnect() }
   }, [article?.itemId, article?.loading, article?.failure, pinToBottom])

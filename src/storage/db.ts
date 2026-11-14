@@ -19,13 +19,17 @@ import { DatabaseSync } from 'node:sqlite'
  * 与「条目/订阅的记录形状」无关，只描述**表结构本身**。任何破坏性改动都必须升它，
  * 而升它就必须同时想清楚老库怎么办 —— 本模块只会**拒绝**不认识的版本，不做原地迁移。
  */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 /**
- * 本版**能打开并升级**的旧版本。v1 是 M2 05 之前的真实表形状（tests/fixtures/rss-storage-v1.sql）；
- * 升级只加 tags/item_tags 两张表并盖 v2 章，不改 items/texts/cursors 的任何一行。
+ * 本版**能打开并升级**的旧版本。
+ *
+ * - v1 = M2 05 之前的真实表形状（tests/fixtures/rss-storage-v1.sql）；
+ * - v2 = 加了 tags/item_tags 却没有 reading_progress 的形状（M5 02 之前的库）。
+ *
+ * 两条升级都**只加表**，不改 items/texts/cursors 的任何一行。
  */
-const UPGRADABLE_VERSIONS = new Set([1])
+const UPGRADABLE_VERSIONS = new Set([1, 2])
 
 /** 出错时的消息尾巴：把「去找什么」写清楚，比只报 errno 有用。 */
 const errnoOf = (error: unknown): string =>
@@ -149,9 +153,10 @@ function assertV1Schema(db: DatabaseSync): void {
 /**
  * 建表/升级并盖版本章。幂等：已经盖过章就直接返回（插件每次装载都会走一遍）。
  *
- * 升级路径只有一条：**v1 → v2**（M2 05 加 tags / item_tags）。v1 的 items/texts/cursors
- * 一行都不改，所以旧条目、正文缓存、订阅归属与阅读状态在升级中保持原样；升级后的库
- * 不再能被旧版插件打开（旧版的版本闸只认 1），回滚路径是从备份恢复 rss.db。
+ * 升级路径有两条，都是**只加表**：v1 → v3（M2 05 的 tags/item_tags + M5 02 的 reading_progress）、
+ * v2 → v3（只加 reading_progress）。items/texts/cursors 一行都不改，所以旧条目、正文缓存、
+ * 订阅归属与阅读状态在升级中保持原样；升级后的库不再能被旧版插件打开（旧版的版本闸只认
+ * 自己那一版），回滚路径是从备份恢复 rss.db。
  */
 export function migrateSchema(db: DatabaseSync): void {
   const row = db.prepare('PRAGMA user_version').get()
@@ -166,11 +171,16 @@ export function migrateSchema(db: DatabaseSync): void {
   }
   if (onDisk === 1) {
     assertV1Schema(db)
-    applyDdl(db, 'v1→v2 升级', TAGS_DDL)
+    // v1 直接补到当前版本：两步 DDL 在**同一个事务**里，避免「盖了版本章却少一张表」
+    applyDdl(db, 'v1→v3 升级', TAGS_DDL + PROGRESS_DDL)
+    return
+  }
+  if (onDisk === 2) {
+    applyDdl(db, 'v2→v3 升级', PROGRESS_DDL)
     return
   }
   throw new Error(
-    `订阅数据库的格式版本是 ${onDisk}，不是空库（0）、可升级的 v1 或当前版本 ${SCHEMA_VERSION}：` +
+    `订阅数据库的格式版本是 ${onDisk}，不是空库（0）、可升级的 v1/v2 或当前版本 ${SCHEMA_VERSION}：` +
       '拒绝建表/升级，以免把不认识的库覆盖成半成品。',
   )
 }
@@ -261,5 +271,25 @@ const TAGS_DDL = `
   CREATE INDEX item_tags_by_tag ON item_tags(tag_id, item_id);
 `
 
-/** 全新库一次建到当前版本；v1 升级只执行 TAGS_DDL（见 migrateSchema）。 */
-const SCHEMA_DDL = BASE_SCHEMA_DDL + TAGS_DDL
+/**
+ * v3 新增的阅读进度表（M5 02）。**v2→v3 只执行这一段**，因此升级不会碰旧表的任何一行。
+ *
+ * - 主键 = 条目 id：一条正文只记一个位置（新的覆盖旧的）。
+ * - `version` 是**正文内容标识**（抽取器修订号 + 正文块摘要，见 article.ts 的 contentVersionOf）：
+ *   读进度时按 (item_id, version) 匹配，版本对不上就当没进度 —— 同一修订号下正文变了也能识别。
+ * - `ratio` 是 0..1 的滚动比例而不是像素：正文高度会随图片进场变化，像素位置会漂。
+ *   ⚠️ 写入前一律过 shared.ts 的 clampReadingRatio（库是用户数据，不能假设写进来的都合法）。
+ * - 外键 ON DELETE CASCADE 覆盖「条目被删/被裁」这一条生命周期；cache 淘汰走显式删除
+ *   （capArticleCache），与 texts 的删除同一处发生。
+ */
+const PROGRESS_DDL = `
+  CREATE TABLE reading_progress (
+    item_id    TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
+    version    TEXT NOT NULL,
+    ratio      REAL NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+`
+
+/** 全新库一次建到当前版本；升级路径见 migrateSchema（v1/v2 都只补表）。 */
+const SCHEMA_DDL = BASE_SCHEMA_DDL + TAGS_DDL + PROGRESS_DDL

@@ -134,6 +134,38 @@ const MUTATIONS = [
     judges: ['scroll-dom.test.mjs'],
     from: '" 分钟（估算）"',
     to: '" 分钟"' },
+  // ── M5 02：已缓存正文的阅读进度（2026-11-16）────────────────────────────
+  // 进度按 (条目 id + 正文内容标识) 恢复：**版本必须校验**，否则「正文换了」也会回到旧位置。
+  // 判据在 tests/reading-progress.test.mjs 的「版本对不上就当没有」。
+  { id: 'progress-版本不校验', file: 'lib/store-sqlite.js',
+    judges: ['reading-progress.test.mjs'],
+    from: "if (requiredText(row.version, 'reading_progress.version') !== contentVersion)\n                return undefined;",
+    to: "if (false)\n                return undefined;" },
+  // 比例是**用户数据**：越界值（5、1.7）必须夹到 [0,1]，认不出的（NaN/字符串）按 0。
+  // 少了这道夹取，库里会攒出 scrollTop = 13500 这种恢复时必越界的值。
+  { id: 'progress-写入不夹取', file: 'lib/shared.js',
+    judges: ['reading-progress.test.mjs'],
+    from: "return ratio >= 1 ? 1 : ratio;",
+    to: "return ratio;" },
+  // 缓存淘汰只清正文、不清进度 ⇒ 恢复会指向一段已经不存在的正文（同一份内容标识永远不会再出现，
+  // 那条进度就永远读不到，但它仍然挡着「这一条没有进度」的判断）。判据在 tests/refresh.test.mjs。
+  { id: 'progress-淘汰不清进度', file: 'lib/refresh.js',
+    judges: ['refresh.test.mjs'],
+    from: "await store.clearReadingProgress(itemId);",
+    to: "void 0;" },
+  // 离开正文（切换 / 卸载）必须落盘：少了这一句，界面完全正常，只有「重开」才看得出进度没记住。
+  // 判据在 tests/scroll-dom.test.mjs 的真 DOM 用例（切换一次必须恰好写一次）。
+  { id: 'progress-离开不落盘', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    from: "onSaveProgress(itemId, contentVersion, readingRatioOf(box.scrollTop, box.scrollHeight, box.clientHeight));",
+    to: "void 0;" },
+  // 恢复侧同样要夹：库里的比例来自用户数据，而恢复时的内容高度与记录时不一定相同。
+  // ⚠️ **刻意没有** restoreTopFor 的「去掉夹取」这条变异：它实测是**等价变异**，不是测试缺口。
+  // 推导（两轮实测）：① 去掉外层的 clampScrollTop ⇒ 内层已把 safe 夹在 [0,1]，结果不变；
+  // ② 去掉内层夹取 ⇒ 外层 clampScrollTop 把 safe*ceiling 再夹回 [0, ceiling]，结果仍不变；
+  // ③ 两层都去掉 ⇒ 浏览器对 scrollTop 赋值本身就会夹到 [0, maxTop]（越界只是「停在底部」）。
+  // 三个方向都改不出可观察的差别，所以这条入门槛只会变成狼来了。函数契约仍由
+  // tests/reading-progress.test.mjs 的纯函数用例钉住（0.5→1350 / NaN→0 / 越界→maxTop）。
   // M4 01：候选的相对链接必须按**重定向落点**解析。退回输入 URL 时，站点只要做过一次
   // 301（http→https、加斜杠、换域名），相对候选就被拼到错的 host 上；判据在 subscribe.test.mjs
   // 的「重定向后相对候选按最终页面 URL 解析」。OCCURRENCES 独立实测 = 1（lib/subscribe.js:142）。
@@ -1363,9 +1395,12 @@ const MUTATIONS = [
   { id: 'tag-v1不升级', file: 'lib/storage/db.js',
     judges: ['tag-storage.test.mjs'],
     from: 'if (onDisk === 1) {', to: 'if (false) {' },
+  // ⚠️ 2026-11-16（M5 02）重锚：v1 的升级从「一次 applyDdl(TAGS_DDL)」改成
+  // 「一次 applyDdl(TAGS_DDL + PROGRESS_DDL)」（两步 DDL 同一事务），旧 from 会报**未应用**。
+  // 语义不变：v1 升上来必须把标签表建上。
   { id: 'tag-升级不建标签表', file: 'lib/storage/db.js',
     judges: ['tag-storage.test.mjs'],
-    from: "applyDdl(db, 'v1→v2 升级', TAGS_DDL);", to: "applyDdl(db, 'v1→v2 升级', '');" },
+    from: "applyDdl(db, 'v1→v3 升级', TAGS_DDL + PROGRESS_DDL);", to: "applyDdl(db, 'v1→v3 升级', PROGRESS_DDL);" },
   { id: 'tag-升级后版本仍为1', file: 'lib/storage/db.js',
     judges: ['tag-storage.test.mjs'],
     from: 'db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);', to: "db.exec('PRAGMA user_version = 1');" },

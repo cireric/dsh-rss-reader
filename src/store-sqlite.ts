@@ -38,7 +38,7 @@ import {
 } from './domain.js'
 import { readConfigFile, writeConfigFile, type ReaderConfigFile } from './storage/config-file.js'
 import { SCHEMA_VERSION } from './storage/db.js'
-import { sanitizeViewPreferences, type Cursor, type TagView } from './shared.js'
+import { clampReadingRatio, sanitizeViewPreferences, type Cursor, type TagView } from './shared.js'
 import type { CleanupCandidate, ReaderStore } from './store.js'
 import type { ArticleEntry } from './retention.js'
 import { applyFeedIntent, type FeedIntent } from './feed-intent.js'
@@ -318,6 +318,15 @@ const UPSERT_CURSOR = `
   INSERT INTO cursors (feed_id, seen, cursor_at) VALUES (?, ?, ?)
   ON CONFLICT(feed_id) DO UPDATE SET seen = excluded.seen, cursor_at = excluded.cursor_at`
 const DELETE_CURSOR = 'DELETE FROM cursors WHERE feed_id = ?'
+/** 阅读进度（M5 02）：主键 = 条目 id，一条正文只记一个位置。 */
+const SELECT_PROGRESS = 'SELECT version, ratio FROM reading_progress WHERE item_id = ?'
+const UPSERT_PROGRESS = `
+  INSERT INTO reading_progress (item_id, version, ratio, updated_at) VALUES (?, ?, ?, ?)
+  ON CONFLICT(item_id) DO UPDATE SET
+    version    = excluded.version,
+    ratio      = excluded.ratio,
+    updated_at = excluded.updated_at`
+const DELETE_PROGRESS = 'DELETE FROM reading_progress WHERE item_id = ?'
 
 /** items 行（含 LEFT JOIN 出来的正文列）→ ItemRecord。 */
 function toItemRecord(row: Record<string, SQLOutputValue>): ItemRecord {
@@ -710,10 +719,11 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
       // 显式删两表，不把正确性押在 PRAGMA foreign_keys 的默认值上（spec §11.2 的注释同此意）。
       // 幂等：删一个不存在的键不是错误（旧实现同样是 no-op）。
       runInTransaction(() => {
-        // item_tags 的外键也带 ON DELETE CASCADE；仍显式删一次，与 texts 同一纪律：
-        // 不把用户标签关联的存亡押在某个连接的 PRAGMA 默认值上。
+        // item_tags / reading_progress 的外键都带 ON DELETE CASCADE；仍显式删一次，与 texts 同一纪律：
+        // 不把用户标签关联与阅读进度的存亡押在某个连接的 PRAGMA 默认值上。
         sql(DELETE_ITEM_TAGS).run(itemId)
         sql(DELETE_TEXT).run(itemId)
+        sql(DELETE_PROGRESS).run(itemId)
         sql(DELETE_ITEM).run(itemId)
       })
     },
@@ -954,6 +964,39 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
           sql(DELETE_TEXT).run(loserId)
           sql(DELETE_ITEM).run(loserId)
         }
+      })
+    },
+
+    /**
+     * 读阅读进度（M5 02）：按 (item_id, version) 匹配，版本对不上就当没有。
+     *
+     * 为什么判据在 SQL 之后还要在 JS 里比一次：SQL 只按主键取行（一条正文一整行），
+     * 版本比较这一句两种实现都得有，写在**一处**（这里）才不会分家。
+     */
+    readingProgress: (itemId, contentVersion) => {
+      const row = sql(SELECT_PROGRESS).get(itemId)
+      if (row === undefined) return undefined
+      if (requiredText(row.version, 'reading_progress.version') !== contentVersion) return undefined
+      return { ratio: clampReadingRatio(optionalNumber(row.ratio, 'reading_progress.ratio')) }
+    },
+
+    /**
+     * 记一次阅读进度。**缺条目一律拒绝**：progress 是条目数据的附庸，孤儿的进度行既没人读、
+     * 还会在下次 force 全量清理时留下谜团（与 updateItem 的「写一次不等于创建」同一条纪律）。
+     */
+    saveReadingProgress: async (itemId, contentVersion, ratio) => {
+      runInTransaction(() => {
+        if (sql(SELECT_ITEM).get(itemId) === undefined) {
+          throw new Error('saveReadingProgress 拒绝：条目 ' + itemId + ' 不在库里（写一次不等于创建）')
+        }
+        sql(UPSERT_PROGRESS).run(itemId, contentVersion, clampReadingRatio(ratio), new Date().toISOString())
+      })
+    },
+
+    /** 清进度：正文缓存被淘汰时调（条目本身还在，只是正文没了）。幂等。 */
+    clearReadingProgress: async (itemId) => {
+      runInTransaction(() => {
+        sql(DELETE_PROGRESS).run(itemId)
       })
     },
 

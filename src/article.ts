@@ -11,6 +11,7 @@
  * 不引第三方 Readability：只用「按块级标签保护 + 按边界切分」这套启发式，够用且完全可测。
  * 已知它会漏掉少数与导航混排的版式，这种失败是**可见**的（内容明显不对），而不是静默出错。
  */
+import { createHash } from 'node:crypto'
 import { fetchFeed, type FetchLimits } from './feed/fetch.js'
 import { MIN_CONTENT_CHARS } from './shared.js'
 import { decodeEntities, htmlToText, preToText } from './html-text.js'
@@ -26,6 +27,26 @@ import { decodeEntities, htmlToText, preToText } from './html-text.js'
  * 版本 1 = 纯文本段落（已废弃）；2 = 结构化块；3 = 正文容器识别（去掉站点杂图）。
  */
 export const EXTRACTOR_REVISION = 3
+
+/**
+ * 正文的**内容标识**（M5 02 的阅读进度键）：`<抽取器修订号>:<块列表摘要>`。
+ *
+ * 为什么不能只挂 EXTRACTOR_REVISION：**同一修订号下正文也会变** —— 站点更新了文章、
+ * 或者抽取器对同一份 HTML 产出了不同的块（启发式改了却忘了抬版本）。阅读进度记的是
+ * 「读到正文的百分之几」，正文一换，那个百分比就不再指向同一段文字。
+ *
+ * 为什么由宿主算：客户端 bundle 不许引第三方库、也不该自带一份哈希实现；而这个值必须
+ * 与「缓存是否命中」看的是**同一份内容**。宿主在两个分支（命中缓存 / 新抓取）都拿得到
+ * 块列表，客户端只需要把它原样回带。
+ *
+ * @param revision 抽取器修订号（缓存行上的那个值，不是当前常量 —— 老缓存得按它自己的版本算）
+ * @param blocks   块列表（新抓的是 ArticleBlock[]，缓存里读回来的是宽松的 Record；这里只做摘要，
+ *                 不认识具体形状）。老缓存只有 paragraphs 时按空块算 —— 那份缓存本来就会被重抓。
+ */
+export function contentVersionOf(revision: number, blocks: readonly unknown[] | undefined): string {
+  const digest = createHash('sha256').update(JSON.stringify(blocks ?? [])).digest('base64url')
+  return revision + ':' + digest.slice(0, 16)
+}
 
 /** 整块丢弃的标签（连同内容）：这些几乎从不属于正文。 */
 const DROP_BLOCKS = ['script', 'style', 'noscript', 'svg', 'iframe', 'form', 'nav', 'header', 'footer', 'aside', 'template'] as const

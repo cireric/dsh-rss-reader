@@ -289,7 +289,9 @@ async function mountReader({ items = [], feeds, folders, tags = [], article, hol
     }
     if (body.endpoint === 'article') {
       if (gate !== undefined) await gate
-      return ok(article ?? { itemId: body.payload.itemId, title: 'ART', blocks: [{ kind: 'p', text: '正文' }], paragraphs: ['正文'] })
+      // article 可以是函数：阅读进度的用例需要「a 有进度、b 没有」这种按条目区分的回包
+      const payload = typeof article === 'function' ? article(body.payload.itemId) : article
+      return ok(payload ?? { itemId: body.payload.itemId, title: 'ART', blocks: [{ kind: 'p', text: '正文' }], paragraphs: ['正文'] })
     }
     if (body.endpoint === 'markRead' || body.endpoint === 'unmarkRead') {
       const ids = Array.isArray(body.payload?.itemIds) ? body.payload.itemIds : []
@@ -715,6 +717,55 @@ test('正文页阅读偏好：时长标「估算」、字号/栏宽落到正文�
 
   // 主题标记：auto 时不覆盖任何颜色（完全继承宿主）
   assert.equal(h.box('article').getAttribute('data-rss-reading-theme'), 'auto')
+})
+
+test('阅读进度：切走再回来接着读、滚动不写盘、离开时落盘（M5 02）', skip, async () => {
+  // 内容标识与进度都由宿主给：客户端只负责「按比例恢复 + 在离开时把比例交回去」。
+  const articleOf = (itemId) => itemId === 'a'
+    ? { itemId: 'a', title: 'ART', blocks: [{ kind: 'p', text: '中'.repeat(100) }], contentVersion: '3:aaaa', progress: 0.5 }
+    : { itemId: 'b', title: 'ART B', blocks: [{ kind: 'p', text: '另一篇' }], contentVersion: '3:bbbb' }
+  const h = await mountReader({ items: [item({ id: 'a' }), item({ id: 'b' })], article: articleOf, holdArticle: true })
+  await h.store.load('overview')
+  await sleep(30)
+  h.press('V', true)
+  for (let i = 0; i < 40 && h.store.get().view !== 'article'; i += 1) await sleep(20)
+
+  // 容器必须**在正文到达之前**装上几何：恢复发生在「内容真的画出来」那一刻
+  // React 的重渲染是异步的：view 已切过去但 DOM 还没提交时 box 仍是 null（既有用例都在这里 sleep）
+  for (let i = 0; i < 40 && h.box('article') === null; i += 1) await sleep(20)
+  const box = h.arm(h.box('article'), { scrollHeight: 3000, clientHeight: 300 })
+  h.release()
+  await sleep(150)
+
+  assert.equal(h.scrollTop(box), 1350, '0.5 × (3000-300) = 1350：重开同版缓存要回到上次的位置')
+
+  // 滚动本身不许写盘（逐帧写会把库写热）：滚几次都不该有 saveReadingProgress
+  const saves = () => h.requests.filter((entry) => entry.endpoint === 'saveReadingProgress')
+  h.userScroll(box, 2100)
+  h.userScroll(box, 2400)
+  await sleep(60)
+  assert.equal(saves().length, 0, '滚动过程不许产生任何写盘请求')
+
+  // 切换文章 = 离开这篇：此刻落盘，比例就是离开时屏幕上的那一段
+  h.press('j')
+  await sleep(200)
+  const saved = saves()
+  assert.equal(saved.length, 1, '切换一次应当且只应当写一次')
+  assert.equal(saved[0].payload.itemId, 'a', '写的是**离开的那一篇**')
+  assert.equal(saved[0].payload.contentVersion, '3:aaaa', '版本标识必须原样回带（宿主按它来决定要不要沿用）')
+  assert.ok(Math.abs(saved[0].payload.ratio - 2400 / 2700) < 1e-9, '比例 = 当前 scrollTop / 可滚高度，实际 ' + saved[0].payload.ratio)
+
+  assert.equal(h.store.get().article.itemId, 'b', 'j 应当切到 b')
+  assert.equal(h.scrollTop(box), 0, 'b 没有进度 ⇒ 从顶部开始（不沿用上一条的位置）')
+
+  // 关掉正文（组件卸载）= 另一条落盘路径：ref 已经被置空，节点引用要另存
+  h.press('Escape')
+  await sleep(120)
+  assert.equal(h.store.get().view, 'list', 'Esc 回列表')
+  const afterClose = saves()
+  assert.equal(afterClose.length, 2, '卸载也要落盘一次')
+  assert.equal(afterClose[1].payload.itemId, 'b')
+  assert.equal(afterClose[1].payload.ratio, 0, 'b 停在顶部 ⇒ 记 0')
 })
 
 test('左栏渲染：虚拟视图三行 + 每个订阅源一行', skip, async () => {

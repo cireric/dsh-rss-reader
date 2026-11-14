@@ -592,6 +592,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
             scrollAttr={SCROLL_ATTR}
             reading={state.reading}
             onReading={store.setReading}
+            onSaveProgress={store.saveArticleProgress}
             canPrev={store.canStepArticle(-1)}
             canNext={store.canStepArticle(1)}
             onPrev={() => { store.stepArticle(-1) }}

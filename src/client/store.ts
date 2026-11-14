@@ -135,6 +135,10 @@ export interface ArticleState {
   blocks?: Array<Record<string, unknown>>
   paragraphs?: string[]
   failure?: string
+  /** 正文内容标识（M5 02）：进度按 (itemId, contentVersion) 记；缺省 = 老缓存/失败，不记进度 */
+  contentVersion?: string
+  /** 打开时该恢复到的位置（0..1）；缺省 = 从头读 */
+  restoreRatio?: number
   /**
    * 站点是否允许被嵌入。**2026-10-08 起不再决定任何视图**：正文只走抽取视图，这个字段留作诊断
    * （能在界面/日志里说明「这个站禁嵌」）。真正内嵌原站页面的路径已整条删除，理由见 article-pane.tsx。
@@ -953,6 +957,8 @@ export function createReaderStore() {
             blocks: result.blocks,
             paragraphs: result.paragraphs ?? [],
             frameable,
+            contentVersion: result.contentVersion,
+            restoreRatio: result.progress,
           },
         })
       }
@@ -960,6 +966,19 @@ export function createReaderStore() {
       if (state.article?.itemId !== item.id) return
       set({ article: { itemId: item.id, loading: false, failure: error instanceof Error ? error.message : String(error) } })
     }
+  }
+
+  /**
+   * 记一次阅读进度（M5 02）。
+   *
+   * 只在「切换文章 / 关闭正文 / 组件卸载」时调 —— **滚动本身不写盘**：逐帧写会把库写热，
+   * 而进度只要在离开这篇时是对的。失败只记录不弹错：进度是锦上添花，把它升成 error 条
+   * 会让「每切一篇红一次」比丢一次进度更烦人。
+   */
+  const saveArticleProgress = (itemId: string, contentVersion: string, ratio: number): void => {
+    void callRpc('saveReadingProgress', { itemId, contentVersion, ratio }).catch((failure: unknown) => {
+      console.warn('[rss-reader] 阅读进度保存失败（不影响继续阅读；下一次切换会再写一次）', failure)
+    })
   }
 
   /** 打开当前选中的条目为正文（列表页的 V 走这里）。 */
@@ -1354,7 +1373,7 @@ export function createReaderStore() {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
     get, visible, load, loadMore, submitSearch, markRead, selectRelative, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllRead, undoMarkAll,
     setLayout, setMarkAllRange, setShowUnread, refreshCount, setReading,
-    openArticle, closeArticle, cleanup, stepArticle, canStepArticle,
+    openArticle, closeArticle, cleanup, stepArticle, canStepArticle, saveArticleProgress,
     toggleFeeds, exportOpml, importOpml, addFeed, removeFeed, discover, clearDiscovery,
     dismissNotice: (): void => { set({ notice: undefined }) },
     setFilter,

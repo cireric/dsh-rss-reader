@@ -149,6 +149,33 @@ export function edgeTopFor(maxTop: number, edge: 'top' | 'bottom'): number {
   return edge === 'top' ? 0 : ceiling
 }
 
+/**
+ * 「读到哪儿」的比例（0..1）—— 阅读进度的**存储形态**（M5 02）。
+ *
+ * 为什么记比例而不是像素：正文高度会随图片进场变化（抽取层只回传 src/alt，图片没有固有尺寸），
+ * 像素位置在内容长高之后就指向另一段文字了；比例跟着内容一起伸缩。
+ * 内容不足一屏（没有可滚的余地）时记 0：那种情况下「读到哪儿」没有意义，恢复也只是停在顶部。
+ *
+ * 夹取放在这里而不是调用方：写入侧（端点/两个 store）与恢复侧都要同一套边界。
+ */
+export function readingRatioOf(scrollTop: number, scrollHeight: number, clientHeight: number): number {
+  const maxTop = scrollHeight - clientHeight
+  if (!Number.isFinite(maxTop) || maxTop <= 0) return 0
+  const top = Number.isFinite(scrollTop) && scrollTop > 0 ? scrollTop : 0
+  return top >= maxTop ? 1 : top / maxTop
+}
+
+/**
+ * 比例 → 该滚到的位置（M5 02 的恢复侧）。**越界一律夹住**：库里的比例来自用户数据，
+ * 而恢复时的 scrollHeight 与记录时的不一定相同（图片还没加载完 ⇒ 内容更矮）。
+ */
+export function restoreTopFor(ratio: number, scrollHeight: number, clientHeight: number): number {
+  const maxTop = scrollHeight - clientHeight
+  const ceiling = Number.isFinite(maxTop) && maxTop > 0 ? maxTop : 0
+  const safe = Number.isFinite(ratio) ? (ratio <= 0 ? 0 : ratio >= 1 ? 1 : ratio) : 0
+  return clampScrollTop(safe * ceiling, ceiling)
+}
+
 /** 「翻页」：按**一屏**为单位滚动视野（空格 / shift+空格）。 */
 export function pageTop(currentTop: number, viewportHeight: number, maxTop: number, direction: 1 | -1): number {
   const step = Number.isFinite(viewportHeight) && viewportHeight > 0 ? viewportHeight : 1

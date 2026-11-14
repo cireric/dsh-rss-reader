@@ -13,7 +13,7 @@ import { normalizeTagIds, normalizeTagName, requireTagId, TagError } from './tag
 import type { FolderView, TagView } from './shared.js'
 import { articleCharsOf, selectCleanup, type ArticleEntry, type CleanupRow } from './retention.js'
 import { applyFeedIntent, type FeedIntent } from './feed-intent.js'
-import { countUnreadPerFeed, recencyOf, sanitizeViewPreferences, type Cursor, type ViewPreferences } from './shared.js'
+import { clampReadingRatio, countUnreadPerFeed, recencyOf, sanitizeViewPreferences, type Cursor, type ViewPreferences } from './shared.js'
 
 /**
  * 清理候选行：**判据字段**（供 selectCleanup 复跑）与**释放量原料**一次带齐。
@@ -185,6 +185,21 @@ export interface ReaderStore {
   viewPreferences(): ViewPreferences
   /** 写回视图偏好。传进来的值先过一遍形状校验才落库。 */
   saveViewPreferences(preferences: unknown): Promise<ViewPreferences>
+
+  /**
+   * 读某条的阅读进度（M5 02）。**内容标识对不上就当没有**：正文变了，旧位置指向的不是同一段文字。
+   *
+   * 判据放在存储侧而不是调用方：两个实现（SQL 版与内存版）都得给同一个答案，
+   * 而「版本相等」这件事只该有**一处**写法。
+   */
+  readingProgress(itemId: string, contentVersion: string): { ratio: number } | undefined
+  /**
+   * 记一次阅读进度。ratio 由实现夹到 [0,1]（shared.ts 的 clampReadingRatio）。
+   * 条目不存在则拒绝 —— 与 updateItem 同一条纪律：写一次不等于创建。
+   */
+  saveReadingProgress(itemId: string, contentVersion: string, ratio: number): Promise<void>
+  /** 清掉某条的阅读进度（正文缓存淘汰时调；条目整体删除由 deleteItem 一并处理）。幂等。 */
+  clearReadingProgress(itemId: string): Promise<void>
 }
 
 export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
@@ -210,6 +225,8 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
   /** 旧适配器的标签是内存态：只服务 ReaderStore 的结构比对与测试，不参与生产装载。 */
   const tags = new Map<string, TagRecord>()
   const itemTagIds = new Map<string, Set<string>>()
+  /** 旧适配器的阅读进度是内存态：只服务 ReaderStore 的结构比对与测试，不参与生产装载。 */
+  const progress = new Map<string, { version: string; ratio: number }>()
   const tagViews = (): TagView[] => [...tags.values()]
     .sort((a, b) => a.createdAt === b.createdAt ? a.id.localeCompare(b.id) : a.createdAt.localeCompare(b.createdAt))
     .map((tag) => ({
@@ -258,6 +275,8 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
     updateItem: async (itemId, fn) => { await items.update(itemId, fn) },
     deleteItem: async (itemId) => {
       await items.delete(itemId)
+      // 进度跟着条目走：条目没了，位置就没有意义（SQL 版靠外键 + 显式删除做同一件事）
+      progress.delete(itemId)
     },
     listItems: (feedId) => {
       const found: Array<[string, ItemRecord]> = []
@@ -406,6 +425,18 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
       }
       itemTagIds.set(keeperId, keeperTags)
     },
+    readingProgress: (itemId, contentVersion) => {
+      const row = progress.get(itemId)
+      if (row === undefined || row.version !== contentVersion) return undefined
+      return { ratio: row.ratio }
+    },
+    saveReadingProgress: async (itemId, contentVersion, ratio) => {
+      if (items.get(itemId) === undefined) {
+        throw new Error('saveReadingProgress 拒绝：条目 ' + itemId + ' 不在库里（写一次不等于创建）')
+      }
+      progress.set(itemId, { version: contentVersion, ratio: clampReadingRatio(ratio) })
+    },
+    clearReadingProgress: async (itemId) => { progress.delete(itemId) },
     viewPreferences: () => sanitizeViewPreferences(
       global.get(),
       (feedId) => feeds.get(feedId) !== undefined,

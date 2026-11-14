@@ -355,6 +355,43 @@ test('正文缓存闸门：超限时清最旧的缓存，但条目本身与已�
   })
 })
 
+test('正文缓存淘汰同时清掉阅读进度（M5 02 的「缓存淘汰可清理进度」）', async () => {
+  // 判据只在这一层能钉住：判据本身（selectArticleEvictions）不动，动的是**副作用链**——
+  // 清正文之后有没有把按它记的进度一起清掉。少了这一句，恢复会指向一段已经不在的正文。
+  const store = memoryStore()
+  const mk = (n) => ({ title: 't' + n, link: 'https://ex.test/' + n, guid: 'g' + n, date: 'Mon, 0' + n + ' Jan 2024 00:00:00 GMT' })
+  await withServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/rss+xml' })
+    res.end(rss([mk(1), mk(2), mk(3)]))
+  }, async (base) => {
+    const feedUrl = base + '/feed.xml'
+    await refreshFeeds([feedUrl], store, BASE_OPTIONS)
+    const ids = [...store.items.keys()]
+    for (const [index, id] of ids.entries()) {
+      const record = store.items.get(id)
+      await store.saveItem(id, {
+        ...record,
+        article: { fetchedAt: '2024-0' + (index + 1) + '-01T00:00:00.000Z', paragraphs: ['x'.repeat(1000)] },
+      })
+      await store.saveReadingProgress(id, 'v1', 0.5)
+    }
+
+    // 上限 1500 ⇒ 清两条最旧的
+    await refreshFeeds([feedUrl], store, { ...BASE_OPTIONS, maxArticleCacheChars: 1500 })
+
+    const cached = [...store.items.values()].filter((record) => record.article !== undefined)
+    assert.equal(cached.length, 1, '前置条件：只剩一条缓存')
+    const survivorId = [...store.items.entries()].find(([, record]) => record.article !== undefined)[0]
+    for (const id of ids) {
+      if (id === survivorId) {
+        assert.deepEqual(store.readingProgress(id, 'v1'), { ratio: 0.5 }, '没被淘汰的那条进度必须留着')
+        continue
+      }
+      assert.equal(store.readingProgress(id, 'v1'), undefined, '缓存被清掉的条目，进度也必须一起清（' + id + '）')
+    }
+  })
+})
+
 test('正文缓存闸门：现行的 blocks 形态同样要被统计到（2026-10-07 修回归）', async () => {
   const store = memoryStore()
   const payload = rss(THREE_ITEMS)

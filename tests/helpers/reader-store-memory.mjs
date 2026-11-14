@@ -55,6 +55,8 @@ export function memoryStore() {
   const feeds = new Map()
   const cursors = new Map()
   const items = new Map()
+  /** 阅读进度（M5 02）：与生产实现同一条语义 —— 版本相等才算、ratio 夹到 [0,1]。 */
+  const progress = new Map()
   return {
     feeds,
     cursors,
@@ -74,7 +76,15 @@ export function memoryStore() {
     saveItem: async (id, record) => { items.set(id, record) },
     // 原子读改写（ReaderStore 契约的一部分）：fn 在写入槽位看到当前记录，见 src/store.ts 的注释
     updateItem: async (id, fn) => { items.set(id, fn(items.get(id))) },
-    deleteItem: async (id) => { items.delete(id) },
+    deleteItem: async (id) => { items.delete(id); progress.delete(id) },
+    readingProgress: (itemId, contentVersion) => {
+      const row = progress.get(itemId)
+      return row === undefined || row.version !== contentVersion ? undefined : { ratio: row.ratio }
+    },
+    saveReadingProgress: async (itemId, contentVersion, ratio) => {
+      progress.set(itemId, { version: contentVersion, ratio: Math.max(0, Math.min(1, ratio)) })
+    },
+    clearReadingProgress: async (itemId) => { progress.delete(itemId) },
     listItems: (feedId) => [...items.entries()].filter(([, record]) => record.feedId === feedId),
     /**
      * 清算原料（src/store.ts 的契约）：**只交出这三样，正文不许跟着出来**。

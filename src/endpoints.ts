@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { createSearch } from './search.js'
 import type { Config } from './config.js'
-import { EXTRACTOR_REVISION, fetchArticle, blocksToText } from './article.js'
+import { EXTRACTOR_REVISION, contentVersionOf, fetchArticle, blocksToText } from './article.js'
 import { rebuildItem, type ItemRecord } from './domain.js'
 import { selectCleanup } from './retention.js'
 import { buildOpml, parseOpml } from './opml.js'
@@ -24,7 +24,7 @@ import type { ReaderStore } from './store.js'
 // 未读判据（isUnread / countUnreadPerFeed）不再由本文件在 JS 侧实现：Task 5 把它交给了存储侧，
 // 自持实现里的 SQL `read_at IS NULL` 与 shared.ts 的 isUnread 是同一件事，两者的等价由
 // tests/store-sqlite.test.mjs 的「同一夹具上逐键对账」钉住。shared.ts 仍是那条规则的定义处。
-import { decodeCursor, encodeCursor, fail, ok, recencyOf, sanitizeViewPreferences, type Cursor, type Endpoint, type ItemView, type Overview, type RefreshRun, type RpcResult, type UnreadAccount } from './shared.js'
+import { clampReadingRatio, decodeCursor, encodeCursor, fail, ok, recencyOf, sanitizeViewPreferences, type Cursor, type Endpoint, type ItemView, type Overview, type RefreshRun, type RpcResult, type UnreadAccount } from './shared.js'
 
 /** 端点需要的运行时依赖（显式传入，不靠闭包）。 */
 export interface EndpointDeps {
@@ -426,10 +426,15 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       // 老缓存（升级前抓的，只有纯文本 paragraphs）没有版本号 ⇒ 判为过期、自动重抓一次。
       // 否则模型升级后老缓存会永远挡住新逻辑——实测：9 条老缓存导致「图片怎么都不显示」。
       if (existing.article !== undefined && existing.article.revision === ARTICLE_REVISION) {
+        // 内容标识与进度都从**这一份**缓存算（M5 02）：客户端拿到的版本号与它即将显示的
+        // 块列表严格同源，才谈得上「同一份正文的进度」。进度读的是本地库，不出网。
+        const contentVersion = contentVersionOf(ARTICLE_REVISION, existing.article.blocks)
         return ok({
           itemId, cached: true, title: existing.article.title,
           blocks: existing.article.blocks, paragraphs: existing.article.paragraphs,
           frameable: existing.article.frameable,
+          contentVersion,
+          progress: ctx.store.readingProgress(itemId, contentVersion)?.ratio,
         })
       }
       if (existing.link === '') return fail('bad-request', '该条目没有可抓取的链接')
@@ -469,7 +474,32 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         rebuildItem(current, { omit: ['articleFailure'], set: { article } }))
       ctx.log('取正文成功：' + existing.link + '（' + fetched.blocks.length + ' 块 ' +
         blocksToText(fetched.blocks).length + ' 字符）')
-      return ok({ itemId, cached: false, title: article.title, blocks: article.blocks, frameable: article.frameable })
+      // 同一份内容版本号在两条分支上必须一致（否则「缓存命中」与「刚抓」会各记一个进度）
+      const contentVersion = contentVersionOf(article.revision, article.blocks)
+      return ok({
+        itemId, cached: false, title: article.title, blocks: article.blocks, frameable: article.frameable,
+        contentVersion,
+        // 内容与旧缓存逐字节相同时版本号相等 ⇒ 旧进度照常恢复；不同则读不到（版本不匹配）
+        progress: ctx.store.readingProgress(itemId, contentVersion)?.ratio,
+      })
+    },
+  },
+
+  saveReadingProgress: {
+    to: async (payload, ctx) => {
+      // 阅读进度（M5 02）。**只写本地库**：这条路径一次网络都不发（恢复进度也不该发）。
+      const body = payload as { itemId?: unknown; contentVersion?: unknown; ratio?: unknown } | null
+      const itemId = typeof body?.itemId === 'string' ? body.itemId : ''
+      const contentVersion = typeof body?.contentVersion === 'string' ? body.contentVersion : ''
+      if (itemId === '' || contentVersion === '') {
+        return fail('bad-request', 'saveReadingProgress 需要 itemId 与 contentVersion（字符串）')
+      }
+      if (ctx.store.item(itemId) === undefined) return fail('not-found', '条目不存在：' + itemId)
+      // 夹取只在这里与存储侧发生（clampReadingRatio 是唯一实现）：快速滚动时会算出越界值，
+      // 而库里躺着 1.5 这种比例只会让下一次恢复「越界」。
+      const ratio = clampReadingRatio(body?.ratio)
+      await ctx.store.saveReadingProgress(itemId, contentVersion, ratio)
+      return ok({ ratio })
     },
   },
 

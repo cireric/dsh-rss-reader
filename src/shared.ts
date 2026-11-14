@@ -26,7 +26,7 @@ export const ROUTE_PATH = '/rss-reader-api'
 export const ENDPOINT_NAMES = [
   'overview', 'refresh', 'markRead', 'unmarkRead', 'toggleStar', 'toggleKeepUnread', 'article', 'cleanup',
   'opmlExport', 'opmlImport', 'addFeed', 'removeFeed', 'discoverFeeds',
-  'viewPreferences', 'saveViewPreferences', 'searchItems',
+  'viewPreferences', 'saveViewPreferences', 'saveReadingProgress', 'searchItems',
   'listFolders', 'createFolder', 'renameFolder', 'deleteFolder', 'moveFeedToFolder',
   'listTags', 'createTag', 'renameTag', 'deleteTag', 'setItemTags',
 ] as const
@@ -262,6 +262,13 @@ export interface ArticlePayload {
   blocks?: Array<Record<string, unknown>>
   /** 旧版本回传的纯文本段落；仅为兼容尚未刷新的老缓存，不再写入 */
   paragraphs?: string[]
+  /**
+   * 正文内容标识（M5 02）：抽取器修订号 + 块列表摘要，见 article.ts 的 contentVersionOf。
+   * 阅读进度按 (itemId, contentVersion) 恢复 —— 内容变了就不沿用旧位置。
+   */
+  contentVersion?: string
+  /** 上次读到哪儿（0..1）。缺省 = 没有进度（或内容版本对不上），从顶部开始。 */
+  progress?: number
   /** 抓取/抽取失败的原因；与 blocks 互斥 */
   failure?: string
   /** 站点是否允许被 iframe 嵌入（决定能否切到「原站视图」） */
@@ -460,6 +467,18 @@ export function estimateReadingMinutes(blocks: ReadonlyArray<Record<string, unkn
     }
   }
   return Math.ceil(cjk / CJK_CHARS_PER_MINUTE + words / WORDS_PER_MINUTE)
+}
+
+/**
+ * 阅读进度的比例，夹到 [0, 1]（M5 02）。**这是唯一的夹取点**：写入侧（端点、两个 store）与
+ * 读取侧都调它，避免「库里躺着 1.5」这种只有某一层才认的形状。
+ *
+ * 非有限数（NaN / Infinity / 字符串）一律按 0 处理：进度的语义是「读到哪儿」，认不出就是没读到。
+ */
+export function clampReadingRatio(value: unknown): number {
+  const ratio = typeof value === 'number' ? value : Number.NaN
+  if (!Number.isFinite(ratio) || ratio <= 0) return 0
+  return ratio >= 1 ? 1 : ratio
 }
 
 /**

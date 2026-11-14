@@ -589,6 +589,16 @@ JSON 后端每次写整份原子重写。在 200 源 × 500 条（10 万条目�
 `dev_inject_plugin` 认 `dir`。判据仍然是行为：`~/.dsh/super-injector/reload-debug.log` 里有没有这一次的
 `reload match=…`（本次传错参数时，那条日志里一条都没有）。
 
+**2026-11-13（M5 02）再补一条更危险的**：**watch 会自动重载宿主，于是「改代码 + build」等于对真实库执行迁移**。
+`实测`：改完 `src/storage/db.ts`（v2→v3 加表）并 `npm run build` 之后，没有等我调任何注入器工具，
+`~/.dsh/super-injector/reload-debug.log` 里就出现 `17:22:41Z / 17:22:43Z / 17:22:49Z` 三条
+`reload match=@dsh-external/dsh-rss-reader`，而真实库 `rss.db` 的 mtime 正是 `17:22Z`、`user_version` 已经是 3。
+因果推断（`猜测`，但没有第二种解释）：那次自动重载跑了 `migrateSchema`。
+**含义**：任何会改物理 schema / 写 migration 的改动，**build 之前**就得先按备份流程拷一份真实库 ——
+本轮的 `/tmp/m5-02-pre-migration-backup` 因此是**迁移后**的快照，不是回滚点。
+同一条日志还显示这几条 reload 是 `cm=yes clientPath(short)=undefined`，即**客户端半边没被换掉**：
+宿主迁移了、前端还是旧 UI —— 「同一代插件两半不同步」是这条自动重载的常态，别拿它当发布验证。
+
 ---
 
 ## 五、数据与解析

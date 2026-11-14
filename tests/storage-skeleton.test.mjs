@@ -174,7 +174,8 @@ test('openDatabase 建库为 0600、WAL、busy_timeout=5000，migrateSchema 才�
     assert.equal(db.prepare('PRAGMA journal_mode').get().journal_mode, 'wal', '必须真的开在 WAL 上')
     assert.equal(db.prepare('PRAGMA busy_timeout').get().timeout, 5000, '并发写要靠 busy_timeout 排队')
 
-    assert.equal(SCHEMA_VERSION, 2, '物理布局版本是对外契约，改它必须同时想迁移')
+    // v3 = M5 02 加了 reading_progress 表（只加表，v1/v2 都能升上来）
+  assert.equal(SCHEMA_VERSION, 3, '物理布局版本是对外契约，改它必须同时想迁移')
     assert.equal(db.prepare('PRAGMA user_version').get().user_version, 0, 'migrateSchema 之前不许盖章')
     migrateSchema(db)
     assert.equal(db.prepare('PRAGMA user_version').get().user_version, SCHEMA_VERSION)

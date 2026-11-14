@@ -218,6 +218,10 @@ async function capArticleCache(store: ReaderStore, maxChars: number): Promise<nu
     // 写进去的字段（用户在刷新途中标已读/加星）。2026-10-10 与 article 端点同一个丢失更新类别，
     // 判据在 tests/refresh.test.mjs 的「正文缓存淘汰期间并发标已读」。
     await store.updateItem(itemId, (current) => rebuildItem(current, { omit: ['article', 'articleFailure'] }))
+    // 正文没了，进度也就没有对象可指（M5 02 的验收项「缓存淘汰可清理进度」）。
+    // 顺序放在清正文之后：先清正文再清进度，最坏只留一条孤儿进度（下次打开时版本对不上，无害）；
+    // 反过来则会出现「进度没了、正文还在」—— 用户重开同一篇会从顶部开始，那才是丢东西。
+    await store.clearReadingProgress(itemId)
   }
   return evicted.length
 }
