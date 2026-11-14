@@ -42,7 +42,7 @@ function memoryStore({ articleWriteDelayMs = 120 } = {}) {
     saveFeed: async (id, record) => { feeds.set(id, record) },
     cursor: () => undefined,
     saveCursor: async () => {},
-    deleteFeed: async () => {},
+    deleteSubscription: async () => ({ items: 0 }),
     item: (id) => items.get(id),
     saveItem: async (id, record) => {
       if (isArticleWrite(record)) await sleep(articleWriteDelayMs)

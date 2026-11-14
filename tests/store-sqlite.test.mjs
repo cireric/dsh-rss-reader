@@ -507,7 +507,7 @@ test('updateItem 中途失败时整条回滚：行与正文都不留半截（禁
   }
 })
 
-test('listFeeds / feed / saveFeed / deleteFeed 与旧实现同形（条件请求字段一个都不能丢）', async () => {
+test('listFeeds / feed / saveFeed / deleteSubscription 与旧实现同形（条件请求字段一个都不能丢）', async () => {
   const { store, db, dir } = freshStore('feeds')
   try {
     const record = {
@@ -535,13 +535,18 @@ test('listFeeds / feed / saveFeed / deleteFeed 与旧实现同形（条件请求
     assert.equal(store.listFeeds().every(([, feed]) => feedRecordSchema.safeParse(feed).success), true)
     assert.deepEqual(Object.keys(store.feed('https://b.example/feed.xml')), ['url'], '只填了 url 的源，其余字段键缺席')
 
-    // 退订：删源记录与它的游标；条目由调用方一并删（src/store.ts:16）
+    // 退订：一次变更——订阅项 + 该源全部条目 + 游标（ADR-0002）
     await store.saveItem('i-1', item('https://a.example/feed.xml'))
+    await store.saveItem('i-2', item('https://a.example/feed.xml'))
+    await store.saveItem('other-1', item('https://b.example/feed.xml'))
     await store.saveCursor('https://a.example/feed.xml', { seen: ['i-1'], cursorAt: '2026-10-11T09:00:00.000Z' })
-    await store.deleteFeed('https://a.example/feed.xml')
+    const removed = await store.deleteSubscription('https://a.example/feed.xml')
+    assert.deepEqual(removed, { items: 2 }, '返回真正删掉的条目数（另一个源的条目不许算进来）')
     assert.equal(store.feed('https://a.example/feed.xml'), undefined)
     assert.equal(store.cursor('https://a.example/feed.xml'), undefined)
-    assert.notEqual(store.item('i-1'), undefined, '条目不在 deleteFeed 的职责里（旧实现同样不删，改它会变成静默删数据）')
+    assert.equal(store.item('i-1'), undefined, '条目必须跟着退订一起消失（不再是调用方的事）')
+    assert.equal(store.item('i-2'), undefined)
+    assert.notEqual(store.item('other-1'), undefined, '别的源的条目一条都不许碰')
     assert.deepEqual(store.listFeeds().map(([id]) => id), ['https://b.example/feed.xml'])
   } finally {
     db.close()
@@ -549,11 +554,13 @@ test('listFeeds / feed / saveFeed / deleteFeed 与旧实现同形（条件请求
   }
 })
 
-test('deleteFeed 先写 config、后删游标：config 写不进去时游标必须还在（跨介质顺序）', async () => {
+test('deleteSubscription 先写 config、再删条目与游标：config 写不进去时库里一条都不许动（跨介质顺序）', async () => {
   const { store, db, configPath, dir } = freshStore('deletefeed-order')
   try {
     const feedId = 'https://a.example/feed.xml'
     await store.saveFeed(feedId, { url: feedId })
+    await store.saveItem('i-1', item(feedId))
+    await store.saveItem('i-2', item(feedId))
     await store.saveCursor(feedId, { seen: ['i-1'], cursorAt: '2026-10-11T09:00:00.000Z' })
     const before = readFileSync(configPath, 'utf8')
 
@@ -563,7 +570,7 @@ test('deleteFeed 先写 config、后删游标：config 写不进去时游标必�
     mkdirSync(configPath)
 
     await assert.rejects(
-      () => store.deleteFeed(feedId),
+      () => store.deleteSubscription(feedId),
       'config.json 写不进去时必须抛错，不许静默当成「退订成功」（用户以为退订了，源其实还在）',
     )
 
@@ -576,6 +583,9 @@ test('deleteFeed 先写 config、后删游标：config 写不进去时游标必�
       undefined,
       '跨介质写入的失败必须停在 config 这一步：游标还在，这次退订是一次干净的 no-op，重试即可',
     )
+    // 条目同理：config 都还没写成功，库里的条目一条都不许动 —— 否则就是「删了一半」的老病（ADR-0002）
+    assert.notEqual(store.item('i-1'), undefined, 'config 失败时条目一条都不许删')
+    assert.notEqual(store.item('i-2'), undefined, 'config 失败时条目一条都不许删')
 
     // 源记录同理：配置是订阅的唯一副本，一次失败的退订不许让它少一个源
     rmSync(configPath, { recursive: true, force: true })
@@ -583,10 +593,13 @@ test('deleteFeed 先写 config、后删游标：config 写不进去时游标必�
     assert.notEqual(store.feed(feedId), undefined, '失败的退订不许动订阅映射')
     assert.deepEqual(store.listFeeds().map(([id]) => id), [feedId])
 
-    // 正常路径不受影响：config 恢复成可写文件后，退订照样成功
-    await store.deleteFeed(feedId)
+    // 正常路径不受影响：config 恢复成可写文件后，退订照样成功，且条目一起消失
+    const removed = await store.deleteSubscription(feedId)
+    assert.deepEqual(removed, { items: 2 })
     assert.equal(store.feed(feedId), undefined)
     assert.equal(store.cursor(feedId), undefined)
+    assert.equal(store.item('i-1'), undefined, '成功路径必须把条目删掉')
+    assert.equal(store.item('i-2'), undefined)
   } finally {
     db.close()
     rmSync(dir, { recursive: true, force: true })

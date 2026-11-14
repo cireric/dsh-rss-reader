@@ -97,6 +97,32 @@ export function createLifecycle(deps: LifecycleDeps): Lifecycle {
    * 必须在建 store **之前**跑：它一旦通过，后面每一步都带着一份已证明可用的订阅；放在 store
    * 之后的话，中间任何一步都可能先写库，而守卫抛错时这一代已经半装好了。
    */
+  /**
+   * 孤儿条目：`items` 里 feed_id 已不在当前订阅集合的行。**只报告，不删**（ADR-0002）。
+   *
+   * 正常退订是一次变更，不会留下孤儿；出现即说明某次变更半途失败（config 写成功、库事务失败）
+   * 或有人手工改库。删数据必须有人发话，所以这里只让它在日志里现身。
+   * 代价是装载时一次 GROUP BY feed_id（走 i1 索引，10 万行毫秒级），不进热路径。
+   */
+  const reportOrphanItems = (db: DatabaseSync, logLine: (message: string) => void): void => {
+    const feeds = new Set(
+      configFileMissing(configFile) ? [] : Object.keys(readConfigFile(configFile).feeds),
+    )
+    const rows = db.prepare('SELECT feed_id AS feed_id, COUNT(*) AS n FROM items GROUP BY feed_id').all()
+    let orphans = 0
+    for (const row of rows) {
+      const feedId = row.feed_id
+      const count = row.n
+      if (typeof feedId !== 'string' || typeof count !== 'number') {
+        throw new Error('读不出条目按源的分组（返回 ' + JSON.stringify(row) + '）：库被外部改动过？')
+      }
+      if (!feeds.has(feedId)) orphans += count
+    }
+    if (orphans > 0) {
+      logLine('检测到 ' + orphans + ' 条孤儿条目（所属订阅已不在 config.json 里）：只报告不删除，见 ADR-0002')
+    }
+  }
+
   const assertSubscriptionsNotLost = (db: DatabaseSync): void => {
     // 文件在不在分两类：在 ⇒ 读一遍（读不出来由 readConfigFile 响亮抛错，既有语义）；
     // 不在 ⇒ 只有「库里也没条目」才是首次安装。
@@ -114,7 +140,7 @@ export function createLifecycle(deps: LifecycleDeps): Lifecycle {
       )
     }
     if (Object.keys(file.feeds).length === 0) {
-      // 正常退订会把条目一起删（endpoints.removeFeed），所以「feeds 空 + 条目 > 0」只可能是
+      // 正常退订会把条目一起删（store.deleteSubscription），所以「feeds 空 + 条目 > 0」只可能是
       // 订阅映射丢了/被清空了 —— 与 scripts/verify-backup.mjs 的第四条判据逐字同义，
       // docs/ops/backup-restore.md §4 承诺「与装载路径同一条判据」，这里把它补成真的。
       throw new Error(
@@ -238,6 +264,7 @@ export function createLifecycle(deps: LifecycleDeps): Lifecycle {
         try {
           migrateSchema(db)
           assertSubscriptionsNotLost(db)
+          reportOrphanItems(db, log)
         } catch (error) {
           // 这个句柄此刻还**没有**登记到 database（下面的 database = db 才登记），所以 stop 的
           // 「先看 database 再 close」关不到它 —— 失败路径必须自己关。不关的后果是每失败一次泄漏

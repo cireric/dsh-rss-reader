@@ -662,12 +662,12 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       if (!feedId) return fail('bad-request', 'removeFeed 需要 url')
       const known = ctx.store.feed(feedId)
       if (known === undefined) return fail('not-found', '订阅不存在：' + feedId)
-      // 连带删掉该源的全部条目与游标——留着孤儿条目只会让人困惑
-      const items = ctx.store.listItems(feedId)
-      for (const [itemId] of items) await ctx.store.deleteItem(itemId)
-      await ctx.store.deleteFeed(feedId)
-      ctx.log('退订 ' + feedId + '（连带删除 ' + items.length + ' 条条目）')
-      return ok({ removed: 1, items: items.length })
+      // 退订是**一次变更**，由 store 拥有（订阅项 + 条目 + 游标，见 ADR-0002）：
+      // 这里既不逐条删（N+1 个事务、还会把整源正文物化出来），也不碰 config.json。
+      // 失败时事务回滚 ⇒ 什么都没发生，用户看到的是「退订失败」，不是「少了一半」。
+      const { items } = await ctx.store.deleteSubscription(feedId)
+      ctx.log('退订 ' + feedId + '（连带删除 ' + items + ' 条条目）')
+      return ok({ removed: 1, items })
     },
   },
 

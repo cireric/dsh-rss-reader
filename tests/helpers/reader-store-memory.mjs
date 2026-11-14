@@ -83,7 +83,18 @@ export function memoryStore(options = {}) {
     saveCursor: async (id, record) => { cursors.set(id, record) },
     item: (id) => items.get(id),
     allItems: () => [...items.entries()],
-    deleteFeed: async (feedId) => { feeds.delete(feedId); cursors.delete(feedId) },
+    deleteSubscription: async (feedId) => {
+      let removed = 0
+      for (const [itemId, record] of items.entries()) {
+        if (record.feedId !== feedId) continue
+        items.delete(itemId)
+        progress.delete(itemId)
+        removed += 1
+      }
+      cursors.delete(feedId)
+      feeds.delete(feedId)
+      return { items: removed }
+    },
     saveItem: async (id, record) => { items.set(id, record) },
     // 原子读改写（ReaderStore 契约的一部分）：fn 在写入槽位看到当前记录，见 src/store.ts 的注释
     updateItem: async (id, fn) => { items.set(id, fn(items.get(id))) },

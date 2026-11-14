@@ -329,6 +329,9 @@ const SELECT_CURSOR = 'SELECT * FROM cursors WHERE feed_id = ?'
 const UPSERT_CURSOR = `
   INSERT INTO cursors (feed_id, seen, cursor_at) VALUES (?, ?, ?)
   ON CONFLICT(feed_id) DO UPDATE SET seen = excluded.seen, cursor_at = excluded.cursor_at`
+/** 退订用：该源的条目数与整源删除（子表由 ON DELETE CASCADE 带走）。 */
+const COUNT_ITEMS_BY_FEED = 'SELECT COUNT(*) AS n FROM items WHERE feed_id = ?'
+const DELETE_ITEMS_BY_FEED = 'DELETE FROM items WHERE feed_id = ?'
 const DELETE_CURSOR = 'DELETE FROM cursors WHERE feed_id = ?'
 /** 阅读进度（M5 02）：主键 = 条目 id，一条正文只记一个位置。 */
 const SELECT_PROGRESS = 'SELECT version, ratio FROM reading_progress WHERE item_id = ?'
@@ -676,23 +679,30 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
       })
     },
 
-    deleteFeed: async (feedId) => {
-      // 与旧实现逐条一致：只删源记录与它的游标，**不删条目**（条目由调用方一并删，
-      // 见 src/store.ts:16 与 endpoints.ts 的 removeFeed）。在这里顺手多删会让「退订」
-      // 变成一次看不见的批量删数据。
-      //
-      // **顺序是「先写 config、后删游标」，不能反过来**：两者落在不同介质上（文件 vs 库），
-      // 中间失败无法共同回滚。反过来时若 config 写不进去（文件损坏/磁盘满），用户看到的是
-      // 「源还在订阅列表里、游标却没了」——下一轮刷新会把整份 feed 当新内容重新导入成未读。
-      // 这个顺序下最坏只是一条孤儿游标，无害。
+    deleteSubscription: async (feedId) => {
+      // 顺序：**先写 config（订阅的真相），再在一个事务里删条目与游标**，见 store.ts 的接口注释
+      // 与 docs/adr/0002-unsubscribe-is-one-change.md。跨介质没有共同回滚，只能选失败形态：
+      //   · config 写不进去 ⇒ 库一条都没动，这次退订是干净的 no-op，重试即可；
+      //   · 库事务失败 ⇒ 订阅已消失、条目留下 ⇒ 看不见的孤儿条目（访问期挡板挡住、装载时报告）。
+      // 反过来（先删库再写 config）的失败形态是「源还在、条目没了」——用户可见的数据丢失。
       writeFeeds(configPath, (feeds) => {
         const next = { ...feeds }
         delete next[feedId]
         return next
       })
+      let removed = 0
       runInTransaction(() => {
+        // 计数必须和删除在同一个事务里：先数后删跨出事务，报出去的条数就可能不是真删掉的。
+        const row = sql(COUNT_ITEMS_BY_FEED).get(feedId)
+        const count = row === undefined ? undefined : row.n
+        if (typeof count !== 'number') {
+          throw new Error('数不出该源的条目数（返回 ' + JSON.stringify(row) + '）：库被外部改动过？')
+        }
+        removed = count
+        sql(DELETE_ITEMS_BY_FEED).run(feedId)
         sql(DELETE_CURSOR).run(feedId)
       })
+      return { items: removed }
     },
 
     item: (itemId) => {

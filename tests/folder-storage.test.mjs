@@ -297,7 +297,7 @@ test('横切不变量：刷新、订阅写入、偏好保存、退订都不得�
     await ctx.store.saveFeed('https://c.example/feed.xml', { url: 'https://c.example/feed.xml' })
     assert.deepEqual(readConfigFile(ctx.configPath).folders, ['旧分组', '空目录'], '订阅写入保留目录')
 
-    await ctx.store.deleteFeed(feedB)
+    await ctx.store.deleteSubscription(feedB)
     assert.deepEqual(readConfigFile(ctx.configPath).folders, ['旧分组', '空目录'], '退订保留目录')
 
     const disk = readConfigFile(ctx.configPath)

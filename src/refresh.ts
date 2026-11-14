@@ -284,12 +284,12 @@ async function refreshOne(
   )
   const stamp = now().toISOString()
 
-  // 抓取窗口内用户可能已经退订了这个源（endpoints.removeFeed 会先删条目、再 deleteFeed）。
+  // 抓取窗口内用户可能已经退订了这个源（removeFeed → store.deleteSubscription，一次变更）。
   // 判据必须带 previous !== undefined：**本轮开始时它得还在**。只判「现在不在」会把
   // 「首次抓取未预置源」也当成退订（既有夹具正是这种形状），那是行为漂移。
-  // 这时不能再写：updateFeed 会抛「源不存在」，而已经写进去的条目/游标会变成孤儿；
-  // 一个源的这种失败也不该掀翻整轮（模块头的不变式①）。2026-11-15 实测：不加这一句
-  // 会留下孤儿 cursor + item，并让 refreshFeeds 整体 reject。
+  // 这是一个**前置检查**，不是补偿：过了这一句到各次 saveItem 之间仍有 await 让出点，
+  // 退订恰好落进这段窗口仍会写出孤儿条目 —— 那部分由装载时的孤儿报告兜底（ADR-0002）。
+  // 一个源的这种失败也不该掀翻整轮（模块头的不变式①）。
   if (previous !== undefined && store.feed(feedId) === undefined) {
     return { feedId, url: feedId, status: 'failed', added: 0, reason: '订阅已在抓取期间移除，本轮结果丢弃' }
   }

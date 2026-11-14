@@ -1027,9 +1027,9 @@ test('P2-1 刷新途中退订该源：按失败返回、不抛错、不留孤儿
   const other = 'https://other.example/feed'
   await store.saveFeed(victim, { url: victim })
   await store.saveFeed(other, { url: other })
-  // 抓取窗口内用户退订：与 endpoints.removeFeed 的 deleteFeed 同一动作（条目此时还没写）。
+  // 抓取窗口内用户退订：与 endpoints.removeFeed 的 deleteSubscription 同一动作（条目此时还没写）。
   const fakeFetch = async (url) => {
-    if (url === victim) await store.deleteFeed(victim)
+    if (url === victim) await store.deleteSubscription(victim)
     return { kind: 'ok', body: rss(THREE_ITEMS), finalUrl: url }
   }
   const outcomes = await refreshFeeds([victim, other], store, {

@@ -44,8 +44,23 @@ export interface ReaderStore {
   updateFeed(feedId: string, intent: FeedIntent): Promise<void>
   cursor(feedId: string): CursorRecord | undefined
   saveCursor(feedId: string, record: CursorRecord): Promise<void>
-  /** 退订：删源记录与它的游标（条目由调用方一并删，避免留下孤儿） */
-  deleteFeed(feedId: string): Promise<void>
+  /**
+   * **退订：一次变更**——订阅项（config.json）+ 该源全部条目 + 游标，都由这个方法完成。
+   *
+   * 为什么不能只删源记录（2026-11-14 收口，见 docs/adr/0002-unsubscribe-is-one-change.md）：
+   * 订阅的真相在 config.json，库内没有 feeds 表，所以「删订阅」在库层面没有任何级联可依赖。
+   * 让调用方自己拼（listItems → 逐条 deleteItem → 删源）等于 N+1 个独立事务 + 一次跨介质写，
+   * 中途失败会把「一半条目没了、源还在」留给用户。实测（隔离副本，2026-11-14）：
+   * 20 条删掉 4 条、星标 2→1，下一轮刷新把这 4 条当新条目写回，已读态与星标永久丢失。
+   *
+   * 顺序固定为「**先写 config，再在一个事务里删 items 与 cursors**」：跨介质没有共同回滚，
+   * 只能选失败形态——这个顺序下最坏是留下看不见的孤儿条目（访问期挡板挡住、装载时报告）；
+   * 反过来则是用户可见的数据丢失。
+   *
+   * 子表（texts / item_tags / reading_progress）由 ON DELETE CASCADE 带走。
+   * 返回真正删掉的条目数，供调用方如实汇报。
+   */
+  deleteSubscription(feedId: string): Promise<{ items: number }>
   /** 单条读取（标记已读要读改写，不能覆盖其它字段） */
   item(itemId: string): ItemRecord | undefined
   saveItem(itemId: string, record: ItemRecord): Promise<void>
@@ -272,9 +287,18 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
     },
     cursor: (feedId) => cursors.get(feedId),
     saveCursor: (feedId, record) => cursors.put(feedId, record),
-    deleteFeed: async (feedId) => {
+    deleteSubscription: async (feedId) => {
+      // 旧适配器同样是一次调用完成：条目 + 游标 + 源记录（Map 上没有事务，但中间不碰其它介质）。
+      let removed = 0
+      for (const [itemId, record] of items.entries()) {
+        if (record.feedId !== feedId) continue
+        await items.delete(itemId)
+        progress.delete(itemId)
+        removed += 1
+      }
       await cursors.delete(feedId)
       await feeds.delete(feedId)
+      return { items: removed }
     },
     item: (itemId) => items.get(itemId),
     saveItem: (itemId, record) => items.put(itemId, record),

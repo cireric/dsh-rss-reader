@@ -337,8 +337,8 @@ function articleTool(deps: ReadToolDeps): ToolDefinition {
         return { itemId, cached: false, reason: '条目不存在：可能从未抓取过，或已被清理' }
       }
       // ⚠️ **先确认这条还属于当前订阅，再谈任何元数据/正文**（审查发现）：
-      // 退订只删源记录与游标，残留条目仍留在 items 表里（孤儿行）。照搬 record.feedId 回给模型，
-      // 等于让一个已退订的来源继续通过 Agent 对外提供标题与正文。
+      // 正常退订会连同条目一起删掉（store.deleteSubscription），但半途失败或手工改库仍可能留下
+      // 孤儿行。照搬 record.feedId 回给模型，等于让一个已退订的来源继续通过 Agent 对外提供标题与正文。
       const subscribed = new Set(store.listFeeds().map(([id]) => id))
       if (!subscribed.has(record.feedId)) {
         return { itemId, cached: false, reason: '该条目所属订阅源已退订，内容不再对外提供' }

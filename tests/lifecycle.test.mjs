@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Config } from '../lib/config.js'
 import { createLifecycle } from '../lib/lifecycle.js'
+import { openDatabase, migrateSchema } from '../lib/storage/db.js'
 
 const FEED_ID = 'https://feed0.example.com/atom.xml'
 
@@ -172,6 +173,30 @@ test('守卫抛错时响亮失败，且失败路径自己关掉句柄（订阅�
 //   ⑦ `generationSignal = undefined` 去掉（信号没清）
 // 多数是**既有缺口**（基线 lib/index.js 里是同一份代码），但 H2 的验收标准写着「每条约束各有
 // 一条测试」，且 ⑤⑦ 属于**句柄释放**这一层（本仓库记过事故）。下面三条把它们各自钉住。
+
+test('装载时把孤儿条目报告出来（所属订阅已不在 config.json 里）：只报告，不删', async () => {
+  const h = make('orphans')
+  try {
+    // 先造库：一条属于当前订阅的条目 + 一条属于已退订源的条目（孤儿）。
+    // 直接写列（不经过 store）：store 要等 start 之后才存在，而这条判据测的正是装载那一刻。
+    const db = openDatabase(join(h.dir, 'rss.db'))
+    migrateSchema(db)
+    const insert = db.prepare(
+      'INSERT INTO items (id, feed_id, title, link, fetched_at) VALUES (?, ?, ?, ?, ?)',
+    )
+    insert.run('ok-1', FEED_ID, '正常', 'https://feed0.example.com/1', '2026-01-01T00:00:00.000Z')
+    insert.run('orphan-1', 'https://gone.example/feed', '孤儿', 'https://gone.example/1', '2026-01-01T00:00:00.000Z')
+    db.close()
+
+    await h.lc.start()
+    assert.ok(
+      h.lines.some((line) => line.includes('孤儿条目') && line.includes('1 条')),
+      '孤儿条目必须在装载日志里现身（只报告，不删）—— 实际日志：' + JSON.stringify(h.lines),
+    )
+    assert.notEqual(h.lc.ready().item('orphan-1'), undefined, '只报告，不许自动删除（删数据要有人发话）')
+    assert.notEqual(h.lc.ready().item('ok-1'), undefined, '正常条目当然还在')
+  } finally { h.clean() }
+})
 
 test('缺口 ①：refreshNow 的节流往返 —— 第二轮被拦且记下「还剩多久」', async () => {
   const h = make('throttle')

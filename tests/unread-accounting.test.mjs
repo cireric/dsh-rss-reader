@@ -47,7 +47,7 @@ function memoryStore() {
     saveFeed: async (id, record) => { feeds.set(id, record) },
     cursor: () => undefined,
     saveCursor: async () => {},
-    deleteFeed: async (feedId) => { feeds.delete(feedId) },
+    deleteSubscription: async (feedId) => { feeds.delete(feedId); return { items: 0 } },
     item: (id) => items.get(id),
     saveItem: async (id, record) => { items.set(id, record) },
     // 原子读改写（ReaderStore 契约的一部分）：fn 在写入槽位看到当前记录，见 src/store.ts 的注释

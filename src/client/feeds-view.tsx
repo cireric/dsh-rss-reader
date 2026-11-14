@@ -414,9 +414,10 @@ export function FeedsView({
               </select>
             </label>
             <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
-              title="退订并删除该源的全部条目（不可撤销）"
+              title="退订并删除该源的全部条目（含星标，不可撤销）"
               onClick={() => {
-                if (window.confirm('退订该源并删除它的全部条目？\n\n' + feed.id + '\n\n此操作不可撤销。')) onRemove(feed.id)
+                if (window.confirm('退订该源并删除它的全部条目？\n\n' + feed.id +
+                  '\n\n全部条目（包括你星标的）会被永久删除，此操作不可撤销。')) onRemove(feed.id)
               }}>退订</button>
           </div>
         ))}
