@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { EXTRACTOR_REVISION, extractArticle, isDecorativeImage, isFrameable, pickImageUrl, attrOf, blocksToText } from '../lib/article.js'
+import { EXTRACTOR_REVISION, extractArticle, fetchArticle, isDecorativeImage, isFrameable, pickImageUrl, attrOf, blocksToText } from '../lib/article.js'
 // decodeEntities / htmlToText 已搬到 html-text.ts（2026-10-07），断言一条没动
 import { decodeEntities, htmlToText } from '../lib/html-text.js'
 
@@ -250,7 +250,9 @@ test('容器识别不得吃掉标题：标题仍从全页取（og:title 在 head
  */
 test('抽取版本：常量必须由 article.ts 导出，且 endpoints 不得再写死数字', () => {
   assert.equal(typeof EXTRACTOR_REVISION, 'number')
-  assert.ok(EXTRACTOR_REVISION >= 3, '容器识别这一版至少是 3，实际 ' + EXTRACTOR_REVISION)
+  assert.ok(EXTRACTOR_REVISION >= 4, '正文 base 用落点这一版至少是 4，实际 ' + EXTRACTOR_REVISION)
+  // 为什么是 >= 4：P1-1 改了「相对图片按哪个 URL 解析」，旧缓存里的错图 URL 只有靠版本号
+  // 落后才会被重抓（endpoints 的缓存命中判据是 revision === EXTRACTOR_REVISION）。
   const endpoints = readFileSync(join(here, '..', 'src', 'endpoints.ts'), 'utf8')
   assert.match(endpoints, /ARTICLE_REVISION = EXTRACTOR_REVISION/, 'endpoints 必须引用抽取器导出的版本，而不是写字面量')
   assert.ok(
@@ -279,4 +281,24 @@ test('标题：剥掉站点后缀，但不碰本身就是标题的写法', () =>
   assert.equal(extractArticle(page('一个没有分隔符的普通标题')).title, '一个没有分隔符的普通标题')
   assert.equal(extractArticle(page('短标题 | 这里是一个非常长的后半段，明显不是站点名')).title, '短标题 | 这里是一个非常长的后半段，明显不是站点名')
   assert.equal(extractArticle(page('A | B')).title, 'A | B', '过短的标题一律不剥')
+})
+
+
+test('正文 base 用重定向落点 finalUrl：相对图片按落点解析，而不是请求 URL', async () => {
+  const html = '<!doctype html><html><body><article><h1>标题</h1>'
+    + '<p>' + '这是一段足够长的正文，用来通过四十字符的内容门槛，并确保抽取器能认出正文容器。'.repeat(2) + '</p>'
+    + '<img src="img/a.png" alt="示例图">'
+    + '</article></body></html>'
+  let calledWith = ''
+  const fakeFetch = async (url) => {
+    calledWith = url
+    return { kind: 'ok', body: html, finalUrl: 'https://final.example/new/post' }
+  }
+  const result = await fetchArticle('https://origin.example/old/post', { timeoutMs: 1000, maxBytes: 1_000_000 }, undefined, fakeFetch)
+  assert.equal(calledWith, 'https://origin.example/old/post', '请求仍打用户给的那个 URL（订阅身份不变）')
+  assert.equal(result.kind, 'ok')
+  const image = result.blocks.find((block) => block.kind === 'img')
+  assert.ok(image !== undefined, '正文里的图片块必须保留')
+  assert.equal(image.src, 'https://final.example/new/img/a.png',
+    '相对 img src 必须按 finalUrl 解析：按请求 URL 会指向 origin.example/old/img/a.png（裂图）')
 })

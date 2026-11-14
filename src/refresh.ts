@@ -172,6 +172,10 @@ function truncateContent(text: string | undefined, limit: number): string | unde
  * 星标永不自动删**。改动前这里是「无差别删最旧」，实测会连星标条目一起删掉。
  */
 async function prune(store: ReaderStore, feedId: string, maxItems: number): Promise<void> {
+  // 非法上限（0 / 负数 / NaN）一律视为「未配置」⇒ 不裁剪。与 selectArticleEvictions、
+  // selectStalestFeeds、truncateContent 同一条纪律：非法值回落到**不制造破坏**的一边。
+  // 不这么写的话 maxItems=0 会把未星标、未保持未读的条目全部删光（2026-11-15 实测）。
+  const limit = Number.isFinite(maxItems) && maxItems > 0 ? Math.floor(maxItems) : Number.POSITIVE_INFINITY
   const rows: RetentionRow[] = store.listItems(feedId).map(([itemId, record]) => ({
     id: itemId,
     starred: record.starred,
@@ -179,7 +183,7 @@ async function prune(store: ReaderStore, feedId: string, maxItems: number): Prom
     read: record.readAt !== undefined,
     recency: recencyOf(record),
   }))
-  for (const itemId of selectPrunable(rows, maxItems)) {
+  for (const itemId of selectPrunable(rows, limit)) {
     await store.deleteItem(itemId)
   }
 }
@@ -280,115 +284,146 @@ async function refreshOne(
   )
   const stamp = now().toISOString()
 
-  if (result.kind === 'failed') {
-    // 字段合并规则在 src/feed-intent.ts（H4 收拢）；「失败的尝试也是一次尝试」的防饿死判据
-    // 随意图走（refresh-failure），判据在 tests/refresh.test.mjs。
-    await store.updateFeed(feedId, { kind: 'refresh-failure', url: feedId, stamp, reason: result.reason })
-    return { feedId, url: feedId, status: 'failed', added: 0, reason: result.reason }
+  // 抓取窗口内用户可能已经退订了这个源（endpoints.removeFeed 会先删条目、再 deleteFeed）。
+  // 判据必须带 previous !== undefined：**本轮开始时它得还在**。只判「现在不在」会把
+  // 「首次抓取未预置源」也当成退订（既有夹具正是这种形状），那是行为漂移。
+  // 这时不能再写：updateFeed 会抛「源不存在」，而已经写进去的条目/游标会变成孤儿；
+  // 一个源的这种失败也不该掀翻整轮（模块头的不变式①）。2026-11-15 实测：不加这一句
+  // 会留下孤儿 cursor + item，并让 refreshFeeds 整体 reject。
+  if (previous !== undefined && store.feed(feedId) === undefined) {
+    return { feedId, url: feedId, status: 'failed', added: 0, reason: '订阅已在抓取期间移除，本轮结果丢弃' }
   }
 
-  if (result.kind === 'not-modified') {
-    // 升级轮里还被判 304（源忽略了无条件请求）：写回版本号避免每轮都重试，并留下痕迹
-    const upgradeSkipped = needsContentUpgrade
-    // 304 也是**成功**（源说「内容没变」）：lastFailure 必须清 —— 横幅只能反映最近一次真实结果
-    //（用户实测：月光博客连续十几次 not-modified，横幅仍写 HTTP 502）。合并语义在 feed-intent.ts。
-    await store.updateFeed(feedId, { kind: 'refresh-not-modified', url: feedId, stamp, contentRevision: CONTENT_REVISION })
-    return upgradeSkipped
-      ? { feedId, url: feedId, status: 'not-modified', added: 0, reason: '源未响应无条件请求，正文升级跳过' }
-      : { feedId, url: feedId, status: 'not-modified', added: 0 }
-  }
-
-  const parsed = parseFeed(result.body, feedId)
-  const cursor = store.cursor(feedId)
-  const seen = cursor?.seen ?? []
-
-  /**
-   * 身份索引：**这个源里我们见过什么**，供 resolveItemIds 判断「这条是不是老条目换了个身份」。
-   *
-   * 两个来源缺一不可：
-   * - items 表里的条目 ⇒ 知道「老身份」是什么（源换 guid 写法后候选表里没有它了）；
-   * - 游标里的 seen ⇒ 知道被保留量裁掉的条目（它不在表里，但身份仍被占用，见「去重不是归档」）。
-   * 链接反查只走条目表：链接是**现在的**链接，只对还在表里的条目有意义。
-   */
-  const knownIds = new Set(seen)
-  const idByLink = new Map<string, string>()
-  /** 同链接分叉出多条时留下**最早**那条的记录：修复动作认的是它，与 identity-repair 同一判据 */
-  const recordById = new Map<string, { link: string; title: string; publishedAt?: string; fetchedAt: string }>()
-  for (const [itemId, record] of store.listItems(feedId)) {
-    knownIds.add(itemId)
-    recordById.set(itemId, { link: record.link, title: record.title, publishedAt: record.publishedAt, fetchedAt: record.fetchedAt })
-    const link = record.link.trim()
-    const previous = idByLink.get(link)
-    if (previous === undefined) idByLink.set(link, itemId)
-    else {
-      const a = recordById.get(previous)
-      if (record.fetchedAt < (a?.fetchedAt ?? record.fetchedAt)) idByLink.set(link, itemId)
+  let added = 0
+  try {
+    if (result.kind === 'failed') {
+      // 字段合并规则在 src/feed-intent.ts（H4 收拢）；「失败的尝试也是一次尝试」的防饿死判据
+      // 随意图走（refresh-failure），判据在 tests/refresh.test.mjs。
+      await store.updateFeed(feedId, { kind: 'refresh-failure', url: feedId, stamp, reason: result.reason })
+      return { feedId, url: feedId, status: 'failed', added: 0, reason: result.reason }
     }
-  }
-  const known: KnownIdentities = {
-    has: (id) => knownIds.has(id),
-    idOf: (link) => idByLink.get(link),
-    recordOf: (id) => recordById.get(id),
-  }
 
-  // 一次响应内先把身份解析干净：认回老身份，再处理撞车（规格 §5 不变量 2）
-  const resolved = resolveItemIds(feedId, parsed.items, known)
-  const seenSet = new Set(seen)
-  const freshIds: string[] = []
+    if (result.kind === 'not-modified') {
+      // 升级轮里还被判 304（源忽略了无条件请求）：写回版本号避免每轮都重试，并留下痕迹
+      const upgradeSkipped = needsContentUpgrade
+      // 304 也是**成功**（源说「内容没变」）：lastFailure 必须清 —— 横幅只能反映最近一次真实结果
+      //（用户实测：月光博客连续十几次 not-modified，横幅仍写 HTTP 502）。合并语义在 feed-intent.ts。
+      await store.updateFeed(feedId, { kind: 'refresh-not-modified', url: feedId, stamp, contentRevision: CONTENT_REVISION })
+      return upgradeSkipped
+        ? { feedId, url: feedId, status: 'not-modified', added: 0, reason: '源未响应无条件请求，正文升级跳过' }
+        : { feedId, url: feedId, status: 'not-modified', added: 0 }
+    }
 
-  for (const [index, item] of parsed.items.entries()) {
-    const itemId = resolved.ids[index]
-    const summary = truncateContent(item.summary, options.maxContentChars)
-    const existing = store.item(itemId)
+    const parsed = parseFeed(result.body, feedId)
+    const cursor = store.cursor(feedId)
+    const seen = cursor?.seen ?? []
 
-    if (existing !== undefined || seenSet.has(itemId)) {
-      // 已见过：只补「更完整的正文」，绝不碰 readAt / starred（已读与星标是用户数据）。
-      // 这条同时承担回填：解析优先级修好后，老条目在下一次抓取里就能拿到全文。
-      if (existing !== undefined && (summary?.length ?? 0) > (existing.summary?.length ?? 0)) {
-        // ⚠️ 合并进**当前**记录，不要用循环开头那份 existing 快照整体写回：抓取是长任务，
-        // 期间用户完全可能把它标已读/加星，用旧快照写回会把这些用户数据一起抹掉。
-        // （2026-10-10 与 article 端点同一个丢失更新类别，判据在 tests/refresh.test.mjs）
-        await store.updateItem(itemId, (current) => ({ ...current, summary }))
+    /**
+     * 身份索引：**这个源里我们见过什么**，供 resolveItemIds 判断「这条是不是老条目换了个身份」。
+     *
+     * 两个来源缺一不可：
+     * - items 表里的条目 ⇒ 知道「老身份」是什么（源换 guid 写法后候选表里没有它了）；
+     * - 游标里的 seen ⇒ 知道被保留量裁掉的条目（它不在表里，但身份仍被占用，见「去重不是归档」）。
+     * 链接反查只走条目表：链接是**现在的**链接，只对还在表里的条目有意义。
+     */
+    const knownIds = new Set(seen)
+    const idByLink = new Map<string, string>()
+    /** 同链接分叉出多条时留下**最早**那条的记录：修复动作认的是它，与 identity-repair 同一判据 */
+    const recordById = new Map<string, { link: string; title: string; publishedAt?: string; fetchedAt: string }>()
+    for (const [itemId, record] of store.listItems(feedId)) {
+      knownIds.add(itemId)
+      recordById.set(itemId, { link: record.link, title: record.title, publishedAt: record.publishedAt, fetchedAt: record.fetchedAt })
+      const link = record.link.trim()
+      const previous = idByLink.get(link)
+      if (previous === undefined) idByLink.set(link, itemId)
+      else {
+        const a = recordById.get(previous)
+        if (record.fetchedAt < (a?.fetchedAt ?? record.fetchedAt)) idByLink.set(link, itemId)
       }
-      continue
+    }
+    const known: KnownIdentities = {
+      has: (id) => knownIds.has(id),
+      idOf: (link) => idByLink.get(link),
+      recordOf: (id) => recordById.get(id),
     }
 
-    seenSet.add(itemId)
-    freshIds.push(itemId)
-    await store.saveItem(itemId, {
-      feedId,
-      title: item.title,
-      link: item.link,
-      publishedAt: item.publishedAt,
-      summary,
-      fetchedAt: stamp,
-      starred: false,
+    // 一次响应内先把身份解析干净：认回老身份，再处理撞车（规格 §5 不变量 2）
+    const resolved = resolveItemIds(feedId, parsed.items, known)
+    const seenSet = new Set(seen)
+    const freshIds: string[] = []
+
+    for (const [index, item] of parsed.items.entries()) {
+      const itemId = resolved.ids[index]
+      const summary = truncateContent(item.summary, options.maxContentChars)
+      const existing = store.item(itemId)
+
+      if (existing !== undefined || seenSet.has(itemId)) {
+        // 已见过：只补「更完整的正文」，绝不碰 readAt / starred（已读与星标是用户数据）。
+        // 这条同时承担回填：解析优先级修好后，老条目在下一次抓取里就能拿到全文。
+        if (existing !== undefined && (summary?.length ?? 0) > (existing.summary?.length ?? 0)) {
+          // ⚠️ 合并进**当前**记录，不要用循环开头那份 existing 快照整体写回：抓取是长任务，
+          // 期间用户完全可能把它标已读/加星，用旧快照写回会把这些用户数据一起抹掉。
+          // （2026-10-10 与 article 端点同一个丢失更新类别，判据在 tests/refresh.test.mjs）
+          await store.updateItem(itemId, (current) => ({ ...current, summary }))
+        }
+        continue
+      }
+
+      seenSet.add(itemId)
+      freshIds.push(itemId)
+      await store.saveItem(itemId, {
+        feedId,
+        title: item.title,
+        link: item.link,
+        publishedAt: item.publishedAt,
+        summary,
+        fetchedAt: stamp,
+        starred: false,
+      })
+      added += 1
+    }
+
+    // 去重窗口的非法上限同理：0 / 负数 / NaN = 未配置 ⇒ 不截断。
+    // 清空 seen 会让下一轮把整份 feed 当成新内容重新导入成未读（条目暴增 + 已读态错位）。
+    const seenLimit = Number.isFinite(options.maxSeenPerFeed) && options.maxSeenPerFeed > 0
+      ? Math.floor(options.maxSeenPerFeed)
+      : Number.POSITIVE_INFINITY
+    const nextSeen = [...freshIds, ...seen]
+    await store.saveCursor(feedId, {
+      seen: seenLimit === Number.POSITIVE_INFINITY ? nextSeen : nextSeen.slice(0, seenLimit),
+      cursorAt: stamp,
     })
-  }
+    await store.updateFeed(feedId, {
+      kind: 'refresh-success',
+      url: feedId,
+      stamp,
+      title: parsed.title ?? previous?.title,
+      etag: result.etag,
+      lastModified: result.lastModified,
+      contentRevision: CONTENT_REVISION,
+    })
+    await prune(store, feedId, options.maxItemsPerFeed)
 
-  await store.saveCursor(feedId, {
-    seen: [...freshIds, ...seen].slice(0, options.maxSeenPerFeed),
-    cursorAt: stamp,
-  })
-  await store.updateFeed(feedId, {
-    kind: 'refresh-success',
-    url: feedId,
-    stamp,
-    title: parsed.title ?? previous?.title,
-    etag: result.etag,
-    lastModified: result.lastModified,
-    contentRevision: CONTENT_REVISION,
-  })
-  await prune(store, feedId, options.maxItemsPerFeed)
-
-  return {
-    feedId,
-    url: feedId,
-    status: 'added',
-    added: freshIds.length,
-    // 源在撒谎（同一次响应里 id 撞车）时留痕，由刷新摘要渲染出来 —— 它不该静默
-    untrusted: resolved.untrusted > 0 ? resolved.untrusted : undefined,
-    // 「认回了老条目」也留痕：它是「源的身份依据变过」这唯一一个可观测信号
-    reclaimed: resolved.reclaimed > 0 ? resolved.reclaimed : undefined,
+    return {
+      feedId,
+      url: feedId,
+      status: 'added',
+      added,
+      // 源在撒谎（同一次响应里 id 撞车）时留痕，由刷新摘要渲染出来 —— 它不该静默
+      untrusted: resolved.untrusted > 0 ? resolved.untrusted : undefined,
+      // 「认回了老条目」也留痕：它是「源的身份依据变过」这唯一一个可观测信号
+      reclaimed: resolved.reclaimed > 0 ? resolved.reclaimed : undefined,
+    }
+  } catch (error) {
+    // 单源持久化失败必须**就地降级**（模块头的不变式①）：磁盘满、config.json 被外部改坏、
+    // SQLITE_BUSY 都只该影响这一个源。不接住的话，整轮 refreshFeeds 会 reject ——
+    // 健康源的结果、日志摘要、正文缓存清算会一起丢掉（2026-11-15 实测）。
+    return {
+      feedId,
+      url: feedId,
+      status: 'failed',
+      added,
+      reason: '存储写入失败：' + (error instanceof Error ? error.message : String(error)),
+    }
   }
 }

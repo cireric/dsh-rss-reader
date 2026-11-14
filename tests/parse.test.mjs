@@ -155,3 +155,24 @@ test('身份解析：三条里两条同 URL、一条不同 ⇒ 只重算撞车�
   assert.equal(ids[0], ids[1], 'URL 相同就还是同一条')
   assert.notEqual(ids[0], ids[2])
 })
+
+
+test('条目链接只放行 http/https：javascript: / data: / file: / mailto: 归一成空串，相对与合法链接不变', () => {
+  // P0-1 判据：feed 的 <link> 由发布者控制。非 http(s) 一律 ''（本仓既有「无链接」语义），
+  // 否则它会原样进客户端的 <a href>，成为同源脚本执行面。
+  const rss = (link) => '<?xml version="1.0"?><rss version="2.0"><channel><title>t</title>'
+    + '<item><title>x</title><link>' + link + '</link><guid>g</guid></item></channel></rss>'
+  for (const bad of ['javascript:alert(1)', 'data:text/html,alert(1)', 'file:///etc/passwd', 'mailto:x@example.com']) {
+    assert.equal(parseFeed(rss(bad), 'https://example.com/feed.xml').items[0].link, '', bad + ' 不能进 items.link')
+  }
+  assert.equal(parseFeed(rss('/post/1'), 'https://example.com/feed.xml').items[0].link, 'https://example.com/post/1',
+    '相对链接仍按源地址绝对化')
+  assert.equal(parseFeed(rss('https://example.com/a'), 'https://example.com/feed.xml').items[0].link, 'https://example.com/a',
+    '合法 https 链接逐字不变')
+
+  // Atom 走的是另一条取值路径（link 是属性而不是元素文本），单独钉一条。
+  const atom = (href) => '<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>t</title>'
+    + '<entry><title>x</title><id>g</id><link href="' + href + '"/></entry></feed>'
+  assert.equal(parseFeed(atom('javascript:alert(1)'), 'https://atom.example/feed').items[0].link, '')
+  assert.equal(parseFeed(atom('/posts/1'), 'https://atom.example/feed').items[0].link, 'https://atom.example/posts/1')
+})

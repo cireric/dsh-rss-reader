@@ -8,6 +8,7 @@
  */
 import { XMLParser } from 'fast-xml-parser'
 import { asArray } from '../xml-node.js'
+import { httpUrlOrEmpty } from '../shared.js'
 import { toIsoUtc } from './date.js'
 
 export type FeedFormat = 'rss2' | 'rss1' | 'atom' | 'unknown'
@@ -85,9 +86,14 @@ export function absolutize(href: string | undefined, baseUrl: string): string {
   const value = (href ?? '').trim()
   if (!value) return ''
   try {
-    return new URL(value, baseUrl).toString()
+    // 相对链接仍按 baseUrl 绝对化；协议白名单与客户端渲染共用 shared.ts 的唯一判据。
+    // 为什么要在这里挡（而不是只在渲染层）：javascript: 一旦落库就成了**存储型**注入，
+    // 每个读这条记录的面（列表 / 正文 / Agent 工具）都得各自记得再挡一次。
+    return httpUrlOrEmpty(new URL(value, baseUrl).toString())
   } catch {
-    return value
+    // 解析失败仍返回原值（不抛错，与本函数既有语义一致），但同样要过白名单：
+    // 坏 baseUrl 下 'javascript:' 不能借这条 catch 漏出去。
+    return httpUrlOrEmpty(value)
   }
 }
 

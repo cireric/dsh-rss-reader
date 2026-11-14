@@ -133,3 +133,15 @@ test('用法错误：不给目录时打印用法并退出 2（不误判为「可
   assert.equal(result.status, 2)
   assert.match(result.stderr, /用法/)
 })
+
+
+test('P2-4 config.json 里的 feed 记录不合 FeedRecord ⇒ 拒绝恢复（与装载路径同一条判据）', () => {
+  const dir = makeBackup('bad-feed')
+  try {
+    // writeConfigFile 会在写侧校验，所以这里必须直接写原始 JSON（模拟被别的写入者改坏的副本）
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ version: 1, feeds: { [FEED]: { title: 5 } } }, null, 2))
+    const result = verify(dir)
+    assert.equal(result.status, 2, '不可装载的 config.json 不许判「可以恢复」：' + result.stderr)
+    assert.match(result.stderr, /不能装载/)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})

@@ -6,6 +6,9 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
 import { SCHEMA_VERSION } from '../lib/storage/db.js'
+// 正文缓存的 revision 跟着抽取器版本走：写死 3 会在下一次抬版本时变成「缓存过期」，
+// 让「旧库可读」这条用例去走网络（2026-11-15 抬到 4 时实测踩到）。
+import { EXTRACTOR_REVISION } from '../lib/article.js'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -50,7 +53,7 @@ test('搜索直接使用旧版 v1 库，Worker 启动失败时仍可阅读且恢
       oldDb.prepare('INSERT INTO items (id, feed_id, title, link, fetched_at, kept_unread) VALUES (?, ?, ?, ?, ?, ?)')
         .run('unread', feed, '旧版保留未读', 'https://example.test/unread', time, 1)
       oldDb.prepare('INSERT INTO texts (item_id, body, revision, frameable, title, fetched_at) VALUES (?, ?, ?, ?, ?, ?)')
-        .run('read', JSON.stringify(blocks), 3, 0, '旧版缓存标题', time)
+        .run('read', JSON.stringify(blocks), EXTRACTOR_REVISION, 0, '旧版缓存标题', time)
       oldDb.prepare('INSERT INTO cursors (feed_id, seen, cursor_at) VALUES (?, ?, ?)')
         .run(feed, JSON.stringify(['read', 'unread']), time)
     } finally {

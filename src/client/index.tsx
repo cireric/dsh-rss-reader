@@ -39,7 +39,7 @@ import { FeedsView } from './feeds-view.js'
 import { FeedNav } from './feed-nav.js'
 import { TagEditor } from './tag-editor.js'
 import { ArticleView } from './article-pane.js'
-import { MIN_CONTENT_CHARS, recencyOf, ROUTE_PATH, type ArticlePayload, type CleanupResult, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult } from '../shared.js'
+import { httpUrlOrEmpty, MIN_CONTENT_CHARS, recencyOf, ROUTE_PATH, type ArticlePayload, type CleanupResult, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult } from '../shared.js'
 import { htmlToText } from '../html-text.js'
 // resolveReaderKey 也搬去了（keyboard-routing.ts 第 1 层）；这里只留帮助浮窗要用的两张表。
 import { READER_KEY_HELP, READER_HELP_SCOPE_LABEL } from '../keys.js'
@@ -638,6 +638,9 @@ export function createReader(store: ReaderStore): () => ReactNode {
           {items.map((item) => {
             // expanded 视图下每条都带正文摘录；list 视图下只有 o 展开的那一条（GR 的 o 就是 list 专用）
             const isOpen = state.layout === 'expanded' || expanded === item.id
+            // 历史行可能带脏 link（修复前落库的 javascript:）：渲染前过 shared.ts 的唯一白名单。
+            // 空串 = 既有的「无链接」语义（不渲染「打开原站」、也不留点击间距）。
+            const safeLink = httpUrlOrEmpty(item.link)
             const unread = item.readAt === undefined
             const selected = state.selectedId === item.id
             return (
@@ -669,12 +672,16 @@ export function createReader(store: ReaderStore): () => ReactNode {
                           另有 {state.duplicates[item.id].length} 个来源
                         </summary>
                         <span className="dsh-rss-dupes-list">
-                          {state.duplicates[item.id].map((other) => (
-                            <a key={other.itemId} href={other.link} target="_blank" rel="noreferrer"
-                              data-rss-dupe-item={other.itemId}>
-                              {other.feedTitle} · {other.title || other.link}
-                            </a>
-                          ))}
+                          {state.duplicates[item.id].map((other) => {
+                            // 历史行可能带脏 link：渲染期统一过白名单。空 href 会变成「点一下刷新当前页」，
+                            // 所以认不出就退成纯文本，不做可点链接。
+                            const href = httpUrlOrEmpty(other.link)
+                            const label = other.feedTitle + ' · ' + (other.title || other.link)
+                            return href === ''
+                              ? <span key={other.itemId} data-rss-dupe-item={other.itemId}>{label}</span>
+                              : <a key={other.itemId} href={href} target="_blank" rel="noreferrer"
+                                  data-rss-dupe-item={other.itemId}>{label}</a>
+                          })}
                         </span>
                       </details>
                     )}
@@ -700,12 +707,12 @@ export function createReader(store: ReaderStore): () => ReactNode {
                         })()}
                         {/* 「保持未读」按规格是**条目下方的链接**（GR 没给它快捷键），所以这里不放键位 */}
                         <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
-                          style={{ fontSize: 12, marginTop: 8, marginRight: item.link === '' ? 0 : 12 }}
+                          style={{ fontSize: 12, marginTop: 8, marginRight: safeLink === '' ? 0 : 12 }}
                           onClick={(event) => { event.stopPropagation(); void store.toggleKeepUnread(item.id) }}>
                           {item.keptUnread === true ? '取消保持未读' : '保持未读'}
                         </button>
-                        {item.link !== '' && (
-                          <a href={item.link} target="_blank" rel="noreferrer" style={{ fontSize: 12, display: 'inline-block', marginTop: 8 }}>打开原站 ↗</a>
+                        {safeLink !== '' && (
+                          <a href={safeLink} target="_blank" rel="noreferrer" style={{ fontSize: 12, display: 'inline-block', marginTop: 8 }}>打开原站 ↗</a>
                         )}
                       </span>
                     )}

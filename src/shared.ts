@@ -501,6 +501,32 @@ export function clampReadingRatio(value: unknown): number {
 export const MIN_CONTENT_CHARS = 40
 
 /**
+ * 只放行 http/https 的绝对 URL；其余（`javascript:` / `data:` / `file:` / `mailto:` …）一律空串。
+ *
+ * 为什么必须有它（M5 安全评审，2026-11-15）：feed 的条目 `<link>` 由**发布者控制**，而它会
+ * 原样进入客户端的三处 `<a href>` 与 `v` 键的 `window.open`。一个 `javascript:` 链接就是一次
+ * **同源**脚本执行 —— 宿主把浏览器请求视为 owner 身份（packages/client/connection 的
+ * requestRejection/admit），等于把 API 交给 feed 作者。抓取层（feed/fetch.ts 的 blockedReason）
+ * 与图片层（article.ts 的 safeUrl）早已做同一件事，唯独条目链接的展示/打开漏了。
+ *
+ * 为什么放在 shared.ts：写入口（feed 解析）与读/渲染口（客户端）必须共用**同一份**判据；
+ * 抄两份就是下一次漂移。`''` 是本仓既有的「无链接」语义（article 端点直接拒、界面不渲染
+ * 「打开原站」），所以归一成空串是最小侵入。
+ *
+ * 不做历史数据迁移：库里旧行可能已经是脏 link，渲染期兜底足以阻断执行面；改用户数据风险更高
+ *（见 docs/ops/backup-restore.md 的备份约束）。
+ */
+export function httpUrlOrEmpty(raw: string): string {
+  try {
+    const url = new URL(raw)
+    // 归一化后的字符串交回去（同时剥掉 URL 里的控制字符）；合法 http(s) 的常见写法逐字不变。
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : ''
+  } catch {
+    return ''
+  }
+}
+
+/**
  * 条目的排序用时间：优先发布时间，缺则退到抓取时间。
  *
  * 宿主侧（列表排序、按源裁剪、显式清理）与浏览器半（列表显示）都用它——原先三处各写一份，

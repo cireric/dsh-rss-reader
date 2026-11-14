@@ -137,6 +137,20 @@ export function pruneOldLogs(root: string, keepDays = 14, now: Date = new Date()
   return removed
 }
 /**
+ * 落盘前的最小转义：CR/LF 与其余 C0 控制字符（\t 保留）→ 可见转义序列。
+ *
+ * 为什么只对文件：sink 是宿主 logger 的既有形态，改它会牵动别人的日志管道；而
+ * 「一条日志 = 一行」这条不变量只在按行读的文件上成立（prune / 排障 / 发布前真机判据都按行读）。
+ * 不转义时，message 里的一条 \n 就能伪造一行日志 —— 而「当天日志无装载失败」正是发布判据之一。
+ */
+function escapeLogLine(message: string): string {
+  return message
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, (ch) => '\\u' + ch.charCodeAt(0).toString(16).padStart(4, '0'))
+}
+
+/**
  * 日志写入器：把「行首时间戳 / 双 sink / 落点策略」三条判定收进一个 Interface
  *（2026-10-15 H2 Task 1，从 src/index.ts 的 apply 闭包搬来）。
  *
@@ -172,6 +186,8 @@ export function createLogger(opts: {
     const at = clock()
     const line = '[' + at.toISOString() + '] ' + message
     sink?.(line)
+    // 文件里那行单独转义（控制字符不得换行）：sink 保持原样，见 escapeLogLine 的理由。
+    const fileLine = '[' + at.toISOString() + '] ' + escapeLogLine(message)
     // 默认落点按**当天现算**（长驻进程不能只算一次，否则之后所有日志都写进装载那天）
     const target = logFile === '' ? dailyLogPath(storagesRoot, at) : logFile
     try {
@@ -183,7 +199,7 @@ export function createLogger(opts: {
       mkdirSync(dirname(target), logFile === ''
         ? { recursive: true, mode: 0o700 }
         : { recursive: true })
-      appendFileSync(target, line + '\n')
+      appendFileSync(target, fileLine + '\n')
     } catch (error) {
       // 日志写不进去要可见，但不能因此拖垮插件本身
       warn('[dsh-rss-reader] 写刷新日志失败：' + String(error))

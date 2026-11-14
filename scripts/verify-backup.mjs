@@ -20,6 +20,9 @@ import { DatabaseSync } from 'node:sqlite'
 import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { SCHEMA_VERSION } from '../lib/storage/db.js'
+// 与装载路径**同一份**校验：readConfigFile 会逐条过 feedRecordSchema（strict）并校验 folders 形状。
+// 校验器的唯一职责是回答「这份副本能不能拿来恢复」，不能只验「是不是合法 JSON」。
+import { readConfigFile } from '../lib/storage/config-file.js'
 
 const CONFIG_VERSION = 1
 
@@ -68,6 +71,14 @@ function main(argv) {
       bad('config.json 的 feeds 不是「feedId → 记录」的映射')
     } else {
       ok('config.json 版本与形状合格，订阅 ' + Object.keys(config.feeds).length + ' 条')
+      // 再跑一遍装载路径的读取器：feed 记录/文件夹任何一条不合 schema，恢复后插件都起不来，
+      // 而「能不能起来」正是本校验器要回答的问题（2026-11-15：原实现只看顶层形状）。
+      try {
+        const loaded = readConfigFile(configPath)
+        ok('config.json 通过装载校验（订阅 ' + Object.keys(loaded.feeds).length + ' 条）')
+      } catch (error) {
+        bad('config.json 不能装载：' + (error instanceof Error ? error.message : String(error)))
+      }
     }
   }
 

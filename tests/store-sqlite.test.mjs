@@ -25,7 +25,7 @@ import { createSqliteStore } from '../lib/store-sqlite.js'
 import { feedRecordSchema, itemRecordSchema } from '../lib/domain.js'
 import { articleCharsOf, selectCleanup } from '../lib/retention.js'
 import { countUnreadPerFeed, recencyOf, DEFAULT_READING_PREFERENCES } from '../lib/shared.js'
-import { freshStore, tempDir } from './helpers/reader-store-memory.mjs'
+import { freshStore, strictMemoryStore, tempDir } from './helpers/reader-store-memory.mjs'
 import { applyFeedIntent } from '../lib/feed-intent.js'
 
 /** 断言读回来的记录合 ItemRecord（strict）——多带一列就会在这里翻红。 */
@@ -932,4 +932,47 @@ test('H4：refresh-failure 盖 lastAttemptedAt 但不盖 lastFetchedAt（防饿�
     assert.equal(after.lastFetchedAt, '2026-10-11T09:00:00.000Z', 'lastFetchedAt 是「上次成功」，不许被失败盖掉')
     assert.equal(after.lastFailure, 'HTTP 500', '失败原因如实记录')
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+
+/* ──────────────── P2-2：桩与两个生产实现的 updateFeed 契约（2026-11-15） ──────────────── */
+test('P2-2 updateFeed 契约：refresh 三种意图在源不存在时拒绝，upsert 允许创建（桩 strict 模式与生产一致）', async () => {
+  const { store } = freshStore('updatefeed-contract')
+  const strict = strictMemoryStore()
+  const stamp = '2026-11-15T00:00:00.000Z'
+  const missing = 'https://missing.example/feed'
+  const intents = [
+    { kind: 'refresh-success', url: missing, stamp, title: 't', etag: undefined, lastModified: undefined, contentRevision: 2 },
+    { kind: 'refresh-not-modified', url: missing, stamp, contentRevision: 2 },
+    { kind: 'refresh-failure', url: missing, stamp, reason: 'HTTP 500' },
+  ]
+  for (const intent of intents) {
+    await assert.rejects(() => store.updateFeed(missing, intent), /源不存在/, '生产 store 必须拒绝 ' + intent.kind)
+    await assert.rejects(() => strict.updateFeed(missing, intent), /源不存在/, 'strict 桩必须与生产同判据：' + intent.kind)
+  }
+  const upsert = { kind: 'upsert-subscription', url: 'https://new.example/feed', title: '新源', folder: undefined }
+  await store.updateFeed('https://new.example/feed', upsert)
+  await strict.updateFeed('https://new.example/feed', upsert)
+  assert.equal(store.feed('https://new.example/feed').title, '新源')
+  assert.equal(strict.feed('https://new.example/feed').title, '新源', 'upsert 的创建语义两边都要允许')
+})
+
+
+test('P3-3 mergeItems 不丢被并条目的阅读进度（keeper 没有才接住，已有则保留）', async () => {
+  const { store, db } = freshStore('merge-progress')
+  const record = (title) => ({ feedId: 'https://f.example/', title, link: 'https://e.test/1', fetchedAt: '2026-11-15T00:00:00.000Z', starred: false })
+  await store.saveItem('keeper', record('k'))
+  await store.saveItem('loser', record('l'))
+  await store.saveReadingProgress('loser', '4:abcd', 0.5)
+  await store.mergeItems('keeper', ['loser'], record('k'))
+  assert.deepEqual(store.readingProgress('keeper', '4:abcd'), { ratio: 0.5 }, 'keeper 没有进度时必须接住 loser 的')
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM reading_progress').get().n, 1, '只留一行（loser 的已级联删除）')
+
+  // keeper 已有进度：保留 keeper 的，不被 loser 覆盖（用户最后读的是 keeper）
+  await store.saveItem('keeper2', record('k2'))
+  await store.saveItem('loser2', record('l2'))
+  await store.saveReadingProgress('keeper2', '4:abcd', 0.2)
+  await store.saveReadingProgress('loser2', '4:abcd', 0.9)
+  await store.mergeItems('keeper2', ['loser2'], record('k2'))
+  assert.deepEqual(store.readingProgress('keeper2', '4:abcd'), { ratio: 0.2 }, 'keeper 已有进度时不许被 loser 覆盖')
 })

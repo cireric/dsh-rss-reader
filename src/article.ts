@@ -24,9 +24,10 @@ import { decodeEntities, htmlToText, preToText } from './html-text.js'
  * 「修了还是老样子」，根因就在这里（实测：库里那篇文章的缓存时间早于修复 1 小时）。
  * 放在抽取逻辑旁边，改抽取的人改的就是同一个文件，漏抬版本变成「看得见的不一致」而不是静默事故。
  *
- * 版本 1 = 纯文本段落（已废弃）；2 = 结构化块；3 = 正文容器识别（去掉站点杂图）。
+ * 版本 1 = 纯文本段落（已废弃）；2 = 结构化块；3 = 正文容器识别（去掉站点杂图）；
+ * 4 = 正文 base 改用重定向落点（finalUrl）——相对图片不再按请求 URL 解析。
  */
-export const EXTRACTOR_REVISION = 3
+export const EXTRACTOR_REVISION = 4
 
 /**
  * 正文的**内容标识**（M5 02 的阅读进度键）：`<抽取器修订号>:<块列表摘要>`。
@@ -766,12 +767,23 @@ export async function fetchArticle(
   url: string,
   limits: FetchLimits,
   signal?: AbortSignal,
+  /**
+   * 抓取实现（测试注入；生产不传）。与 refresh.ts 的 fetchFeedImpl、subscribe.ts 的 fetchImpl
+   * 同一条模式。为什么需要这个缝：正文路径的判据是「相对图片按 finalUrl 解析」，而本地 301 桩
+   * 在 fetchFeed 里走不通 —— 重定向目标永远按不可信处理，127.0.0.1 会被拒（2026-11-15 实测：
+   * '重定向被拒：拒绝访问内网地址 127.0.0.1'）。不注入就只能读源码断言，那是脆弱方式。
+   */
+  fetchImpl: typeof fetchFeed = fetchFeed,
 ): Promise<{ kind: 'ok'; title?: string; blocks: ArticleBlock[]; frameable: boolean } | { kind: 'failed'; reason: string }> {
   let frameable = true
-  const result = await fetchFeed(url, {}, limits, signal, (response) => { frameable = isFrameable(response.headers) })
+  const result = await fetchImpl(url, {}, limits, signal, (response) => { frameable = isFrameable(response.headers) })
   if (result.kind === 'failed') return { kind: 'failed', reason: result.reason }
   if (result.kind === 'not-modified') return { kind: 'failed', reason: '原站返回 304（未传条件请求，异常）' }
-  const extracted = extractArticle(result.body, url)
+  // ⚠️ base 必须是 result.finalUrl（跟完重定向后真正取到内容的地址），不是入参 url：
+  // 站点 301 换 host/路径时，相对 img src 按请求 URL 会解析到旧地址（裂图），
+  // 而错 URL 会写进正文缓存，抬 EXTRACTOR_REVISION 之前一直错。
+  // 与 src/subscribe.ts 的 discoverCandidates 用的是同一条纪律（page.finalUrl）。
+  const extracted = extractArticle(result.body, result.finalUrl)
   if (extracted.blocks.length === 0) return { kind: 'failed', reason: '没能从该页面里抽出正文（版式不支持）' }
   return { kind: 'ok', title: extracted.title, blocks: extracted.blocks, frameable }
 }

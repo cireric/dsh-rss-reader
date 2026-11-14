@@ -9,7 +9,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { refreshFeeds, selectStalestFeeds } from '../lib/refresh.js'
-import { memoryStore, armConcurrentRead } from './helpers/reader-store-memory.mjs'
+import { memoryStore, strictMemoryStore, armConcurrentRead } from './helpers/reader-store-memory.mjs'
 import { Config, apply } from '../lib/index.js'
 
 // 内存桩已抽到 tests/helpers/reader-store-memory.mjs（C4-a）：refresh 用的是它的全量版，
@@ -994,4 +994,67 @@ test('M4 02：连续两轮失败累计到 2，恢复成功后清零并清掉横�
   mode = 'fail'
   await refreshFeeds([url], store, options)
   assert.equal(store.feed(url).failureCount, 1, '清零后再失败从 1 开始数')
+})
+
+
+/* ──────────────── P2-1：单源持久化失败隔离（2026-11-15） ──────────────── */
+test('P2-1 单源存储写失败只降级该源：其余源照常出、整轮不 reject', async () => {
+  const store = strictMemoryStore()
+  await withServer(serveFeed(THREE_ITEMS), async (base) => {
+    const good = base + '/good.xml'
+    const bad = base + '/bad.xml'
+    await store.saveFeed(good, { url: good })
+    await store.saveFeed(bad, { url: bad })
+    const originalSaveItem = store.saveItem
+    store.saveItem = async (id, record) => {
+      if (record.feedId === bad) throw new Error('模拟磁盘写失败')
+      return originalSaveItem(id, record)
+    }
+    // 不 catch：判据就是「refreshFeeds 不 reject」——reject 会让本用例直接红。
+    const outcomes = await refreshFeeds([good, bad], store, { ...BASE_OPTIONS, refreshConcurrency: 1 })
+    assert.equal(outcomes.length, 2, '两个源都要有 outcome（不许因为一个失败丢掉另一个）')
+    assert.equal(outcomes[0].status, 'added')
+    assert.equal(outcomes[1].status, 'failed')
+    assert.match(outcomes[1].reason, /存储写入失败/)
+    assert.equal([...store.items.values()].filter((record) => record.feedId === good).length, 3,
+      '健康源的三条必须都入库（整轮不许被一个源的磁盘错误掀翻）')
+  })
+})
+
+test('P2-1 刷新途中退订该源：按失败返回、不抛错、不留孤儿条目/游标', async () => {
+  const store = strictMemoryStore()
+  const victim = 'https://victim.example/feed'
+  const other = 'https://other.example/feed'
+  await store.saveFeed(victim, { url: victim })
+  await store.saveFeed(other, { url: other })
+  // 抓取窗口内用户退订：与 endpoints.removeFeed 的 deleteFeed 同一动作（条目此时还没写）。
+  const fakeFetch = async (url) => {
+    if (url === victim) await store.deleteFeed(victim)
+    return { kind: 'ok', body: rss(THREE_ITEMS), finalUrl: url }
+  }
+  const outcomes = await refreshFeeds([victim, other], store, {
+    ...BASE_OPTIONS, refreshConcurrency: 1, fetchFeedImpl: fakeFetch,
+  })
+  assert.equal(outcomes[0].status, 'failed', '已退订的源本轮按失败返回，而不是把整轮打成异常')
+  assert.match(outcomes[0].reason, /订阅已在抓取期间移除/)
+  assert.equal(outcomes[1].status, 'added', '另一个源照常入库')
+  assert.equal([...store.items.values()].filter((record) => record.feedId === victim).length, 0,
+    '已退订源不许留下孤儿条目（updateFeed 抛错前写进去的那些）')
+  assert.equal(store.cursors.has(victim), false, '已退订源不许留下孤儿游标')
+})
+
+
+test('P3-4 非法保留上限（0）不制造破坏：不裁剪、不清空去重窗口', async () => {
+  const store = strictMemoryStore()
+  await withServer(serveFeed(THREE_ITEMS), async (base) => {
+    const feedUrl = base + '/feed.xml'
+    await store.saveFeed(feedUrl, { url: feedUrl })
+    const options = { ...BASE_OPTIONS, maxItemsPerFeed: 0, maxSeenPerFeed: 0 }
+    const first = await refreshFeeds([feedUrl], store, options)
+    assert.equal(first[0].added, 3)
+    assert.equal(store.items.size, 3, '上限 0 = 未配置，不许把条目删光')
+    assert.equal(store.cursor(feedUrl).seen.length, 3, '上限 0 = 不截断去重窗口')
+    const second = await refreshFeeds([feedUrl], store, options)
+    assert.equal(second[0].added, 0, '去重窗口还在 ⇒ 第二轮不许重复新增')
+  })
 })

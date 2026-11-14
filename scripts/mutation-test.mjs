@@ -23,6 +23,28 @@ const ROOT = process.cwd()
  * 缺口。等价变异混进来会让这道门槛变成狼来了。
  */
 const MUTATIONS = [
+  // ── 2026-11-15 缺陷修复轮：协议白名单 / 正文 base / 日志转义 / 同名多值 ──
+  // 每一条都是「改坏关键判定，看有没有判据喊」。from 锚串取自 lib/ 产物的实际字节
+  //（构建后逐条独立 grep 核对 OCCURRENCES=1，见 docs/pitfalls.md 一、1.4）。
+  { id: 'link-协议白名单失效', file: 'lib/shared.js',
+    judges: ['parse.test.mjs'],
+    from: "return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : '';",
+    to: "return url.toString();" },
+  // 正文 base 回落到请求 URL：301 换路径后相对图片会解析到旧地址（P1-1 的病象）。
+  { id: 'article-正文base回落到请求URL', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    from: 'extractArticle(result.body, result.finalUrl)',
+    to: 'extractArticle(result.body, url)' },
+  // 去掉落盘转义：message 里的换行会伪造日志行（发布前真机判据按行读）。
+  { id: 'log-落盘不转义控制字符', file: 'lib/storage/log-file.js',
+    judges: ['log-file.test.mjs'],
+    from: 'escapeLogLine(message);',
+    to: 'message;' },
+  // 同名多值按值排序：?tag=a&tag=b 与 ?tag=b&tag=a 会被并成同一组提示。
+  { id: 'dupes-同名多值按值排序', file: 'lib/duplicates.js',
+    judges: ['duplicates.test.mjs'],
+    from: 'params.sort((a, b) => a[0].localeCompare(b[0]));',
+    to: 'params.sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]));' },
   // 渲染和键盘共用行序，折叠后仍生成子行会让导航无法跳过。
   { id: 'folder-折叠隐藏订阅行', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],

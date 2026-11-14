@@ -98,20 +98,31 @@ export function createLifecycle(deps: LifecycleDeps): Lifecycle {
    * 之后的话，中间任何一步都可能先写库，而守卫抛错时这一代已经半装好了。
    */
   const assertSubscriptionsNotLost = (db: DatabaseSync): void => {
-    if (!configFileMissing(configFile)) {
-      readConfigFile(configFile)
-      return
-    }
+    // 文件在不在分两类：在 ⇒ 读一遍（读不出来由 readConfigFile 响亮抛错，既有语义）；
+    // 不在 ⇒ 只有「库里也没条目」才是首次安装。
+    const file = configFileMissing(configFile) ? undefined : readConfigFile(configFile)
     const row = db.prepare('SELECT COUNT(*) AS n FROM items').get()
     const stored = row?.n
     if (typeof stored !== 'number') {
       throw new Error('读不出订阅库的条目数（返回 ' + JSON.stringify(row) + '）：库被外部改动过？')
     }
     if (stored === 0) return
-    throw new Error(
-      '订阅库里有 ' + stored + ' 条条目，但订阅文件 ' + configFile + ' 不存在 —— 订阅映射无从重建。' +
-        '请从备份恢复该文件。不静默继续：那会让用户看到一份空订阅列表。',
-    )
+    if (file === undefined) {
+      throw new Error(
+        '订阅库里有 ' + stored + ' 条条目，但订阅文件 ' + configFile + ' 不存在 —— 订阅映射无从重建。' +
+          '请从备份恢复该文件。不静默继续：那会让用户看到一份空订阅列表。',
+      )
+    }
+    if (Object.keys(file.feeds).length === 0) {
+      // 正常退订会把条目一起删（endpoints.removeFeed），所以「feeds 空 + 条目 > 0」只可能是
+      // 订阅映射丢了/被清空了 —— 与 scripts/verify-backup.mjs 的第四条判据逐字同义，
+      // docs/ops/backup-restore.md §4 承诺「与装载路径同一条判据」，这里把它补成真的。
+      throw new Error(
+        '订阅库里有 ' + stored + ' 条条目，但订阅文件 ' + configFile + ' 里一条订阅都没有 —— 订阅映射丢了。' +
+          '请从备份恢复该文件（若确属退订光了，请先备份 rss.db 再手工清库）。' +
+          '不静默继续：那会让用户看到一份空订阅列表。',
+      )
+    }
   }  /** 把 Config.feeds 里还没落库的源幂等写进新存储（订阅源的真相在 config.json 里）。 */
   const seedConfiguredFeeds = async (target: ReaderStore): Promise<number> => {
     let seeded = 0

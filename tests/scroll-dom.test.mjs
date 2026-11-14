@@ -2167,3 +2167,24 @@ test('M4 02：管理页显示健康、连败次数、最近尝试与上次成功
   assert.match(b.textContent, /连续失败：次数未知/, '老记录没有计数 ⇒ 未知，不许写成 0')
   assert.doesNotMatch(b.textContent, /连续失败：0 次/)
 })
+
+
+test('P0-1：条目链接是 javascript: 时，列表行与正文页都不渲染可点的原站链接（历史脏数据兜底）', skip, async () => {
+  const h = await mountReader({ items: [item({ id: 'bad', link: 'javascript:alert(1)' })] })
+  await h.store.load('overview')
+  await sleep(50)
+  const row = h.win.document.querySelector('[data-rss-row="bad"] .dsh-rss-row-main')
+  assert.ok(row !== null, '条目行必须渲染出来')
+  row.dispatchEvent(new h.win.MouseEvent('click', { bubbles: true, cancelable: true }))
+  await sleep(30)
+
+  assert.equal(h.win.document.querySelector('a[href^="javascript:"]'), null,
+    '列表行展开后不许出现 javascript: 的 href（白名单把它当成无链接）')
+
+  // 正文页的「打开原站」：link 来自同一条脏记录，必须同样挡掉。
+  h.store.select('bad')
+  await h.store.openArticle()
+  await sleep(50)
+  assert.equal(h.win.document.querySelector('a[href^="javascript:"]'), null,
+    '正文页的「打开原站」同样不许出现 javascript:')
+})

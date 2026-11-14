@@ -58,6 +58,9 @@ function loadClientBundle() {
     clearTimeout,
     Date,
     JSON,
+    // 浏览器全局：客户端白名单判据（shared.ts 的 httpUrlOrEmpty）用 new URL 校验协议。
+    // 真实浏览器一定有它；沙箱缺了会让判据走 catch 分支、把合法链接也当成空串（实测踩到）。
+    URL,
   }
   vm.createContext(sandbox)
   vm.runInContext(source, sandbox, { filename: BUNDLE_NAME })
@@ -793,4 +796,15 @@ test('M4 02：刷新提示区分「本轮尝试 X/Y」与「被节流 / 并入�
   await inFlight.store.load('refresh')
   assert.match(inFlight.store.get().notice, /并入/, '并入在途要说清没有发起新一轮')
   assert.doesNotMatch(inFlight.store.get().notice, /本轮尝试/)
+})
+
+
+/* ──────────────── P0-1：条目链接协议白名单（历史脏数据兜底） ──────────────── */
+test('P0-1：条目链接是 javascript: 时，v 键不调用 window.open、也不标已读', async () => {
+  const { store, opened } = await driveStore({ items: [item({ id: 'bad', link: 'javascript:alert(1)' })] })
+  store.select('bad')
+  store.openSelected()
+  assert.deepEqual(opened, [], 'javascript: 链接不许交给 window.open')
+  assert.equal(store.get().items.find((entry) => entry.id === 'bad').readAt, undefined,
+    "动作没发生就不该标已读（与 link === '' 的既有语义一致）")
 })

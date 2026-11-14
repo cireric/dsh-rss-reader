@@ -20,7 +20,8 @@ import type { FeedRecord } from './domain.js'
 export type FeedIntent =
   | {
       /** 刷新成功（200，真的抓到了新内容）：盖两个时间戳、写版本号、**清 lastFailure**。
-       *  url 必带：refresh 的首次抓取兼管创建（previous undefined 合法），url 是 FeedRecord 必填键。 */
+       *  url 必带：FeedRecord 的必填键。previous undefined 时由本函数补；能否落库由 store 的
+       *  updateFeed 裁决（refresh 意图要求源已存在，见文件头）。 */
       kind: 'refresh-success'
       url: string
       stamp: string
@@ -32,7 +33,7 @@ export type FeedIntent =
     }
   | {
       /** 刷新 304（源说内容没变）：也是**成功** —— 同样盖两个时间戳、清 lastFailure，但保留 etag/lastModified。
-       *  url 必带：首次抓取即创建是 refresh 的既有宽容语义。 */
+       *  url 必带：FeedRecord 的必填键（previous undefined 时由本函数补；store 仍要求源已存在）。 */
       kind: 'refresh-not-modified'
       url: string
       stamp: string
@@ -41,7 +42,7 @@ export type FeedIntent =
     }
   | {
       /** 刷新失败：盖 lastAttemptedAt（失败的尝试也是一次尝试，防饿死）+ 记 lastFailure；**不**盖 lastFetchedAt。
-       *  url 必带：失败分支的 ...(previous ?? {}) 旧形态允许首次抓取即失败即创建。 */
+       *  url 必带：FeedRecord 的必填键（previous undefined 时由本函数补；store 仍要求源已存在）。 */
       kind: 'refresh-failure'
       url: string
       stamp: string
@@ -65,16 +66,17 @@ export type FeedIntent =
 /**
  * 按 intent 把一条 FeedRecord 合并出来。
  *
- * previous === undefined（源不存在）时的行为按各 kind 的既有语义：
- *  - refresh 三种：此前 refresh 只对已存在的源跑（种子先行），previous undefined 不是合法输入，
- *    按空记录起步让 schema 校验挡住缺 url 的情况（url 由本函数补）。
- *  - upsert-subscription：**创建**也是它的合法语义（addFeed 新源）。
+ * previous === undefined（源不存在）时，本函数本身是宽容的（纯合并，不做存在性判断）：
+ *  - refresh 三种：仍按空记录起步并补 url（函数层不拒），但**两个 store 的 updateFeed 会拒绝**
+ *    （refresh 意图的前提是源已在，见 src/store.ts 与 store-sqlite.ts）—— 生产路径由 lifecycle
+ *    先种子、后刷新，所以正常不会撞上。
+ *  - upsert-subscription：**创建**也是它的合法语义（addFeed / OPML 新源）。
  */
 export function applyFeedIntent(previous: FeedRecord | undefined, intent: FeedIntent): FeedRecord {
-  // previous === undefined 是**合法输入**：refresh 的首次抓取本来就兼管创建（旧实现
-  // 失败分支 ...(previous ?? {})、成功分支 saveFeed 整体写，tests/refresh.test.mjs 的
-  // 「首次抓取」用例从未预置源记录）。宽容与旧行为逐字等价；「先种子后刷新」的编排纪律
-  // 由 lifecycle 既有代码保证，不在存储层装闸（装闸=改变 refresh 既有语义=行为漂移）。
+  // previous === undefined 在**函数层**是合法输入（纯合并，不判存在性）；但「源不存在时能不能
+  // 落库」由存储层裁决：refresh 三种意图会被两个 store 拒绝（种子先行），只有 upsert 允许创建。
+  // 别把这段读成「refresh 首次抓取兼管创建」——那是旧实现的宽容，存储层没有实现它
+  //（tests/refresh.test.mjs 的「首次抓取」夹具用的是宽容桩，生产由 lifecycle 种子保证）。
   // 因此 refresh 三分支的 url 一律取 intent.url（previous 可能没有）；upsert 同理（创建路径）。
   switch (intent.kind) {
     case 'refresh-success':

@@ -49,9 +49,15 @@ export function freshStore(tag) {
   return { store: createSqliteStore(db, join(dir, 'config.json')), db, configPath: join(dir, 'config.json'), dir }
 }
 
-/** 以下 memoryStore / armConcurrentRead 原样自 tests/refresh.test.mjs 搬入，注释即判据，一字未动。 */
+/** 以下 memoryStore / armConcurrentRead 搬自 tests/refresh.test.mjs；2026-11-15 给 memoryStore 加了
+ * strictFeedUpdates 选项（默认关，保持既有夹具行为），其余保持原样。 */
 
-export function memoryStore() {
+export function memoryStore(options = {}) {
+  // 生产实现（src/store.ts / src/store-sqlite.ts）的 updateFeed 在 refresh 三种意图上要求源已存在
+  // （种子先行）；旧桩无条件创建，于是「刷新途中退订」「首次抓取未预置源」在测试里是绿的、
+  // 在真机上抛错（2026-11-15 复核）。默认保留宽容模式是为了不重写 50 处既有夹具；
+  // **新用例一律用 strictMemoryStore()**，其与生产的等价性由 tests/store-sqlite.test.mjs 钉住。
+  const strictFeedUpdates = options.strictFeedUpdates === true
   const feeds = new Map()
   const cursors = new Map()
   const items = new Map()
@@ -64,9 +70,14 @@ export function memoryStore() {
     feed: (id) => feeds.get(id),
     saveFeed: async (id, record) => { feeds.set(id, record) },
     // 按意图变更（H4）：与生产实现同一条合并规则（applyFeedIntent）—— 桩不自己造第二套语义。
-    // previous undefined 合法（refresh 首次抓取兼创建，与旧行为逐字等价，见 feed-intent.ts 注释）。
+    // strictFeedUpdates 打开时，与两个生产 store 同一守卫：refresh 三种意图在源不存在时抛错，
+    // 只有 upsert-subscription（addFeed / OPML 新源）允许创建。
     updateFeed: async (id, intent) => {
-      feeds.set(id, applyFeedIntent(feeds.get(id), intent))
+      const current = feeds.get(id)
+      if (strictFeedUpdates && current === undefined && intent.kind !== 'upsert-subscription') {
+        throw new Error('updateFeed：源不存在（' + id + '）—— 变更的前提是它已在，创建走 saveFeed 或 upsert 意图')
+      }
+      feeds.set(id, applyFeedIntent(current, intent))
     },
     cursor: (id) => cursors.get(id),
     saveCursor: async (id, record) => { cursors.set(id, record) },
@@ -162,6 +173,16 @@ export function memoryStore() {
     },
   }
 }
+
+/**
+ * 与生产 `updateFeed` 同语义的桩：refresh 三种意图在源不存在时抛错（创建只走 upsert）。
+ *
+ * 为什么保留 memoryStore() 的宽容默认：50 处既有 refresh 夹具都是「空 store 直接抓」，
+ * 它们测的是刷新编排而不是 updateFeed 的存在性；全量改写属于夹具重构，不是本轮缺陷修复。
+ * 但凡是**要判生产行为**的新用例（退订竞态、存储失败隔离）都必须用它 —— 宽容桩会让
+ * 生产上的抛错在测试里变成「悄悄创建」，那是假绿（docs/pitfalls.md 二、2.6）。
+ */
+export const strictMemoryStore = () => memoryStore({ strictFeedUpdates: true })
 
 /**
  * 让**下一次**对 `id` 的写入在其「窗口内」先落一次并发写（把 readAt 写进去）。

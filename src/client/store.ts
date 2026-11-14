@@ -6,7 +6,7 @@
  * 列表、正文、订阅管理与键盘接线，任一改动都要动同一个文件。
  */
 import { useEffect, useState } from 'react'
-import { DEFAULT_READING_PREFERENCES, ROUTE_PATH, recencyOf, sanitizeViewPreferences, type ArticlePayload, type CleanupResult, type DiscoveryResult, type Endpoint, type FeedView, type FolderView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult, type SearchPage, type SearchQuery, type TagView, type DuplicateHintView, type ReadingPreferences, type UnreadAccount, type ViewPreferences } from '../shared.js'
+import { DEFAULT_READING_PREFERENCES, httpUrlOrEmpty, ROUTE_PATH, recencyOf, sanitizeViewPreferences, type ArticlePayload, type CleanupResult, type DiscoveryResult, type Endpoint, type FeedView, type FolderView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult, type SearchPage, type SearchQuery, type TagView, type DuplicateHintView, type ReadingPreferences, type UnreadAccount, type ViewPreferences } from '../shared.js'
 import { createAccountMirror } from './account-mirror.js'
 
 export type Filter = 'all' | 'unread' | 'starred'
@@ -823,8 +823,12 @@ export function createReaderStore() {
    */
   const openSelected = (): void => {
     const item = visible().find((entry) => entry.id === state.selectedId)
-    if (item === undefined || item.link === '') return
-    window.open(item.link, '_blank', 'noopener')
+    if (item === undefined) return
+    // 历史行可能带脏 link（修复前落库的 javascript:）：window.open 前过 shared.ts 的唯一白名单。
+    // 认不出就当「无链接」——不打开新窗口、也不标已读（动作没发生）。
+    const href = httpUrlOrEmpty(item.link)
+    if (href === '') return
+    window.open(href, '_blank', 'noopener')
     void markRead(item.id)
   }
 

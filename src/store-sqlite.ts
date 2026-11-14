@@ -74,6 +74,14 @@ function optionalNumber(value: SQLOutputValue, column: string): number | undefin
   return value
 }
 
+/** 行里的一个值 → 必填数字（NOT NULL 列读不到数字 ⇒ 库被外部改动过，响亮抛错）。 */
+function requiredNumber(value: SQLOutputValue, column: string): number {
+  if (typeof value !== 'number') {
+    throw new Error('订阅库里 ' + column + ' 的值是 ' + describe(value) + '，不是数字：库被外部改动过？')
+  }
+  return value
+}
+
 /**
  * 行里的一个值 → 布尔。
  *
@@ -322,6 +330,8 @@ const UPSERT_CURSOR = `
 const DELETE_CURSOR = 'DELETE FROM cursors WHERE feed_id = ?'
 /** 阅读进度（M5 02）：主键 = 条目 id，一条正文只记一个位置。 */
 const SELECT_PROGRESS = 'SELECT version, ratio FROM reading_progress WHERE item_id = ?'
+/** 身份合并要连带 updated_at（进度行原样搬给 survivor），所以另取一份完整行。 */
+const SELECT_PROGRESS_ROW = 'SELECT version, ratio, updated_at FROM reading_progress WHERE item_id = ?'
 const UPSERT_PROGRESS = `
   INSERT INTO reading_progress (item_id, version, ratio, updated_at) VALUES (?, ?, ?, ?)
   ON CONFLICT(item_id) DO UPDATE SET
@@ -989,10 +999,26 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
       const safe = itemRecordSchema.parse(record)
       runInTransaction(() => {
         writeItem(keeperId, safe)
+        // 阅读进度（M5 02）：进度行的主键是条目 id，删 loser 会级联删掉它的进度。
+        // 合并语义与「正文取更完整的一份」同向：keeper 已有进度就保留（用户最后读的是它），
+        // 没有才接住 loser 的 —— 否则「合并重复条目」会顺手把用户读到的位置弄丢。
+        let keeperProgress = sql(SELECT_PROGRESS_ROW).get(keeperId)
         for (const loserId of loserIds) {
           if (loserId === keeperId) continue
-          // 先复制关联，再删 loser：顺序反了会让 loser 的级联删掉刚刚要保留的标签。
+          // 先复制关联与进度，再删 loser：顺序反了会让 loser 的级联删掉刚刚要保留的东西。
           sql(COPY_ITEM_TAGS).run(keeperId, loserId)
+          if (keeperProgress === undefined) {
+            const loserProgress = sql(SELECT_PROGRESS_ROW).get(loserId)
+            if (loserProgress !== undefined) {
+              sql(UPSERT_PROGRESS).run(
+                keeperId,
+                requiredText(loserProgress.version, 'reading_progress.version'),
+                requiredNumber(loserProgress.ratio, 'reading_progress.ratio'),
+                requiredText(loserProgress.updated_at, 'reading_progress.updated_at'),
+              )
+              keeperProgress = loserProgress
+            }
+          }
           sql(DELETE_ITEM_TAGS).run(loserId)
           sql(DELETE_TEXT).run(loserId)
           sql(DELETE_ITEM).run(loserId)

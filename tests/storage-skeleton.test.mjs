@@ -481,3 +481,25 @@ test('config.json 在而库里没条目 ⇒ 照常装载（守卫不许把正常
   }
 })
 
+
+test('P2-3 config.json 在但订阅为空、库里却有条目 ⇒ 响亮失败（与 verify-backup 同一条判据）', async () => {
+  const home = tempDir('empty-feeds-items')
+  const root = join(home, 'storages', 'rss-reader')
+  let host
+  try {
+    seedStoredItem(root, 'x1')
+    // 空订阅是合法输入，但**库里还有条目**说明订阅映射丢了：正常退订会连条目一起删。
+    writeConfigFile(join(root, 'config.json'), { version: 1, feeds: {} })
+    host = assemble(home)
+    assert.equal(
+      host.lines.some((line) => line.includes('装载失败')),
+      true,
+      '空订阅 + 有条目必须响亮失败，实际日志：\n' + host.lines.join('\n'),
+    )
+    assert.match(host.lines.join('\n'), /一条订阅都没有/, '错误信息要指出「订阅为空」而不是含糊的装载失败')
+  } finally {
+    if (host) await host.teardown()
+    if (host) host.restore()
+    rmSync(home, { recursive: true, force: true })
+  }
+})

@@ -209,3 +209,16 @@ test('duplicateHints 端点：空入参、未知 id、超长入参都不炸', as
     db.close(); rmSync(dir, { recursive: true, force: true })
   }
 })
+
+
+test('P3-2 同名多值参数保持原序：顺序不同的 URL 不是同一个键', () => {
+  // 规则与注释同一口径：只按参数名排序，同名多值保留原始相对顺序。
+  // 按值再排会把 ?tag=a&tag=b 与 ?tag=b&tag=a 并成同一组（「更激进的归并」，需样本才做）。
+  assert.notEqual(
+    linkKeyOf('https://example.com/a?tag=b&tag=a'),
+    linkKeyOf('https://example.com/a?tag=a&tag=b'),
+    '同名多值的顺序不同 ⇒ 两个键（不许按值排序）',
+  )
+  // 不同名参数的顺序仍然无关（既有规则不能丢）
+  assert.equal(linkKeyOf('https://example.com/a?b=1&a=2'), linkKeyOf('https://example.com/a?a=2&b=1'))
+})

@@ -52,8 +52,10 @@ export function linkKeyOf(link: string): string {
     if ((TRACKING_PARAMS as readonly string[]).includes(key.toLowerCase())) continue
     params.push([key, value])
   }
-  // 排序让「参数顺序不同」归到同一个键；同名的多个值保持原有相对顺序
-  params.sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]))
+  // 排序让「参数顺序不同」归到同一个键。**只用 key**：同名多值的相对顺序可能带语义
+  //（?tag=a&tag=b），按值再排会把它们并成同一个键 —— 那是「更激进的归并」，票据要求有样本才做。
+  // Array#sort 是稳定排序，同 key 的项因此保留原始相对顺序。
+  params.sort((a, b) => a[0].localeCompare(b[0]))
 
   let path = url.pathname
   if (path.length > 1 && path.endsWith('/')) path = path.slice(0, -1)

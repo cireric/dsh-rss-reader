@@ -250,3 +250,23 @@ test('createLogger：写失败要 warn 一次，但不抛（不拖垮插件）',
     assert.equal(warnings.length, 1, '写失败必须留痕一次（否则日志静默停更，无人察觉）')
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
+
+
+test('P3-1 日志落盘只占一行：message 里的 \n / \r 变成可见转义（sink 保持原样）', () => {
+  const dir = tempDir('escape')
+  try {
+    const seen = []
+    const log = createLogger({
+      logFile: '', storagesRoot: dir,
+      sink: (line) => seen.push(line),
+      clock: () => new Date('2026-11-15T00:00:00.000Z'),
+    })
+    log('第一行\n第二行\r第三行')
+    const onDisk = readFileSync(join(dir, 'reader-2026-11-15.log'), 'utf8')
+    const lines = onDisk.split('\n').filter((line) => line !== '')
+    assert.equal(lines.length, 1, '一条日志必须只落一行（否则 message 里的换行能伪造日志行）')
+    assert.match(lines[0], /第一行\\n第二行\\r第三行/, '换行要以可见转义保留')
+    assert.equal(seen.length, 1)
+    assert.match(seen[0], /第一行\n第二行/, 'sink 保持原样（宿主日志的既有形态不变）')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})

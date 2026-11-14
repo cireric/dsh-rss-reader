@@ -17,7 +17,7 @@ import { edgeTopFor, readingRatioOf, restoreTopFor } from '../list-scroll.js'
  * 缩成可辨认尺寸，需要看细节时点「打开原站」。
  */
 const ARTICLE_IMAGE_MAX_HEIGHT = 640
-import { READING_FONT_SIZES, READING_LINE_WIDTHS, estimateReadingMinutes, type ItemView, type ReadingPreferences } from '../shared.js'
+import { httpUrlOrEmpty, READING_FONT_SIZES, READING_LINE_WIDTHS, estimateReadingMinutes, type ItemView, type ReadingPreferences } from '../shared.js'
 import type { ArticleState } from './store.js'
 
 /**
@@ -125,7 +125,10 @@ export function ArticleView({ article, item, onBack, scrollAttr, canPrev, canNex
     : (article?.paragraphs ?? []).map((text) => ({ kind: 'p', text }))
   const title = article?.title || item?.title
   const publishedAt = item?.publishedAt
-  const link = item?.link
+  // 历史行可能带脏 link（修复前落库的 javascript:）：渲染前过 shared.ts 的唯一白名单。
+  // 认不出就当作「无链接」——与 item.link === '' 的既有语义一致（不渲染「打开原站」）。
+  const rawLink = item?.link
+  const link = rawLink === undefined ? undefined : httpUrlOrEmpty(rawLink)
   // 只按**已缓存的正文**估：加载中 / 抓取失败时 blocks 为空 ⇒ 0 ⇒ 界面不出现任何数字。
   // 刻意不拿 summary 或源里的 excerpt 去凑 —— 那不是用户即将读的那段文本。
   const readMinutes = estimateReadingMinutes(blocks)
