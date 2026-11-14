@@ -197,6 +197,23 @@ const MUTATIONS = [
     judges: ['scroll-dom.test.mjs'],
     from: "onClick: (event) => event.stopPropagation(),",
     to: "onClick: () => {}," },
+  // ── M5 04：备份校验器（2026-11-14）──────────────────────────────────────────
+  // 校验器是「恢复前唯一的一道闸」，它的三条判定各自要有人看着（判据在 tests/backup-verify.test.mjs）：
+  // ① 完整性检查失效 ⇒ 「能打开但页结构坏了」的副本会被当成好备份恢复进去；
+  // ② 版本区间放宽 ⇒ 别的插件版本写的库会被本版直接覆盖；
+  // ③ 订阅丢失不报 ⇒ 只恢复了库、没恢复 config.json 的形态会被放行（= 订阅全没）。
+  { id: 'backup-完整性检查失效', file: 'scripts/verify-backup.mjs',
+    judges: ['backup-verify.test.mjs'],
+    from: "if (integrity !== 'ok')",
+    to: "if (false)" },
+  { id: 'backup-版本区间放行', file: 'scripts/verify-backup.mjs',
+    judges: ['backup-verify.test.mjs'],
+    from: "} else if (version < 1 || version > SCHEMA_VERSION) {",
+    to: "} else if (version < 1) {" },
+  { id: 'backup-订阅丢了不报', file: 'scripts/verify-backup.mjs',
+    judges: ['backup-verify.test.mjs'],
+    from: "if (items !== undefined && items > 0 && feedCount === 0) {",
+    to: "if (false) {" },
   // M4 01：候选的相对链接必须按**重定向落点**解析。退回输入 URL 时，站点只要做过一次
   // 301（http→https、加斜杠、换域名），相对候选就被拼到错的 host 上；判据在 subscribe.test.mjs
   // 的「重定向后相对候选按最终页面 URL 解析」。OCCURRENCES 独立实测 = 1（lib/subscribe.js:142）。

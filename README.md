@@ -53,6 +53,7 @@ npm run mutation:calibrate # 刷新 judges 快照（fast 的映射过期时重�
 | `src/` | host 半：抓取 / 解析 / 自持存储（SQLite）/ 抽取 / HTTP 端点（tsc → `lib/`） |
 | `src/client/` | 浏览器半：React 组件 + 状态 store（tsdown → 单文件 `lib/client.js`） |
 | `docs/pitfalls.md` | **踩坑与开发经验**：工程流程 / 测试夹具 / React / 宿主平台 / 数据解析 / 产品决定 |
+| `docs/ops/backup-restore.md` | **备份与恢复操作说明**：停写窗口 / WAL 快照 / 校验器 / 回滚 / OPML 导出范围 |
 | `docs/google-reader-feature-spec.md` | 功能基准：§5「不变量」是复刻时最容易踩错的地方 |
 | `AGENTS.md` | 仓库规则、完成定义、工作约定（给 agent 看） |
 
