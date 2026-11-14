@@ -190,7 +190,8 @@ test('装载时把孤儿条目报告出来（所属订阅已不在 config.json �
 
     await h.lc.start()
     assert.ok(
-      h.lines.some((line) => line.includes('孤儿条目') && line.includes('1 条')),
+      h.lines.some((line) => line.includes('孤儿条目') && line.includes('1 条')
+        && line.includes('https://gone.example/feed')),
       '孤儿条目必须在装载日志里现身（只报告，不删）—— 实际日志：' + JSON.stringify(h.lines),
     )
     assert.notEqual(h.lc.ready().item('orphan-1'), undefined, '只报告，不许自动删除（删数据要有人发话）')

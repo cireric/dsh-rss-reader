@@ -987,54 +987,17 @@ const MUTATIONS = [
     // 它「幸存」是**变异没生效**，不是测试缺口；docs/pitfalls.md 二、2.7 记的正是这类坑）。
     from: 'if (readAt !== undefined)\n        record.readAt = readAt;',
     to: 'record.readAt = readAt;' },
-  { id: 'store-deleteSubscription 先删库后写 config', file: 'lib/store-sqlite.js',
+  // ⚠️ 2026-11-14 撤掉「先删库后写 config」那条：补偿写回（下面的 catch）把这段代码改成了
+  // writeFeeds → try/catch，顺序不再是两个相邻块，单 hunk 替换表达不了「把 config 写挪到最后」。
+  // 顺序仍由**行为**钉住：tests/store-sqlite.test.mjs 的「config 写不进去时条目与游标一条都不许动」——
+  // 谁把库操作挪到 config 前面，那条当场翻红。下面这条守的是另一半（失败后写回）。
+  { id: 'store-退订失败不写回订阅', file: 'lib/store-sqlite.js',
     judges: ['store-sqlite.test.mjs'],
-    // 退订要动**两处介质**：config.json（文件）与 items/cursors（库）。它们没有共同事务，
-    // 中间失败无法一起回滚 —— 所以「先做哪一步」本身就是正确性，不是风格（ADR-0002）。
-    // 反过来（先删库）时，config 写不进去（文件损坏 / 磁盘满）会留下「源还在订阅列表里、条目没了」：
-    // 下一轮刷新把它们当新条目重新导入，用户看到的是已读条目**集体变未读**、星标消失。
-    // 正是这个顺序把最坏情况压成「看不见的孤儿条目」。
-    // 判据：tests/store-sqlite.test.mjs 的「deleteSubscription 先写 config、再删条目与游标」——
-    // 它把 configPath 指成一个目录让写入必失败，再断言**条目与游标都还在**；顺序调换后那条当场翻红。
-    // from 照**编译产物**逐字抄（docs/pitfalls.md 一、1.4），含方法体里的那行注释。
-    from: [
-      '            writeFeeds(configPath, (feeds) => {',
-      '                const next = { ...feeds };',
-      '                delete next[feedId];',
-      '                return next;',
-      '            });',
-      '            let removed = 0;',
-      '            runInTransaction(() => {',
-      '                // 计数必须和删除在同一个事务里：先数后删跨出事务，报出去的条数就可能不是真删掉的。',
-      '                const row = sql(COUNT_ITEMS_BY_FEED).get(feedId);',
-      '                const count = row === undefined ? undefined : row.n;',
-      '                if (typeof count !== \'number\') {',
-      '                    throw new Error(\'数不出该源的条目数（返回 \' + JSON.stringify(row) + \'）：库被外部改动过？\');',
-      '                }',
-      '                removed = count;',
-      '                sql(DELETE_ITEMS_BY_FEED).run(feedId);',
-      '                sql(DELETE_CURSOR).run(feedId);',
-      '            });',
-    ].join('\n'),
-    to: [
-      '            let removed = 0;',
-      '            runInTransaction(() => {',
-      '                // 计数必须和删除在同一个事务里：先数后删跨出事务，报出去的条数就可能不是真删掉的。',
-      '                const row = sql(COUNT_ITEMS_BY_FEED).get(feedId);',
-      '                const count = row === undefined ? undefined : row.n;',
-      '                if (typeof count !== \'number\') {',
-      '                    throw new Error(\'数不出该源的条目数（返回 \' + JSON.stringify(row) + \'）：库被外部改动过？\');',
-      '                }',
-      '                removed = count;',
-      '                sql(DELETE_ITEMS_BY_FEED).run(feedId);',
-      '                sql(DELETE_CURSOR).run(feedId);',
-      '            });',
-      '            writeFeeds(configPath, (feeds) => {',
-      '                const next = { ...feeds };',
-      '                delete next[feedId];',
-      '                return next;',
-      '            });',
-    ].join('\n') },
+    // 库事务失败时不把订阅写回 ⇒ config 已经删了、条目还在。退掉最后一个源时，下次装载会被
+    // 「订阅映射丢了」的守卫判死，插件直接起不来（2026-11-14 评审发现的最坏形态）。
+    // 判据：store-sqlite 的「deleteSubscription：库事务失败时把订阅原样写回」。
+    from: '                    writeFeeds(configPath, () => before);\n',
+    to: '' },
   { id: 'store-退订不删条目', file: 'lib/store-sqlite.js',
     judges: ['store-sqlite.test.mjs', 'tag-endpoints.test.mjs'],
     // 退订只删订阅项与游标、把条目留下 ⇒ 用户退了订，条目还在库里占着（且成了孤儿）。

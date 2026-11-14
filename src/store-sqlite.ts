@@ -681,27 +681,39 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
 
     deleteSubscription: async (feedId) => {
       // 顺序：**先写 config（订阅的真相），再在一个事务里删条目与游标**，见 store.ts 的接口注释
-      // 与 docs/adr/0002-unsubscribe-is-one-change.md。跨介质没有共同回滚，只能选失败形态：
-      //   · config 写不进去 ⇒ 库一条都没动，这次退订是干净的 no-op，重试即可；
-      //   · 库事务失败 ⇒ 订阅已消失、条目留下 ⇒ 看不见的孤儿条目（访问期挡板挡住、装载时报告）。
-      // 反过来（先删库再写 config）的失败形态是「源还在、条目没了」——用户可见的数据丢失。
+      // 与 docs/adr/0002-unsubscribe-is-one-change.md。跨介质没有共同回滚，所以库事务一旦失败
+      // 就把订阅**原样写回**（下面的 catch）—— 失败必须等于「什么都没发生」。
+      // 不写回的话：退掉最后一个源会让 config 变空、条目还在，下次装载被守卫判成「订阅映射丢了」
+      // 直接拒绝启动，比留孤儿更糟（2026-11-14 评审发现）。
+      const before = readFeeds(configPath)
       writeFeeds(configPath, (feeds) => {
         const next = { ...feeds }
         delete next[feedId]
         return next
       })
       let removed = 0
-      runInTransaction(() => {
-        // 计数必须和删除在同一个事务里：先数后删跨出事务，报出去的条数就可能不是真删掉的。
-        const row = sql(COUNT_ITEMS_BY_FEED).get(feedId)
-        const count = row === undefined ? undefined : row.n
-        if (typeof count !== 'number') {
-          throw new Error('数不出该源的条目数（返回 ' + JSON.stringify(row) + '）：库被外部改动过？')
+      try {
+        runInTransaction(() => {
+          // 计数必须和删除在同一个事务里：先数后删跨出事务，报出去的条数就可能不是真删掉的。
+          const row = sql(COUNT_ITEMS_BY_FEED).get(feedId)
+          const count = row === undefined ? undefined : row.n
+          if (typeof count !== 'number') {
+            throw new Error('数不出该源的条目数（返回 ' + JSON.stringify(row) + '）：库被外部改动过？')
+          }
+          removed = count
+          sql(DELETE_ITEMS_BY_FEED).run(feedId)
+          sql(DELETE_CURSOR).run(feedId)
+        })
+      } catch (error) {
+        // 写回整份「退订前」的订阅（连同键序）：这一次退订就当没发生过。
+        // 写回也失败（磁盘满 / 权限）才落到「订阅没了、条目还在」，那时两个错误一起抛，别只留一个。
+        try {
+          writeFeeds(configPath, () => before)
+        } catch (restoreError) {
+          throw new Error('退订失败，且订阅写回也失败：' + String(error) + '；写回错误：' + String(restoreError))
         }
-        removed = count
-        sql(DELETE_ITEMS_BY_FEED).run(feedId)
-        sql(DELETE_CURSOR).run(feedId)
-      })
+        throw error
+      }
       return { items: removed }
     },
 

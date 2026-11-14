@@ -91,18 +91,11 @@ export function createLifecycle(deps: LifecycleDeps): Lifecycle {
   const ready = (): ReaderStore | undefined => (cancelled ? undefined : store)
 
   /**
-   * 「订阅映射丢了，但条目还在」必须响亮失败 —— config.json 是用户订阅的唯一可备份副本。
-   * 与首次安装的区分：items 为 0 时一路放过；只有「有数据却没了订阅」才是故障。
-   *
-   * 必须在建 store **之前**跑：它一旦通过，后面每一步都带着一份已证明可用的订阅；放在 store
-   * 之后的话，中间任何一步都可能先写库，而守卫抛错时这一代已经半装好了。
-   */
-  /**
    * 孤儿条目：`items` 里 feed_id 已不在当前订阅集合的行。**只报告，不删**（ADR-0002）。
    *
-   * 正常退订是一次变更，不会留下孤儿；出现即说明某次变更半途失败（config 写成功、库事务失败）
-   * 或有人手工改库。删数据必须有人发话，所以这里只让它在日志里现身。
-   * 代价是装载时一次 GROUP BY feed_id（走 i1 索引，10 万行毫秒级），不进热路径。
+   * 正常退订是一次变更，不会留下孤儿；出现即说明某次变更半途失败，或有人手工改库。
+   * 删数据必须有人发话，所以这里只让它在日志里现身，并点出是哪个源（否则看日志的人还得自己查）。
+   * 代价是装载时一次 GROUP BY feed_id（走 i1 索引，见 src/storage/db.ts:267；耗时未实测），不进热路径。
    */
   const reportOrphanItems = (db: DatabaseSync, logLine: (message: string) => void): void => {
     const feeds = new Set(
@@ -110,18 +103,32 @@ export function createLifecycle(deps: LifecycleDeps): Lifecycle {
     )
     const rows = db.prepare('SELECT feed_id AS feed_id, COUNT(*) AS n FROM items GROUP BY feed_id').all()
     let orphans = 0
+    const sources: string[] = []
     for (const row of rows) {
       const feedId = row.feed_id
       const count = row.n
       if (typeof feedId !== 'string' || typeof count !== 'number') {
         throw new Error('读不出条目按源的分组（返回 ' + JSON.stringify(row) + '）：库被外部改动过？')
       }
-      if (!feeds.has(feedId)) orphans += count
+      if (!feeds.has(feedId)) {
+        orphans += count
+        sources.push(feedId + '×' + count)
+      }
     }
     if (orphans > 0) {
-      logLine('检测到 ' + orphans + ' 条孤儿条目（所属订阅已不在 config.json 里）：只报告不删除，见 ADR-0002')
+      // 只列前三个源，余下用「等」收尾：日志是给人看的，不是导出清单。
+      const shown = sources.slice(0, 3).join('、') + (sources.length > 3 ? ' 等' : '')
+      logLine('检测到 ' + orphans + ' 条孤儿条目（' + shown + '）：只报告不删除，见 ADR-0002')
     }
   }
+
+  /**
+   * 「订阅映射丢了，但条目还在」必须响亮失败 —— config.json 是用户订阅的唯一可备份副本。
+   * 与首次安装的区分：items 为 0 时一路放过；只有「有数据却没了订阅」才是故障。
+   *
+   * 必须在建 store **之前**跑：它一旦通过，后面每一步都带着一份已证明可用的订阅；放在 store
+   * 之后的话，中间任何一步都可能先写库，而守卫抛错时这一代已经半装好了。
+   */
 
   const assertSubscriptionsNotLost = (db: DatabaseSync): void => {
     // 文件在不在分两类：在 ⇒ 读一遍（读不出来由 readConfigFile 响亮抛错，既有语义）；

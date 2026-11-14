@@ -55,6 +55,8 @@ bash scripts/gate.sh      # L1 一键门禁：build → build:client → typeche
 |---|---|
 | `src/` | host 半：抓取 / 解析 / 自持存储（SQLite）/ 抽取 / HTTP 端点（tsc → `lib/`） |
 | `src/client/` | 浏览器半：React 组件 + 状态 store（tsdown → 单文件 `lib/client.js`） |
+| `GLOSSARY.md` | **领域词表**：判据 / 裁决者 / 候选 ⊇ 判定集 / 订阅与退订 / 孤儿条目（用词以此为准） |
+| `docs/adr/` | **架构决定记录**：一份决定一个文件（ADR-0001 判据只有一个裁决者、ADR-0002 退订是一次变更） |
 | `docs/pitfalls.md` | **踩坑与开发经验**：工程流程 / 测试夹具 / React / 宿主平台 / 数据解析 / 产品决定 |
 | `docs/ops/backup-restore.md` | **备份与恢复操作说明**：停写窗口 / WAL 快照 / 校验器 / 回滚 / OPML 导出范围 |
 | `docs/ops/build-reproducibility.md` | **依赖盘点与干净目录复现**：checkout 依赖表 / 各层退出码 / 锁文件方案 |

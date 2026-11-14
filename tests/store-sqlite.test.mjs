@@ -606,6 +606,35 @@ test('deleteSubscription 先写 config、再删条目与游标：config 写不�
   }
 })
 
+test('deleteSubscription：库事务失败时把订阅原样写回（失败 = 什么都没发生）', async () => {
+  const { store, db, configPath, dir } = freshStore('deletefeed-compensate')
+  try {
+    const feedId = 'https://a.example/feed.xml'
+    await store.saveFeed(feedId, { url: feedId, title: 'A' })
+    await store.saveItem('i-1', item(feedId))
+    await store.saveCursor(feedId, { seen: ['i-1'], cursorAt: '2026-10-11T09:00:00.000Z' })
+    const beforeConfig = readFileSync(configPath, 'utf8')
+
+    // 让**库**变成只读：config 是文件，照写不误；事务里的 DELETE 一定抛错。
+    // 这正是「config 写成功、库失败」那一半 —— 退掉最后一个源时不写回，下次装载会被
+    // 「订阅映射丢了」的守卫拒绝开库（2026-11-14 评审发现），比留孤儿更糟。
+    db.exec('PRAGMA query_only = ON')
+    try {
+      await assert.rejects(() => store.deleteSubscription(feedId), '库失败时不许静默当成退订成功')
+    } finally {
+      db.exec('PRAGMA query_only = OFF')
+    }
+
+    assert.equal(readFileSync(configPath, 'utf8'), beforeConfig, '订阅必须原样写回（连键序都不许变）')
+    assert.notEqual(store.feed(feedId), undefined, '订阅必须还在')
+    assert.notEqual(store.item('i-1'), undefined, '条目一条都不许删 —— 失败等于什么都没发生')
+    assert.notEqual(store.cursor(feedId), undefined, '游标也不许动')
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('cursor 的 seen 是 JSON 文本；saveCursor 覆盖，缺 cursorAt 时键缺席', async () => {
   const { store, db, dir } = freshStore('cursors')
   try {
