@@ -31,12 +31,12 @@ fi
 EXPECTED_LINE=$(node -e "process.stdout.write(String(require(process.argv[1]).line || ''))" "$ROOT/dsh-version.json")
 EXPECTED_VERSION=$(node -e "process.stdout.write(String(require(process.argv[1]).tested || ''))" "$ROOT/dsh-version.json")
 if [ "$(echo "$CHECKOUT_VERSION" | cut -d. -f1-2)" != "$EXPECTED_LINE" ]; then
-  echo "build: checkout 版本是 $CHECKOUT_VERSION，但本仓库只在 $EXPECTED_LINE.x 上验证过（见 dsh-version.json）" >&2
+  echo "build: checkout 版本是 ${CHECKOUT_VERSION}，但本仓库只在 ${EXPECTED_LINE}.x 上验证过（见 dsh-version.json）" >&2
   echo "       换一代宿主需要单独验证并更新 dsh-version.json，不能只改这里。" >&2
   exit 1
 fi
 if [ "$CHECKOUT_VERSION" != "$EXPECTED_VERSION" ]; then
-  echo "build: 注意 —— checkout 版本是 $CHECKOUT_VERSION，验证过的是 $EXPECTED_VERSION（同一条 $EXPECTED_LINE.x，放行但未验证）" >&2
+  echo "build: 注意 —— checkout 版本是 ${CHECKOUT_VERSION}，验证过的是 ${EXPECTED_VERSION}（同一条 ${EXPECTED_LINE}.x，放行但未验证）" >&2
 fi
 
 TSC="$CHECKOUT/node_modules/.bin/tsc"
@@ -98,7 +98,7 @@ link_pnpm() {
   local dest="$1" pattern="$2" found
   found=$(find "$CHECKOUT/node_modules/.pnpm" -maxdepth 1 -type d -name "$pattern@*" 2>/dev/null | head -1)
   if [ -z "$found" ]; then
-    echo "build: 找不到 pnpm 包 $pattern（checkout 里没有？）" >&2
+    echo "build: 找不到 pnpm 包 ${pattern}（checkout 里没有？）" >&2
     exit 1
   fi
   link_pkg "$dest" "${found#$CHECKOUT/}/node_modules/$dest"

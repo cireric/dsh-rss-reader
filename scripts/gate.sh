@@ -51,7 +51,7 @@ for i in "${!step_names[@]}"; do
 done
 
 echo ""
-echo "=== L1 汇总（checkout: $CHECKOUT）==="
+echo "=== L1 汇总（checkout: ${CHECKOUT}）==="
 echo -e "$summary"
 if [ "$failed" -ne 0 ]; then
   echo ""
