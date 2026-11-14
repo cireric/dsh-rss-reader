@@ -42,9 +42,12 @@ npm test                 # 单元/集成 + 真实 DOM 接线
 npm run mutation         # 变异门槛：默认并行 gate（整轮 ~3min 量级，副本自动建在 /tmp；
                          # K/套件并发/子进程堆上限都按宿主资源设闸，见 docs/pitfalls.md §1.10）
 npm run mutation:calibrate # 刷新 judges 快照（fast 的映射过期时重跑；快照收 docs/superpowers/plans/2026-10-15-judges-dump.json）
+
+bash scripts/gate.sh      # L1 一键门禁：build → build:client → typecheck → test，逐条打印退出码
 ```
 
 改代码前先扫一遍 [docs/pitfalls.md](docs/pitfalls.md) 的标题 —— 构建与测试的三个坑都在那里。
+构建依赖从哪来、怎么在空目录里复现、为什么没有锁文件：见 [docs/ops/build-reproducibility.md](docs/ops/build-reproducibility.md)。
 
 ## 结构
 
@@ -54,6 +57,8 @@ npm run mutation:calibrate # 刷新 judges 快照（fast 的映射过期时重�
 | `src/client/` | 浏览器半：React 组件 + 状态 store（tsdown → 单文件 `lib/client.js`） |
 | `docs/pitfalls.md` | **踩坑与开发经验**：工程流程 / 测试夹具 / React / 宿主平台 / 数据解析 / 产品决定 |
 | `docs/ops/backup-restore.md` | **备份与恢复操作说明**：停写窗口 / WAL 快照 / 校验器 / 回滚 / OPML 导出范围 |
+| `docs/ops/build-reproducibility.md` | **依赖盘点与干净目录复现**：checkout 依赖表 / 各层退出码 / 锁文件方案 |
+| `docs/feature-status.md` | **功能状态**：每条能力的状态、源码落点与证据等级（发布前必看） |
 | `docs/google-reader-feature-spec.md` | 功能基准：§5「不变量」是复刻时最容易踩错的地方 |
 | `AGENTS.md` | 仓库规则、完成定义、工作约定（给 agent 看） |
 

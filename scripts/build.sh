@@ -19,6 +19,26 @@ if [ -z "$CHECKOUT" ] || [ ! -d "$CHECKOUT/packages" ]; then
   exit 1
 fi
 
+# ── checkout 版本断言（M5 05 的方案 A）────────────────────────────────────────
+# 本插件的依赖来自 checkout 里的源码目录而不是 npm 包：换个位置没事，换个**版本**要先知道。
+# 判据在根目录的 dsh-version.json：line 不同 ⇒ 拒绝构建（那是另一代宿主，类型与运行期契约都可能变）；
+# 只是补丁/rc 号不同 ⇒ 放行但告警（没在这个版本上验证过，别把绿灯当证据）。
+CHECKOUT_VERSION=$(node -e "process.stdout.write(String(require(process.argv[1] + '/package.json').version || ''))" "$CHECKOUT" 2>/dev/null || true)
+if [ -z "$CHECKOUT_VERSION" ]; then
+  echo "build: 读不出 checkout 的版本（$CHECKOUT/package.json）" >&2
+  exit 1
+fi
+EXPECTED_LINE=$(node -e "process.stdout.write(String(require(process.argv[1]).line || ''))" "$ROOT/dsh-version.json")
+EXPECTED_VERSION=$(node -e "process.stdout.write(String(require(process.argv[1]).tested || ''))" "$ROOT/dsh-version.json")
+if [ "$(echo "$CHECKOUT_VERSION" | cut -d. -f1-2)" != "$EXPECTED_LINE" ]; then
+  echo "build: checkout 版本是 $CHECKOUT_VERSION，但本仓库只在 $EXPECTED_LINE.x 上验证过（见 dsh-version.json）" >&2
+  echo "       换一代宿主需要单独验证并更新 dsh-version.json，不能只改这里。" >&2
+  exit 1
+fi
+if [ "$CHECKOUT_VERSION" != "$EXPECTED_VERSION" ]; then
+  echo "build: 注意 —— checkout 版本是 $CHECKOUT_VERSION，验证过的是 $EXPECTED_VERSION（同一条 $EXPECTED_LINE.x，放行但未验证）" >&2
+fi
+
 TSC="$CHECKOUT/node_modules/.bin/tsc"
 if [ ! -x "$TSC" ] && [ ! -f "$TSC.cmd" ]; then
   echo "build: tsc not found at $TSC" >&2
