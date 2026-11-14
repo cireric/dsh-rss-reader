@@ -680,14 +680,12 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       // **候选集由存储侧一条 SQL 选出**（Task 5）：原先这里 `allItems()` 把整张 items 表
       // （10 万行）物化到 JS 再筛 —— 「点一次清理 = 一次全表遍历」，而 spec §3.1 只把清理记在
       // accountOf 名下，漏了这一处（计划的定稿加固已记账）。
-      // 判据的定义处仍是 retention.ts 的 selectCleanup；但**候选集**已由存储侧的 SQL 预筛过
-      // （src/store-sqlite.ts 的 SELECT_CLEANUP_IDS），那一份是**第二实现**而不是第二口径：
-      // 它把「已读 / 未星标 / 早于阈值」三项照抄，另**更窄**一条 —— kept_unread = 0
-      // （用户对「保持未读」说的是「别动它」，与星标同级）。
-      // 这里把候选喂回 selectCleanup 复跑，所以**最终删哪些 = SQL 谓词 ∩ selectCleanup**：
-      // SQL 只负责「不用把整张 items 表搬进 JS」，判断仍由判据之家做出，两处必须同步改。
-      // 「两份实现仍然是同一个判据」由 tests/store-sqlite.test.mjs 的两条钉住：对账用例
-      // （「候选集必须与 selectCleanup 的集合逐字相等（除 kept 之外）」）与 SQL 文本断言。
+      // 判据的**唯一裁决者**是 retention.ts 的 selectCleanup。存储侧的 SQL（SELECT_CLEANUP_IDS）
+      // 只负责「不用把整张 items 表搬进 JS」—— 它只筛「已读 + 够旧」，连星标与保持未读也不筛。
+      // 所以喂回来的候选**可能比判定集宽**（受保护的旧条目也在里面），这里必须复跑判据：
+      // 删掉这一句 = 让 SQL 的宽容度决定「用户说别动」的条目命不命，2026-11-14 之前的形态。
+      // 「候选 ⊇ 判定集」由 tests/store-sqlite.test.mjs 钉住；「受保护条目活下来」由
+      // tests/overview-scale.test.mjs 与 tests/overview-paging.test.mjs 钉住。
       const cutoff = new Date(Date.now() - ctx.config.cleanupAfterDays * 24 * 3600 * 1000).toISOString()
       const candidates = ctx.store.listCleanupCandidates(cutoff)
       const doomed = new Set(selectCleanup(candidates, cutoff))

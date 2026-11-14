@@ -309,13 +309,7 @@ function sqliteStoreWithRecords(rows, feedIds) {
   return { store, db, dir }
 }
 
-/** 只取两边共有的字段做对照，顺带按 id 排序 —— 顺序不是这条判据要钉的东西。 */
-const candidatesOf = (rows) => rows
-  .map(({ id, starred, kept, read, recency, articleChars, summaryChars }) =>
-    ({ id, starred, kept, read, recency, articleChars, summaryChars }))
-  .sort((a, b) => a.id.localeCompare(b.id))
-
-test('逐方法同义性：listCleanupCandidates 的候选行与旧实现逐字段相等（两边都比判据之家更窄）', () => {
+test('逐方法同义性：listCleanupCandidates 在两个适配器上得出同一个最终删除集（候选宽度可以不同）', () => {
   const cutoff = '2026-01-01T00:00:00.000Z'
   const feedIds = [FEED_ID, FEED_EMPTY]
   const legacy = legacyStoreWithRecords(EQUIV_ROWS, feedIds)
@@ -324,29 +318,33 @@ test('逐方法同义性：listCleanupCandidates 的候选行与旧实现逐字�
     const legacyRows = legacy.listCleanupCandidates(cutoff)
     const sqliteRows = store.listCleanupCandidates(cutoff)
 
-    // ① 候选集两边**逐字段**相等 —— 且「保持未读」那条两边都被排除。
-    //    （写这条时我原以为旧实现会把 kept 那条交出来 —— 实测它同样先按 !kept 过滤再跑判据，
-    //      两边的口径本来就一致；断言在这里当场把那个错判暴露了，这正是逐方法对照的用处。）
-    assert.deepEqual(candidatesOf(sqliteRows), candidatesOf(legacyRows),
-      '候选行（含 articleChars / summaryChars）必须与旧实现逐字段相等 —— 两份实现分家时这条要翻红')
-
-    // ② 三类受保护的行两边都不进候选：星标、未读、与「保持未读」
-    for (const id of ['old-starred', 'old-kept', 'new-read', 'unread-1']) {
-      assert.equal(sqliteRows.some((row) => row.id === id), false, id + ' 不得进候选')
+    // ① **候选宽度允许不同**：自持实现只筛「已读 + 够旧」这两项成本条件，旧实现顺带跑了判据。
+    //    契约只要求「候选 ⊇ 判定集」，所以这里不比对候选集合本身，而是比对**经判据之后的效果**。
+    const sqliteById = new Map(sqliteRows.map((row) => [row.id, row]))
+    for (const id of ['old-starred', 'old-kept', 'old-plain', 'old-with-body']) {
+      assert.ok(sqliteById.has(id), '自持实现的候选必须包含 ' + id + '（保护条款由判据裁决，不由 SQL 排除）')
     }
+    // 判据字段必须是库里的事实：受保护的两条照实报 true（回填成 false 会让判据失明）
+    assert.equal(sqliteById.get('old-starred').starred, true, '星标列必须照实读')
+    assert.equal(sqliteById.get('old-kept').kept, true, '保持未读列必须照实读')
 
-    // ③ 与「判据之家」的原始集合对照：selectCleanup 单算会把「保持未读」也算进去 ——
-    //    所以两份实现都必须比它更窄（SQL 谓词的第四项 / 旧实现的 filter(!kept)）。
-    //    这条钉的是「更窄」这件事本身，而不是某一份实现的写法。
-    const raw = { id: 'old-kept', starred: false, kept: true, read: true, recency: '2020-01-01T00:00:00.000Z' }
-    assert.deepEqual(selectCleanup([raw], cutoff), ['old-kept'],
-      '判据之家单独算会认为它可以清 —— 两份实现的候选集都必须比它更窄（多守「保持未读」）')
-
-    // ④ **最终删除集**才是 cleanup 的实际效果：候选 ∩ selectCleanup —— 两边必须逐字相等
+    // ② 两边算出的**最终删除集**必须逐字相等，且受保护的三类一条都不许进去
     const doomed = (rows) => selectCleanup(rows, cutoff).sort()
     assert.deepEqual(doomed(sqliteRows), doomed(legacyRows),
-      '两边算出的最终删除集必须逐字相等（星标 / 保持未读都不许被动）')
+      '两个适配器经过判据之后的删除集必须逐字相等')
     assert.deepEqual(doomed(sqliteRows), ['old-plain', 'old-with-body'], '实际该删的就是这两条')
+    for (const id of ['old-starred', 'old-kept', 'new-read', 'unread-1']) {
+      assert.equal(doomed(sqliteRows).includes(id), false, id + ' 不得被删')
+    }
+
+    // ③ 释放量按**真正要删的那批**汇总：候选里那两条受保护的不许计进 freedChars
+    const freed = (rows) => {
+      const deleted = new Set(doomed(rows))
+      return rows
+        .filter((row) => deleted.has(row.id))
+        .reduce((sum, row) => sum + row.articleChars + row.summaryChars, 0)
+    }
+    assert.equal(freed(sqliteRows), freed(legacyRows), '两边的释放量必须相等')
   } finally {
     db.close()
     rmSync(dir, { recursive: true, force: true })

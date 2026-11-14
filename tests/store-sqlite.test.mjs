@@ -205,8 +205,14 @@ test('listCleanupCandidates：候选集由 SQL 选出，且与 selectCleanup 的
     const cutoff = '2026-06-01T00:00:00.000Z'
 
     const candidates = store.listCleanupCandidates(cutoff)
-    assert.deepEqual(candidates.map((row) => row.id), ['old-read'],
-      '候选 = 已读 + 未星标 + 未保持未读 + 早于阈值（read_at IS NOT NULL AND starred = 0 AND kept_unread = 0 AND recency < ?）')
+    // 候选 = **成本筛选**的结果（已读 + 早于阈值）。星标与保持未读**不再**由 SQL 排除：
+    // 保护条款只由 retention.ts 的 selectCleanup 裁决，SQL 只负责少取点行。
+    assert.deepEqual(candidates.map((row) => row.id).sort(), ['old-kept', 'old-read', 'old-starred'],
+      '候选 = 已读 + 早于阈值（starred / kept 不在谓词里，保护由判据负责）')
+    // 判据字段必须是**库里的事实**，不是按谓词回填的常量 —— 回填会让判据看不见真实状态
+    const byId = new Map(candidates.map((row) => [row.id, row]))
+    assert.equal(byId.get('old-starred').starred, true, '星标列必须照实读')
+    assert.equal(byId.get('old-kept').kept, true, '保持未读列必须照实读')
     // 候选行必须自带判据字段（供调用方复跑 selectCleanup）与释放量原料（免得为每条候选再点读一次）
     assert.deepEqual(
       Object.keys(candidates[0]).sort(),
@@ -234,8 +240,8 @@ test('listCleanupCandidates：候选集由 SQL 选出，且与 selectCleanup 的
     assert.equal(withBody.articleChars, 5 + 3, 'blocks 里 text 与 items 的字符数都要算进去')
     assert.equal(withBody.summaryChars, 3, '摘要同样占字节，释放量要如实算进去')
 
-    // 与唯一口径对账：候选集是 selectCleanup 判据的**子集**（宁可保守，不许比判据更宽），
-    // 且被它排除的那批并回来正好等于判据的集合（不许比判据更窄）。
+    // 与判据之家对账：**候选 ⊇ 判定集**（包含关系，不是相等）。
+    // 按全表算出的判定集，每一条都必须出现在候选里 —— 少取会变成「永远清不掉」的沉默漏洞。
     const rows = store.allItems().map(([id, record]) => ({
       id,
       starred: record.starred,
@@ -245,13 +251,15 @@ test('listCleanupCandidates：候选集由 SQL 选出，且与 selectCleanup 的
       articleChars: 0,
     }))
     const doomed = selectCleanup(rows, cutoff).sort()
-    assert.deepEqual(
-      doomed.filter((id) => id !== 'old-kept'),
-      store.listCleanupCandidates(cutoff).map((row) => row.id).sort(),
-      '除「保持未读」外，候选集必须与 selectCleanup 的集合逐字相等',
-    )
-    assert.ok(doomed.includes('old-kept'),
-      'selectCleanup 单独算会把「已读 + 保持未读」也算进去 —— SQL 谓词多守的一条正是这里（见谓词的 kept_unread = 0）')
+    assert.deepEqual(doomed, ['old-read', 'old-with-body'], '判据按全表算，该删的就是这两条（后者是后加的那条带正文的）')
+    // 重新取一次候选（上面刚补了一条带正文的 old-with-body）
+    const allCandidates = store.listCleanupCandidates(cutoff)
+    for (const id of doomed) {
+      assert.ok(allCandidates.some((row) => row.id === id), '候选必须包含判定集里的 ' + id)
+    }
+    // 反向：在候选上复跑判据，得到的必须是同一个集合（受保护的两条被挡回去）
+    assert.deepEqual(selectCleanup(allCandidates, cutoff).sort(), doomed,
+      '在候选上复跑判据必须得到同一个判定集（星标 / 保持未读挡在判据这一层）')
   } finally {
     db.close()
     rmSync(dir, { recursive: true, force: true })
@@ -287,11 +295,11 @@ test('listRecent / unreadPerFeed / listCleanupCandidates 的排序、聚合与�
       reads.some((text) => /GROUP BY\s+i?\.?feed_id/.test(text) && /read_at IS NULL/.test(text)),
       'unreadPerFeed 必须是 SQL 侧聚合，且未读判据是 read_at IS NULL（与 isUnread 同口径）：' + JSON.stringify(reads),
     )
-    assert.ok(
-      reads.some((text) => /read_at IS NOT NULL/.test(text) && /starred = 0/.test(text)
-        && /kept_unread = 0/.test(text) && /recency < \?/.test(text)),
-      '清理候选必须是 SQL 侧筛选（否则「点一次清理 = 一次全表遍历」原样留下）：' + JSON.stringify(reads),
-    )
+    const cleanupSql = reads.find((text) => /read_at IS NOT NULL/.test(text) && /recency < \?/.test(text))
+    assert.ok(cleanupSql !== undefined,
+      '清理候选必须有 SQL 侧的成本筛选（否则「点一次清理 = 一次全表遍历」原样留下）：' + JSON.stringify(reads))
+    assert.ok(!/starred\s*=\s*0/.test(cleanupSql) && !/kept_unread\s*=\s*0/.test(cleanupSql),
+      '保护条款不许回到 SQL：星标与保持未读只能由 selectCleanup 裁决（判据是唯一裁决者）')
   } finally {
     db.close()
     rmSync(dir, { recursive: true, force: true })

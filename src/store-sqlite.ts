@@ -244,28 +244,30 @@ const SELECT_ARTICLE_CACHE_ENTRIES =
 /**
  * 清理候选（Task 5）：一条 SQL 选完。
  *
- * ⚠️ **这是 `retention.ts` 的 `selectCleanup`（判据的定义处）的第二实现，不是第二口径**。
- * 四项都在这里重述：前三项（已读 `read_at IS NOT NULL`、未星标 `starred = 0`、早于阈值
- * `recency < ?`）逐条照抄 `selectCleanup`；**第四项 `kept_unread = 0` 比它更窄** ——
- * 用户对「保持未读」说的是「别动它」，与星标同级，而 `selectCleanup` 是纯判据、不含这条
- * （所以它写在 store.ts 的 listCleanupCandidates 契约里）。
- * 于是最终删除集 = 本谓词 ∩ `selectCleanup`（`endpoints.ts` 的 `cleanup` 把候选喂回判据复跑）。
+ * ⚠️ **这条 SQL 只做成本筛选，不做判定**（2026-11-14 收口；来由见 `.scratch/cleanup-criterion/issues/01-cleanup-criterion-ownership.md`）。
+ * 它只保留两项：已读 `read_at IS NOT NULL`、早于阈值 `recency < ?` —— 两项都走索引与生成列，
+ * 作用是把候选从「整张 items 表」压到「已读且够旧的」那一小块。
  *
- * 谓词里的每一列都直接对应记录的字段（readAt→read_at、starred、keptUnread→kept_unread、
- * recencyOf(record)→生成列 recency），所以它确实与 selectCleanup 是同一件事的两种写法 ——
- * 而「两份实现没有被改分家」由 `tests/store-sqlite.test.mjs` 的两条钉住：
- *   · 「listCleanupCandidates：候选集由 SQL 选出，且与 selectCleanup 的判据对得上（唯一口径不漂）」
- *     在同一夹具上断言集合关系（候选集 == selectCleanup 的集合，除 kept 那一条外逐字相等）；
- *   · 「…排序、聚合与筛选真的写在 SQL 里」用正则断言 `read_at IS NOT NULL` / `starred = 0` /
- *     `kept_unread = 0` / `recency < ?` 真的出现在这条 SQL 文本里。
- * **改判据时两处都要改，改完重跑这两条。**
+ * **保护条款不在这里**：`starred = 0` 与 `kept_unread = 0` 已从谓词里撤掉，因为「哪些行该删」
+ * 只能有一个裁决者（`retention.ts` 的 `selectCleanup`）。谓词多守一条，判据就少看见一类行，
+ * 那批纯函数用例也就重新变成装饰。
  *
- * 三条保护列**照 items 行直接读**（不 JOIN texts）：texts 的读列只用于释放量，
+ * 现在的义务只有**包含关系**：候选 ⊇ `selectCleanup` 的判定集。
+ *   · 少取（比判据更窄）= 少清，不会多删；
+ *   · 多取（连星标 / 保持未读一起取回）= 判据挡回去。
+ * 两侧都有断言：`tests/store-sqlite.test.mjs` 的「候选集必须包含判定集」，
+ * 与 `tests/overview-scale.test.mjs` / `tests/overview-paging.test.mjs` 的「受保护条目活下来」。
+ *
+ * 判据字段（read / starred / kept）**照列读，不许按谓词回填**：回填会让判据看不见真实状态。
+ * 2026-11-14 隔离实验实测过那条路径 —— 放宽 `kept_unread = 0` 后，回填的 `kept: false`
+ * 让 `selectCleanup` 直接放行，用户标记「别动它」的条目被删。
+ *
+ * 这三列**照 items 行直接读**（不 JOIN texts）：texts 的读列只用于释放量，
  * 而清理的候选往往几千条，正文是不该在这一步就搬进内存的那部分（那是「按需读行」的全部意义）。
  */
 const SELECT_CLEANUP_IDS = [
-  'SELECT i.id AS id FROM items i',
-  ' WHERE i.read_at IS NOT NULL AND i.starred = 0 AND i.kept_unread = 0 AND i.recency < ?',
+  'SELECT i.id AS id, i.read_at AS read_at, i.starred AS starred, i.kept_unread AS kept_unread'
+  + ' FROM items i WHERE i.read_at IS NOT NULL AND i.recency < ?',
 ].join('')
 
 /**
@@ -877,21 +879,23 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
      * 库里只存 blocks 形态，parse 失败会被 SQLite/json 响亮抛出，不编造 0）。
      */
     listCleanupCandidates: (cutoffIso) => {
-      const ids = sql(SELECT_CLEANUP_IDS).all(cutoffIso).map((row) => requiredText(row.id, 'items.id'))
-      return ids.map((id) => {
-        const row = sql(SELECT_ITEM_CHARS).get(id)
-        if (row === undefined) {
+      const rows = sql(SELECT_CLEANUP_IDS).all(cutoffIso)
+      return rows.map((row) => {
+        const id = requiredText(row.id, 'items.id')
+        const chars = sql(SELECT_ITEM_CHARS).get(id)
+        if (chars === undefined) {
           throw new Error('清理候选 ' + id + ' 在补齐释放量时消失了：候选集与库里不一致（另一写者并发删了它？）')
         }
         return {
           id,
-          // 谓词已经保证这三项（保持未读那条是本实现比 selectCleanup 多守的），照实回填即可
-          starred: false,
-          kept: false,
-          read: true,
-          recency: requiredText(row.recency, 'items.recency'),
-          articleChars: articleCharsFromRow(row),
-          summaryChars: optionalText(row.summary, 'items.summary')?.length ?? 0,
+          // 三个判据字段**照列读**（不是按谓词回填）：谓词只负责少取点行，
+          // 「哪些行该删」由 retention.ts 的 selectCleanup 裁决 —— 判据必须看见真实状态。
+          starred: booleanAt(row.starred, 'items.starred'),
+          kept: booleanAt(row.kept_unread, 'items.kept_unread'),
+          read: row.read_at !== null,
+          recency: requiredText(chars.recency, 'items.recency'),
+          articleChars: articleCharsFromRow(chars),
+          summaryChars: optionalText(chars.summary, 'items.summary')?.length ?? 0,
         }
       })
     },

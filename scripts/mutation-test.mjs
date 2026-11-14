@@ -268,8 +268,14 @@ const MUTATIONS = [
     to: 'return [...read, ...unread].slice(0, overflow).map((row) => row.id);' },
   { id: 'retention-清理的星标保护', file: 'lib/retention.js',
     judges: ['overview-paging.test.mjs', 'retention.test.mjs', 'store-sqlite.test.mjs'],
-    from: '.filter((row) => row.read && !row.starred && row.recency < cutoffIso)',
-    to: '.filter((row) => row.read && row.recency < cutoffIso)' },
+    from: '.filter((row) => row.read && !row.starred && !row.kept && row.recency < cutoffIso)',
+    to: '.filter((row) => row.read && !row.kept && row.recency < cutoffIso)' },
+  { id: 'retention-清理的保持未读保护', file: 'lib/retention.js',
+    judges: ['overview-paging.test.mjs', 'retention.test.mjs', 'store-sqlite.test.mjs'],
+    // 「保持未读」是用户明确说的「别动它」，与星标同级。2026-11-14 起这条保护住在判据里
+    // （此前只写在 SQL 谓词里，判据根本看不见 kept）。少了它，清理会静默删掉用户标记的条目。
+    from: '.filter((row) => row.read && !row.starred && !row.kept && row.recency < cutoffIso)',
+    to: '.filter((row) => row.read && !row.starred && row.recency < cutoffIso)' },
   // 上限守卫（2026-10-11 修复轮 1 重写）：守卫已从 `maxChars <= 0` 改成 `!(maxChars > 0)`，
   // 为的是把 NaN 一起挡在外面 —— 挡住「整个清单」的那条与挡 NaN 的那条是同一处代码，分成两条变异。
   // ① 去掉「上限非法」这半 ⇒ 上限 0 / 负数会被当成「必须清到 0 字符」，把全部缓存清空。
@@ -1074,19 +1080,24 @@ const MUTATIONS = [
     // 的「标空之后 A 的键必须还在」与 tests/overview-scale.test.mjs 的键集断言。
     from: 'unread[feedId] = 0;',
     to: ';' },
-  { id: 'cleanup-保持未读不再受保护', file: 'lib/store-sqlite.js',
-    judges: ['overview-paging.test.mjs', 'overview-scale.test.mjs', 'store-sqlite.test.mjs'],
-    // 用户对 kept-unread 说的是「别动它」，与星标同级（store.ts 的 listCleanupCandidates 契约）。
-    // 谓词里少了它，清理会**静默删掉**用户明确标了「保持未读」的条目 —— 不可逆的数据丢失。
-    // 判据：tests/overview-scale.test.mjs 的「old-0-1 必须活下来」+ tests/store-sqlite.test.mjs 的候选集对账。
-    from: 'AND i.kept_unread = 0',
-    to: 'AND i.kept_unread >= 0' },
-  { id: 'cleanup-星标不再受保护', file: 'lib/store-sqlite.js',
-    judges: ['overview-paging.test.mjs', 'overview-scale.test.mjs', 'store-sqlite.test.mjs'],
-    // 星标是用户明确要留的东西（retention.ts 的 selectCleanup 也钉着它）。谓词里少了它，
-    // 一次「清理」会把星标旧条目一起删掉，且**没有任何断言会翻红**（除非有这条）。
-    from: 'AND i.starred = 0',
-    to: 'AND i.starred >= 0' },
+  // ⚠️ 2026-11-14 撤掉两条（原 id：cleanup-保持未读不再受保护 / cleanup-星标不再受保护）：
+  // 保护条款已从 SELECT_CLEANUP_IDS 搬进 retention.ts 的 selectCleanup，谓词里不再有
+  // `starred = 0` / `kept_unread = 0` 两串 —— 旧锚会报**未应用**（比幸存更隐蔽，pitfalls §2.7）。
+  // 同一个缺陷现在由下面三条守：retention-清理的星标保护 / retention-清理的保持未读保护 /
+  // cleanup-候选行的保持未读按谓词回填。按 AGENTS.md「等价变异不入门槛」，这里不补 SQL 谓词的宽容度变异：
+  // 谓词现在只做成本筛选，放宽它只会让候选更宽、由判据挡回去，行为不变。
+  { id: 'cleanup-候选行的保持未读按谓词回填', file: 'lib/store-sqlite.js',
+    judges: ['overview-scale.test.mjs', 'store-sqlite.test.mjs', 'overview-paging.test.mjs'],
+    // 旧写法按谓词回填 `kept: false` —— SQL 一旦放宽，判据看见的仍是 false，用户说「别动它」的条目被删。
+    // 2026-11-14 的隔离实验实测过这条路径；现在候选行必须照列读真实状态。
+    from: "kept: booleanAt(row.kept_unread, 'items.kept_unread'),",
+    to: 'kept: false,' },
+  { id: 'cleanup-候选集直接当删除集', file: 'lib/endpoints.js',
+    judges: ['overview-scale.test.mjs', 'overview-paging.test.mjs'],
+    // 跳过判据 = 让 SQL 的宽容度决定用户数据。SQL 现在只筛「已读 + 够旧」，
+    // 星标与保持未读的旧条目都在候选里 —— 少了这一句，它们会被直接删掉。
+    from: 'const doomed = new Set(selectCleanup(candidates, cutoff));',
+    to: 'const doomed = new Set(candidates.map((row) => row.id));' },
   { id: 'listRecent-负数上限下传给 SQLite', file: 'lib/store-sqlite.js',
     judges: ['store-sqlite.test.mjs'],
     // SQLite 把 LIMIT -1 当「无上限」。删掉 JS 侧短路后，「取 300 条」在一处算错成负数时
@@ -1188,13 +1199,9 @@ const MUTATIONS = [
     // 判据：tests/overview-paging.test.mjs 的「逐方法同义性：listArticleCacheEntries…」。
     from: 'chars: articleCharsOf(record.article),',
     to: 'chars: 0,' },
-  { id: 'store-旧实现候选集放过保持未读', file: 'lib/store.js',
-    judges: ['overview-paging.test.mjs'],
-    // 去掉「保持未读」的保护后，旧实现会把用户明确说「别动它」的条目交出去当清理候选 ——
-    // 与 SQL 谓词（第四项 kept_unread = 0）不再同义，最终删除集也就跟着变宽。
-    // 判据：tests/overview-paging.test.mjs 的「逐方法同义性：listCleanupCandidates…」。
-    from: 'rows.filter((row) => !row.kept),',
-    to: 'rows,' },
+  // ⚠️ 2026-11-14 撤掉（原 id：store-旧实现候选集放过保持未读）：旧实现里那句
+  // `rows.filter((row) => !row.kept)` 已删（保护条款只留 selectCleanup 一处），锚随代码消失。
+  // 它守的行为改由 retention-清理的保持未读保护 覆盖 —— 两个适配器都走同一个判据。
   { id: 'paging-续页不追加而是替换', file: 'lib/client.js',
     judges: ['client-bundle.test.mjs', 'nav-selection.test.mjs'],
     // 替换 ⇒ 翻到第二页时第一页整个消失（用户找不到刚读的那条）。

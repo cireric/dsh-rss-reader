@@ -104,24 +104,27 @@ export interface CleanupRow extends RetentionRow {
 }
 
 /**
- * 选出显式清理要删除的条目：**已读 + 未星标 + 早于阈值**。
+ * 选出显式清理要删除的条目：**已读 + 未星标 + 未保持未读 + 早于阈值**。
  *
- * 三个条件缺一不可：未读的可能是还没看的（删了就没了），星标的是用户明确要留的，
- * 晚于阈值的是近期历史（用户可能还要回看）。删除是**不可逆**的，所以判据刻意保守。
+ * 四个条件缺一不可：未读的可能是还没看的（删了就没了），星标与「保持未读」是用户明确说
+ * 「我要留着」的，晚于阈值的是近期历史（用户可能还要回看）。删除是**不可逆**的，所以判据刻意保守。
  *
- * ⚠️ **这条判据有两份实现，本函数是它的定义处（口径之家）**。Task 5 之后，自持存储为了不把整张
- * items 表物化到 JS，必须在 **SQL 里预先筛一遍**（`src/store-sqlite.ts` 的 `SELECT_CLEANUP_IDS`）；
- * 那一份是**第二实现，不是第二口径**，改判定时两处都要改：
- *   · 它把本函数的三项（`read_at IS NOT NULL` / `starred = 0` / `recency < ?`）**逐条照抄**，
- *     另外**更窄**一条 —— `kept_unread = 0`（用户对「保持未读」说的是「别动它」，与星标同级）；
- *   · 因此最终删除集 = **SQL 谓词 ∩ 本函数**，而「两份实现仍然是同一个判据」这件事由
- *     `tests/store-sqlite.test.mjs` 的对账用例钉住（「候选集必须与 selectCleanup 的集合逐字相等
- *     （除 kept 之外）」）；同文件另有断言把这三项真的出现在 SQL 文本里
- *     （「listRecent / unreadPerFeed / listCleanupCandidates 的排序、聚合与筛选真的写在 SQL 里」）。
- * 改完任何一处都必须重跑那两条 —— 它们才是「判据没分家」的判据。
+ * ⚠️ **本函数是这条判据唯一的裁决者**（2026-11-14 收口；来由见 `.scratch/cleanup-criterion/issues/01-cleanup-criterion-ownership.md`）。
+ *
+ * 自持存储为了不把整张 items 表物化到 JS，仍会在 SQL 里先筛一遍
+ * （`src/store-sqlite.ts` 的 `SELECT_CLEANUP_IDS`）。但那份 SQL 只被允许做**成本筛选**
+ * （`read_at IS NOT NULL AND recency < ?`），**不许替本函数决定保护条款**：星标与「保持未读」
+ * 的过滤已从谓词里撤掉，改由这里裁决。
+ *
+ * 为什么这么切：两份实现「逐字等价」是一条没人守得住、也没人能证明的义务 —— 候选行的判据字段
+ * 若按谓词回填（旧写法把 read / starred / kept 写死成 true / false / false），SQL 坏掉时本函数
+ * 照样放行。2026-11-14 的隔离实验实测过：把 `kept_unread = 0` 放宽成 `>= 0`，
+ * 一条 `kept_unread = 1` 的旧条目会进候选并被删，而纯函数用例一条都不会红。
+ * 现在的义务只有一条**包含关系**：候选 ⊇ 本函数的判定集。SQL 少取 = 少清（可接受、有断言），
+ * 多取 = 由本函数挡回去（有断言）。两侧都由 `tests/store-sqlite.test.mjs` 钉住。
  */
 export function selectCleanup(rows: readonly CleanupRow[], cutoffIso: string): string[] {
   return rows
-    .filter((row) => row.read && !row.starred && row.recency < cutoffIso)
+    .filter((row) => row.read && !row.starred && !row.kept && row.recency < cutoffIso)
     .map((row) => row.id)
 }

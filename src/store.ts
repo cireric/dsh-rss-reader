@@ -126,17 +126,14 @@ export interface ReaderStore {
   /**
    * 显式清理的候选行（Task 5；原先由调用方 allItems() 全表物化后再筛）。
    *
-   * 判据的定义处是 `retention.ts` 的 `selectCleanup`（已读 + 未星标 + 早于阈值）。本方法的契约是
-   * **它的第二实现**（自持实现里是一条 SQL，见 `store-sqlite.ts` 的 `SELECT_CLEANUP_IDS`），
-   * 四项都要在存储侧重述 —— 前三项照抄判据，**第四项比判据更窄**：
-   *   · `readAt !== undefined`（已读）
-   *   · `starred === false`（未星标）
-   *   · `recencyOf(record) < cutoffIso`（早于阈值）
-   *   · `keptUnread !== true`（**不被**「保持未读」保护）—— 用户对 kept-unread 说的是「别动它」，
-   *     与星标同级；`selectCleanup` 是纯判据、不含这条，所以它只写在候选的契约里。
-   * 于是调用方的最终删除集 = **候选集 ∩ `selectCleanup`(候选)**（`endpoints.ts` 的 `cleanup` 就是
-   * 这么做的）。两份实现必须同步改，一致性由 `tests/store-sqlite.test.mjs` 的对账用例钉住
-   * （「候选集必须与 selectCleanup 的集合逐字相等（除 kept 之外）」）。
+   * **判据的唯一裁决者是 `retention.ts` 的 `selectCleanup`**；本方法只负责「把可能要删的行捞出来」。
+   * 契约是一条**包含关系**：
+   *   · 候选集 **⊇** `selectCleanup` 的判定集（少取 = 少清，可接受；不许漏掉真该删的）；
+   *   · 候选行必须携带**真实**的 `read / starred / kept` 与 `recency`，**不许按谓词回填**
+   *     （回填会让判据看不见真实状态，2026-11-14 的隔离实验实测过这条路径）。
+   * 调用方的最终删除集 = `selectCleanup(候选)`（`endpoints.ts` 的 `cleanup` 就这么做）。
+   * 自持实现因此只筛「已读 + 够旧」两项成本条件，星标与保持未读交给判据 —— 见
+   * `store-sqlite.ts` 的 `SELECT_CLEANUP_IDS` 注释。
    */
   listCleanupCandidates(cutoffIso: string): CleanupCandidate[]
   /** 全部订阅源（key 即归一化后的 URL）——订阅源以存储域为准，Config 只是种子 */
@@ -363,10 +360,8 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
         }
         rows.push(row)
       }
-      const doomed = new Set(selectCleanup(
-        rows.filter((row) => !row.kept),
-        cutoffIso,
-      ))
+      // 不再在这里预筛 kept：保护条款只住在 selectCleanup 一处（否则又是两份实现）。
+      const doomed = new Set(selectCleanup(rows, cutoffIso))
       return rows.filter((row) => doomed.has(row.id))
     },
     listFeeds: () => [...feeds.entries()],

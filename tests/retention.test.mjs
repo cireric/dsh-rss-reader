@@ -6,7 +6,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { selectPrunable, selectArticleEvictions, selectCleanup } from '../lib/retention.js'
 
-const row = (id, recency, { starred = false, read = false } = {}) => ({ id, starred, read, recency })
+const row = (id, recency, { starred = false, kept = false, read = false } = {}) => ({ id, starred, kept, read, recency })
 
 test('裁剪：未超上限时一条都不删', () => {
   assert.deepEqual(selectPrunable([row('a', '2026-01-01')], 5), [])
@@ -61,11 +61,13 @@ test('正文缓存：超限时从最旧开始清，清到刚好达标即停', ()
   assert.deepEqual(selectArticleEvictions(entries, 1000), [])
 })
 
-test('显式清理：三个条件缺一不可', () => {
+test('显式清理：四个条件缺一不可', () => {
   const cutoff = '2026-06-01T00:00:00.000Z'
   const rows = [
     { ...row('keep-unread', '2026-01-01'), articleChars: 0 },
     { ...row('keep-starred', '2026-01-01', { read: true, starred: true }), articleChars: 0 },
+    // 「保持未读」是用户明确说的「别动它」，与星标同级（2026-11-14 起由判据本身守，不再依赖 SQL 谓词）
+    { ...row('keep-kept', '2026-01-01', { read: true, kept: true }), articleChars: 0 },
     { ...row('keep-recent', '2026-07-01', { read: true }), articleChars: 0 },
     { ...row('delete-me', '2026-01-01', { read: true }), articleChars: 5000 },
   ]
