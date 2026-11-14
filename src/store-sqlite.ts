@@ -39,6 +39,7 @@ import {
 import { readConfigFile, writeConfigFile, type ReaderConfigFile } from './storage/config-file.js'
 import { SCHEMA_VERSION } from './storage/db.js'
 import { clampReadingRatio, sanitizeViewPreferences, type Cursor, type TagView } from './shared.js'
+import { linkKeyOf, type DuplicateRow } from './duplicates.js'
 import type { CleanupCandidate, ReaderStore } from './store.js'
 import type { ArticleEntry } from './retention.js'
 import { applyFeedIntent, type FeedIntent } from './feed-intent.js'
@@ -278,12 +279,13 @@ const SELECT_CLEANUP_IDS = [
  * 「取消保持未读」（saveItem + 省略该字段）静默失效。需要合并进当前记录的场景一律走 updateItem。
  */
 const UPSERT_ITEM = `
-  INSERT INTO items (id, feed_id, title, link, published_at, fetched_at, summary, read_at, starred, kept_unread, article_failure)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO items (id, feed_id, title, link, link_key, published_at, fetched_at, summary, read_at, starred, kept_unread, article_failure)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(id) DO UPDATE SET
     feed_id         = excluded.feed_id,
     title           = excluded.title,
     link            = excluded.link,
+    link_key        = excluded.link_key,
     published_at    = excluded.published_at,
     fetched_at      = excluded.fetched_at,
     summary         = excluded.summary,
@@ -600,6 +602,8 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
       record.feedId,
       record.title,
       record.link,
+      // link_key 是派生列：规则只在 duplicates.ts 的 linkKeyOf 一处（M5 03 的跨源提示按它批量查）
+      linkKeyOf(record.link),
       record.publishedAt ?? null,
       record.fetchedAt,
       record.summary ?? null,
@@ -726,6 +730,35 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
         sql(DELETE_PROGRESS).run(itemId)
         sql(DELETE_ITEM).run(itemId)
       })
+    },
+
+    /**
+     * 跨源重复提示的候选行（M5 03）：**一次 IN 查询**，走 i3 索引。
+     *
+     * 为什么必须有这条方法（而不是在端点里 allItems() 再筛）：票据明令禁止「每次渲染扫全库」，
+     * 而候选可能在别的页、别的源（跨页也要能找到）。分段是 SQLite 变量上限（默认 999）的兜底，
+     * 400 一批既安全又不会把语句缓存撑爆。
+     */
+    itemsByLinkKeys: (keys) => {
+      const unique = [...new Set(keys)].filter((key) => key !== '')
+      if (unique.length === 0) return []
+      const rows: DuplicateRow[] = []
+      for (let offset = 0; offset < unique.length; offset += 400) {
+        const chunk = unique.slice(offset, offset + 400)
+        const statement = 'SELECT id, feed_id, title, link, read_at FROM items WHERE link_key IN ('
+          + chunk.map(() => '?').join(',') + ')'
+        for (const row of sql(statement).all(...chunk)) {
+          const readAt = optionalText(row.read_at, 'items.read_at')
+          rows.push({
+            id: requiredText(row.id, 'items.id'),
+            feedId: requiredText(row.feed_id, 'items.feed_id'),
+            title: requiredText(row.title, 'items.title'),
+            link: requiredText(row.link, 'items.link'),
+            ...(readAt === undefined ? {} : { readAt }),
+          })
+        }
+      }
+      return rows
     },
 
     /**

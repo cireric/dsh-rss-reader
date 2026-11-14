@@ -114,6 +114,10 @@ const STYLE = `
 .dsh-rss-row[data-rss-unread] .dsh-rss-dot { background:var(--rss-accent); }
 .dsh-rss-row-title { display:block; font-size:14px; line-height:1.4; overflow-wrap:anywhere; }
 .dsh-rss-row[data-rss-unread] .dsh-rss-row-title { font-weight:650; }
+.dsh-rss-dupes { display:block; margin-top:4px; font-size:12px; }
+.dsh-rss-dupes > summary { cursor:pointer; color:var(--rss-muted); width:max-content; }
+.dsh-rss-dupes-list { display:flex; flex-direction:column; gap:2px; margin-top:4px; }
+.dsh-rss-dupes-list a { overflow-wrap:anywhere; }
 .dsh-rss-summary { display:block; max-width:760px; margin-top:8px;
   font-size:14px; line-height:1.65; overflow-wrap:anywhere; }
 .dsh-rss-article-inset { padding-inline:clamp(24px, 4vw, 52px); }
@@ -655,6 +659,25 @@ export function createReader(store: ReaderStore): () => ReactNode {
                     <span className="dsh-rss-meta" style={{ marginTop: 2 }}>
                       {selectedFeed === undefined && item.feedTitle + ' · '}{relativeTime(recencyOf(item))}
                     </span>
+                    {/* 跨源重复提示（M5 03）：只提示、不合并 —— 每个源仍保留自己的 id / 已读 / 星标。
+                        点击与空格都要 stopPropagation：整行是个 role=button（会选中+标读），
+                        展开提示不该顺手把那篇文章标成已读。 */}
+                    {state.duplicates[item.id] !== undefined && (
+                      <details className="dsh-rss-dupes" data-rss-duplicates={item.id}
+                        onClick={(event) => event.stopPropagation()}>
+                        <summary onKeyDown={(event) => { if (event.key === ' ') event.stopPropagation() }}>
+                          另有 {state.duplicates[item.id].length} 个来源
+                        </summary>
+                        <span className="dsh-rss-dupes-list">
+                          {state.duplicates[item.id].map((other) => (
+                            <a key={other.itemId} href={other.link} target="_blank" rel="noreferrer"
+                              data-rss-dupe-item={other.itemId}>
+                              {other.feedTitle} · {other.title || other.link}
+                            </a>
+                          ))}
+                        </span>
+                      </details>
+                    )}
                     {isOpen && (
                       <span className="dsh-rss-summary">
                         {(() => {

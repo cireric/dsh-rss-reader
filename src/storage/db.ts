@@ -12,6 +12,7 @@
 import { closeSync, mkdirSync, openSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { linkKeyOf } from '../duplicates.js'
 
 /**
  * 物理布局版本，存在 `PRAGMA user_version`。
@@ -19,7 +20,7 @@ import { DatabaseSync } from 'node:sqlite'
  * 与「条目/订阅的记录形状」无关，只描述**表结构本身**。任何破坏性改动都必须升它，
  * 而升它就必须同时想清楚老库怎么办 —— 本模块只会**拒绝**不认识的版本，不做原地迁移。
  */
-export const SCHEMA_VERSION = 3
+export const SCHEMA_VERSION = 4
 
 /**
  * 本版**能打开并升级**的旧版本。
@@ -29,7 +30,7 @@ export const SCHEMA_VERSION = 3
  *
  * 两条升级都**只加表**，不改 items/texts/cursors 的任何一行。
  */
-const UPGRADABLE_VERSIONS = new Set([1, 2])
+const UPGRADABLE_VERSIONS = new Set([1, 2, 3])
 
 /** 出错时的消息尾巴：把「去找什么」写清楚，比只报 errno 有用。 */
 const errnoOf = (error: unknown): string =>
@@ -116,10 +117,13 @@ function configureDatabase(db: DatabaseSync, path: string): void {
  * 在**一个事务**里执行 DDL 并盖版本章。失败必须把版本号与所有新建对象一起回滚 ——
  * 「表建了一半、版本却盖了」会让下一次启动误以为库已完整，是最坏的半成品形态。
  */
-function applyDdl(db: DatabaseSync, label: string, ddl: string): void {
+function applyDdl(db: DatabaseSync, label: string, ddl: string, after?: (db: DatabaseSync) => void): void {
   db.exec('BEGIN')
   try {
     db.exec(ddl)
+    // 数据回填必须与 DDL 在**同一个事务**里。先盖章再回填的话，中途崩掉会留下一个
+    // 「版本已是新版本、列却全空」的库 —— 功能静默失效，而版本闸放行，没有任何报错。
+    after?.(db)
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
     db.exec('COMMIT')
   } catch (error) {
@@ -133,6 +137,34 @@ function applyDdl(db: DatabaseSync, label: string, ddl: string): void {
       )
     }
     throw new Error(`${label}失败（已回滚，版本号未变，可安全重试）：${String(error)}`, { cause: error })
+  }
+}
+
+/**
+ * v4 给 items 加一列 `link_key`（原文链接的归一化键，M5 03 的跨源重复提示按它批量查）。
+ *
+ * - **为什么是列而不是每次现算**：提示要按「可见条目」批量查候选，而候选在别的页、别的源
+ *   （票据要求跨页也能找到）。现算只能把整张 items 表的 link 搬进 JS 扫一遍 —— 票据明令禁止。
+ *   列 + 索引把这件事变成一次 IN 查询。
+ * - 值由 `duplicates.ts` 的 linkKeyOf 算（同一处规则），写入路径在 store-sqlite 的 writeItem。
+ * - 老库升级必须**回填**，且回填与 DDL 同一事务（见 applyDdl 的注释）。
+ */
+const LINK_KEY_DDL = `
+  ALTER TABLE items ADD COLUMN link_key TEXT;
+  CREATE INDEX i3 ON items(link_key);
+`
+
+/** 给已有行补 link_key。解析不出的链接写空串（与 linkKeyOf 的「不参与判定」同义）。 */
+function backfillLinkKeys(db: DatabaseSync): void {
+  const rows = db.prepare('SELECT id, link FROM items').all()
+  const update = db.prepare('UPDATE items SET link_key = ? WHERE id = ?')
+  for (const row of rows) {
+    const id = row.id
+    const link = row.link
+    if (typeof id !== 'string' || typeof link !== 'string') {
+      throw new Error('items 行形状异常：id/link 不是字符串（' + JSON.stringify(row) + '）')
+    }
+    update.run(linkKeyOf(link), id)
   }
 }
 
@@ -171,16 +203,20 @@ export function migrateSchema(db: DatabaseSync): void {
   }
   if (onDisk === 1) {
     assertV1Schema(db)
-    // v1 直接补到当前版本：两步 DDL 在**同一个事务**里，避免「盖了版本章却少一张表」
-    applyDdl(db, 'v1→v3 升级', TAGS_DDL + PROGRESS_DDL)
+    // v1 直接补到当前版本：所有 DDL 在**同一个事务**里，避免「盖了版本章却少一张表」
+    applyDdl(db, 'v1→v4 升级', TAGS_DDL + PROGRESS_DDL + LINK_KEY_DDL, backfillLinkKeys)
     return
   }
   if (onDisk === 2) {
-    applyDdl(db, 'v2→v3 升级', PROGRESS_DDL)
+    applyDdl(db, 'v2→v4 升级', PROGRESS_DDL + LINK_KEY_DDL, backfillLinkKeys)
+    return
+  }
+  if (onDisk === 3) {
+    applyDdl(db, 'v3→v4 升级', LINK_KEY_DDL, backfillLinkKeys)
     return
   }
   throw new Error(
-    `订阅数据库的格式版本是 ${onDisk}，不是空库（0）、可升级的 v1/v2 或当前版本 ${SCHEMA_VERSION}：` +
+    `订阅数据库的格式版本是 ${onDisk}，不是空库（0）、可升级的 v1/v2/v3 或当前版本 ${SCHEMA_VERSION}：` +
       '拒绝建表/升级，以免把不认识的库覆盖成半成品。',
   )
 }
@@ -221,6 +257,9 @@ const BASE_SCHEMA_DDL = `
     starred         INTEGER NOT NULL DEFAULT 0,
     kept_unread     INTEGER NOT NULL DEFAULT 0,
     article_failure TEXT,
+    -- 原文链接的归一化键（M5 03）：'' = 不参与重复判定。写入在 store-sqlite 的 writeItem，
+    -- 规则在 duplicates.ts 的 linkKeyOf —— 这里是**派生列**，不是第二份真相。
+    link_key        TEXT,
     recency         TEXT NOT NULL GENERATED ALWAYS AS (COALESCE(published_at, fetched_at)) VIRTUAL
   );
 
@@ -228,6 +267,8 @@ const BASE_SCHEMA_DDL = `
   CREATE INDEX i1 ON items(feed_id, recency DESC);
   -- 跨源 top-N 与 keyset 分页（spec §10 的排序键）
   CREATE INDEX i2 ON items(recency DESC, id ASC);
+  -- 跨源重复提示的批量查（M5 03）：WHERE link_key IN (…) 走这条索引
+  CREATE INDEX i3 ON items(link_key);
 
   CREATE TABLE texts (
     item_id    TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,

@@ -14,6 +14,7 @@ import type { FolderView, TagView } from './shared.js'
 import { articleCharsOf, selectCleanup, type ArticleEntry, type CleanupRow } from './retention.js'
 import { applyFeedIntent, type FeedIntent } from './feed-intent.js'
 import { clampReadingRatio, countUnreadPerFeed, recencyOf, sanitizeViewPreferences, type Cursor, type ViewPreferences } from './shared.js'
+import { linkKeyOf, type DuplicateRow } from './duplicates.js'
 
 /**
  * 清理候选行：**判据字段**（供 selectCleanup 复跑）与**释放量原料**一次带齐。
@@ -200,6 +201,14 @@ export interface ReaderStore {
   saveReadingProgress(itemId: string, contentVersion: string, ratio: number): Promise<void>
   /** 清掉某条的阅读进度（正文缓存淘汰时调；条目整体删除由 deleteItem 一并处理）。幂等。 */
   clearReadingProgress(itemId: string): Promise<void>
+
+  /**
+   * 按「归一化链接键」批量取候选行（M5 03 的跨源重复提示）。
+   *
+   * 键由调用方用 duplicates.ts 的 linkKeyOf 算好；实现只负责按 key 取行，
+   * **不自己再归一化一遍**（否则同一个规则会有两份写法）。
+   */
+  itemsByLinkKeys(keys: readonly string[]): DuplicateRow[]
 }
 
 export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
@@ -424,6 +433,23 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
         await items.delete(loserId)
       }
       itemTagIds.set(keeperId, keeperTags)
+    },
+    /**
+     * 旧路径：全表扫一遍。它只服务测试里的同义性基线（生产是 createSqliteStore 的 IN 查询），
+     * **不要**在装载路径上用它 —— 票据禁止的「每次渲染扫全库」正是这个形状。
+     */
+    itemsByLinkKeys: (keys) => {
+      const wanted = new Set(keys.filter((key) => key !== ''))
+      if (wanted.size === 0) return []
+      const rows: DuplicateRow[] = []
+      for (const [id, record] of items.entries()) {
+        if (!wanted.has(linkKeyOf(record.link))) continue
+        rows.push({
+          id, feedId: record.feedId, title: record.title, link: record.link,
+          ...(record.readAt === undefined ? {} : { readAt: record.readAt }),
+        })
+      }
+      return rows
     },
     readingProgress: (itemId, contentVersion) => {
       const row = progress.get(itemId)

@@ -166,6 +166,37 @@ const MUTATIONS = [
   // ③ 两层都去掉 ⇒ 浏览器对 scrollTop 赋值本身就会夹到 [0, maxTop]（越界只是「停在底部」）。
   // 三个方向都改不出可观察的差别，所以这条入门槛只会变成狼来了。函数契约仍由
   // tests/reading-progress.test.mjs 的纯函数用例钉住（0.5→1350 / NaN→0 / 越界→maxTop）。
+  // ── M5 03：跨源重复提示（2026-11-16）──────────────────────────────────────
+  // 「同源不算」是这条提示的定义之一：同一链接在同一源里重复是 identity-repair 的活，
+  // 在这里再报一次只是重复报警。判据在 tests/duplicates.test.mjs 的分组用例。
+  { id: 'dupes-同源也算重复', file: 'lib/duplicates.js',
+    judges: ['duplicates.test.mjs'],
+    from: "row.id !== item.id && row.feedId !== item.feedId",
+    to: "row.id !== item.id" },
+  // 非 http(s) 的链接（javascript: / mailto: / data:）一律不参与判定：它们不是「可读的原文」，
+  // 而且两个 null 链接会把不相干的文章连成一组。判据是归一化样本表里的那几条。
+  { id: 'dupes-非 http(s) 链接参与判定', file: 'lib/duplicates.js',
+    judges: ['duplicates.test.mjs'],
+    from: "if (url.protocol !== 'http:' && url.protocol !== 'https:')\n        return '';",
+    to: "if (false)\n        return '';" },
+  // 候选必须**跨页**查（票据验收项）：退回「只用这一页的条目」时，另一页的兄弟永远看不到，
+  // 而界面上只是「提示少了一条」，没有任何报错。判据是端点用例里 b1 不在这一页那一条。
+  { id: 'dupes-只查这一页', file: 'lib/endpoints.js',
+    judges: ['duplicates.test.mjs'],
+    from: "const candidates = keys.size === 0 ? [] : ctx.store.itemsByLinkKeys([...keys]);",
+    to: "const candidates = visible;" },
+  // 升级回填必须**归一化**：直接把 link 原样写进 link_key，老条目会因为 ?utm_/#fragment 而永远匹配不上。
+  // 判据是 v2→v4 的升级用例（夹具链接带 utm 与 fragment）。
+  { id: 'dupes-回填不归一', file: 'lib/storage/db.js',
+    judges: ['duplicates.test.mjs'],
+    from: "update.run(linkKeyOf(link), id);",
+    to: "update.run(link, id);" },
+  // 整行是 role=button（点一下就选中 + 标读）：展开提示必须 stopPropagation，
+  // 否则「点开看看别的来源」会顺手把这篇标成已读。判据在真 DOM 用例里。
+  { id: 'dupes-展开顺手标读', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    from: "onClick: (event) => event.stopPropagation(),",
+    to: "onClick: () => {}," },
   // M4 01：候选的相对链接必须按**重定向落点**解析。退回输入 URL 时，站点只要做过一次
   // 301（http→https、加斜杠、换域名），相对候选就被拼到错的 host 上；判据在 subscribe.test.mjs
   // 的「重定向后相对候选按最终页面 URL 解析」。OCCURRENCES 独立实测 = 1（lib/subscribe.js:142）。
@@ -670,10 +701,13 @@ const MUTATIONS = [
   // 整份写入盖过去（persistView 落的是整个 state）。判据在「记住上次选中的导航项…」里
   // 逐个动作各断言一次。三条 from 各自唯一：产物里 persistView() 共 3 处，下面分别锚在
   // 「后随 applyOverview」「后随 /**」「前随 set({ navVisible: … })」上（均实测 OCCURRENCES=1）。
+  // ⚠️ 2026-11-16（M5 03）重锚：原先锚在 `};` 之后紧跟 `const applyOverview` 的地方，而跨源提示的
+  // refreshDuplicateHints 现在插在两者之间 ⇒ 旧 from 报「未应用」。改成锚 setFilter 独有的
+  // 「relocateSelection + persistView + resetSearchPage」三连（实测 OCCURRENCES=1）。
   { id: 'persist-setFilter 不写盘', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs'],
-    from: 'relocateSelection();\n\t\t\t\tpersistView();\n\t\t\t\tresetSearchPage();\n\t\t\t};\n\t\t\tconst applyOverview',
-    to: 'relocateSelection();\n\t\t\t\tresetSearchPage();\n\t\t\t};\n\t\t\tconst applyOverview' },
+    from: "\t\t\t\t\tfilter,\n\t\t\t\t\tnavCursor: {\n\t\t\t\t\t\tkind: \"filter\",\n\t\t\t\t\t\tfilter\n\t\t\t\t\t}\n\t\t\t\t});\n\t\t\t\trelocateSelection();\n\t\t\t\tpersistView();",
+    to: "\t\t\t\t\tfilter,\n\t\t\t\t\tnavCursor: {\n\t\t\t\t\t\tkind: \"filter\",\n\t\t\t\t\t\tfilter\n\t\t\t\t\t}\n\t\t\t\t});\n\t\t\t\trelocateSelection();" },
   { id: 'persist-selectNav 不写盘', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs'],
     from: 'relocateSelection();\n\t\t\t\tpersistView();\n\t\t\t\tresetSearchPage();\n\t\t\t\tconst scopeChanged = current.kind === "folder" || next.kind === "folder" || current.kind === "tag" || next.kind === "tag";',
@@ -1398,9 +1432,12 @@ const MUTATIONS = [
   // ⚠️ 2026-11-16（M5 02）重锚：v1 的升级从「一次 applyDdl(TAGS_DDL)」改成
   // 「一次 applyDdl(TAGS_DDL + PROGRESS_DDL)」（两步 DDL 同一事务），旧 from 会报**未应用**。
   // 语义不变：v1 升上来必须把标签表建上。
+  // ⚠️ 2026-11-16（M5 03）再重锚：v4 让 v1 的升级又多了一段 LINK_KEY_DDL。
+  // 语义不变：v1 升上来必须把标签表建上。
   { id: 'tag-升级不建标签表', file: 'lib/storage/db.js',
     judges: ['tag-storage.test.mjs'],
-    from: "applyDdl(db, 'v1→v3 升级', TAGS_DDL + PROGRESS_DDL);", to: "applyDdl(db, 'v1→v3 升级', PROGRESS_DDL);" },
+    from: "applyDdl(db, 'v1→v4 升级', TAGS_DDL + PROGRESS_DDL + LINK_KEY_DDL, backfillLinkKeys);",
+    to: "applyDdl(db, 'v1→v4 升级', PROGRESS_DDL + LINK_KEY_DDL, backfillLinkKeys);" },
   { id: 'tag-升级后版本仍为1', file: 'lib/storage/db.js',
     judges: ['tag-storage.test.mjs'],
     from: 'db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);', to: "db.exec('PRAGMA user_version = 1');" },

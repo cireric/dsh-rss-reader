@@ -26,8 +26,8 @@ const ITEM_ID = 'item-0001'
 const ROUND = '2026-10-11T09:00:00.000Z'
 
 test('端点名字表非空、无重复、全为非空字符串', () => {
-  assert.equal(ENDPOINT_NAMES.length, 27)
-  assert.equal(new Set(ENDPOINT_NAMES).size, 27)
+  assert.equal(ENDPOINT_NAMES.length, 28)
+  assert.equal(new Set(ENDPOINT_NAMES).size, 28)
   for (const name of ENDPOINT_NAMES) assert.equal(typeof name, 'string')
 })
 

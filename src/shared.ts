@@ -26,7 +26,7 @@ export const ROUTE_PATH = '/rss-reader-api'
 export const ENDPOINT_NAMES = [
   'overview', 'refresh', 'markRead', 'unmarkRead', 'toggleStar', 'toggleKeepUnread', 'article', 'cleanup',
   'opmlExport', 'opmlImport', 'addFeed', 'removeFeed', 'discoverFeeds',
-  'viewPreferences', 'saveViewPreferences', 'saveReadingProgress', 'searchItems',
+  'viewPreferences', 'saveViewPreferences', 'saveReadingProgress', 'duplicateHints', 'searchItems',
   'listFolders', 'createFolder', 'renameFolder', 'deleteFolder', 'moveFeedToFolder',
   'listTags', 'createTag', 'renameTag', 'deleteTag', 'setItemTags',
 ] as const
@@ -285,6 +285,16 @@ export interface CleanupResult {
 export interface OpmlExportResult {
   opml: string
   feedCount: number
+}
+
+/**
+ * 跨源重复提示（M5 03）：某条可见条目在**别的源**里还有哪些同链接的条目。
+ *
+ * 只做提示，不做合并：每个来源仍保留独立的 id、已读与星标（PRD F08 的硬要求）。
+ */
+export interface DuplicateHintView {
+  itemId: string
+  others: Array<{ itemId: string; feedId: string; feedTitle: string; title: string; link: string; readAt?: string }>
 }
 
 /** OPML 导入（`opmlImport`）的返回：逐源结果 + 汇总，坏源单独列出（§3.1）。 */

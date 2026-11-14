@@ -6,7 +6,7 @@
  * 列表、正文、订阅管理与键盘接线，任一改动都要动同一个文件。
  */
 import { useEffect, useState } from 'react'
-import { DEFAULT_READING_PREFERENCES, ROUTE_PATH, recencyOf, sanitizeViewPreferences, type ArticlePayload, type CleanupResult, type DiscoveryResult, type Endpoint, type FeedView, type FolderView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult, type SearchPage, type SearchQuery, type TagView, type ReadingPreferences, type UnreadAccount, type ViewPreferences } from '../shared.js'
+import { DEFAULT_READING_PREFERENCES, ROUTE_PATH, recencyOf, sanitizeViewPreferences, type ArticlePayload, type CleanupResult, type DiscoveryResult, type Endpoint, type FeedView, type FolderView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult, type SearchPage, type SearchQuery, type TagView, type DuplicateHintView, type ReadingPreferences, type UnreadAccount, type ViewPreferences } from '../shared.js'
 import { createAccountMirror } from './account-mirror.js'
 
 export type Filter = 'all' | 'unread' | 'starred'
@@ -204,6 +204,13 @@ export interface ReaderState {
    */
   reading: ReadingPreferences
   /**
+   * 跨源重复提示（M5 03）：itemId → 别的源里的同链接条目。
+   *
+   * 只在这一屏加载完之后**批量查一次**（不是每次渲染查）：这份 map 是查询结果，不是判据 ——
+   * 判据在宿主（duplicates.ts 的 linkKeyOf + 跨源过滤），客户端只负责显示。
+   */
+  duplicates: Record<string, DuplicateHintView['others']>
+  /**
    * 续页游标（Overview.nextCursor，keyset）：**原样**回带给下一次 overview 调用。
    *
    * 客户端不解释它的内容（格式 `"<recency>|<id>"` 由宿主定义，见 src/shared.ts 的 decodeCursor）——
@@ -265,7 +272,7 @@ export function createReaderStore() {
     view: 'list', layout: 'list', markAllRange: 'all', showUnread: true, article: undefined, notice: undefined,
     importReport: undefined, discovery: undefined, feedsBusy: false,
     navSelection: { kind: 'virtual' }, perFeedUnread: {}, navVisible: true,
-    reading: DEFAULT_READING_PREFERENCES,
+    reading: DEFAULT_READING_PREFERENCES, duplicates: {},
     nextCursor: undefined, loadingMore: false, searchRevision: 0,
     // 光标初值 = 与初始 filter 一致的那一行（初始 filter 是 'all'，故就是「全部」那一行）：
     // 「我停在哪」与「此刻生效的是哪」在开局是同一行，之后才由 shift+n/p 与 shift+o 分开。
@@ -361,6 +368,7 @@ export function createReaderStore() {
         items, selectedId, nextCursor, loading: false, loadingMore: false,
         searchRevision: state.searchRevision + (firstPage ? 1 : 0),
       })
+      refreshDuplicateHints()
     } catch (error) {
       if (version !== listVersion) return
       set({ loading: false, loadingMore: false, error: error instanceof Error ? error.message : String(error) })
@@ -449,6 +457,30 @@ export function createReaderStore() {
     resetSearchPage()
   }
 
+  /**
+   * 拉一次跨源重复提示（M5 03）。
+   *
+   * **一次 load 一次**：把这一屏的条目 id 一起发过去，宿主按 link_key 批量查 ——
+   * 客户端不做「每次渲染扫全库」，也不为每条单独发请求。
+   * 失败只留痕不弹错：提示是附加信息，不该让列表红一次。
+   */
+  const refreshDuplicateHints = (): void => {
+    const itemIds = state.items.slice(0, 200).map((item) => item.id)
+    if (itemIds.length === 0) {
+      if (Object.keys(state.duplicates).length > 0) set({ duplicates: {} })
+      return
+    }
+    void callRpc<{ hints?: DuplicateHintView[] }>('duplicateHints', { itemIds })
+      .then((result) => {
+        const next: Record<string, DuplicateHintView['others']> = {}
+        for (const hint of result.hints ?? []) next[hint.itemId] = hint.others
+        set({ duplicates: next })
+      })
+      .catch((failure: unknown) => {
+        console.warn('[rss-reader] 跨源重复提示查询失败，本次不显示', failure)
+      })
+  }
+
   const applyOverview = (overview: Overview): void => {
     const selected = state.selectedId
     const stillThere = selected !== undefined && overview.items.some((item) => item.id === selected)
@@ -473,6 +505,7 @@ export function createReaderStore() {
         : {}),
     })
     if (missing) persistView()
+    refreshDuplicateHints()
     // 兜底走 relocateSelection 而不是「取 items[0]」：后者不含源条件，选源状态下按 r 刷新
     // 会把选中项送到源外（那一刻 visible() 里没有它，j/k 直接失灵）。
     if (!stillThere) relocateSelection()

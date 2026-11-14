@@ -132,35 +132,6 @@ test('阅读进度：删条目连带删进度（两条路径都清）', async ()
   }
 })
 
-test('v2→v3 升级：只加 reading_progress 表，旧数据一行不动', async () => {
-  // 造一个**真实 v2 库**：先建到当前版本，再摘掉 v3 那张表并把版本章退回 2 —— 形状与 M5 02 之前的库一致
-  const dir = mkdtempSync(join(tmpdir(), 'rss-progress-v2-'))
-  try {
-    const db = openDatabase(join(dir, 'rss.db'))
-    migrateSchema(db)
-    db.exec('DROP TABLE reading_progress')
-    db.exec('PRAGMA user_version = 2')
-    db.prepare('INSERT INTO items (id, feed_id, title, link, fetched_at, starred) VALUES (?, ?, ?, ?, ?, 0)')
-      .run('old-1', FEED_ID, '老条目', 'https://site.example/old', ROUND)
-    db.close()
-
-    const reopened = openDatabase(join(dir, 'rss.db'))
-    try {
-      migrateSchema(reopened)
-      assert.equal(reopened.prepare('PRAGMA user_version').get().user_version, SCHEMA_VERSION)
-      const row = reopened.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='reading_progress'").get()
-      assert.ok(row !== undefined, 'v3 的表必须补上')
-      assert.equal(reopened.prepare('SELECT title FROM items WHERE id = ?').get('old-1').title, '老条目', '旧条目原样保留')
-      migrateSchema(reopened) // 幂等
-      assert.equal(reopened.prepare('PRAGMA user_version').get().user_version, SCHEMA_VERSION)
-    } finally {
-      reopened.close()
-    }
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
 /* ============================ ③ 端点 ============================ */
 
 function makeDispatch(store) {

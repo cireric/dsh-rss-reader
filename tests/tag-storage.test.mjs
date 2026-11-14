@@ -53,7 +53,8 @@ function snapshot(path) {
     return {
       version: db.prepare('PRAGMA user_version').get().user_version,
       tables: db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all().map((row) => row.name),
-      items: db.prepare('SELECT * FROM items ORDER BY id').all(),
+      // 同 search-upgrade：* 会带上 v4 新增的派生列 link_key（见该文件同处注释）
+      items: db.prepare('SELECT id, feed_id, title, link, published_at, fetched_at, summary, read_at, starred, kept_unread, article_failure, recency FROM items ORDER BY id').all(),
       texts: db.prepare('SELECT * FROM texts ORDER BY item_id').all(),
       cursors: db.prepare('SELECT * FROM cursors ORDER BY feed_id').all(),
     }
@@ -75,7 +76,7 @@ function freshStore(tag) {
 const tagNames = (tags) => tags.map((tag) => tag.name).sort()
 const tagIds = (tags) => tags.reduce((acc, tag) => ({ ...acc, [tag.name]: tag.id }), {})
 
-test('v1→v2 升级：只加标签表，条目/正文/游标/阅读状态原样保留，重启幂等', () => {
+test('v1→v4 升级：只加表与派生列，条目/正文/游标/阅读状态原样保留，且回填 link_key', () => {
   const { dir, path } = makeV1('upgrade')
   try {
     const before = snapshot(path)
@@ -88,7 +89,16 @@ test('v1→v2 升级：只加标签表，条目/正文/游标/阅读状态原样
       assert.deepEqual(after.items, before.items, '升级不得改任何条目（含已读/星标/保持未读）')
       assert.deepEqual(after.texts, before.texts, '升级不得改正文缓存')
       assert.deepEqual(after.cursors, before.cursors, '升级不得改去重窗口')
-      assert.ok(after.tables.includes('tags') && after.tables.includes('item_tags'), '两张标签表必须建出来')
+      for (const table of ['tags', 'item_tags', 'reading_progress']) {
+        assert.ok(after.tables.includes(table), table + ' 表必须建出来')
+      }
+      // v4 的派生列必须在**升级时**回填（不回填的话跨源重复提示对老条目静默失效，而且没有任何报错）
+      const keys = db.prepare('SELECT id, link FROM items ORDER BY id').all()
+      assert.ok(keys.length > 0, '前置条件：老库里有用例条目')
+      for (const row of keys) {
+        const stored = db.prepare('SELECT link_key FROM items WHERE id = ?').get(row.id).link_key
+        assert.equal(stored, row.link.trim(), 'link_key 必须按 link 归一化后回填（' + row.id + '）')
+      }
       migrateSchema(db)
       assert.equal(snapshot(path).version, SCHEMA_VERSION, '已升级库上 migrateSchema 是空操作')
     } finally { db.close() }
@@ -96,7 +106,7 @@ test('v1→v2 升级：只加标签表，条目/正文/游标/阅读状态原样
     const reopened = openDatabase(path)
     try {
       migrateSchema(reopened)
-      assert.equal(reopened.prepare('PRAGMA user_version').get().user_version, SCHEMA_VERSION, '重启后仍能打开 v2')
+      assert.equal(reopened.prepare('PRAGMA user_version').get().user_version, SCHEMA_VERSION, '重启后仍能打开当前版本')
     } finally { reopened.close() }
 
     const db2 = openDatabase(path)

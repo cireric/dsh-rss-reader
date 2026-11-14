@@ -124,7 +124,7 @@ function overviewStub(items, feeds, folders, accountItems = items, tags = []) {
 /** 本轮 mountReader 的收尾函数登记表：afterEach 统一清（消灭未决 handle ⇒ 变异不再拖死套件）。 */
 const liveCleanups = []
 
-async function mountReader({ items = [], feeds, folders, tags = [], article, holdArticle, search, folderApi } = {}) {
+async function mountReader({ items = [], feeds, folders, tags = [], article, holdArticle, search, folderApi, duplicates } = {}) {
   const { JSDOM } = STACK
   // P3（gate 调优轮）：挂载前拍全局快照，cleanup 时还原 —— 此前每个 mount 都把
   // window/document/fetch/ResizeObserver 覆盖成新 JSDOM 的桩且从不还原，跨用例的桩污染面
@@ -225,6 +225,8 @@ async function mountReader({ items = [], feeds, folders, tags = [], article, hol
       return ok(overviewStub(visibleItems, serverFeeds, serverFolders, items, tagDirectory()))
     }
     if (body.endpoint === 'searchItems' && search) return ok(await search(body.payload))
+    // 跨源重复提示（M5 03）：客户端一次 load 调一次，桩按用例给的结果回
+    if (body.endpoint === 'duplicateHints') return ok({ hints: duplicates ?? [] })
     if (folderApi !== undefined) {
       const custom = await folderApi(body, { feeds: serverFeeds, folders: serverFolders, items })
       if (custom !== undefined) return custom
@@ -766,6 +768,37 @@ test('阅读进度：切走再回来接着读、滚动不写盘、离开时落�
   assert.equal(afterClose.length, 2, '卸载也要落盘一次')
   assert.equal(afterClose[1].payload.itemId, 'b')
   assert.equal(afterClose[1].payload.ratio, 0, 'b 停在顶部 ⇒ 记 0')
+})
+
+test('跨源重复提示：行内可展开看别的来源，且展开不会把那篇标成已读（M5 03）', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a' }), item({ id: 'b', feedId: 'g', feedTitle: '源 G' })],
+    duplicates: [{
+      itemId: 'a',
+      others: [{ itemId: 'b', feedId: 'g', feedTitle: '源 G', title: '同一篇（另一源）', link: 'https://other.example/a' }],
+    }],
+  })
+  await h.store.load('overview')
+  await sleep(80)
+
+  const hint = h.win.document.querySelector('[data-rss-duplicates="a"]')
+  assert.ok(hint !== null, 'a 那一行应当出现跨源重复提示')
+  assert.match(hint.textContent ?? '', /另有 1 个来源/, '提示文案要说清「几个来源」')
+  const link = hint.querySelector('[data-rss-dupe-item="b"]')
+  assert.ok(link !== null, '展开后要能看到别的来源那条')
+  assert.match(link.textContent ?? '', /源 G/, '每一行都要标明它来自哪个源')
+  assert.equal(link.getAttribute('href'), 'https://other.example/a', '点开是那一源的原文（提示不改任何状态）')
+
+  // 行本身是 role=button（点击会选中 + 标读）：展开提示必须 stopPropagation，不能顺手把文章标读
+  assert.equal(h.store.get().items.find((entry) => entry.id === 'a').readAt, undefined, '前置条件：未读')
+  const summary = hint.querySelector('summary')
+  summary.dispatchEvent(new h.win.MouseEvent('click', { bubbles: true, cancelable: true }))
+  await sleep(30)
+  assert.equal(h.store.get().items.find((entry) => entry.id === 'a').readAt, undefined,
+    '展开提示不该把那篇文章标成已读（stopPropagation 是承重的）')
+
+  // b 没有提示（桩只给了 a 一条）
+  assert.equal(h.win.document.querySelector('[data-rss-duplicates="b"]'), null, '没有候选的行不该凭空多出一行提示')
 })
 
 test('左栏渲染：虚拟视图三行 + 每个订阅源一行', skip, async () => {

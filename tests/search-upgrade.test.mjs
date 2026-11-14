@@ -19,7 +19,9 @@ function snapshot(path, configPath) {
     return {
       version: db.prepare('PRAGMA user_version').get().user_version,
       schema: db.prepare('SELECT type, name, sql FROM sqlite_schema ORDER BY name').all(),
-      items: db.prepare('SELECT * FROM items ORDER BY id').all(),
+      // 显式列而不是 *：v4 给 items 加了派生列 link_key（升级时会回填），它在 v1 里不存在 ——
+      // 拿 * 比较会把「新增派生列」误报成「旧条目被改了」。业务列一个不少，仍逐行对账。
+      items: db.prepare('SELECT id, feed_id, title, link, published_at, fetched_at, summary, read_at, starred, kept_unread, article_failure, recency FROM items ORDER BY id').all(),
       texts: db.prepare('SELECT * FROM texts ORDER BY item_id').all(),
       cursors: db.prepare('SELECT * FROM cursors ORDER BY feed_id').all(),
       config: JSON.parse(readFileSync(configPath, 'utf8')),

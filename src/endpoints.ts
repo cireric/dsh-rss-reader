@@ -18,13 +18,14 @@ import { rebuildItem, type ItemRecord } from './domain.js'
 import { selectCleanup } from './retention.js'
 import { buildOpml, parseOpml } from './opml.js'
 import { FolderError } from './folders.js'
+import { duplicateHintsOf, linkKeyOf, type DuplicateRow } from './duplicates.js'
 import { TagError } from './tags.js'
 import { discoverCandidates, validateSubscriptions } from './subscribe.js'
 import type { ReaderStore } from './store.js'
 // 未读判据（isUnread / countUnreadPerFeed）不再由本文件在 JS 侧实现：Task 5 把它交给了存储侧，
 // 自持实现里的 SQL `read_at IS NULL` 与 shared.ts 的 isUnread 是同一件事，两者的等价由
 // tests/store-sqlite.test.mjs 的「同一夹具上逐键对账」钉住。shared.ts 仍是那条规则的定义处。
-import { clampReadingRatio, decodeCursor, encodeCursor, fail, ok, recencyOf, sanitizeViewPreferences, type Cursor, type Endpoint, type ItemView, type Overview, type RefreshRun, type RpcResult, type UnreadAccount } from './shared.js'
+import { clampReadingRatio, decodeCursor, encodeCursor, fail, ok, recencyOf, sanitizeViewPreferences, type Cursor, type DuplicateHintView, type Endpoint, type ItemView, type Overview, type RefreshRun, type RpcResult, type UnreadAccount } from './shared.js'
 
 /** 端点需要的运行时依赖（显式传入，不靠闭包）。 */
 export interface EndpointDeps {
@@ -482,6 +483,42 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         // 内容与旧缓存逐字节相同时版本号相等 ⇒ 旧进度照常恢复；不同则读不到（版本不匹配）
         progress: ctx.store.readingProgress(itemId, contentVersion)?.ratio,
       })
+    },
+  },
+
+  duplicateHints: {
+    to: async (payload, ctx) => {
+      // 跨源重复提示（M5 03）：**一次批量查**，只针对客户端这一屏的条目。
+      // 不做「每次渲染扫全库」：客户端一次 load 调一次，宿主按 link_key 走索引查候选。
+      const raw = (payload as { itemIds?: unknown } | null)?.itemIds
+      const ids = Array.isArray(raw) ? raw.map(String) : []
+      if (ids.length === 0) return ok({ hints: [] })
+      // 一屏最多几百条；超出的直接截断而不是报错 —— 提示是锦上添花，不该让面板红一次
+      const visible: DuplicateRow[] = []
+      for (const itemId of ids.slice(0, 200)) {
+        const record = ctx.store.item(itemId)
+        if (record === undefined) continue
+        visible.push({
+          id: itemId, feedId: record.feedId, title: record.title, link: record.link,
+          ...(record.readAt === undefined ? {} : { readAt: record.readAt }),
+        })
+      }
+      const keys = new Set<string>()
+      for (const row of visible) {
+        const key = linkKeyOf(row.link)
+        if (key !== '') keys.add(key)
+      }
+      const candidates = keys.size === 0 ? [] : ctx.store.itemsByLinkKeys([...keys])
+      const hints = duplicateHintsOf(visible, candidates)
+      // 源标题由这里补（客户端不该为了提示再拉一次订阅表）
+      const titles = new Map(ctx.store.listFeeds().map(([feedId, feed]) => [feedId, feed.title ?? feedId]))
+      const view: DuplicateHintView[] = hints.map((hint) => ({
+        itemId: hint.itemId,
+        others: hint.others.map((other) => ({
+          ...other, feedTitle: titles.get(other.feedId) ?? other.feedId,
+        })),
+      }))
+      return ok({ hints: view })
     },
   },
 
