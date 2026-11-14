@@ -25,9 +25,14 @@
 ### 3.1 停写窗口 + 离线复制（最稳，适合定期手动备份）
 
 ```bash
-# 1) 停写：卸载插件（它的 disposer 会同步关库并 checkpoint）
-#    在 DSH 里：dev_uninject_plugin match=@dsh-external/dsh-rss-reader
-#    或者停掉整个 DSH 进程（等价，且更彻底）
+# 1) 停写，两条路选一条：
+#    a) 只卸插件（最轻，宿主与界面都还在）：dev_uninject_plugin match=@dsh-external/dsh-rss-reader
+#    b) 停整个 DSH 宿主（最彻底：所有插件、后台任务、定时器一起停，**注入器的 watch 也一起停** ——
+#       否则它在备份窗口里可能把插件自动装回去，写到一半）。它就是一个 node 进程，
+#       没有注册成系统服务，所以停法是「到你启动它的那个终端里 Ctrl-C」，或对监听端口的进程发 SIGTERM：
+#         lsof -nP -iTCP:<Web GUI 端口> -sTCP:LISTEN    # 先确认是哪个 PID
+#         kill <PID>                                    # 发 SIGTERM，等它自己退
+#       ⚠️ 这一步会连同正在用 DSH 的 agent 会话一起停掉 —— **只能由人操作，不要交给 agent**。
 # 2) 复制。停写之后 WAL 已被 checkpoint（实测会变成 0 字节或直接消失），只拷主文件就是完整的；
 #    -wal / -shm 若还在也一并拷上（多拷不亏，少拷可能少数据）
 DEST=~/rss-backup-$(date -u +%F)
@@ -80,7 +85,7 @@ node scripts/verify-backup.mjs <备份目录>
 ## 5. 恢复步骤
 
 ```bash
-# 0) 停写（同 §3.1 —— 恢复期间同样不能有写入者）
+# 0) 停写（同 §3.1 的 a/b 两条路 —— 恢复期间同样不能有写入者；b 只能由人操作）
 # 1) 校验要恢复的那份
 node scripts/verify-backup.mjs <备份目录>            # 必须 EXIT=0
 # 2) 把**现在**的目录挪走（mv，不是 rm —— 回滚就靠它）
