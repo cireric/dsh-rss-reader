@@ -123,25 +123,37 @@ o / v / 正文加载五处全部走它。展开规则收成导出的纯函数 `n
 
 ## 阶段 4 —— 客户端 store：48 项平铺名单，依赖全在暗处
 
-**状态**：未开始 · **规模**：大 · **来源**：评审卡 #4
+**状态**：部分完成（接缝与假通道已落地；48 项动作分家未做）· **规模**：大 · **来源**：评审卡 #4
 
-**问题**：`createReaderStore()` 收零参数，实际依赖 `fetch` / `AbortController` / `setTimeout` / `Date` / `Blob` /
-`document` / `window.open` / `console`；四份测试沙箱各复制一遍装配；`account-mirror` 的 `deps.callRpc` 只有 store
-一个 adapter，是**假想**接缝。改一次 overview 回包形状要动四个测试文件。
+**原来的问题**：`createReaderStore()` 收零参数，实际依赖 fetch / AbortController / setTimeout / Date /
+Blob / document / window.open / console；四份测试沙箱各复制一遍装配；改一次 overview 回包形状要动四个
+测试文件。
 
-**证据**：`src/client/store.ts:268`（零参数）、`:1409`（48 个成员）；`tests/nav-selection.test.mjs:63`、
-`tests/unread-accounting.test.mjs:290`、`tests/nav-persistence.test.mjs:390`、`tests/client-bundle.test.mjs:41`；
-`src/client/account-mirror.ts:59`。
+**已落地**
 
-**方案**：在构造处画一条真接缝——把通道、时钟、opener 作为**显式依赖**注入；内部按列表 / 搜索 / 订阅管理 / 标签分家，
-各自只暴露自己那几项。可复用阶段 3 的「契约 + 替身」写法。
+| 提交 | 内容 |
+|---|---|
+| `5de290d` | **ReaderStoreDeps 接缝**：8 个依赖（rpc / now / setTimeout / clearTimeout / open / saveFile / log / newAbortController）全部可注入，默认实现与改动前逐条一致 |
+| `29aa58f` | 共享假通道 `tests/helpers/client-channel.mjs`；nav-selection 接入 |
+| `f994336` | unread-accounting 接入（撤销窗口定时器改由 deps 注入） |
+| `986c955` | nav-persistence 接入；假通道按「线上传输」归一化 payload（跨 realm 的原型差异） |
+| `8d5fd6e` | 导航域纯模型抽出 `src/client/nav-model.ts`（七个纯函数；公开接口不变） |
 
-**验收**
-- [ ] 四份沙箱收成一份假通道（`client-bundle` 的失败必须从「报错」变回「断言」）
-- [ ] 换一次 overview 回包形状，只改一处
-- [ ] 回归：`client-bundle` / `nav-*` / `unread-accounting` / `scroll-dom` 全绿
+**两处真问题（都是用例当场红的）**：假通道漏传 abort signal（两条「迟到的旧回包」用例翻红）；
+payload 未过 JSON（五条 deepStrictEqual 因原型不同翻红，值却一模一样）。
 
-**风险**：动了构造函数 ⇒ 所有客户端用例的 setup 跟着改。一次性改完、单独提交，不要和别的阶段混。
+**没做完的两件（都拆成了独立票据）**
+
+1. `02b-client-bundle-channel.md`：client-bundle 的两段 fault-injection 桩（挂起请求 / 按调用序列回
+   失败信封）需要给假通道加一个**编排层**，不是简单迁移。
+2. `03-split-store.md` 的剩余部分：48 项动作按域分家（列表 / 搜索 / 订阅 / 标签）。第一刀（纯模型抽出）
+   已完成；剩下要把闭包里的 state 切片与动作组一起拆，是独立一轮的量级。
+
+**验收（当前状态）**
+- [x] 接缝：8 个依赖可注入，默认行为不变（全量 637 绿）
+- [x] 三份沙箱收进一份假通道（nav-selection / unread-accounting / nav-persistence）
+- [ ] client-bundle 接入（拆票 02b）
+- [x] 回归：nav-* / unread-accounting / scroll-dom / client-bundle 全绿；mutation 242/242 幸存 0
 
 ---
 

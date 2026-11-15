@@ -835,8 +835,9 @@ const MUTATIONS = [
   { id: 'persist-写盘不串行化', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs'],
     judgeTests: ['写盘串行化：前一次慢、后一次快时，最终的记忆是「后一次动作」'],
-    from: 'viewWriteChain = viewWriteChain.then(() => callRpc("saveViewPreferences", { preferences }))',
-    to: 'viewWriteChain = callRpc("saveViewPreferences", { preferences })' },
+    // 2026-11-15 重锚：阶段 4 的 deps 接缝把 callRpc 换成了 deps.rpc。
+    from: 'viewWriteChain = viewWriteChain.then(() => deps.rpc("saveViewPreferences", { preferences }))',
+    to: 'viewWriteChain = deps.rpc("saveViewPreferences", { preferences })' },
   // ⑥ 宿主写侧不归一再落库 ⇒ 认不出的原值进媒介（存储里攒垃圾，只被读侧遮住）
   { id: 'persist-宿主写侧不归一', file: 'lib/store.js',
     judges: ['nav-persistence.test.mjs'],
@@ -1423,7 +1424,8 @@ const MUTATIONS = [
     judgeTests: ['分页接线：续页游标在时渲染「加载更多」，点它真的取下一页（并追加到当前列表）', '分页：续页是追加到列表尾部，不是替换（第一页必须还在）', '分页：每一页都以宿主回包为准整体覆盖账目，绝不在第二页开始派生', '分页：在途时忽略重复的 loadMore（防连点堆请求）'],
     // 回了 undefined ⇒ 宿主当成第一页，列表原地重复同一批 300 条（用户看到重复而不是报错）。
     // 判据：tests/nav-selection.test.mjs 的「续页是追加…」里的 pageCalls 断言。
-    from: 'const overview = await callRpc("overview", {\n\t\t\t\t\t\tcursor,\n\t\t\t\t\t\t...state.navSelection.kind === "folder" ? { folder: state.navSelection.folder } : {},\n\t\t\t\t\t\t...state.navSelection.kind === "tag" ? { tagId: state.navSelection.tagId } : {}\n\t\t\t\t\t});',
+    // 2026-11-15 重锚：同上（deps.rpc）。
+    from: 'const overview = await deps.rpc("overview", {\n\t\t\t\t\t\tcursor,\n\t\t\t\t\t\t...state.navSelection.kind === "folder" ? { folder: state.navSelection.folder } : {},\n\t\t\t\t\t\t...state.navSelection.kind === "tag" ? { tagId: state.navSelection.tagId } : {}\n\t\t\t\t\t});',
     to: 'const overview = await callRpc("overview", {});' },
   { id: 'paging-在途不挡重复请求', file: 'lib/client.js',
     judges: ['nav-selection.test.mjs'],
