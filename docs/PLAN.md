@@ -141,14 +141,17 @@ Blob / document / window.open / console；四份测试沙箱各复制一遍装�
 | `16c0bb0` | 假通道加编排层（script / hold / release）+ 自己的四条单测 |
 | `ba219ff` | 插件入口接受可选 deps：`apply(ctx, deps?)` —— 解开「经由入口建的 store 无法注入通道」的阻塞 |
 | `bc119a8` | client-bundle 两段 fault-injection 桩退役，四份沙箱全部改走假通道 |
+| `37ac2f2` | 48 个成员的**四块边界表**（谁写谁的 state）写成文 |
+| `2db1f31` | 标签域搬进 `src/client/tag-actions.ts`（第一块真的搬走了） |
 
 **两处真问题（都是用例当场红的）**：假通道漏传 abort signal（两条「迟到的旧回包」用例翻红）；
 payload 未过 JSON（五条 deepStrictEqual 因原型不同翻红，值却一模一样）。
 
 **没做完的一件**
 
-`03-split-store.md` 的剩余部分：48 项动作按域分家（列表 / 搜索 / 订阅 / 标签）。第一刀（纯模型抽出）
-已完成；剩下要把闭包里的 state 切片与动作组一起拆，是独立一轮的量级。
+`03-split-store.md` 的剩余部分：**列表 / 搜索 / 订阅**三块还没搬（标签域已搬，见 `2db1f31`）。
+按边界表顺序搬、每搬一块跑一次全量；列表域依赖最多（items / selectedId / nextCursor / 账目 / 撤销窗口），
+建议最后搬。
 
 **验收（当前状态）**
 - [x] 接缝：8 个依赖可注入，默认行为不变（全量 637 绿）
