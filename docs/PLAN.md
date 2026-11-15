@@ -138,21 +138,22 @@ Blob / document / window.open / console；四份测试沙箱各复制一遍装�
 | `f994336` | unread-accounting 接入（撤销窗口定时器改由 deps 注入） |
 | `986c955` | nav-persistence 接入；假通道按「线上传输」归一化 payload（跨 realm 的原型差异） |
 | `8d5fd6e` | 导航域纯模型抽出 `src/client/nav-model.ts`（七个纯函数；公开接口不变） |
+| `16c0bb0` | 假通道加编排层（script / hold / release）+ 自己的四条单测 |
+| `ba219ff` | 插件入口接受可选 deps：`apply(ctx, deps?)` —— 解开「经由入口建的 store 无法注入通道」的阻塞 |
+| `bc119a8` | client-bundle 两段 fault-injection 桩退役，四份沙箱全部改走假通道 |
 
 **两处真问题（都是用例当场红的）**：假通道漏传 abort signal（两条「迟到的旧回包」用例翻红）；
 payload 未过 JSON（五条 deepStrictEqual 因原型不同翻红，值却一模一样）。
 
-**没做完的两件（都拆成了独立票据）**
+**没做完的一件**
 
-1. `02b-client-bundle-channel.md`：client-bundle 的两段 fault-injection 桩（挂起请求 / 按调用序列回
-   失败信封）需要给假通道加一个**编排层**，不是简单迁移。
-2. `03-split-store.md` 的剩余部分：48 项动作按域分家（列表 / 搜索 / 订阅 / 标签）。第一刀（纯模型抽出）
-   已完成；剩下要把闭包里的 state 切片与动作组一起拆，是独立一轮的量级。
+`03-split-store.md` 的剩余部分：48 项动作按域分家（列表 / 搜索 / 订阅 / 标签）。第一刀（纯模型抽出）
+已完成；剩下要把闭包里的 state 切片与动作组一起拆，是独立一轮的量级。
 
 **验收（当前状态）**
 - [x] 接缝：8 个依赖可注入，默认行为不变（全量 637 绿）
 - [x] 三份沙箱收进一份假通道（nav-selection / unread-accounting / nav-persistence）
-- [ ] client-bundle 接入（拆票 02b）
+- [x] client-bundle 接入（`ba219ff` `bc119a8`）
 - [x] 回归：nav-* / unread-accounting / scroll-dom / client-bundle 全绿；mutation 242/242 幸存 0
 
 ---
