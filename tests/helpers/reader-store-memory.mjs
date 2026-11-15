@@ -52,138 +52,13 @@ export function freshStore(tag) {
 /** 以下 memoryStore / armConcurrentRead 搬自 tests/refresh.test.mjs；2026-11-15 给 memoryStore 加了
  * strictFeedUpdates 选项（默认关，保持既有夹具行为），其余保持原样。 */
 
-export function memoryStore(options = {}) {
-  // 生产实现（src/store.ts / src/store-sqlite.ts）的 updateFeed 在 refresh 三种意图上要求源已存在
-  // （种子先行）；旧桩无条件创建，于是「刷新途中退订」「首次抓取未预置源」在测试里是绿的、
-  // 在真机上抛错（2026-11-15 复核）。默认保留宽容模式是为了不重写 50 处既有夹具；
-  // **新用例一律用 strictMemoryStore()**，其与生产的等价性由 tests/store-sqlite.test.mjs 钉住。
-  const strictFeedUpdates = options.strictFeedUpdates === true
-  const feeds = new Map()
-  const cursors = new Map()
-  const items = new Map()
-  /** 阅读进度（M5 02）：与生产实现同一条语义 —— 版本相等才算、ratio 夹到 [0,1]。 */
-  const progress = new Map()
-  return {
-    feeds,
-    cursors,
-    items,
-    feed: (id) => feeds.get(id),
-    saveFeed: async (id, record) => { feeds.set(id, record) },
-    // 按意图变更（H4）：与生产实现同一条合并规则（applyFeedIntent）—— 桩不自己造第二套语义。
-    // strictFeedUpdates 打开时，与两个生产 store 同一守卫：refresh 三种意图在源不存在时抛错，
-    // 只有 upsert-subscription（addFeed / OPML 新源）允许创建。
-    updateFeed: async (id, intent) => {
-      const current = feeds.get(id)
-      if (strictFeedUpdates && current === undefined && intent.kind !== 'upsert-subscription') {
-        throw new Error('updateFeed：源不存在（' + id + '）—— 变更的前提是它已在，创建走 saveFeed 或 upsert 意图')
-      }
-      feeds.set(id, applyFeedIntent(current, intent))
-    },
-    cursor: (id) => cursors.get(id),
-    saveCursor: async (id, record) => { cursors.set(id, record) },
-    item: (id) => items.get(id),
-    allItems: () => [...items.entries()],
-    deleteSubscription: async (feedId) => {
-      let removed = 0
-      for (const [itemId, record] of items.entries()) {
-        if (record.feedId !== feedId) continue
-        items.delete(itemId)
-        progress.delete(itemId)
-        removed += 1
-      }
-      cursors.delete(feedId)
-      feeds.delete(feedId)
-      return { items: removed }
-    },
-    saveItem: async (id, record) => { items.set(id, record) },
-    // 原子读改写（ReaderStore 契约的一部分）：fn 在写入槽位看到当前记录，见 src/store.ts 的注释
-    updateItem: async (id, fn) => { items.set(id, fn(items.get(id))) },
-    deleteItem: async (id) => { items.delete(id); progress.delete(id) },
-    readingProgress: (itemId, contentVersion) => {
-      const row = progress.get(itemId)
-      return row === undefined || row.version !== contentVersion ? undefined : { ratio: row.ratio }
-    },
-    saveReadingProgress: async (itemId, contentVersion, ratio) => {
-      progress.set(itemId, { version: contentVersion, ratio: Math.max(0, Math.min(1, ratio)) })
-    },
-    clearReadingProgress: async (itemId) => { progress.delete(itemId) },
-    listItems: (feedId) => [...items.entries()].filter(([, record]) => record.feedId === feedId),
-    /**
-     * 清算原料（src/store.ts 的契约）：**只交出这三样，正文不许跟着出来**。
-     * 桩也必须守这条 —— 否则测的其实是「桩自己把正文摊开了」，
-     * 而生产实现恰恰是为了不让正文进堆才单列这条方法（docs/pitfalls.md 二、2.6）。
-     */
-    listArticleCacheEntries: () => {
-      const entries = []
-      for (const [itemId, record] of items.entries()) {
-        if (record.article === undefined) continue
-        const chars = (record.article.paragraphs ?? []).reduce((sum, paragraph) => sum + paragraph.length, 0)
-          + (record.article.blocks ?? []).reduce((sum, block) => {
-            const text = block.text
-            if (typeof text === 'string') return sum + text.length
-            const listItems = block.items
-            if (Array.isArray(listItems)) return sum + listItems.reduce((inner, i) => inner + String(i).length, 0)
-            return sum
-          }, 0)
-        entries.push({ id: itemId, chars, fetchedAt: record.article.fetchedAt ?? '' })
-      }
-      return entries
-    },
-    listFeeds: () => [...feeds.entries()],
-    // 文件夹目录（ReaderStore 契约，M2 03）：测试桩按订阅的 folder 派生；这些用例不涉及空目录。
-    listFolders: () => {
-      const folders = []
-      for (const [id, record] of feeds.entries()) {
-        if (record.folder === undefined || record.folder === '') continue
-        let folder = folders.find((entry) => entry.name === record.folder)
-        if (folder === undefined) { folder = { name: record.folder, feedIds: [] }; folders.push(folder) }
-        folder.feedIds.push(id)
-      }
-      return folders
-    },
-    /**
-     * 与自持实现同形（Task 5 的三条 SQL 取数方法）。
-     *
-     * 桩也必须守**同一条契约**：unreadPerFeed 先按传进来的键铺 0（0 未读的源留键）、
-     * listCleanupCandidates 把 SQL 谓词多守的「保持未读不删」一并实现 —— 桩与实现各写一套
-     * 语义，测出来的就只是桩的理解（docs/pitfalls.md 二、2.5 / 2.6）。
-     */
-    unreadPerFeed: (feedIds) => {
-      const unread = {}
-      for (const feedId of feedIds) unread[feedId] = 0
-      for (const record of items.values()) {
-        if (unread[record.feedId] === undefined || record.readAt !== undefined) continue
-        unread[record.feedId] += 1
-      }
-      return unread
-    },
-    listTags: () => [],
-    tagIdsForItems: (itemIds) => Object.fromEntries(itemIds.map((id) => [id, []])),
-    listRecent: (limit) => {
-      if (limit <= 0) return []
-      const rows = [...items.entries()]
-      rows.sort(([idA, a], [idB, b]) => {
-        const byTime = (b.publishedAt ?? b.fetchedAt).localeCompare(a.publishedAt ?? a.fetchedAt)
-        return byTime !== 0 ? byTime : idA.localeCompare(idB)
-      })
-      return rows.slice(0, limit)
-    },
-    listCleanupCandidates: (cutoffIso) => {
-      const rows = []
-      for (const [id, record] of items.entries()) {
-        const recency = record.publishedAt ?? record.fetchedAt
-        // 判据 = retention.ts 的 selectCleanup（已读 + 未星标 + 早于阈值）另加「保持未读」保护
-        if (record.readAt === undefined || record.starred || record.keptUnread === true) continue
-        if (recency >= cutoffIso) continue
-        rows.push({
-          id, starred: false, kept: false, read: true, recency,
-          articleChars: 0, summaryChars: record.summary?.length ?? 0,
-        })
-      }
-      return rows
-    },
-  }
-}
+// 2026-11-15 票据 02：实现搬到 src/memory-store.ts（由 tsc 盯着，少一个方法就编译失败），
+// 这里只留一个薄适配层，保证既有 50+ 处调用点不用改。
+import { createMemoryStore } from '../../lib/memory-store.js'
+
+export { createMemoryStore }
+
+export const memoryStore = (options = {}) => createMemoryStore(options)
 
 /**
  * 与生产 `updateFeed` 同语义的桩：refresh 三种意图在源不存在时抛错（创建只走 upsert）。
@@ -193,7 +68,7 @@ export function memoryStore(options = {}) {
  * 但凡是**要判生产行为**的新用例（退订竞态、存储失败隔离）都必须用它 —— 宽容桩会让
  * 生产上的抛错在测试里变成「悄悄创建」，那是假绿（docs/pitfalls.md 二、2.6）。
  */
-export const strictMemoryStore = () => memoryStore({ strictFeedUpdates: true })
+export const strictMemoryStore = () => createMemoryStore({ strictFeedUpdates: true })
 
 /**
  * 让**下一次**对 `id` 的写入在其「窗口内」先落一次并发写（把 readAt 写进去）。

@@ -16,6 +16,7 @@ import { openDatabase, migrateSchema } from '../../lib/storage/db.js'
 import { writeConfigFile } from '../../lib/storage/config-file.js'
 import { createSqliteStore } from '../../lib/store-sqlite.js'
 import { createStore } from '../../lib/store.js'
+import { createMemoryStore } from '../../lib/memory-store.js'
 import { DEFAULT_VIEW_PREFERENCES } from '../../lib/shared.js'
 import { FolderError } from '../../lib/folders.js'
 import { linkKeyOf } from '../../lib/duplicates.js'
@@ -425,6 +426,16 @@ export function legacyImpl() {
         global: { get: () => global, set: async (value) => { global = value } },
       }
       return { store: createStore(domain), async dispose() {} }
+    },
+  }
+}
+
+/** 内存版：第一等实现（src/memory-store.ts），不是「谁的私货」—— 与另外两份跑同一套契约。 */
+export function memoryImpl() {
+  return {
+    label: 'memory（第一等替身）',
+    async open() {
+      return { store: createMemoryStore(), async dispose() {} }
     },
   }
 }

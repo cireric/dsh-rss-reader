@@ -1146,6 +1146,13 @@ const MUTATIONS = [
     // 判据：store-sqlite 的「cursor 必须跟着退订一起消失」。
     from: '                sql(DELETE_CURSOR).run(feedId);\n',
     to: '' },
+  { id: 'memory-候选回填星标', file: 'lib/memory-store.js',
+    judges: ['store-contract.test.mjs'],
+    // 把「候选行如实报真值」退化成按谓词回填 —— 判据（retention 的 selectCleanup）就再也看不见
+    // 星标保护，清理会把星标条目删掉。这正是 2026-11-14 隔离实验实测过的那条路径。
+    // 判据：契约用例「候选行携带的字段必须是真的」。
+    from: '                    starred: record.starred === true,',
+    to: '                    starred: false,' },
   { id: 'client-标签选中落盘成虚拟视图', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs'],
     judgeTests: ['选中的标签会记住：重开后回到同一个标签，而不是静默掉回「全部」'],

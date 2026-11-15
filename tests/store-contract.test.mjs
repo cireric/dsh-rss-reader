@@ -3,9 +3,9 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { contractCases, sqliteImpl, legacyImpl } from './helpers/reader-store-contract.mjs'
+import { contractCases, sqliteImpl, legacyImpl, memoryImpl } from './helpers/reader-store-contract.mjs'
 
-for (const impl of [sqliteImpl(), legacyImpl()]) {
+for (const impl of [sqliteImpl(), legacyImpl(), memoryImpl()]) {
   test('ReaderStore 契约 · ' + impl.label, async (t) => {
     for (const contractCase of contractCases) {
       await t.test(contractCase.name, async () => {
