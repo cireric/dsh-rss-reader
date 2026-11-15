@@ -48,6 +48,7 @@ export type NavCursor =
  * 在这里一处：键盘光标的行序、顶栏按钮的顺序、左栏渲染的顺序都读它。三处各写一份迟早错位。
  */
 
+import { createTagActions } from './tag-actions.js'
 import {
   navRowsOf, navCursorKey, nextExpandedOf, memorableSelectionOf, sameNavSelection, selectionExists, VIRTUAL_VIEWS,
 } from './nav-model.js'
@@ -1336,90 +1337,11 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   }
 
   /** 标签写入串行队列：频繁点击时按点击顺序发 setItemTags，最后一次覆盖即为服务端结果。 */
-  let tagWrite: Promise<void> = Promise.resolve()
-  /** 失败代数：一次失败后，队列里尚未发送的旧快照必须作废，避免它们再把坏状态写一次。 */
-  let tagEpoch = 0
-
-  const createTag = async (name: string): Promise<void> => {
-    try {
-      const result = await deps.rpc<{ tag: TagView }>('createTag', { name })
-      set({ tags: [...state.tags, { ...result.tag, itemCount: 0 }], notice: '已创建标签「' + result.tag.name + '」' })
-    } catch (failure) {
-      set({ error: failure instanceof Error ? failure.message : String(failure) })
-    }
-  }
-
-  const renameTag = async (id: string, name: string): Promise<void> => {
-    try {
-      const result = await deps.rpc<{ tag: TagView }>('renameTag', { id, name })
-      // 改名不换 id：当前标签范围与文章关联都保持不变，只替换显示名。
-      set({
-        tags: state.tags.map((tag) => tag.id === id ? { ...tag, name: result.tag.name } : tag),
-        notice: '已把标签改名为「' + result.tag.name + '」',
-      })
-    } catch (failure) {
-      set({ error: failure instanceof Error ? failure.message : String(failure) })
-    }
-  }
-
-  const deleteTag = async (id: string): Promise<void> => {
-    try {
-      await deps.rpc<{ deleted: true }>('deleteTag', { id })
-      const selected = state.navSelection.kind === 'tag' && state.navSelection.tagId === id
-      set({
-        tags: state.tags.filter((tag) => tag.id !== id),
-        items: state.items.map((item) => ({ ...item, tagIds: (item.tagIds ?? []).filter((tagId) => tagId !== id) })),
-        ...(selected ? { navSelection: { kind: 'virtual' }, filter: 'all', navCursor: { kind: 'filter', filter: 'all' } } : {}),
-        notice: '已删除标签（文章与阅读状态不受影响）',
-      })
-      if (selected) {
-        persistView()
-        await load('overview')
-      }
-    } catch (failure) {
-      set({ error: failure instanceof Error ? failure.message : String(failure) })
-    }
-  }
-
-  /** 乐观切换一篇文章的标签；写盘串行化，迟到失败会回取当前页把可见状态拉回真相。 */
-  const toggleItemTag = (tagId: string): void => {
-    const itemId = state.selectedId
-    if (itemId === undefined) return
-    const item = state.items.find((entry) => entry.id === itemId)
-    const tag = state.tags.find((entry) => entry.id === tagId)
-    if (item === undefined || tag === undefined) return
-    const epoch = tagEpoch
-    const current = item.tagIds ?? []
-    const active = current.includes(tagId)
-    const nextIds = active ? current.filter((id) => id !== tagId) : [...current, tagId]
-    const delta = active ? -1 : 1
-    set({
-      items: state.items.map((entry) => entry.id === itemId ? { ...entry, tagIds: nextIds } : entry),
-      tags: state.tags.map((entry) => entry.id === tagId
-        ? { ...entry, itemCount: Math.max(0, (entry.itemCount ?? 0) + delta) }
-        : entry),
-    })
-    tagWrite = tagWrite.then(async () => {
-      if (epoch !== tagEpoch) return
-      try {
-        const result = await deps.rpc<{ itemId: string; tags: TagView[] }>('setItemTags', { itemId, tagIds: nextIds })
-        if (state.items.some((entry) => entry.id === itemId)) {
-          set({ error: undefined, items: state.items.map((entry) => entry.id === itemId
-            ? { ...entry, tagIds: result.tags.map((tag) => tag.id) }
-            : entry) })
-        }
-      } catch (failure) {
-        tagEpoch += 1
-        const message = failure instanceof Error ? failure.message : String(failure)
-        // 迟到/失败都不许把乐观状态留在界面上；重取当前页会把服务端真值带回。
-        await load('overview')
-        // load 成功会清 error；失败提示必须在回取之后重新挂上，否则用户只看到静默回滚。
-        set({ error: message })
-      }
-    }).catch((error: unknown) => {
-      deps.log('error', '标签写入队列异常', error)
-    })
-  }
+  // 标签域（四个动作 + 写盘队列 + 失败代数）已搬进 src/client/tag-actions.ts ——
+  // 按边界表，它们只碰 tags 与条目的 tagIds，共享 get / set / rpc 三样。
+  const tagActions = createTagActions({
+    get, set, rpc: deps.rpc, log: deps.log, persistView, reload: () => load('overview'),
+  })
 
   return {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
@@ -1435,7 +1357,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     openNavCursor,
     toggleNav, toggleFolder,
     createFolder, renameFolder, deleteFolder, moveFeedToFolder,
-    createTag, renameTag, deleteTag, toggleItemTag,
+    ...tagActions,
   }
 }
 
