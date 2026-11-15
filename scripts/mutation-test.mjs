@@ -1146,6 +1146,13 @@ const MUTATIONS = [
     // 判据：store-sqlite 的「cursor 必须跟着退订一起消失」。
     from: '                sql(DELETE_CURSOR).run(feedId);\n',
     to: '' },
+  { id: 'cleanup-端点不复跑判据', file: 'lib/endpoints.js',
+    judges: ['cleanup-endpoint.test.mjs'],
+    // 端点直接把候选当删除集 ⇒ 星标与保持未读的条目被一起删掉。2026-11-14 之前的形态就是这个：
+    // 判据看起来还在（listCleanupCandidates 里跑过），但端点这层没有第二道闸。
+    // 判据：cleanup-endpoint 的「更宽的候选集上判据仍然生效」。
+    from: '            const doomed = new Set(selectCleanup(candidates, cutoff));',
+    to: '            const doomed = new Set(candidates.map((row) => row.id));' },
   { id: 'memory-候选回填星标', file: 'lib/memory-store.js',
     judges: ['store-contract.test.mjs'],
     // 把「候选行如实报真值」退化成按谓词回填 —— 判据（retention 的 selectCleanup）就再也看不见

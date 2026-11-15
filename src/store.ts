@@ -11,7 +11,7 @@ import type { ReaderConfigFile } from './storage/config-file.js'
 import { addFolder, deleteFolder, folderViews, moveFeedToFolder, renameFolder } from './folders.js'
 import { normalizeTagIds, normalizeTagName, requireTagId, TagError } from './tags.js'
 import type { FolderView, TagView } from './shared.js'
-import { articleCharsOf, selectCleanup, type ArticleEntry, type CleanupRow } from './retention.js'
+import { articleCharsOf, type ArticleEntry, type CleanupRow } from './retention.js'
 import { applyFeedIntent, type FeedIntent } from './feed-intent.js'
 import { clampReadingRatio, countUnreadPerFeed, recencyOf, sanitizeViewPreferences, type Cursor, type ViewPreferences } from './shared.js'
 import { linkKeyOf, type DuplicateRow } from './duplicates.js'
@@ -31,6 +31,24 @@ export interface CleanupCandidate extends CleanupRow {
    */
   readonly summaryChars: number
 }
+
+/**
+ * 按域切片的**窄接口**（票据 03）。
+ *
+ * 为什么用 `Pick<ReaderStore, …>` 而不是另写四份方法清单：另写就是第二份真值 —— 给 ReaderStore
+ * 加一个方法，四份清单都要跟着改，而「两处各写一遍」正是本仓库反复付学费的地方。Pick 从根上
+ * 保证切片与主接口永远一致。
+ *
+ * 用途：调用方只声明自己真正用到的那片，替身也只需要满足自己那一片。逐步替换即可 ——
+ * 端点上下文（EndpointCtx.store）目前仍是完整 ReaderStore，收窄它是 28 个端点的活，不在这一轮。
+ */
+export type PagingStore = Pick<ReaderStore, 'listRecent'>
+/** 未读账：判据来自 unreadPerFeed，**键域**来自 listFeeds（0 未读的源也要留 0）。 */
+export type UnreadStore = Pick<ReaderStore, 'unreadPerFeed' | 'listFeeds'>
+/** 清理：候选由存储侧成本过滤，删除由调用方按判据执行。 */
+export type CleanupStore = Pick<ReaderStore, 'listCleanupCandidates' | 'deleteItem'>
+/** 标签批量读：列表/搜索页每行一次查询的替代品。 */
+export type TagBatchStore = Pick<ReaderStore, 'tagIdsForItems'>
 
 export interface ReaderStore {
   feed(feedId: string): FeedRecord | undefined
@@ -369,24 +387,29 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
       })
       return rows.slice(0, limit)
     },
-    /** 旧路径：全表筛一遍（判据通过 retention.ts 的 selectCleanup 复跑，与端点侧同口径）。 */
+    /**
+     * 旧路径：全表扫一遍，只做**成本过滤**（已读 + 够旧），与自持实现的 SQL 谓词同义。
+     *
+     * 判据（星标 / 保持未读 / 阈值）**只在端点那一处**执行 —— 此前这里先跑一遍 selectCleanup
+     * 再把结果交出去，于是同一条判据被执行两次：端点改了、这里没改，或者反过来，都看不出异常
+     * （2026-11-14 评审记的欠账）。候选比判定集宽是**契约要求**，不是缺陷。
+     */
     listCleanupCandidates: (cutoffIso) => {
       const rows: CleanupCandidate[] = []
       for (const [itemId, record] of items.entries()) {
-        const row: CleanupCandidate = {
+        const recency = recencyOf(record)
+        if (record.readAt === undefined || recency >= cutoffIso) continue
+        rows.push({
           id: itemId,
           starred: record.starred,
           kept: record.keptUnread === true,
-          read: record.readAt !== undefined,
-          recency: recencyOf(record),
+          read: true,
+          recency,
           articleChars: articleCharsOf(record.article),
           summaryChars: record.summary?.length ?? 0,
-        }
-        rows.push(row)
+        })
       }
-      // 不再在这里预筛 kept：保护条款只住在 selectCleanup 一处（否则又是两份实现）。
-      const doomed = new Set(selectCleanup(rows, cutoffIso))
-      return rows.filter((row) => doomed.has(row.id))
+      return rows
     },
     listFeeds: () => [...feeds.entries()],
     listFolders: () => folderViews(folderFile()),
