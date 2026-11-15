@@ -23,6 +23,7 @@ import { Config } from '../lib/config.js'
 import { deps } from './helpers/reader-store-memory.mjs'
 import { createMemoryStore } from '../lib/memory-store.js'
 import { createFakeChannel, loadClientModule } from './helpers/client-channel.mjs'
+import { overviewStub } from './helpers/overview-fixture.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const BUNDLE = join(ROOT, 'lib', 'client.js')
@@ -201,13 +202,8 @@ function clientItem(id, overrides = {}) {
 }
 
 /** 桩 overview：键域 = feeds 表、0 未读的源也留 0 值键（守宿主契约）。 */
-function clientOverview(items) {
-  const feeds = [...new Set(items.map((entry) => entry.feedId))].map((feedId) => ({ id: feedId, title: feedId }))
-  const perFeedUnread = {}
-  for (const feed of feeds) perFeedUnread[feed.id] = 0
-  for (const entry of items) if (entry.readAt === undefined) perFeedUnread[entry.feedId] += 1
-  return { feeds, items, folders: [], unread: items.filter((entry) => entry.readAt === undefined).length, perFeedUnread, refreshed: false }
-}
+// 宿主回包形状只在 tests/helpers/overview-fixture.mjs 一处定义（阶段 4 验收项）。
+const clientOverview = (items) => overviewStub({ items })
 
 /**
  * 加载真实构建产物 lib/client.js 并取出 createReaderStore（桩沙箱沿用 nav-selection.test.mjs 那套）。

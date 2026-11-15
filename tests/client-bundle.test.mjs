@@ -19,6 +19,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createFakeChannel } from './helpers/client-channel.mjs'
+import { overviewStub as overviewFixture } from './helpers/overview-fixture.mjs'
 import vm from 'node:vm'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -198,22 +199,8 @@ async function driveStore({ items = [], article, hostTruth, failEndpoints = [], 
  * @param items 条目表
  * @param feeds 订阅源表；不给则按 items 里出现过的 feedId 推导（此时两者恰好相等）
  */
-function overviewStub(items, feeds) {
-  const table = feeds ?? [...new Set(items.map((entry) => entry.feedId))].map((feedId) => ({ id: feedId, title: feedId }))
-  const perFeedUnread = {}
-  // 先按 feeds 表铺 0：这一步是键域的全部要点，缺了它 0 未读的源就会丢键
-  for (const feed of table) perFeedUnread[feed.id] = 0
-  for (const entry of items) {
-    // 已退订源的条目可能仍在 items 里，但那种源不该出现在 map 中（契约：键域 = feeds 表）
-    if (entry.readAt === undefined && entry.feedId in perFeedUnread) perFeedUnread[entry.feedId] += 1
-  }
-  return {
-    feeds: table, items, folders: [],
-    unread: items.filter((entry) => entry.readAt === undefined).length,
-    perFeedUnread,
-    refreshed: false,
-  }
-}
+// 宿主回包形状只在 tests/helpers/overview-fixture.mjs 一处定义（阶段 4 验收项）。
+const overviewStub = (items, feeds) => overviewFixture({ items, feeds })
 
 /**
  * 宿主账目的**可动副本** + markRead/unmarkRead 的回包形状（照 src/endpoints.ts 的 accountOf）。

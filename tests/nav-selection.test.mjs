@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createFakeChannel, loadClientModule } from './helpers/client-channel.mjs'
+import { overviewStub } from './helpers/overview-fixture.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const BUNDLE = join(ROOT, 'lib', 'client.js')
@@ -36,20 +37,8 @@ function item(id, overrides = {}) {
  * 这样客户端「无条件使用」才是被测的真相；若这里图省事只给未读 > 0 的源发键，
  * 就测不出「键域不全」这个任务 1 专门守的点。
  */
-function overviewOf(items) {
-  const feeds = [...new Set(items.map((entry) => entry.feedId))].map((feedId) => ({ id: feedId, title: feedId }))
-  const perFeedUnread = {}
-  for (const feed of feeds) perFeedUnread[feed.id] = 0
-  for (const entry of items) {
-    if (entry.readAt === undefined) perFeedUnread[entry.feedId] += 1
-  }
-  return {
-    feeds, items, folders: [],
-    unread: items.filter((entry) => entry.readAt === undefined).length,
-    perFeedUnread,
-    refreshed: false,
-  }
-}
+// 宿主回包形状只在 tests/helpers/overview-fixture.mjs 一处定义（阶段 4 验收项）。
+const overviewOf = (items) => overviewStub({ items })
 
 /**
  * 加载真实 bundle 并取出它导出的 createReaderStore。

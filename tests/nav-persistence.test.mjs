@@ -20,6 +20,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { tmpdir } from 'node:os'
 import { createFakeChannel, loadClientModule } from './helpers/client-channel.mjs'
+import { overviewStub } from './helpers/overview-fixture.mjs'
 import { articleCharsOf } from '../lib/retention.js'
 import { createDispatch } from '../lib/endpoints.js'
 import { Config } from '../lib/config.js'
@@ -303,13 +304,8 @@ function item(id, overrides = {}) {
 }
 
 /** 守宿主契约的 overview 桩（键域 = feeds 表，0 未读的源也留键）。 */
-function overviewOf(items, tags = []) {
-  const feeds = [...new Set(items.map((entry) => entry.feedId))].map((feedId) => ({ id: feedId, title: feedId }))
-  const perFeedUnread = {}
-  for (const feed of feeds) perFeedUnread[feed.id] = 0
-  for (const entry of items) if (entry.readAt === undefined) perFeedUnread[entry.feedId] += 1
-  return { feeds, items, folders: [], tags, unread: items.filter((entry) => entry.readAt === undefined).length, perFeedUnread, refreshed: false }
-}
+// 宿主回包形状只在 tests/helpers/overview-fixture.mjs 一处定义（阶段 4 验收项）。
+const overviewOf = (items, tags = []) => overviewStub({ items, tags })
 
 /**
  * 加载真实 bundle / 驱动真实 store。prefs 是「宿主那一侧的域 global」：跨两次 store 实例共享，
