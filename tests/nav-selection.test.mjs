@@ -13,7 +13,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import vm from 'node:vm'
+import { createFakeChannel, loadClientModule } from './helpers/client-channel.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const BUNDLE = join(ROOT, 'lib', 'client.js')
@@ -61,62 +61,14 @@ function overviewOf(items) {
  * @param overview 第一页的桩回包（或 `{ first, next }`：见下）
  */
 function loadExports(overview) {
-  const source = readFileSync(BUNDLE, 'utf8')
-  let captured = null
-  class HTMLElementStub {}
-  const sandbox = {
-    document: { addEventListener: () => {}, removeEventListener: () => {}, querySelector: () => null, activeElement: null },
-    window: { __ModuleLoader__: { load: (entry) => { captured = entry } }, open: () => {} },
-    console,
-    HTMLElement: HTMLElementStub,
-    AbortController,
-    setTimeout,
-    clearTimeout,
-    Date,
-    JSON,
-  }
-  vm.createContext(sandbox)
-  vm.runInContext(source, sandbox, { filename: BUNDLE_NAME })
-  assert.ok(captured !== null, 'client bundle 没有调用 window.__ModuleLoader__.load')
-  // pages：overview 被调用时按 payload.cursor 分派。默认只有第一页（不带 cursor 时回 overview 本身），
-  // 带 cursor 的请求一律按 pages[cursor] 取 —— 分页的断言必须能看见「客户端回带了哪个游标」。
-  const pages = overview !== null && typeof overview === 'object' && overview.pages !== undefined ? overview.pages : {}
-  const pageCalls = []
-  const base = pages.base ?? overview
-  sandbox.fetch = async (_url, init) => {
-    const body = JSON.parse(init.body)
-    const ok = (value) => ({ ok: true, status: 200, json: async () => ({ ok: true, value }) })
-    if (body.endpoint === 'searchItems' && overview.search) return ok(await overview.search(body.payload, init.signal))
-    if (overview.request) {
-      const mocked = await overview.request(body.endpoint, body.payload)
-      if (mocked !== undefined) return ok(mocked)
-    }
-    if (body.endpoint === 'overview') {
-      const cursor = body.payload?.cursor
-      pageCalls.push(cursor)
-      if (cursor === undefined) return ok(base)
-      const page = pages[cursor]
-      if (page === undefined) throw new Error('测试桩没有为游标 ' + cursor + ' 准备回包')
-      return ok(page)
-    }
-    return ok({ changed: 1, unread: 0 })
-  }
-  sandbox.pageCalls = pageCalls
-  // 本文件只驱动 store（不渲染组件），hook 桩给到「能跑通模块定义」即可；
-  // useState 真的存值是「渲染多遍」那类用例才需要的，这里用不上。
-  const require = (specifier) => {
-    if (specifier === 'react' || specifier === 'react/jsx-runtime') {
-      return {
-        jsx: () => null, jsxs: () => null, Fragment: Symbol('Fragment'),
-        useEffect: () => {}, useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}],
-        useCallback: (fn) => fn, useRef: (initial) => ({ current: initial }), default: {},
-      }
-    }
-    throw new Error('未预期的外部依赖：' + specifier)
-  }
-  const exports = captured.factory(require)
-  // pageCalls 挂在沙箱上（fetch 是闭包，测试拿不到它）
-  exports.__pageCalls = () => sandbox.pageCalls
+  // 2026-11-15 阶段 4 票据 02：沙箱与假通道收进共享 helper —— 本文件不再自己写 fetch 分支。
+  const { exports } = loadClientModule({ AbortController, setTimeout, clearTimeout })
+  const channel = createFakeChannel({ overview, request: overview.request })
+  // 调用点保持原样（exports.createReaderStore()）：这里把通道注入进去。
+  const create = exports.createReaderStore
+  exports.createReaderStore = (overrides = {}) => create({ rpc: channel.rpc, ...overrides })
+  // pageCalls 是分页断言的原料（每次 overview 回带的是哪个游标）
+  exports.__pageCalls = () => channel.pageCalls
   return exports
 }
 
