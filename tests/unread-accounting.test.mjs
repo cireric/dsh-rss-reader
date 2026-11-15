@@ -15,15 +15,14 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import vm from 'node:vm'
 import { articleCharsOf } from '../lib/retention.js'
 import { createDispatch } from '../lib/endpoints.js'
 import { Config } from '../lib/config.js'
 import { deps } from './helpers/reader-store-memory.mjs'
 import { createMemoryStore } from '../lib/memory-store.js'
+import { createFakeChannel, loadClientModule } from './helpers/client-channel.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const BUNDLE = join(ROOT, 'lib', 'client.js')
@@ -222,12 +221,9 @@ function clientOverview(items) {
  *   的 items 少于宿主账目，任何"拿本地 items 整体重算"的做法都会把账目算小。
  */
 function loadStore(overview, hostTruth) {
-  const source = readFileSync(BUNDLE, 'utf8')
-  let captured = null
-  class HTMLElementStub {}
-  // 撤销窗口定时器的捕获表：5000ms 的定时器只登记不排程。理由与 client-bundle 夹具一致 ——
-  // 真排程会让每条 judge 在测试跑完后白等 5s 事件循环排空（实测 unread-accounting 5.12s 里
-  // 5.08s 是空转）。窗口是否武装改由用例显式断言，判据不降反升。
+  const { exports } = loadClientModule()
+  // 撤销窗口定时器的捕获表：5000ms 的定时器只登记不排程（真排程会让每条用例白等 5s）。
+  // 现在它通过 deps 注入 store（沙箱已经不需要 setTimeout 了）—— 接缝让「捕获」变成显式参数。
   const undoWindowTimers = []
   let undoWindowSeq = 0
   const sandboxSetTimeout = (fn, ms, ...args) => {
@@ -243,19 +239,7 @@ function loadStore(overview, hostTruth) {
     if (index >= 0) { undoWindowTimers.splice(index, 1); return }
     clearTimeout(handle)
   }
-  const sandbox = {
-    document: { addEventListener: () => {}, removeEventListener: () => {}, querySelector: () => null, activeElement: null },
-    window: { __ModuleLoader__: { load: (entry) => { captured = entry } }, open: () => {} },
-    console,
-    HTMLElement: HTMLElementStub,
-    setTimeout: sandboxSetTimeout,
-    clearTimeout: sandboxClearTimeout,
-    Date,
-    JSON,
-  }
-  vm.createContext(sandbox)
-  vm.runInContext(source, sandbox, { filename: BUNDLE_NAME })
-  assert.ok(captured !== null, 'client bundle 没有调用 window.__ModuleLoader__.load')
+
 
   // 宿主侧的真账：可由调用方给一份比本地 items 更大的（截断场景）
   const host = {
@@ -271,37 +255,31 @@ function loadStore(overview, hostTruth) {
       host.unread = Math.max(0, host.unread + delta)
     }
   }
-  sandbox.fetch = async (_url, init) => {
-    const body = JSON.parse(init.body)
-    const payload = body.payload ?? {}
-    const reply = (value) => ({ ok: true, status: 200, json: async () => ({ ok: true, value }) })
-    if (body.endpoint === 'overview' || body.endpoint === 'refresh') {
-      return reply({ ...overview, unread: host.unread, perFeedUnread: { ...host.perFeedUnread } })
-    }
-    if (body.endpoint === 'markRead' || body.endpoint === 'unmarkRead') {
-      const ids = Array.isArray(payload.itemIds) ? payload.itemIds : []
-      shiftHost(ids, body.endpoint === 'markRead' ? -1 : 1)
-      // 回包**同时**给 unread 与 perFeedUnread（宿主契约：src/endpoints.ts 的 unreadAccount）。
-      // 客户端在截断场景下看不见全量条目，只能靠这一份整体覆盖 —— 桩件少给一个字段就等于
-      // 「替被测代码兜一个契约上不该存在的形状」（docs/pitfalls.md 二、2.5 / 2.6）。
-      return reply({ changed: ids.length, unread: host.unread, perFeedUnread: { ...host.perFeedUnread } })
-    }
-    return reply({})
-  }
-
-  const require = (specifier) => {
-    if (specifier === 'react' || specifier === 'react/jsx-runtime') {
-      return {
-        jsx: () => null, jsxs: () => null, Fragment: Symbol('Fragment'),
-        useEffect: () => {}, useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}],
-        useCallback: (fn) => fn, useRef: (initial) => ({ current: initial }), default: {},
+  const channel = createFakeChannel({
+    overview,
+    request: (endpoint, payload) => {
+      if (endpoint === 'overview' || endpoint === 'refresh') {
+        return { ...overview, unread: host.unread, perFeedUnread: { ...host.perFeedUnread } }
       }
-    }
-    throw new Error('未预期的外部依赖：' + specifier)
-  }
+      if (endpoint === 'markRead' || endpoint === 'unmarkRead') {
+        const ids = Array.isArray(payload?.itemIds) ? payload.itemIds : []
+        shiftHost(ids, endpoint === 'markRead' ? -1 : 1)
+        // 回包**同时**给 unread 与 perFeedUnread（宿主契约：src/endpoints.ts 的 unreadAccount）。
+        // 客户端在截断场景下看不见全量条目，只能靠这一份整体覆盖 —— 桩件少给一个字段就等于
+        // 「替被测代码兜一个契约上不该存在的形状」（docs/pitfalls.md 二、2.5 / 2.6）。
+        return { changed: ids.length, unread: host.unread, perFeedUnread: { ...host.perFeedUnread } }
+      }
+      return undefined
+    },
+  })
+
   // 交出**宿主真账的句柄**：截断 + 外部漂移那两条用例要表达「装载之后、按 A 之前，
   // 另一个面板把某个源标掉了」，那就必须能在两步之间改宿主这一侧的数（见用例注释）。
-  return { store: captured.factory(require).createReaderStore(), host, feedOf, undoWindowTimers }
+  // 撤销窗口的定时器由 deps 注入（沙箱不用再提供 setTimeout）—— 这正是接缝的用处。
+  return {
+    store: exports.createReaderStore({ rpc: channel.rpc, setTimeout: sandboxSetTimeout, clearTimeout: sandboxClearTimeout }),
+    host, feedOf, undoWindowTimers,
+  }
 }
 
 async function clientStore(items, hostTruth) {
