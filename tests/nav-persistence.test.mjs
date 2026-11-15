@@ -19,7 +19,7 @@ import { readFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'no
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { tmpdir } from 'node:os'
-import vm from 'node:vm'
+import { createFakeChannel, loadClientModule } from './helpers/client-channel.mjs'
 import { articleCharsOf } from '../lib/retention.js'
 import { createDispatch } from '../lib/endpoints.js'
 import { Config } from '../lib/config.js'
@@ -316,49 +316,33 @@ function overviewOf(items, tags = []) {
  * 这样「重开面板」在测试里就是「再建一个 store、读同一份 prefs」。
  */
 function loadExports({ items, tags = [], prefs, failSave = false, writeDelayMs = [] }) {
-  const source = readFileSync(BUNDLE, 'utf8')
-  let captured = null
-  class HTMLElementStub {}
-  const sandbox = {
-    document: { addEventListener: () => {}, removeEventListener: () => {}, querySelector: () => null, activeElement: null },
-    window: { __ModuleLoader__: { load: (entry) => { captured = entry } }, open: () => {} },
-    console, HTMLElement: HTMLElementStub, setTimeout, clearTimeout, Date, JSON,
-  }
-  vm.createContext(sandbox)
-  vm.runInContext(source, sandbox, { filename: BUNDLE_NAME })
-  assert.ok(captured !== null, 'client bundle 没有调用 window.__ModuleLoader__.load')
-  sandbox.fetch = async (_url, init) => {
-    const body = JSON.parse(init.body)
-    const ok = (value) => ({ ok: true, status: 200, json: async () => ({ ok: true, value }) })
-    const bad = (code, message) => ({ ok: true, status: 200, json: async () => ({ ok: false, error: { code, message, details: {} } }) })
-    if (body.endpoint === 'overview' || body.endpoint === 'refresh') return ok(overviewOf(items, tags))
-    if (body.endpoint === 'viewPreferences') return ok({ preferences: prefs.value })
-    if (body.endpoint === 'saveViewPreferences') {
-      if (failSave) return bad('internal', '写盘失败')
-      // 第 n 次写盘的延迟由用例指定：用来表达「后发的先到」这种真实网络里会发生的事。
-      // ⚠️ 序号必须在**请求到达时**取，不能用 prefs.writes.length（它只在落库后 +1）：
-      // 两个请求同时在飞时，第二个到达时 length 还是 0 —— 两次会拿到同一个延迟，
-      // 「后发先到」这个形态就表达不出来（本条夹具的第一版正是这么错的，变异因此静默幸存）。
-      prefs.arrived = (prefs.arrived ?? 0) + 1
-      const delay = writeDelayMs[prefs.arrived - 1] ?? 0
-      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay))
-      prefs.value = body.payload.preferences
-      prefs.writes.push(body.payload.preferences)
-      return ok({ preferences: prefs.value })
-    }
-    return ok({ changed: 1, unread: 0 })
-  }
-  const require = (specifier) => {
-    if (specifier === 'react' || specifier === 'react/jsx-runtime') {
-      return {
-        jsx: () => null, jsxs: () => null, Fragment: Symbol('Fragment'),
-        useEffect: () => {}, useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}],
-        useCallback: (fn) => fn, useRef: (initial) => ({ current: initial }), default: {},
+  // 2026-11-15 阶段 4 票据 02：沙箱与假通道收进共享 helper（本文件不再自己写 fetch 分支）。
+  const { exports } = loadClientModule()
+  const channel = createFakeChannel({
+    overview: overviewOf(items, tags),
+    request: async (endpoint, payload) => {
+      if (endpoint === 'refresh') return overviewOf(items, tags)
+      if (endpoint === 'viewPreferences') return { preferences: prefs.value }
+      if (endpoint === 'saveViewPreferences') {
+        if (failSave) throw new Error('internal: 写盘失败')
+        // 第 n 次写盘的延迟由用例指定：用来表达「后发的先到」这种真实网络里会发生的事。
+        // ⚠️ 序号必须在**请求到达时**取，不能用 prefs.writes.length（它只在落库后 +1）：
+        // 两个请求同时在飞时，第二个到达时 length 还是 0 —— 两次会拿到同一个延迟，
+        // 「后发先到」这个形态就表达不出来（本条夹具的第一版正是这么错的，变异因此静默幸存）。
+        prefs.arrived = (prefs.arrived ?? 0) + 1
+        const delay = writeDelayMs[prefs.arrived - 1] ?? 0
+        if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay))
+        prefs.value = payload.preferences
+        prefs.writes.push(payload.preferences)
+        return { preferences: prefs.value }
       }
-    }
-    throw new Error('未预期的外部依赖：' + specifier)
-  }
-  return captured.factory(require)
+      return undefined
+    },
+  })
+  // 调用点保持 exports.createReaderStore()：这里把通道注入进去。
+  const create = exports.createReaderStore
+  exports.createReaderStore = (overrides = {}) => create({ rpc: channel.rpc, ...overrides })
+  return exports
 }
 
 /** 「重开面板」：新 store 读同一份宿主 prefs。 */

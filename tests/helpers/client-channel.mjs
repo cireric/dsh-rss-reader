@@ -64,16 +64,20 @@ export function createFakeChannel({ overview, request } = {}) {
   const pages = overview?.pages ?? {}
   const pageCalls = []
   const base = pages.base ?? overview
+  // 真通道是「序列化过去、反序列化回来」：payload 出自 bundle 的 realm（vm 沙箱），
+  // 不归一化就会让 deepStrictEqual 因为**原型不同**而失败（实测：值一模一样仍然红）。
+  const wire = (value) => (value === undefined ? undefined : JSON.parse(JSON.stringify(value)))
   const rpc = async (endpoint, payload, signal) => {
-    calls.push([endpoint, payload])
+    const body = wire(payload)
+    calls.push([endpoint, body])
     // 搜索用例要看「旧请求被 abort」：把 signal 原样交给自定义处理器（与真实通道同形）。
-    if (endpoint === 'searchItems' && overview?.search) return overview.search(payload, signal)
+    if (endpoint === 'searchItems' && overview?.search) return overview.search(body, signal)
     if (request !== undefined) {
-      const mocked = await request(endpoint, payload)
+      const mocked = await request(endpoint, body)
       if (mocked !== undefined) return mocked
     }
     if (endpoint === 'overview') {
-      const cursor = payload?.cursor
+      const cursor = body?.cursor
       pageCalls.push(cursor)
       if (cursor === undefined) return base
       const page = pages[cursor]
