@@ -11,6 +11,8 @@
 | #2 清理判据只留一个裁决者 | 判据归位 + 契约改包含关系 + 三撤三增变异 | `420bae7` `6435e04` |
 | #1 退订收成一次变更 | `deleteSubscription` 拥有条目+游标+订阅项；失败写回 | `63fdc29` `fa6aa64` |
 | 阶段 1 · tag 选中被记忆静默降级 | 四种 kind 与 NavSelection 一一对应；投影收成一个穷尽函数 | `1c26275` |
+| 阶段 2 · 「打开一条」五遍 | `store.activate` 成为唯一触发点；`nextExpandedOf` 收成一条规则 | `3aff807` |
+| 阶段 3 · ReaderStore 契约与替身 | 36 方法可执行契约 + 内存实现升格 + 窄接口 + 判据归一 + 五份局部桩退役 | `6fbdeb0` `03af3ed` `ba96196` `6a3f470` |
 
 ## 怎么用这份文件
 
@@ -23,7 +25,7 @@
 
 ## 阶段 1 —— tag 选中在「记忆」这条接缝上被静默降级
 
-**状态**：已完成（2026-11-15，未提交）· **规模**：小 · **来源**：评审卡 #6
+**状态**：已完成（`1c26275`）· **规模**：小 · **来源**：评审卡 #6
 
 **实际改动**：`ViewPreferences['navSelection']` 增加 `{ kind: 'tag'; tagId }`；`sanitizeViewPreferences` 增加第四个
 判据 `isKnownTag`（store 侧查 `tags` 表、客户端用 `state.tags`）；`persistView` 的嵌套三元换成
@@ -54,7 +56,7 @@
 
 ## 阶段 2 —— 「打开一条」写了五遍，其中一遍语义不同
 
-**状态**：已完成 · **规模**：小到中 · **来源**：评审卡 #5
+**状态**：已完成（`3aff807`）· **规模**：小到中 · **来源**：评审卡 #5
 
 **前置决定（已由规范回答）**：`docs/google-reader-feature-spec.md:211` 写的是「`o` / `enter` | open/close item」——
 所以行内的 Enter/Space 应当是 **toggle**，此前的「恒展开」是缺陷，不是有意行为。
@@ -86,31 +88,36 @@ o / v / 正文加载五处全部走它。展开规则收成导出的纯函数 `n
 
 ## 阶段 3 —— ReaderStore 的契约没有家，替身是无声的部分实现
 
-**状态**：未开始 · **规模**：中到大 · **来源**：评审卡 #3 + 上一轮评审留下的两笔欠账
+**状态**：已完成（`6fbdeb0` `03af3ed` `ba96196` `6a3f470`）· **规模**：中到大 · **来源**：评审卡 #3 + 上一轮评审留下的两笔欠账
 
-**问题**：36 个方法的 interface 有三份实现；测试替身只实现 **23** 个，且比生产更宽松（`listRecent` 忽略
-cursor/feedIds/tagId；`updateItem` 与 `saveReadingProgress` 不拒绝缺失键）；另有 5 份局部桩各写一遍。
-「接口就是测试面」在这里失效：调用方与测试并不跨同一个接缝。
+**原来的问题**：36 个方法的 interface 有三份实现；测试替身只实现 23 个，且比生产更宽松
+（`listRecent` 忽略 cursor/feedIds/tagId；`updateItem` 与 `saveReadingProgress` 不拒绝缺失键）；
+另有 5 份局部桩各写一遍。「接口就是测试面」在这里失效 —— 调用方、测试、实现跨的不是同一个接缝。
+另有两笔欠账：契约不对称（旧适配器自己跑一遍 `selectCleanup`）、内存桩只产出「判定集」宽度。
 
-**顺带收掉的欠账**（2026-11-14 评审在 #2 那轮留下的）：
-1. 契约不对称：旧适配器自己跑一次 `selectCleanup` 再 filter，sqlite 适配器不跑、端点再跑一次；
-2. 内存桩只产出「判定集」宽度，永远走不到「候选比判定集宽」那条路，端点那层判据在用它时不被覆盖。
+**实际拆分**（票据在 `.scratch/reader-store-contract/issues/`，一票一提交）：
 
-**证据**：`src/store.ts:35`（36 个方法）；`tests/helpers/reader-store-memory.mjs:66`（23 个）、`:151`（忽略分页参数）、`:89`；
-5 份局部桩：`tests/endpoints-perfeed-unread`、`article-markread-race`、`unread-accounting`、`nav-persistence`、`identity`。
+| 票据 | 提交 | 做了什么 |
+|---|---|---|
+| 01 契约套件 | `6fbdeb0` | 23 条契约断言 + 两个实现工厂 + 守门用例（空实现必须全红） |
+| 02 内存实现升格 | `03af3ed` | `tests/helpers/*.mjs` → `src/memory-store.ts`（tsc 盯着，少一个方法就编译失败）；补 13 个方法，修 4 处「比生产宽松」 |
+| 03 窄接口 + 判据归一 | `ba96196` | 四个 `Pick` 窄接口；`selectCleanup` 从两处执行收到一处；`cleanup-endpoint` 用例 |
+| 04 局部桩退役 | `6a3f470` | 五份局部桩（430 行）→ 共享实现 + 薄覆盖；两个测试钩子（慢写入、裸写偏好） |
 
-**方案**：把契约做成**可执行的兼容套件**（一份夹具 + 每个方法一组等价断言），三份实现跑同一套；替身补全并从
-`tests/` 升到 `src/`（第一等实现，不再是每份测试的私货）。然后按域收窄接口：分页 / 未读账 / 清理候选 / 标签批量读
-各一个小 interface，替身才小到能完整实现。
+**结果**：36 个方法 × 3 份实现跑同一套契约（sqlite / legacy / memory）；契约里 36 个方法全部被调用，
+零遗漏；`grep 'selectCleanup(' src/` 只剩 `endpoints.ts:691` 一个调用点。
+
+**两处偏离（有意的）**：
+- 窄接口用 `Pick<ReaderStore, …>` 反向派生，而不是原计划的「组合」——单份清单的性质相同、diff 更小。
+  若以后要「小接口是主声明」，搬运是机械动作。
+- `EndpointCtx.store` 仍是完整 `ReaderStore`（收窄它要动 28 个端点），目前只有 `accountOf` 用上了
+  `UnreadStore`。这是「逐步替换」的第一步，不是遗漏。
 
 **验收**
-- [ ] 三份适配器跑同一套契约，缺方法或更宽松 ⇒ 当场失败
-- [ ] 5 份局部桩退役（或写明为什么必须留）
-- [ ] 端点那层判据在内存替身上也能被覆盖（欠账 2）
-- [ ] 回归：`store-sqlite` / `overview-paging` / 全量 552 全绿
-
-**风险 / 顺序**：先加套件、再拆接口，分两个提交——套件是安全网，拆接口才是改动。拆接口会牵动
-`endpoints` / `tools` / `lifecycle` 三处调用，务必逐个改、逐个跑。
+- [x] 三份适配器跑同一套契约，缺方法或更宽松 ⇒ 当场失败（守门用例：空实现全红）
+- [x] 5 份局部桩退役（无一份需要保留）
+- [x] 端点那层判据在内存实现上被覆盖（`tests/cleanup-endpoint.test.mjs`：候选含受保护行，只有该删的被删）
+- [x] 回归：build / build:client / typecheck / test **637** / mutation **242**（幸存 0）全绿
 
 ---
 
