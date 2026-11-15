@@ -249,6 +249,24 @@ const browserDeps: ReaderStoreDeps = {
   newAbortController: () => new AbortController(),
 }
 
+/**
+ * 读者 store。
+ *
+ * ## 四块的分界（阶段 4 票据 03 的第一份成文边界）
+ *
+ * 下面 48 个成员按**谁写谁的 state** 分四块。这不是目录结构，是写入权限表 —— 拆文件之前先把
+ * 这条边界写清楚，否则拆出来的只是四个共享同一个 state 的碎片。
+ *
+ * | 域 | 拥有的 state | 动作 | 允许改别人的什么 |
+ * |---|---|---|---|
+ * | 列表 | `items` / `selectedId` / `nextCursor` / `loadingMore` / `filter` / `layout` / `markAllRange` | load / loadMore / visible / setFilter / setLayout / activate / selectRelative / markRead / toggleStar / toggleKeepUnread / toggleRead / markAllRead / undoMarkAll / cleanup / stepArticle | 只**读** feeds / tags；改账目一律经 account-mirror（回包整体覆盖） |
+ * | 搜索 | `search` / `searchRevision` | submitSearch | 用列表的 items 展示；**不许**改 filter |
+ * | 订阅 | `feeds` / `folders` / `navSelection` / `navCursor` / `navVisible` / `foldedFolders` / `viewPreferences` | addFeed / removeFeed / importOpml / exportOpml / discover / createFolder / renameFolder / deleteFolder / moveFeedToFolder / selectNav / moveNavCursor / openNavCursor / toggleNav / toggleFolder | 改 navSelection 后必须走 persistView；退订只能经 `deleteSubscription` |
+ * | 标签 | `tags` / 条目的 `tagIds` | createTag / renameTag / deleteTag / toggleItemTag | 乐观改 tagIds，失败回取当前页拉回真相（tagWrite 串行化 + tagEpoch 身份） |
+ *
+ * 共享的只有三样：`deps`（通道/时钟/opener）、`set`（唯一写入口）、`state`（只读快照）。
+ * 拆文件时的安全绳 = 现有 642 条测试；它们钉的是行为，不是文件位置。
+ */
 export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   const deps: ReaderStoreDeps = { ...browserDeps, ...overrides }
   let state: ReaderState = {
