@@ -45,6 +45,46 @@ test('宿主资源闸：并发/堆/内存水位都必须在脚本里（2026-10-1
   // `--workers 8` 畅通无阻，资源闸形同虚设）。
   assert.ok(src.includes('const ceiling = defaultWorkers()'), '--workers 必须受同一资源闸夹取')
 })
+test('P1：judgeTests 细化必须带「跑前漂移校验」，不许靠 pattern 静默跳过', () => {
+  // 为什么钉这两处：node --test 在 pattern 一条都没匹配上时**照样报 pass**（实测：
+  // `ℹ tests 1 / pass 1`，文件自身被算成一条通过的测试）⇒ 只靠输出识别不出 0 命中，
+  // 失效形态就是「变异看起来幸存」。判据必须在跑之前查名字还在不在。
+  assert.ok(src.includes('judgeSpec('), '缺 judgeSpec（judges + judgeTests 的唯一入口）')
+  assert.ok(src.includes('judgeTests'), '缺 judgeTests')
+  assert.ok(src.includes('--test-name-pattern='), '缺测试名过滤')
+  assert.ok(src.includes("src.includes(\"test('\" + name"), '缺跑前存在性校验（漂移兜底）')
+  assert.ok(src.includes('drift'), '缺漂移回退标记')
+  assert.ok(src.includes('回退整文件'), '漂移时必须回退整文件，不许静默跳过')
+})
+
+test('P2：增量模式 opt-in，gate 默认路径不读缓存，且只缓存 caught', () => {
+  // 三条判据：① 默认（不传 --changed/--incremental）完全不知道缓存存在；
+  // ② 缓存只收 caught（survived/crashed/unapplied 永远重跑）；③ 缓存文件不进 VCS。
+  assert.ok(src.includes("a === '--changed'"), '缺 --changed')
+  assert.ok(src.includes("a === '--incremental'"), '缺 --incremental')
+  assert.ok(src.includes('const useCache = args.changed || args.incremental'), 'gate 默认路径不许读缓存')
+  assert.ok(src.includes("if (r.status !== 'caught') continue"), '缓存只许收 caught')
+  assert.ok(readFileSync('.gitignore', 'utf8').includes('.mutation-cache.json'), '.mutation-cache.json 必须进 .gitignore')
+})
+test('P0：judge 套件不得退回固定 sleep（等待必须是 waitFor/settle）', () => {
+  // 为什么钉这个：固定 sleep 是**同步点**，不是保险丝（docs/pitfalls.md §2.13）。
+  // 它一旦被复制回来，scroll-dom 会从 3s 退回 15s，而且不会有任何断言变红 ——
+  // 只有结构判据挡得住。
+  const scroll = readFileSync('tests/scroll-dom.test.mjs', 'utf8')
+  assert.ok(!scroll.includes('await sleep('), 'scroll-dom 出现了裸 sleep：等待请用 waitFor(业务条件) / settle()')
+  assert.ok(scroll.includes('const settle = async'), '缺 settle()')
+  assert.ok(scroll.includes('async function waitFor('), '缺 waitFor()')
+  for (const file of ['tests/client-bundle.test.mjs', 'tests/unread-accounting.test.mjs']) {
+    assert.ok(readFileSync(file, 'utf8').includes('UNDO_WINDOW_MS'), file + ' 缺撤销窗口捕获（5000ms 定时器必须只捕获不排程）')
+  }
+})
+
+test('P3：--timings 报表可算出 >=1s 占比与 ETA（观察优化空间的唯一入口）', () => {
+  assert.ok(src.includes("a === '--timings'"), '缺 --timings')
+  assert.ok(src.includes('function writeTimings('), '缺 writeTimings')
+  assert.ok(src.includes('slowShare'), '缺 >=1s 占比（优化空间就看这个数）')
+  assert.ok(src.includes('etaSecondsByWorkers'), '缺 ETA')
+})
 test('内环无墙钟断言（timing 判据全部住在 tests/perf/）', () => {
   assert.ok(!readFileSync('tests/overview-scale.test.mjs', 'utf8').includes('OVERVIEW_BUDGET_MS'), '内环仍有墙钟判据（终审 I1：负载刀口）')
   assert.ok(readFileSync('tests/perf/overview-scale.test.mjs', 'utf8').includes('OVERVIEW_BUDGET_MS'), 'perf 侧未收编 timing 判据')

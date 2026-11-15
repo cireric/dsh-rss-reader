@@ -28,6 +28,11 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const BUNDLE = join(ROOT, 'lib', 'client.js')
 // 与 client-bundle.test.mjs 的 BUNDLE_NAME 同一条理由（变异门槛的「崩了」分类器靠帧里的文件名）
 const BUNDLE_NAME = 'client.js'
+/**
+ * 撤销窗口时长（src/client/store.ts:328 的 5000ms）。与 client-bundle 夹具同一条口径：
+ * 窗口**时长**由断言钉住，墙钟等待不参与（夹具只捕获、不排程，见 loadStore 的 sandbox.setTimeout）。
+ */
+const UNDO_WINDOW_MS = 5000
 
 /* ------------------------------------------------------------------ host 半 */
 
@@ -296,13 +301,31 @@ function loadStore(overview, hostTruth) {
   const source = readFileSync(BUNDLE, 'utf8')
   let captured = null
   class HTMLElementStub {}
+  // 撤销窗口定时器的捕获表：5000ms 的定时器只登记不排程。理由与 client-bundle 夹具一致 ——
+  // 真排程会让每条 judge 在测试跑完后白等 5s 事件循环排空（实测 unread-accounting 5.12s 里
+  // 5.08s 是空转）。窗口是否武装改由用例显式断言，判据不降反升。
+  const undoWindowTimers = []
+  let undoWindowSeq = 0
+  const sandboxSetTimeout = (fn, ms, ...args) => {
+    if (ms === UNDO_WINDOW_MS) {
+      undoWindowSeq -= 1
+      undoWindowTimers.push({ id: undoWindowSeq, fn, ms })
+      return undoWindowSeq
+    }
+    return setTimeout(fn, ms, ...args)
+  }
+  const sandboxClearTimeout = (handle) => {
+    const index = undoWindowTimers.findIndex((entry) => entry.id === handle)
+    if (index >= 0) { undoWindowTimers.splice(index, 1); return }
+    clearTimeout(handle)
+  }
   const sandbox = {
     document: { addEventListener: () => {}, removeEventListener: () => {}, querySelector: () => null, activeElement: null },
     window: { __ModuleLoader__: { load: (entry) => { captured = entry } }, open: () => {} },
     console,
     HTMLElement: HTMLElementStub,
-    setTimeout,
-    clearTimeout,
+    setTimeout: sandboxSetTimeout,
+    clearTimeout: sandboxClearTimeout,
     Date,
     JSON,
   }
@@ -354,7 +377,7 @@ function loadStore(overview, hostTruth) {
   }
   // 交出**宿主真账的句柄**：截断 + 外部漂移那两条用例要表达「装载之后、按 A 之前，
   // 另一个面板把某个源标掉了」，那就必须能在两步之间改宿主这一侧的数（见用例注释）。
-  return { store: captured.factory(require).createReaderStore(), host, feedOf }
+  return { store: captured.factory(require).createReaderStore(), host, feedOf, undoWindowTimers }
 }
 
 async function clientStore(items, hostTruth) {
@@ -548,6 +571,16 @@ function driftFeedB(live) {
   live.host.unread -= 3
 }
 
+test('客户端：markAllRead 的 5000ms 撤销窗口必须被武装（夹具捕获不排程）', async () => {
+  // 夹具为省掉每条 judge 的 5s 空转把 5000ms 定时器改成「捕获不排程」⇒ 必须显式钉住
+  // 「窗口被武装了一次、时长仍是 5000ms」。这是把隐式等待换成显式契约，不是放宽判据。
+  const { store, undoWindowTimers } = loadStore(clientOverview([clientItem('a1')]))
+  await store.load('overview')
+  await store.markAllRead()
+  assert.equal(undoWindowTimers.length, 1, 'markAll 必须武装且只武装一个撤销窗口')
+  assert.equal(undoWindowTimers[0].ms, UNDO_WINDOW_MS, '窗口仍是 5000ms')
+  assert.ok(store.get().undo !== undefined, '窗口武装的同时必须给出撤销条')
+})
 test('截断场景下「全部标已读」：以宿主回包的 perFeedUnread 为准，守恒式不破', async () => {
   const live = loadStore(clientOverview([clientItem('a1'), clientItem('a2'), clientItem('a3')]), DRIFTING_HOST)
   await live.store.load('overview')

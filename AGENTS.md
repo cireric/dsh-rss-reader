@@ -66,4 +66,4 @@ Issue 以本地 markdown 跟踪，落在本仓库 `.scratch/<feature-slug>/` 下
 
 ### Domain docs
 
-single-context：根 `GLOSSARY.md` + `docs/adr/`（尚不存在，由 /domain-modeling 懒创建）。见 `docs/agents/domain.md`。
+single-context：根 `GLOSSARY.md` + `docs/adr/`（由 /domain-modeling 懒创建）。见 `docs/agents/domain.md`。

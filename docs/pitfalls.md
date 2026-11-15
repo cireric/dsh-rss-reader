@@ -394,6 +394,52 @@ mountReader() 先建好 JSDOM、把 window/document 等装进全局，再 requir
 
 ---
 
+### 2.13 固定 `sleep` 是**同步点**，不是保险丝；悬挂定时器会让每个 judge 白等 5 秒
+
+**病象**（`实测`，2026-11-15 变异门槛提速轮）：`scroll-dom` 单跑 14.9 s，其中 **12.9 s 是 212 处 `await sleep(...)`**；
+`client-bundle` 5.4 s 里 **5.01 s** 是进程在等事件循环排空。47 条 scroll-dom 变异因此吃掉了全量门槛 79.8% 的时间。
+
+**根因**（两条，修法不同）：
+
+1. **`sleep(n)` 拿固定毫秒当同步手段**。它等的其实是「React 把这次提交画出来」或「某个请求落完」，
+   而这两件事只要个位数毫秒。把 `sleep` 全换成 `settle()`（一个宏任务）后套件 **15.0 s → 1.02 s**，
+   但 **12 条用例当场翻红** —— 证明它们不是可删的保险丝，而是**承重的同步点**：删了会真红，留着白等 30–40 倍。
+2. **悬挂的 5000 ms 定时器**：`store.markAllRead()` 会挂撤销窗口定时器（`src/client/store.ts:328`），
+   测试跑完没人清 ⇒ `node:test` 要等事件循环排空。实测 `client-bundle` 5.01 s、`unread-accounting` 5.08 s 纯空转。
+
+**修法**：
+
+- 夹具提供 `waitFor(pred, { timeout, interval: 5, label })`：判据是**业务可见状态**（`view === 'article'`、
+  `document.querySelector('[data-rss-article]') !== null`、`saves().length === 1`），轮询间隔 5 ms，超时抛错并带 label。
+- 夹具提供 `settle()`：等「没有在飞请求 + DOM 连续两跳不变」。跳用 **MessageChannel + 定时器两个任务源各让一次**
+  （React 18 调度器走 MessageChannel；只让定时器会漏掉排在另一条队前的提交 —— 实测并发下 1/6 轮早退）。
+- 5000 ms 撤销窗口在夹具里**只捕获不排程**，并用一条用例显式断言「窗口被武装一次、仍是 5000 ms」。
+  判据从「隐式等 5 秒」变成「显式钉住 5000 这个常量」，不降反升。
+
+**判据**：`tests/scroll-dom.test.mjs` 56/56 × 连续 10 轮 0 flake；全量套件 `--test-concurrency=3` 连续 10 轮 0 flake；
+`client-bundle` 5.4 s → 0.41 s、`unread-accounting` 5.1 s → 0.10 s；全量 gate 240/240 抓到、0 幸存。
+
+**⚠️ 别用 `--test-force-exit` 当主修法**：它能治「悬挂 handle」这一族（实测 5.4 s → 0.37 s），
+但也把「测试泄漏句柄」这个形态一起藏了。夹具侧捕获 + 显式断言才是判据不降的做法。
+
+### 2.14 `node --test` 在 `--test-name-pattern` **一条都没匹配上时照样报 pass**
+
+**病象**（`实测`）：给一条变异配了不存在的 `judgeTests`，期望「没匹配到就回退整文件」，
+结果门槛报 **survived（236 ms 套件全绿）** —— 变异看起来幸存，实际是一条用例都没跑。
+
+**根因**：`node --test --test-name-pattern=<不存在的名字> tests/x.test.mjs` 的输出是
+`✔ tests/x.test.mjs … ℹ tests 1 / pass 1`（**文件本身被算成一条通过的测试**），退出码 0。
+所以「`ℹ tests 0`」这个判据永远不会出现，靠输出识别不出 0 命中。
+
+**修法**：把漂移校验放在**跑之前**——在 judge 文件源码里查 `test('<名字>'` 字面量是否还在；
+有任何一个找不到就退回整文件，并在输出里点名缺了哪条（不许静默跳过）。
+判据：故意塞一个不存在的名字 ⇒ 打印「judgeTests 与测试文件漂移（缺：…），回退整文件」，随后按整文件判 caught。
+
+**同族的第二个陷阱（`实测`，2026-11-15 性能闸）**：在 `node --test` 里再 spawn `node --test <file>`，
+node 判成「递归调用 test runner」并**直接跳过**——子进程 25ms 退出 0，一行用例都没跑。
+于是「墙钟预算」这类闸门会变成永远通过的空转。判据：子进程耗时远小于单文件正常耗时（如 25ms vs 3s）。
+修法：子进程用「直接执行测试文件」`node tests/x.test.mjs`（不带 `--test`），并 `delete env.NODE_TEST_CONTEXT`。
+
 ## 三、客户端 / React
 
 ### 3.1 长驻监听器不许捕获「会变的值」

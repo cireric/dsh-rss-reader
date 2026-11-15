@@ -9,8 +9,9 @@
  * 用法：npm run mutation（需先 npm run build + npm run build:client —— 改的是 lib/ 产物）。
  * 判据：**每一条变异都必须被抓到**；有幸存者就以非零码退出，并指出是哪条漏了。
  */
-import { readFileSync, writeFileSync, mkdirSync, cpSync, rmSync, mkdtempSync, existsSync } from 'node:fs'
-import { execSync } from 'node:child_process'
+import { readFileSync, writeFileSync, mkdirSync, cpSync, rmSync, mkdtempSync, existsSync, readdirSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { execSync, execFileSync } from 'node:child_process'
 import { Worker } from 'node:worker_threads'
 import os from 'node:os'
 import path from 'node:path'
@@ -28,11 +29,13 @@ const MUTATIONS = [
   //（构建后逐条独立 grep 核对 OCCURRENCES=1，见 docs/pitfalls.md 一、1.4）。
   { id: 'link-协议白名单失效', file: 'lib/shared.js',
     judges: ['parse.test.mjs'],
+    judgeTests: ['条目链接只放行 http/https：javascript: / data: / file: / mailto: 归一成空串，相对与合法链接不变'],
     from: "return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : '';",
     to: "return url.toString();" },
   // 正文 base 回落到请求 URL：301 换路径后相对图片会解析到旧地址（P1-1 的病象）。
   { id: 'article-正文base回落到请求URL', file: 'lib/article.js',
     judges: ['article.test.mjs'],
+    judgeTests: ['正文 base 用重定向落点 finalUrl：相对图片按落点解析，而不是请求 URL'],
     from: 'extractArticle(result.body, result.finalUrl)',
     to: 'extractArticle(result.body, url)' },
   // 去掉落盘转义：message 里的换行会伪造日志行（发布前真机判据按行读）。
@@ -43,36 +46,44 @@ const MUTATIONS = [
   // 同名多值按值排序：?tag=a&tag=b 与 ?tag=b&tag=a 会被并成同一组提示。
   { id: 'dupes-同名多值按值排序', file: 'lib/duplicates.js',
     judges: ['duplicates.test.mjs'],
+    judgeTests: ['P3-2 同名多值参数保持原序：顺序不同的 URL 不是同一个键'],
     from: 'params.sort((a, b) => a[0].localeCompare(b[0]));',
     to: 'params.sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]));' },
   // 渲染和键盘共用行序，折叠后仍生成子行会让导航无法跳过。
   { id: 'folder-折叠隐藏订阅行', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['文件夹展开与折叠同步键盘行序，汇总未读且保留订阅选择'],
     from: 'if (foldedFolders.has(folder)) continue;', to: 'if (false) continue;' },
   // 文件夹计数必须保留同组前面各源的未读数。
   { id: 'folder-未读汇总覆盖同组', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['C4-b 判定：行高量不到（offsetHeight=0）时按列表兜底 48 滚，而不是按 0 滚（量错对象的「有值但不正确」是实测事故）', '文件夹展开与折叠同步键盘行序，汇总未读且保留订阅选择'],
     from: '(unreadByFolder.get(feed.folder) ?? 0) + (perFeedUnread[feed.id] ?? 0)', to: '(perFeedUnread[feed.id] ?? 0)' },
   // 搜索刷新可能移动同一条目，跟随滚动必须响应新结果。
   { id: 'search-刷新后跟随同一选中项', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['刷新搜索后相同选中项移出视口时，列表跟随其新位置'],
     from: 'state.selectedId,\n\t\t\t\t\tstate.view,\n\t\t\t\t\tstate.searchRevision', to: 'state.selectedId, state.view' },
   // 刷新要重查已加载的页，否则深页选中的文章会被替换成第一条。
   { id: 'search-刷新保留已加载窗口', file: 'lib/client.js',
     judges: ['nav-selection.test.mjs'],
+    judgeTests: ['搜索刷新废弃旧续页，沿新游标恢复已加载窗口和选中项'],
     from: 'await loadSearch(void 0, Math.max(1, searchPages))', to: 'await loadSearch()' },
   // 限页前必须检查字面命中，否则无关文章会抢占搜索分页。
   { id: 'search-只返回字面命中', file: 'lib/search-worker.js',
     judges: ['search.test.mjs'],
+    judgeTests: ['本地搜索跨页稳定，按源、日期、星标和已读筛选，并只查当前缓存'],
     from: 'THEN (${match}) ELSE 0 END', to: 'THEN (1) ELSE 0 END' },
   // article-view.ts 随原站视图整条删除（2026-10-08），那条变异的目标已不存在。
   // 换成守护本次修复的两条判定：装饰性小图过滤、同一图重复去重。
   { id: 'article-装饰性小图过滤', file: 'lib/article.js',
     judges: ['article.test.mjs'],
+    judgeTests: ['装饰性小图判据：CDN 尺寸描述符 ≤200 就当头像/图标丢掉（2026-10-08 用户实测）', '抽取：装饰性小图与重复图都不进正文（sspai 那篇的回归）'],
     from: 'if (width > 0 && height > 0 && width <= DECORATIVE_IMAGE_MAX && height <= DECORATIVE_IMAGE_MAX)',
     to: 'if (false)' },
   { id: 'article-重复图去重', file: 'lib/article.js',
     judges: ['article.test.mjs'],
+    judgeTests: ['抽取：装饰性小图与重复图都不进正文（sspai 那篇的回归）'],
     from: 'if (count > MAX_SAME_IMAGE)', to: 'if (false)' },
   // 容器识别（2026-10-09）：它替代了「按尺寸/路径逐条猜杂图」的做法，失效就意味着站点头像与
   // 页脚二维码重新回到正文里 —— 正是用户截图里的现象，所以必须有人看着它。
@@ -87,9 +98,11 @@ const MUTATIONS = [
     to: 'const blocks = focused' },
   { id: 'keys-r 归还刷新计数', file: 'lib/keys.js',
     judges: ['keys.test.mjs'],
+    judgeTests: ['键位：r 刷新计数；w/W 已空出且不得被偷偷接管（2026-10-08）', '帮助表逐条反查：每一行声明的动作都必须与实现解析出来的完全一致', '帮助表反向覆盖：实现里能返回的动作，都必须出现在帮助表里'],
     from: "return 'refreshCount';", to: "return 'toggleRender';" },
   { id: 'client-A 的范围阈值过滤', file: 'lib/client.js',
     judges: ['client-bundle.test.mjs'],
+    judgeTests: ['A 的范围阈值：只标「早于所选范围」的条目（规格 §3.3 的 panic button）'],
     from: 'recencyOf(item) < before', to: 'true' },
   // ⚠️ 2026-11-13（M4 01）重锚：判据从 discoverAndValidate 收进 limitsForCandidate 之后，
   // 「options.limits」变成了参数「limits」—— 旧 from 会报**未应用**（比幸存更隐蔽，pitfalls 二、2.7）。
@@ -97,6 +110,7 @@ const MUTATIONS = [
   // 两个调用方共用这一处判据。
   { id: 'subscribe-信任不跨源传播', file: 'lib/subscribe.js',
     judges: ['subscribe.test.mjs'],
+    judgeTests: ['信任不跨源传播：同源候选继承可信目标、跨源候选一律不可信（安全边界）', '发现：同源候选继承可信目标；跨源候选一律不可信', '发现：一次重定向不能把候选升级成可信目标（落点只用于解析，不用于继承信任）'],
     from: 'const inherited = limits.trustedTarget === true && isSameOrigin(candidate, pageUrl);',
     to: 'const inherited = limits.trustedTarget === true;' },
   // ── M4 02：订阅健康（2026-11-13）────────────────────────────────────────────
@@ -104,32 +118,38 @@ const MUTATIONS = [
   // 判据在 tests/refresh.test.mjs（真 refreshFeeds 两轮失败 ⇒ 2）与 store-sqlite 的失败累计用例。
   { id: 'health-连败不累计', file: 'lib/feed-intent.js',
     judges: ['refresh.test.mjs', 'store-sqlite.test.mjs'],
+    judgeTests: ['M4 02：连续两轮失败累计到 2，恢复成功后清零并清掉横幅', 'M4 02：失败累计 1→2，200 与 304 都清零；undefined（历史未知）与 0（零连败）不得混为一谈'],
     from: 'failureCount: (previous?.failureCount ?? 0) + 1,',
     to: 'failureCount: 1,' },
   // 200 与 304 都必须**显式写 0**（省略 = 退回「历史未知」，界面会把刚成功的源显示成「次数未知」）。
   // 两个分支各一条：它们是同一判定的两处实现，只改一处就只是半条规矩。
   { id: 'health-200 不清连败', file: 'lib/feed-intent.js',
     judges: ['store-sqlite.test.mjs'],
+    judgeTests: ['M4 02：失败累计 1→2，200 与 304 都清零；undefined（历史未知）与 0（零连败）不得混为一谈', 'H4：refresh-success 清 lastFailure 且盖双时间戳（与旧白名单逐字段等价）'],
     from: '                contentRevision: intent.contentRevision,\n                // 成功即清零（不是「省略这个字段」）：省略等于退回「历史未知」，而这里我们**知道**刚成功。\n                failureCount: 0,',
     to: '                contentRevision: intent.contentRevision,\n                // 成功即清零（不是「省略这个字段」）：省略等于退回「历史未知」，而这里我们**知道**刚成功。\n                failureCount: previous?.failureCount,' },
   { id: 'health-304 不清连败', file: 'lib/feed-intent.js',
     judges: ['store-sqlite.test.mjs'],
+    judgeTests: ['M4 02：失败累计 1→2，200 与 304 都清零；undefined（历史未知）与 0（零连败）不得混为一谈'],
     from: '                // 304 也是成功（源说内容没变）：连败计数同样归零，与 lastFailure 清零同一条理由。\n                failureCount: 0,',
     to: '                // 304 也是成功（源说内容没变）：连败计数同样归零，与 lastFailure 清零同一条理由。\n                failureCount: previous?.failureCount,' },
   // 「把源重新加一遍 = 修好了」是 M4 02 明确要修掉的假象：订阅落库不是抓取结果，不许清失败历史。
   { id: 'health-订阅落库抹掉失败历史', file: 'lib/feed-intent.js',
     judges: ['store-sqlite.test.mjs'],
+    judgeTests: ['M4 02：upsert-subscription 保留失败历史 —— 重复添加 / OPML 重导不得清掉 lastFailure 与连败计数'],
     from: '                lastFailure: previous?.lastFailure,',
     to: '                lastFailure: undefined,' },
   // X 必须是「本轮实际尝试的源数」，不是订阅总数：退回 total 会让界面把「摸了 1/3」吹成「3/3」。
   // 判据在 refresh.test.mjs 的真装配（K=1 / 3 源，断言端点回包的 refresh.attempted === 1）。
   { id: 'health-X 报成订阅总数', file: 'lib/lifecycle.js',
     judges: ['refresh.test.mjs'],
+    judgeTests: ['refreshNow 每轮只抓 refreshFeedsPerRound 个源，且下一轮换一批（接线 + 旋转）'],
     from: "return { outcome: 'ran', attempted: subscriptions.length, total };",
     to: "return { outcome: 'ran', attempted: total, total };" },
   // 「次数未知」不许写成「0 次」：老记录从来没记过计数，补 0 就是撒谎（domain.ts 的三态契约）。
   { id: 'health-未知次数写成 0', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['M4 02：管理页显示健康、连败次数、最近尝试与上次成功；历史未知写成「次数未知」而不是 0'],
     from: '" · 连续失败：" + (feed.failureCount === void 0 ? "次数未知" : feed.failureCount + " 次"),',
     to: '" · 连续失败：" + (feed.failureCount === void 0 ? "0 次" : feed.failureCount + " 次"),' },
 
@@ -138,22 +158,26 @@ const MUTATIONS = [
   // 而这条在类型上完全合法。判据在 tests/nav-persistence.test.mjs（档位原样通过 + 重开恢复）。
   { id: 'reading-字号档位恒回落', file: 'lib/shared.js',
     judges: ['nav-persistence.test.mjs'],
+    judgeTests: ['sanitizeViewPreferences：正文排版逐字段归一，档位外的值一律回落默认', '端点：saveViewPreferences 存下偏好，viewPreferences 原样读回'],
     from: "fontSize: READING_FONT_SIZES.includes(readingSource['fontSize'])\n            ? readingSource['fontSize']",
     to: "fontSize: READING_FONT_SIZES.includes(readingSource['fontSize'])\n            ? DEFAULT_READING_PREFERENCES.fontSize" },
   // 改字号必须落盘：setReading 漏掉 persistView 时界面当场是对的，只有「重开插件」才看得出。
   // 判据是 nav-persistence 的客户端层用例（改字号 → 重开后排版仍恢复）。
   { id: 'reading-改字号不落盘', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs'],
+    judgeTests: ['改字号只动排版：导航、过滤与左栏显隐一项都不许被覆盖（重开后排版也恢复）'],
     from: "...patch\n\t\t\t\t} });\n\t\t\t\tpersistView();",
     to: "...patch\n\t\t\t\t} });" },
   // 时长必须中英各算一半：只数 CJK 时纯英文段落贡献 0 分钟（固定夹具里 200 词那一段就没了）。
   { id: 'reading-时长不计英文', file: 'lib/shared.js',
     judges: ['reading.test.mjs'],
+    judgeTests: ['英文按 200 词/分：400 词 = 2 分钟，401 词 = 3 分钟', '中英混排：两套速率各算各的，加起来再向上取整', '列表项与标题都算正文；图片块整块不计（图注也不计 —— 估的是量级，不值得为它加一条分支）'],
     from: "                if (WORD_PATTERN.test(token))\n                    words += 1;",
     to: "                if (false)\n                    words += 1;" },
   // 界面必须标「估算」：速率是整数近似值，写成确定口吻就是撒谎。判据在 DOM 层的文案断言。
   { id: 'reading-时长不标估算', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['正文页阅读偏好：时长标「估算」、字号/栏宽落到正文、写盘发的是整份偏好', '文件夹展开与折叠同步键盘行序，汇总未读且保留订阅选择'],
     from: '" 分钟（估算）"',
     to: '" 分钟"' },
   // ── M5 02：已缓存正文的阅读进度（2026-11-16）────────────────────────────
@@ -161,24 +185,28 @@ const MUTATIONS = [
   // 判据在 tests/reading-progress.test.mjs 的「版本对不上就当没有」。
   { id: 'progress-版本不校验', file: 'lib/store-sqlite.js',
     judges: ['reading-progress.test.mjs'],
+    judgeTests: ['阅读进度：按 (itemId, 内容标识) 存读，版本对不上就当没有'],
     from: "if (requiredText(row.version, 'reading_progress.version') !== contentVersion)\n                return undefined;",
     to: "if (false)\n                return undefined;" },
   // 比例是**用户数据**：越界值（5、1.7）必须夹到 [0,1]，认不出的（NaN/字符串）按 0。
   // 少了这道夹取，库里会攒出 scrollTop = 13500 这种恢复时必越界的值。
   { id: 'progress-写入不夹取', file: 'lib/shared.js',
     judges: ['reading-progress.test.mjs'],
+    judgeTests: ['clampReadingRatio：只留 [0,1] 的有限数，认不出的一律当 0', '阅读进度：写入即夹取，条目不存在一律拒绝', 'saveReadingProgress 端点：缺参数 / 未知条目响亮失败，比例越界被夹住'],
     from: "return ratio >= 1 ? 1 : ratio;",
     to: "return ratio;" },
   // 缓存淘汰只清正文、不清进度 ⇒ 恢复会指向一段已经不存在的正文（同一份内容标识永远不会再出现，
   // 那条进度就永远读不到，但它仍然挡着「这一条没有进度」的判断）。判据在 tests/refresh.test.mjs。
   { id: 'progress-淘汰不清进度', file: 'lib/refresh.js',
     judges: ['refresh.test.mjs'],
+    judgeTests: ['正文缓存淘汰同时清掉阅读进度（M5 02 的「缓存淘汰可清理进度」）'],
     from: "await store.clearReadingProgress(itemId);",
     to: "void 0;" },
   // 离开正文（切换 / 卸载）必须落盘：少了这一句，界面完全正常，只有「重开」才看得出进度没记住。
   // 判据在 tests/scroll-dom.test.mjs 的真 DOM 用例（切换一次必须恰好写一次）。
   { id: 'progress-离开不落盘', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['阅读进度：切走再回来接着读、滚动不写盘、离开时落盘（M5 02）'],
     from: "onSaveProgress(itemId, contentVersion, readingRatioOf(box.scrollTop, box.scrollHeight, box.clientHeight));",
     to: "void 0;" },
   // 恢复侧同样要夹：库里的比例来自用户数据，而恢复时的内容高度与记录时不一定相同。
@@ -193,30 +221,35 @@ const MUTATIONS = [
   // 在这里再报一次只是重复报警。判据在 tests/duplicates.test.mjs 的分组用例。
   { id: 'dupes-同源也算重复', file: 'lib/duplicates.js',
     judges: ['duplicates.test.mjs'],
+    judgeTests: ['duplicateHintsOf：跨源同链接才算；同源、缺链接、仅标题相同都不算', 'duplicateHints 端点：候选来自别的页、别的源；同源那条不报；读/星标互不影响'],
     from: "row.id !== item.id && row.feedId !== item.feedId",
     to: "row.id !== item.id" },
   // 非 http(s) 的链接（javascript: / mailto: / data:）一律不参与判定：它们不是「可读的原文」，
   // 而且两个 null 链接会把不相干的文章连成一组。判据是归一化样本表里的那几条。
   { id: 'dupes-非 http(s) 链接参与判定', file: 'lib/duplicates.js',
     judges: ['duplicates.test.mjs'],
+    judgeTests: ['linkKeyOf：归一化的每一个边界都有一条固定样本（改规则必须同时改这张表）'],
     from: "if (url.protocol !== 'http:' && url.protocol !== 'https:')\n        return '';",
     to: "if (false)\n        return '';" },
   // 候选必须**跨页**查（票据验收项）：退回「只用这一页的条目」时，另一页的兄弟永远看不到，
   // 而界面上只是「提示少了一条」，没有任何报错。判据是端点用例里 b1 不在这一页那一条。
   { id: 'dupes-只查这一页', file: 'lib/endpoints.js',
     judges: ['duplicates.test.mjs'],
+    judgeTests: ['duplicateHints 端点：候选来自别的页、别的源；同源那条不报；读/星标互不影响'],
     from: "const candidates = keys.size === 0 ? [] : ctx.store.itemsByLinkKeys([...keys]);",
     to: "const candidates = visible;" },
   // 升级回填必须**归一化**：直接把 link 原样写进 link_key，老条目会因为 ?utm_/#fragment 而永远匹配不上。
   // 判据是 v2→v4 的升级用例（夹具链接带 utm 与 fragment）。
   { id: 'dupes-回填不归一', file: 'lib/storage/db.js',
     judges: ['duplicates.test.mjs'],
+    judgeTests: ['v2→v4 升级：只加表与派生列，旧数据一行不动、link_key 回填到位（M5 03 的派生列）'],
     from: "update.run(linkKeyOf(link), id);",
     to: "update.run(link, id);" },
   // 整行是 role=button（点一下就选中 + 标读）：展开提示必须 stopPropagation，
   // 否则「点开看看别的来源」会顺手把这篇标成已读。判据在真 DOM 用例里。
   { id: 'dupes-展开顺手标读', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['跨源重复提示：行内可展开看别的来源，且展开不会把那篇标成已读（M5 03）'],
     from: "onClick: (event) => event.stopPropagation(),",
     to: "onClick: () => {}," },
   // ── M5 04：备份校验器（2026-11-14）──────────────────────────────────────────
@@ -226,14 +259,17 @@ const MUTATIONS = [
   // ③ 订阅丢失不报 ⇒ 只恢复了库、没恢复 config.json 的形态会被放行（= 订阅全没）。
   { id: 'backup-完整性检查失效', file: 'scripts/verify-backup.mjs',
     judges: ['backup-verify.test.mjs'],
+    judgeTests: ['能打开但页结构坏了：必须由 integrity_check 拦住（损坏不都在打开时现形）'],
     from: "if (integrity !== 'ok')",
     to: "if (false)" },
   { id: 'backup-版本区间放行', file: 'scripts/verify-backup.mjs',
     judges: ['backup-verify.test.mjs'],
+    judgeTests: ['未知版本：比当前版本新的库拒绝恢复（那是别的插件版本写的）'],
     from: "} else if (version < 1 || version > SCHEMA_VERSION) {",
     to: "} else if (version < 1) {" },
   { id: 'backup-订阅丢了不报', file: 'scripts/verify-backup.mjs',
     judges: ['backup-verify.test.mjs'],
+    judgeTests: ['订阅丢了：库里有条目但 config.json 没有订阅 ⇒ 拒绝（与装载路径同一条判据）'],
     from: "if (items !== undefined && items > 0 && feedCount === 0) {",
     to: "if (false) {" },
   // M4 01：候选的相对链接必须按**重定向落点**解析。退回输入 URL 时，站点只要做过一次
@@ -241,37 +277,45 @@ const MUTATIONS = [
   // 的「重定向后相对候选按最终页面 URL 解析」。OCCURRENCES 独立实测 = 1（lib/subscribe.js:142）。
   { id: 'discover-候选按最终页面 URL 解析', file: 'lib/subscribe.js',
     judges: ['subscribe.test.mjs'],
+    judgeTests: ['发现：重定向后相对候选按**最终页面 URL** 解析', '发现：一次重定向不能把候选升级成可信目标（落点只用于解析，不用于继承信任）'],
     from: 'const declared = discoverFeedUrls(page.body, page.finalUrl);',
     to: 'const declared = discoverFeedUrls(page.body, userUrl);' },
   // 上面那条的**上游**：fetch 的成功回包必须真的交出落点（退回起始 URL 会让它永远拿到原地址）。
   // 这条只能由 fetch.test.mjs 审 —— subscribe.test.mjs 的 fetchImpl 是桩，改不到抓取层。
   { id: 'fetch-成功回包交出最终落点', file: 'lib/feed/fetch.js',
     judges: ['fetch.test.mjs'],
+    judgeTests: ['成功回包交出最终落点：跟完重定向后是落点 URL，不是起始 URL'],
     from: 'finalUrl: current',
     to: 'finalUrl: url' },
   { id: 'discover-只认 rel=alternate', file: 'lib/feed/discover.js',
     judges: ['discover.test.mjs'],
+    judgeTests: ['只认真正声明 feed 的 link：rel 不对 / type 不对都忽略'],
     from: 'if (!/\\balternate\\b/i.test(rel))', to: 'if (false)' },
   // ⚠️ 2026-10-18：judges 从 client-bundle 改到 keyboard-routing —— 那条变异锚的是 CLIENT 里的
   // 按键路由（`if (view === "list") store.setLayout("expanded")`）。旧 judges 指的 client-bundle 只走
   // 假 React 夹具，从不按 1 键 ⇒ 变异长期「幸存」。按键路由层的判据住在 tests/keyboard-routing.test.mjs。
   { id: 'client-1 键切展开视图', file: 'lib/client.js',
     judges: ['keyboard-routing.test.mjs'],
+    judgeTests: ['C4-b 判定：列表页按 1 切 expanded、按 2 切回 list（切错方向时红）'],
     from: 'setLayout("expanded")', to: 'setLayout("list")' },
   { id: 'retention-星标保护', file: 'lib/retention.js',
     judges: ['refresh.test.mjs', 'retention.test.mjs'],
+    judgeTests: ['裁剪保护星标：满上限时删未读，星标一条都不动', '裁剪：星标条目永不被删——哪怕它最旧、哪怕超额最多', '裁剪：星标占满时宁可超上限也不删（返回数量少于溢出量）', '裁剪：星标与保持未读的条目一律不动（其余按未读优先删）', '裁剪：全被星标/保持占满时，宁可超上限也不删'],
     from: 'const protectedFromPrune = (row) => row.starred || row.kept;',
     to: 'const protectedFromPrune = (row) => row.kept;' },
   { id: 'retention-未读优先级', file: 'lib/retention.js',
     judges: ['retention.test.mjs'],
+    judgeTests: ['裁剪：优先删未读，且从最旧的开始', '裁剪：星标条目永不被删——哪怕它最旧、哪怕超额最多', '裁剪：未读用尽后才轮到已读（已读是最后手段）', '裁剪：星标与保持未读的条目一律不动（其余按未读优先删）'],
     from: 'return [...unread, ...read].slice(0, overflow).map((row) => row.id);',
     to: 'return [...read, ...unread].slice(0, overflow).map((row) => row.id);' },
   { id: 'retention-清理的星标保护', file: 'lib/retention.js',
     judges: ['overview-paging.test.mjs', 'retention.test.mjs', 'store-sqlite.test.mjs'],
+    judgeTests: ['逐方法同义性：listCleanupCandidates 在两个适配器上得出同一个最终删除集（候选宽度可以不同）', '显式清理：四个条件缺一不可', 'listCleanupCandidates：SQL 只做成本筛选，判定由 selectCleanup 做出（候选 ⊇ 判定集）'],
     from: '.filter((row) => row.read && !row.starred && !row.kept && row.recency < cutoffIso)',
     to: '.filter((row) => row.read && !row.kept && row.recency < cutoffIso)' },
   { id: 'retention-清理的保持未读保护', file: 'lib/retention.js',
     judges: ['overview-paging.test.mjs', 'retention.test.mjs', 'store-sqlite.test.mjs'],
+    judgeTests: ['逐方法同义性：listCleanupCandidates 在两个适配器上得出同一个最终删除集（候选宽度可以不同）', '显式清理：四个条件缺一不可', 'listCleanupCandidates：SQL 只做成本筛选，判定由 selectCleanup 做出（候选 ⊇ 判定集）'],
     // 「保持未读」是用户明确说的「别动它」，与星标同级。2026-11-14 起这条保护住在判据里
     // （此前只写在 SQL 谓词里，判据根本看不见 kept）。少了它，清理会静默删掉用户标记的条目。
     from: '.filter((row) => row.read && !row.starred && !row.kept && row.recency < cutoffIso)',
@@ -281,6 +325,7 @@ const MUTATIONS = [
   // ① 去掉「上限非法」这半 ⇒ 上限 0 / 负数会被当成「必须清到 0 字符」，把全部缓存清空。
   { id: 'retention-非法上限保护', file: 'lib/retention.js',
     judges: ['refresh.test.mjs', 'retention.test.mjs'],
+    judgeTests: ['全局预算：上限 <= 0 表示未配置，一条都不清（不是「整份清空」）', '正文缓存：未超上限不清；上限非法一律视为不清理', '全局正文预算：上限 <= 0 返回空（未配置 ≠ 整份清空）', '全局正文预算：上限是 NaN 时一条都不清（垃圾上限不得变成「清空整库」）'],
     // from 照**编译产物**的实际形状写（docs/pitfalls.md 一、1.4）：lib/retention.js:47，独立实测 OCCURRENCES=1。
     from: 'if (!(maxChars > 0) || total <= maxChars)',
     to: 'if (total <= maxChars)' },
@@ -290,34 +335,42 @@ const MUTATIONS = [
   //   非等价变异：NaN 下旧守卫返回整份淘汰名单，新守卫返回空。
   { id: 'retention-NaN 上限不得清空', file: 'lib/retention.js',
     judges: ['retention.test.mjs'],
+    judgeTests: ['全局正文预算：上限是 NaN 时一条都不清（垃圾上限不得变成「清空整库」）'],
     from: 'if (!(maxChars > 0) || total <= maxChars)',
     to: 'if (maxChars <= 0 || total <= maxChars)' },
   { id: 'list-scroll-视口内判定', file: 'lib/list-scroll.js',
     judges: ['list-scroll.test.mjs'],
+    judgeTests: ['单调性：向下移动时目标滚动位置不减小（不会来回跳）'],
     from: 'if (rowTop >= currentTop && rowTop + rowHeight <= currentTop + containerHeight)',
     to: 'if (rowTop > currentTop && rowTop + rowHeight <= currentTop + containerHeight)' },
   { id: 'list-scroll-夹取保护', file: 'lib/list-scroll.js',
     judges: ['list-scroll.test.mjs'],
+    judgeTests: ['滚动计算对非法输入免疫（NaN/0/负数不该把滚动条写坏）'],
     from: 'const ceiling = Number.isFinite(maxTop) && maxTop > 0 ? maxTop : 0;',
     to: 'const ceiling = maxTop;' },
   { id: 'item-id-guid 优先级', file: 'lib/feed/item-id.js',
     judges: ['parse.test.mjs'],
+    judgeTests: ['条目 id 稳定派生：同一输入恒等，不同 guid 不同 id', '身份解析：没有重复时逐条结果与 deriveItemId 完全一致（不改变既有行为）'],
     from: 'const basis = item.id?.trim() || item.link?.trim() ||',
     to: 'const basis = item.link?.trim() ||' },
   { id: 'keys-大写 R', file: 'lib/keys.js',
     judges: ['keys.test.mjs', 'overview-scale.test.mjs'],
+    judgeTests: ['键位：r 刷新计数；w/W 已空出且不得被偷偷接管（2026-10-08）', '帮助表逐条反查：每一行声明的动作都必须与实现解析出来的完全一致'],
     from: "case 'r':\n        case 'R':",
     to: "case 'r':" },
   { id: 'keys-大写 F', file: 'lib/keys.js',
     judges: ['keys.test.mjs'],
+    judgeTests: ['订阅管理键：f 与 F 都要认（标签写的是「F」）', '帮助表逐条反查：每一行声明的动作都必须与实现解析出来的完全一致'],
     from: "case 'f':\n        case 'F':",
     to: "case 'f':" },
   { id: 'refresh-正文升级判定', file: 'lib/refresh.js',
     judges: ['refresh.test.mjs'],
+    judgeTests: ['正文升级：内容版本落后时，该源第一轮必须绕开条件请求（否则永远回填不了）'],
     from: 'const needsContentUpgrade = (previous?.contentRevision ?? 1) < CONTENT_REVISION;',
     to: 'const needsContentUpgrade = (previous?.contentRevision ?? 1) > CONTENT_REVISION;' },
   { id: 'refresh-正文不得降级覆盖', file: 'lib/refresh.js',
     judges: ['overview-scale.test.mjs', 'refresh.test.mjs'],
+    judgeTests: ['正文回填的反面：源变短时不得用更短的正文覆盖更完整的正文'],
     from: 'if (existing !== undefined && (summary?.length ?? 0) > (existing.summary?.length ?? 0))',
     to: 'if (existing !== undefined)' },
   // 闸门必须认**现行**的 blocks 形态（2026-07 事故：只统计 paragraphs ⇒ 字符数恒为 0 ⇒ 闸门永不触发）。
@@ -328,6 +381,7 @@ const MUTATIONS = [
   // lib/store-sqlite.js:296，独立实测 OCCURRENCES=1。
   { id: 'refresh-缓存闸门认 blocks', file: 'lib/store-sqlite.js',
     judges: ['overview-paging.test.mjs', 'overview-scale.test.mjs', 'store-sqlite.test.mjs'],
+    judgeTests: ['逐方法同义性：listCleanupCandidates 在两个适配器上得出同一个最终删除集（候选宽度可以不同）', '逐方法同义性：listArticleCacheEntries 与旧实现逐条相等（只交出 { id, chars, fetchedAt }）', '10 万行：cleanup 的候选集由 SQL 选（不再全表），且释放量与删除数如实', 'listCleanupCandidates：SQL 只做成本筛选，判定由 selectCleanup 做出（候选 ⊇ 判定集）', 'listArticleCacheEntries：只交出 { id, chars, fetchedAt }，且 chars 与 articleCharsOf 同口径'],
     from: "if (typeof fields['text'] === 'string') {",
     to: "if (false) {" },
   // 全局预算的承重点（2026-10-11 任务 9）：这份名单必须覆盖**全库**。
@@ -353,6 +407,7 @@ const MUTATIONS = [
   //   只要输出里出现 ReferenceError / SyntaxError，一律不算抓住（docs/pitfalls.md 二、2.7b）。
   { id: 'refresh-正文闸门退回单源', file: 'lib/refresh.js',
     judges: ['refresh.test.mjs'],
+    judgeTests: ['全局预算：每源都没超上限，但合计超了 ⇒ 必须跨源清（按源清算的漏网形态）', '全局预算：清掉的是跨源最旧的那条，不能只盯着清单里的某一个源'],
     from: 'const entries = store.listArticleCacheEntries();',
     to: "const entries = store.listArticleCacheEntries().filter((entry) => store.item(entry.id)?.feedId === store.listFeeds()[0]?.[0])" },
   // 同一处代码的第二条承重点：**必须走只交出 { id, chars, fetchedAt } 的那条取数路径**。
@@ -363,6 +418,7 @@ const MUTATIONS = [
   // 变异的失败模式会从「缺陷复现」退化成「加载失败」，那不是被抓住（docs/pitfalls.md 二、2.7）。
   { id: 'refresh-正文闸门改走整表', file: 'lib/refresh.js',
     judges: ['refresh.test.mjs'],
+    judgeTests: ['正文缓存闸门：现行的 blocks 形态同样要被统计到（2026-10-07 修回归）'],
     from: 'const entries = store.listArticleCacheEntries();',
     to: 'const entries = store.allItems().filter(([, record]) => record.article !== undefined).map(([id, record]) => ({ id, chars: record.article.paragraphs?.reduce((sum, paragraph) => sum + paragraph.length, 0) ?? 0, fetchedAt: record.article?.fetchedAt ?? \'\' }));' },
   // ── 陈旧度调度（2026-10-11 任务 10）───────────────────────────────────────────
@@ -376,6 +432,7 @@ const MUTATIONS = [
   // （lib/refresh.js:40 的回落链、:201 的失败分支写入）。
   { id: 'refresh-调度键退回只看成功', file: 'lib/refresh.js',
     judges: ['refresh.test.mjs'],
+    judgeTests: ['永久失败的源不得饿死健康源：S ≥ K 时每一轮都还能抓到新的健康源（复刻真实写规则）', '真装配：1 个源恒 500 时，K=1 的轮转仍能摸到另外两个健康源（失败分支必须盖尝试时间）'],
     // lib/refresh.js:40。这就是**修复前的那份代码**：键退回 lastFetchedAt（= 上次成功）。
     // 永久失败的源永远拿不到它 ⇒ 永远最旧 ⇒ 这类源 ≥ K 个时每轮选中同一批，健康源全停更。
     // 实测 2 条翻红（纯函数复刻 200/20/K=20 与真装配 3 源 / 1 个 500 / K=1），RefErr 0 次。
@@ -383,6 +440,7 @@ const MUTATIONS = [
     to: "    return record.lastFetchedAt ?? '';" },
   { id: 'refresh-失败的尝试不盖时间', file: 'lib/feed-intent.js',
     judges: ['refresh.test.mjs', 'teardown-race.test.mjs'],
+    judgeTests: ['真装配：1 个源恒 500 时，K=1 的轮转仍能摸到另外两个健康源（失败分支必须盖尝试时间）', '启动刷新在飞时 teardown：不得把库关在正在写的刷新底下（无「装载失败 / database is not open」）', '面板触发（RPC）的在飞刷新同样受 teardown 保护：不得写在已关闭的句柄上'],
     // H4 重锚（2026-10-18）：合并规则搬进 feed-intent.js 的 refresh-failure 分支（失败分支忘了盖
     // 时间 ⇒ 防饿死失效）。键的口径（调度键退回只看成功）与这里必须同时成立，各自一条变异。
     // 锚照产物 :53-54 实际字节（无缩进前缀的子串匹配；to = 删掉盖时间那行）。
@@ -390,6 +448,7 @@ const MUTATIONS = [
     to: '                lastFailure: intent.reason,' },
   { id: 'refresh-陈旧度不再回落', file: 'lib/refresh.js',
     judges: ['refresh.test.mjs'],
+    judgeTests: ['selectStalestFeeds：按 lastAttemptedAt ?? lastFetchedAt 升序取最旧的 K 个，未抓过的排最前（无限陈旧）', '陈旧度调度的饥饿不变式：源数 > K 时，连续轮次内每个源都会被选中（旋转覆盖全部）'],
     // lib/refresh.js:40 的另一半：去掉对 lastFetchedAt 的回落。已有库（Task 2 迁移过来的记录）
     // 只有 lastFetchedAt、没有 lastAttemptedAt ⇒ 去掉回落后它们全被当成「从未尝试过」，
     // 旧订阅会在装载后一次性涌到最前面。非等价变异（老记录与新记录的排序结果不同）。
@@ -405,12 +464,14 @@ const MUTATIONS = [
   // **只有失败分支那条写入是不可回落的**（它没有 lastFetchedAt 可回落）—— 判据就在上面。
   { id: 'refresh-陈旧度排序倒退', file: 'lib/refresh.js',
     judges: ['refresh.test.mjs'],
+    judgeTests: ['selectStalestFeeds：按 lastAttemptedAt ?? lastFetchedAt 升序取最旧的 K 个，未抓过的排最前（无限陈旧）', '陈旧度调度的饥饿不变式：源数 > K 时，连续轮次内每个源都会被选中（旋转覆盖全部）', 'refreshNow 每轮只抓 refreshFeedsPerRound 个源，且下一轮换一批（接线 + 旋转）', '永久失败的源不得饿死健康源：S ≥ K 时每一轮都还能抓到新的健康源（复刻真实写规则）', '真装配：1 个源恒 500 时，K=1 的轮转仍能摸到另外两个健康源（失败分支必须盖尝试时间）'],
     // lib/refresh.js:71，独立实测 OCCURRENCES=1。排序倒退后取到的是**最新**的 K 个，
     // 而未抓过的源（staleness key = ''，码位最小）从「最前」翻到「最后」⇒ 新建的源再也排不上
     // 第一轮。实测 3 条翻红：陈旧度排序、饥饿不变式、接线（refreshNow 用例）。
     from: 'if (a < b)', to: 'if (a > b)' },
   { id: 'refresh-每轮上限失效', file: 'lib/refresh.js',
     judges: ['refresh.test.mjs'],
+    judgeTests: ['selectStalestFeeds：上限 <= 0 视为「未配置」⇒ 返回全部，不许解读成「一个都不抓」'],
     // lib/refresh.js:55，独立实测 OCCURRENCES=1。整条守卫失效后 limit=0/负数/NaN 会一路走进
     // slice(0, 0) ⇒ 返回空列表 ⇒ **每一轮一个源都不抓**（所有源永久停更的那个静默失效）。
     // 实测 1 条翻红（「上限 <= 0 视为未配置」），正是守卫那一条。
@@ -424,6 +485,7 @@ const MUTATIONS = [
   //   产物 lib/lifecycle.js:126，独立实测 OCCURRENCES=1）。
   { id: 'refresh-取源退回全量', file: 'lib/lifecycle.js',
     judges: ['refresh.test.mjs'],
+    judgeTests: ['refreshNow 每轮只抓 refreshFeedsPerRound 个源，且下一轮换一批（接线 + 旋转）', '真装配：1 个源恒 500 时，K=1 的轮转仍能摸到另外两个健康源（失败分支必须盖尝试时间）'],
     // 退回「全量交出去」= 本任务要修的病象原样保留
     // （200 源 × 15s ÷ 并发 = 600s 一轮），而 selectStalestFeeds 自身的单测**全绿** ——
     // 这条证明「接线」那一层必须有独立断言看着（挑选对了却没生效是本仓库反复踩到的形态）。
@@ -432,6 +494,7 @@ const MUTATIONS = [
     to: 'const subscriptions = target.listFeeds().map(([feedId]) => feedId);' },
   { id: 'config-每轮取源默认无界', file: 'lib/config.js',
     judges: ['refresh.test.mjs'],
+    judgeTests: ['refreshFeedsPerRound 的默认值必须是个具体条数（0 / Infinity = 把「一轮 600s」放回来）'],
     // lib/config.js:20，独立实测 OCCURRENCES=1。把默认值改成 0 之后**别的用例全绿** —— 因为
     // selectStalestFeeds 把 0 解读成「未配置 ⇒ 抓全部」（那是安全侧），于是「一轮 600s」这条
     // 缺陷就借默认值回来了，而且没有任何断言会喊。这正是本任务最容易被回退的形态，所以
@@ -444,42 +507,53 @@ const MUTATIONS = [
     to: 'if (false)' },
   { id: 'item-id-撞车即不可信', file: 'lib/feed/item-id.js',
     judges: ['parse.test.mjs'],
+    judgeTests: ['身份解析：id 重复且 URL 也相同 ⇒ 是源里重复列出的同一条，保持同一个 id 交给下游去重'],
     from: 'new Set(group.map((index) => linkOf[index])).size < 2', to: 'false' },
   // 身份分叉（2026-10-09，用户实测「同一篇文章两条」）：这四条判定是修复的全部承重点，
   // 少一条就退回病象——所以逐个改坏，看 tests/identity.test.mjs 有没有人喊。
   { id: 'item-id-链接反查认回老身份', file: 'lib/feed/item-id.js',
     judges: ['identity.test.mjs'],
+    judgeTests: ['分叉回归：源把 guid 换成同一篇文章的另一种写法 ⇒ 不得变成两条（用户实测的病象）', '分叉回归：guid 整条消失（退到链接派生）也不得变成两条', '撞车兜底仍生效，且被认回的那条不被同响应里的另一条挤掉（不变量 2 与认回身份的交互）'],
     from: 'known?.idOf(linkOf[index])', to: 'undefined' },
   { id: 'item-id-退级不得再用源 id', file: 'lib/feed/item-id.js',
     judges: ['parse.test.mjs'],
+    judgeTests: ['身份解析：同一响应里 id 重复但 URL 不同 ⇒ 不信源给的 id，退到 URL（不变量 2）', '身份解析：三条里两条同 URL、一条不同 ⇒ 只重算撞车组，同 URL 的仍是同一条'],
     from: 'if (options.includeSourceId !== false)', to: 'if (true)' },
   { id: 'item-id-认回身份要有旁证', file: 'lib/feed/item-id.js',
     judges: ['identity.test.mjs'],
+    judgeTests: ['身份不得被抢：源拿老文章的 guid 发新文章 ⇒ 新文章必须换身份，不许顶掉老条目'],
     from: 'return record === undefined || corroborates(record, items[index]);', to: 'return true;' },
   { id: 'identity-幸存者取最早一条', file: 'lib/identity-repair.js',
     judges: ['identity.test.mjs'],
+    judgeTests: ['身份修复：同源同链接的重复被合并，用户状态与正文一律保住', '身份修复：链接为空的条目不参与合并（否则一堆空链接会被揉成一条）'],
     from: 'a.fetchedAt === b.fetchedAt ? a.id.localeCompare(b.id) : a.fetchedAt.localeCompare(b.fetchedAt))',
     to: 'a.fetchedAt === b.fetchedAt ? a.id.localeCompare(b.id) : b.fetchedAt.localeCompare(a.fetchedAt))' },
   { id: 'identity-空链接不参与合并', file: 'lib/identity-repair.js',
     judges: ['identity.test.mjs'],
+    judgeTests: ['身份修复：同源同链接的重复被合并，用户状态与正文一律保住', '身份修复：幂等，再跑一次无事可做（每次打开域都会跑）', '身份修复：链接为空的条目不参与合并（否则一堆空链接会被揉成一条）', '身份修复：幸存者判据与遍历顺序无关（同刻按 id 定序）'],
     from: "const link = row.link.trim();\n        if (link === '')",
     to: "const link = row.link.trim();" },
   { id: 'identity-合并保住已读态', file: 'lib/identity-repair.js',
     judges: ['identity.test.mjs'],
+    judgeTests: ['身份修复：同源同链接的重复被合并，用户状态与正文一律保住'],
     from: 'readAt: keep.readAt ?? extra.readAt,', to: 'readAt: extra.readAt,' },
   { id: 'identity-合并保住星标', file: 'lib/identity-repair.js',
     judges: ['identity.test.mjs'],
+    judgeTests: ['身份修复：同源同链接的重复被合并，用户状态与正文一律保住'],
     from: 'starred: keep.starred || extra.starred,', to: 'starred: keep.starred,' },
   { id: 'retention-保持未读不裁剪', file: 'lib/retention.js',
     judges: ['retention.test.mjs'],
+    judgeTests: ['裁剪：星标与保持未读的条目一律不动（其余按未读优先删）', '裁剪：全被星标/保持占满时，宁可超上限也不删'],
     from: 'row.starred || row.kept',
     to: 'row.starred' },
   { id: 'fetch-重定向目标不可信', file: 'lib/feed/fetch.js',
     judges: ['fetch.test.mjs'],
+    judgeTests: ['出网策略：重定向的目标一律按不可信处理（哪怕起始地址可信）'],
     from: 'const hopBlocked = await resolvedBlockedReason(next, false);',
     to: 'const hopBlocked = await resolvedBlockedReason(next, trusted);' },
   { id: 'fetch-解析层内网拦截', file: 'lib/feed/fetch.js',
     judges: ['fetch.test.mjs'],
+    judgeTests: ['出网策略：域名解析到内网地址也要拒（rebinding 的前置拦截）'],
     from: 'const privateAddress = addresses.find((address) => isPrivateHost(address));',
     to: 'const privateAddress = undefined;' },
   { id: 'client-键解析短路', file: 'lib/client.js',
@@ -507,18 +581,22 @@ const MUTATIONS = [
   // 照源码格式写会「未应用」——那等于这条变异根本没跑，比幸存更隐蔽。
   { id: 'client-容器选择器不分视图', file: 'lib/list-scroll.js',
     judges: ['list-scroll.test.mjs'],
+    judgeTests: ['容器选择器：列表/正文各一个，其他视图没有容器（订阅管理页不该刷警告）'],
     from: "return '[' + SCROLL_ATTR + '=\"article\"]';",
     to: "return '[' + SCROLL_ATTR + '=\"list\"]';" },
   { id: 'client-正文行高量错对象', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['详情页 n/p 按「正文一行」滚动，而不是回落到列表行高（48px = 一行半）', '正文页阅读偏好：时长标「估算」、字号/栏宽落到正文、写盘发的是整份偏好'],
     from: 'const sample = box.querySelector("p") ?? box;',
     to: 'const sample = box;' },
   { id: 'client-半页退化成整页', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['详情页 d / shift+d 翻半页（整屏的一半，且夹得住边界）'],
     from: "? halfPageTop(box.scrollTop, box.clientHeight, maxTop, direction)",
     to: "? pageTop(box.scrollTop, box.clientHeight, maxTop, direction)" },
   { id: 'client-换文章不归零', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['切换文章后阅读位置归零（DOM 节点被复用，scrollTop 不会自己重置）', '阅读进度：切走再回来接着读、滚动不写盘、离开时落盘（M5 02）'],
     from: 'box.scrollTop = 0;',
     to: 'box.scrollTop = box.scrollTop;' },
   // 导航轴（2026-10-10 两列布局任务 2）。这三条是「源 x filter 叠加」的全部承重点：
@@ -541,6 +619,7 @@ const MUTATIONS = [
   // 会把 selectedId 送到源外条目 —— 判据是 tests/nav-selection.test.mjs 的第 6 条用例。
   { id: 'client-setFilter 丢掉源条件', file: 'lib/client.js',
     judges: ['nav-selection.test.mjs'],
+    judgeTests: ['已选中某源时切 filter：selectedId 落在该源内第一条，而不是全表第一条', '「源 × filter 叠加」下打开虚拟视图行：filter 生效，而生效的导航项仍是那个源（叠加不塌缩）'],
     // ⚠️ 2026-10-10 任务 6 返工：setFilter 提出具名函数并顺带同步 navCursor，产物形状随之变化，
     // 本条 from 原为 'set({ filter });\n...relocateSelection();' ⇒ 变成「未应用」。
     // 照新产物重写（独立实测 OCCURRENCES=1），语义仍是原来的那条：**丢掉源条件**、selectedId 落全表第一条。
@@ -551,10 +630,12 @@ const MUTATIONS = [
   // 变成与 filter 并存的第二套过滤状态（本任务实现时第一遍就漏了后者，靠测试才抓到）。
   { id: 'client-再选同源不取消', file: 'lib/client.js',
     judges: ['nav-selection.test.mjs', 'scroll-dom.test.mjs'],
+    judgeTests: ['再选中同一个源 = 取消选中，回到虚拟视图', '点击某个源：右栏列表只剩该源条目'],
     from: 'if (sameNavSelection(current, next) || next.kind === "virtual") set({',
     to: 'if (next.kind === "virtual") set({' },
   { id: 'client-virtual 不归位 filter', file: 'lib/client.js',
     judges: ['nav-selection.test.mjs'],
+    judgeTests: ['虚拟视图与既有 setFilter 等价，不留两套状态'],
     from: 'navSelection: { kind: "virtual" },\n\t\t\t\t\tfilter: "all"',
     to: 'navSelection: { kind: "virtual" }' },
   // 每源未读数的**键域**（2026-10-10）。左栏角标按 feeds 表逐行渲染，键域必须严格 = feeds 表：
@@ -566,6 +647,7 @@ const MUTATIONS = [
   // 独立实测 lib/shared.js:41 OCCURRENCES=1，语义仍是原来那条：**丢键域**（0 未读的源不留键）。
   { id: 'endpoints-perFeedUnread 键域铺 0', file: 'lib/shared.js',
     judges: ['overview-paging.test.mjs', 'store-sqlite.test.mjs'],
+    judgeTests: ['逐方法同义性：unreadPerFeed 与旧实现逐键相等（0 未读的源两边都留 0 值键）', 'unreadPerFeed：与 shared.ts 的唯一口径在同一夹具上逐键相等，且键域 = 传入的 feeds 表（Ruling P-6）'],
     from: 'unread[feedId] = 0;', to: ';' },
   // 左栏（2026-10-10 两列布局任务 3）。这两条是本任务新增的关键判定，各一条变异：
   // 角标门失效 ⇒ 规格不变量 8 的「三者同消」在左栏漏掉（隐藏计数后左栏还留着数字）；
@@ -573,6 +655,7 @@ const MUTATIONS = [
   // 判据由 tests/scroll-dom.test.mjs 的「隐藏未读计数时左栏角标也消失」看着。
   { id: 'client-左栏角标无视 showUnread', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['隐藏未读计数时左栏角标也消失（GR spec 不变量 8）'],
     // ⚠️ `to` 必须**保留展开运算符**：2026-10-11 终检评审 B1 修好分类器后，这条被当场抓成
     //   「崩了（SyntaxError）」—— 它原先写成不带 `...` 的对象字面量，而在对象字面量里少一个 `...`
     //   会让那对花括号被解析成**块语句** ⇒ 产物**加载期**就语法错、整个 client 组一起红。
@@ -582,12 +665,14 @@ const MUTATIONS = [
     to: '...{ "data-rss-nav-badge": String(unread) },' },
   { id: 'client-左栏角标改用派生', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['左栏渲染：虚拟视图三行 + 每个订阅源一行', '隐藏未读计数时左栏角标也消失（GR spec 不变量 8）'],
     from: 'const unread = perFeedUnread[feed.id];',
     to: 'const unread = 0;' },
   // 折叠必须「不占宽度」（任务 3 的精确取值）：退回「渲染但宽 0」会留下一条右边框的缝，
   // 而要求是「收起 = 这一列不存在」。判据由 scroll-dom 的左栏用例看着（左栏容器应整个消失）。
   { id: 'client-折叠时左栏仍渲染', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['过滤三连只显示一处：左栏可见时顶栏不重复（收起左栏则回落到顶栏）', '折叠左栏：容器整个从 DOM 消失（不是 width:0 留一条缝）', 'u 键折叠/展开左栏：走真实按键路径，且正文页不接管（与 o 键同一条裁决）'],
     // from 照**编译产物**的真实形状写（docs/pitfalls.md 一、1.4 记的那条坑；本次实测踩到）：
     // 产物是 `children: [state.navVisible && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(FeedNav, {`
     // （lib/client.js:1931，行首 6 个 tab），不是源码里的 `{state.navVisible && (<FeedNav`。
@@ -602,6 +687,7 @@ const MUTATIONS = [
   // 判据由 tests/scroll-dom.test.mjs 的「滚动不误命中左栏」看着（纯函数层看不见这层错位）。
   { id: 'client-左栏也被标成滚动容器', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['滚动不误命中左栏：n/p 与空格只滚右栏', 'C4-b 判定：行高量不到（offsetHeight=0）时按列表兜底 48 滚，而不是按 0 滚（量错对象的「有值但不正确」是实测事故）', '刷新搜索后相同选中项移出视口时，列表跟随其新位置', '文件夹浏览：空目录可见，进入后只显示成员条目，空目录有明确空状态'],
     // from 照**编译产物**的真实形状写：lib/client.js:634 的 `"data-rss-nav": "",` 是全产物唯一一处
     // （左栏容器只此一个，见 docs/pitfalls.md 一、1.4）。
     from: '"data-rss-nav": "",',
@@ -610,27 +696,32 @@ const MUTATIONS = [
   // 判据是 tests/scroll-dom.test.mjs 的「本 realm 没有 HTMLElement 时快捷键照样能用」。
   { id: 'client-守卫改回环境全局', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['按键守卫不依赖环境全局：本 realm 没有 HTMLElement 时，快捷键照样能用'],
     from: 'function isElementNode(node) {',
     to: 'function isElementNode(node) { return node instanceof HTMLElement;' },
   // 右下角「回顶部 / 去底部」（2026-10-09）。两条各钉一个方向：
   // 反了或都不动，tests/scroll-dom.test.mjs 的箭头用例必须翻红。
   { id: 'client-去底部反成回顶部', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['右下角箭头按钮：上方回顶部、下方去底部（作用在真实滚动容器上）', '点「↓去底部」后内容长高（懒加载图片进场）：必须继续贴底，而不是差一截', '用户自己滚走后就解除「贴底」：不该把读者硬拽回去', '文件夹展开与折叠同步键盘行序，汇总未读且保留订阅选择'],
     from: 'function edgeTopFor(maxTop, edge) {',
     to: 'function edgeTopFor(maxTop, edge) { return 0;' },
   { id: 'client-箭头按钮不接容器', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['切换文章后阅读位置归零（DOM 节点被复用，scrollTop 不会自己重置）', '右下角箭头按钮：上方回顶部、下方去底部（作用在真实滚动容器上）', '点「↓去底部」后内容长高（懒加载图片进场）：必须继续贴底，而不是差一截', '用户自己滚走后就解除「贴底」：不该把读者硬拽回去', '阅读进度：切走再回来接着读、滚动不写盘、离开时落盘（M5 02）'],
     from: 'boxRef.current = node;',
     to: 'boxRef.current = null;' },
   // 「点 ↓ 之后贴住底部」（2026-10-09，用户实测：新文章首点到不了底）。
   // 病因是懒加载图片进场把内容撑高，而 scrollTop 留在原地；判据在 scroll-dom 的第 10 条用例。
   { id: 'client-到底后不贴住底部', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['点「↓去底部」后内容长高（懒加载图片进场）：必须继续贴底，而不是差一截'],
     from: 'if (pinnedRef.current)',
     to: 'if (false)' },
   // 用户滚走必须解除贴底 —— 少了它会把读者的滚动硬拽回底部。
   { id: 'client-用户滚走不解除贴底', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['用户自己滚走后就解除「贴底」：不该把读者硬拽回去'],
     from: 'if (Math.abs(box.scrollTop - expectedTopRef.current) > 2)',
     to: 'if (false)' },
   // 键盘流（2026-10-10 两列布局任务 6）：u 归还 GR 原义「左栏显隐」、向上半页改由 shift+d 接盘。
@@ -639,12 +730,14 @@ const MUTATIONS = [
   // 接线面另有 tests/scroll-dom.test.mjs 的「u 键折叠/展开左栏」看着。
   { id: 'keys-u 改回向上半页', file: 'lib/keys.js',
     judges: ['keys.test.mjs'],
+    judgeTests: ['半页：d 向下、shift+d 向上（u 于 2026-10-10 归还 GR 原义）', 'u 归还 GR 原义：左栏显隐', '帮助表逐条反查：每一行声明的动作都必须与实现解析出来的完全一致'],
     // from 照**编译产物**的真实形状写（docs/pitfalls.md 一、1.4）：lib/keys.js:40 的
     // `        case 'u': return 'toggleNav';` 是全产物唯一一处（独立实测 OCCURRENCES=1）。
     from: "case 'u': return 'toggleNav';",
     to: "case 'u': return 'halfPageUp';" },
   { id: 'keys-shift+d 不接盘上半页', file: 'lib/keys.js',
     judges: ['keys.test.mjs'],
+    judgeTests: ['半页：d 向下、shift+d 向上（u 于 2026-10-10 归还 GR 原义）', '向上半页改由 shift+d 承担', '帮助表逐条反查：每一行声明的动作都必须与实现解析出来的完全一致'],
     // lib/keys.js:38，同样唯一（独立实测 OCCURRENCES=1）。
     // 改成恒向下半页 ⇒ 上半页再无入口，「接盘」这句话在键位层就落空。
     from: "case 'd': return shift === true ? 'halfPageUp' : 'halfPageDown';",
@@ -653,6 +746,7 @@ const MUTATIONS = [
   // （任务 6 若只写 keys 断言就会漏）。判据都是 tests/scroll-dom.test.mjs 里走真实按键路径的新用例。
   { id: 'client-u 键不接左栏显隐', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['u 键折叠/展开左栏：走真实按键路径，且正文页不接管（与 o 键同一条裁决）', '左栏折叠时 shift+n/p/o 不生效：不许改一个看不见的导航'],
     from: 'run(() => store.toggleNav());',
     to: 'run(() => {});' },
   // ── 返工新增（2026-10-10，按规格 §2.4 把「移动」与「打开」拆开）──────────────────────
@@ -663,6 +757,7 @@ const MUTATIONS = [
   //   ③ 打开键必须真的落到作用域（光标算对了却不动右栏 = shift+o 变摆设）
   { id: 'client-shift+n 改成「移动即打开」', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['shift+n / shift+p 在左栏导航里移动选中（不是右栏文章列表的 j/k）', 'shift+o 打开光标所在行 = 等价于点击它（虚拟视图 → setFilter，源 → selectNav）', '文件夹展开与折叠同步键盘行序，汇总未读且保留订阅选择', '标签行纳入 Shift+N/P/O 的可见行序，空标签也可到达'],
     // from 照**编译产物**的真实形状写（docs/pitfalls.md 一、1.4）。lib/client.js:2002，
     // 独立实测 OCCURRENCES=1。改回第一版行为后，press('N', true) 当场换掉右栏列表，
     // 判据「shift+n 移动光标时不改变右栏列表内容与 filter」立刻翻红。
@@ -670,6 +765,7 @@ const MUTATIONS = [
     to: 'run(() => { store.moveNavCursor(action === "navNext" ? 1 : -1); const n = store.get().navCursor; if (n.kind === "feed") store.selectNav({ kind: "feed", feedId: n.feedId }); else store.setFilter(n.filter); });' },
   { id: 'client-移动光标顺带换 filter', file: 'lib/client.js',
     judges: ['nav-selection.test.mjs', 'scroll-dom.test.mjs'],
+    judgeTests: ['moveNavCursor 只动光标：navSelection / filter / selectedId / visible() 一律不变', 'openNavCursor 才落作用域：源行 → selectNav；虚拟视图行 → setFilter（等同鼠标点击）', 'shift+n / shift+p 在左栏导航里移动选中（不是右栏文章列表的 j/k）', 'shift+o 打开光标所在行 = 等价于点击它（虚拟视图 → setFilter，源 → selectNav）'],
     // lib/client.js:598，独立实测 OCCURRENCES=1。这是「移动」那半边更隐蔽的半塌缩形态：
     // 光标确实走了、可 filter 也跟着走（读者看到右栏内容变了）。整条判定的要点是「光标变了而
     // 生效视图没变」，半塌缩同样得被守。
@@ -677,6 +773,7 @@ const MUTATIONS = [
     to: 'set({ navCursor: next, filter: next.kind === "filter" ? next.filter : state.filter });' },
   { id: 'client-打开光标不动作用域', file: 'lib/client.js',
     judges: ['nav-selection.test.mjs', 'scroll-dom.test.mjs'],
+    judgeTests: ['「源 × filter 叠加」下打开虚拟视图行：filter 生效，而生效的导航项仍是那个源（叠加不塌缩）', 'shift+o 打开光标所在行 = 等价于点击它（虚拟视图 → setFilter，源 → selectNav）'],
     // lib/client.js:618，独立实测 OCCURRENCES=1。这是「打开」那半边：光标算对了却落不到作用域。
     from: 'setFilter(cursor.filter);',
     to: ';' },
@@ -686,6 +783,7 @@ const MUTATIONS = [
   // 判据是 tests/unread-accounting.test.mjs 的两条客户端用例（修前实测 2 条翻红）。
   { id: 'client-markRead 不动每源账目', file: 'lib/client.js',
     judges: ['unread-accounting.test.mjs'],
+    judgeTests: ['客户端：打开一条的回包到达前，该源角标已当场 -1（乐观更新不许丢）'],
     from: '[target.feedId]: Math.max(0, (state.perFeedUnread[target.feedId] ?? 0) - 1)',
     to: '[target.feedId]: state.perFeedUnread[target.feedId]' },
   // 增量助手是 markAllRead / undoMarkAll 的账目来源。把「按宿主下发的键铺 0」删掉后，
@@ -693,6 +791,7 @@ const MUTATIONS = [
   // 与任务 1 裁决的键域契约（键域严格 = feeds 表）同一条，是最贵的那类沉默失败。
   { id: 'client-每源账目丢键域', file: 'lib/client.js',
     judges: ['overview-scale.test.mjs', 'unread-accounting.test.mjs'],
+    judgeTests: ['客户端：按下「全部标已读」的回包到达前，角标已按本批当场收起（乐观更新不许丢）'],
     from: 'const next = { ...state.perFeedUnread };',
     to: 'const next = {};' },
   // 严禁退回「按本地 items 整体重算」：客户端只拿得到 maxItemsShown（300）条，
@@ -701,6 +800,7 @@ const MUTATIONS = [
   // 判据是 tests/unread-accounting.test.mjs 的两条截断用例（修前实测 2 条翻红）。
   { id: 'client-每源账目整体重算', file: 'lib/client.js',
     judges: ['unread-accounting.test.mjs'],
+    judgeTests: ['客户端：按下「全部标已读」的回包到达前，角标已按本批当场收起（乐观更新不许丢）'],
     from: 'next[feedId] = Math.max(0, next[feedId] + delta);',
     to: 'next[feedId] = Math.max(0, state.items.filter((i) => i.feedId === feedId && i.readAt === void 0).length);' },
   // ── 视图记忆持久化（2026-10-10 两列布局任务 7）────────────────────────────────
@@ -710,37 +810,44 @@ const MUTATIONS = [
   // ① 读侧的形状校验失效 ⇒ 认不出的值被原样吃到 state 里（「回落」这条承诺当场作废）
   { id: 'persist-读侧不校验形状', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs'],
+    judgeTests: ['持久化值不可信时（未知 feedId / 非法 shape）回落默认值且不抛错'],
     from: '(isKnownFeed === void 0 || isKnownFeed(selection["feedId"]))',
     to: 'true' },
   // ② filter 枚举校验失效 ⇒ 非法 filter 被当成真的过滤条件用（右栏内容与按钮状态各说各话）
   { id: 'persist-filter 不校验枚举', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs'],
+    judgeTests: ['持久化值不可信时（未知 feedId / 非法 shape）回落默认值且不抛错'],
     from: 'FILTERS.includes(filterRaw) ? filterRaw : DEFAULT_VIEW_PREFERENCES.filter',
     to: 'filterRaw ?? DEFAULT_VIEW_PREFERENCES.filter' },
   // ③ 恢复不许盖掉用户在异步窗口里做的手势（时序守卫）
   { id: 'persist-恢复盖掉用户手势', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs'],
+    judgeTests: ['恢复是异步的：用户在它到达之前的手势不会被旧记忆盖掉（整份让位）'],
     from: 'if (viewTouched) return;',
     to: ';' },
   // ④ 恢复必须真的落到 state —— 只读了记忆却不用它，等于功能没接上（最隐蔽的形态）
   { id: 'persist-恢复不落到 state', file: 'lib/client.js',
     judges: ['client-bundle.test.mjs', 'nav-persistence.test.mjs', 'overview-scale.test.mjs'],
+    judgeTests: ['分页接线：续页游标在时渲染「加载更多」，点它真的取下一页（并追加到当前列表）', '记住上次选中的导航项、filter 与左栏显隐，重开后恢复', '选中的标签会记住：重开后回到同一个标签，而不是静默掉回「全部」', '改字号只动排版：导航、过滤与左栏显隐一项都不许被覆盖（重开后排版也恢复）', '持久化值不可信时（未知 feedId / 非法 shape）回落默认值且不抛错'],
     from: 'if (!viewRestored) applyRestoredView(preferences);',
     to: ';' },
   // ⑤ 写盘串行化失效 ⇒ 后发的先到会让记忆回退成更早的状态
   { id: 'persist-写盘不串行化', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs'],
+    judgeTests: ['写盘串行化：前一次慢、后一次快时，最终的记忆是「后一次动作」'],
     from: 'viewWriteChain = viewWriteChain.then(() => callRpc("saveViewPreferences", { preferences }))',
     to: 'viewWriteChain = callRpc("saveViewPreferences", { preferences })' },
   // ⑥ 宿主写侧不归一再落库 ⇒ 认不出的原值进媒介（存储里攒垃圾，只被读侧遮住）
   { id: 'persist-宿主写侧不归一', file: 'lib/store.js',
     judges: ['nav-persistence.test.mjs'],
+    judgeTests: ['真实 createStore：读侧校验坏值、写侧归一后才落库（生产路径，不是桩）'],
     // 2026-11-14 重锚：视图偏好新增了第三个判据（isKnownTag），旧 from 报「未应用」。
     from: 'const safe = sanitizeViewPreferences(preferences, (feedId) => feeds.get(feedId) !== undefined, isKnownFolder, (tagId) => tags.get(tagId) !== undefined);',
     to: 'const safe = preferences;' },
   // ⑦ 宿主读侧不校验 ⇒ 媒介里的坏值被透出去（回落承诺的第二道闸失效）
   { id: 'persist-宿主读侧不校验', file: 'lib/store.js',
     judges: ['nav-persistence.test.mjs', 'overview-scale.test.mjs'],
+    judgeTests: ['真实 createStore：读侧校验坏值、写侧归一后才落库（生产路径，不是桩）'],
     from: 'viewPreferences: () => sanitizeViewPreferences(global.get(), (feedId) => feeds.get(feedId) !== undefined, isKnownFolder, (tagId) => tags.get(tagId) !== undefined),',
     to: 'viewPreferences: () => global.get(),' },
   // ⑧⑨⑩ 三个关键动作各自写一次盘：**三个调用点各一条**，否则任一条漏写都会被另一条的
@@ -752,14 +859,17 @@ const MUTATIONS = [
   // 「relocateSelection + persistView + resetSearchPage」三连（实测 OCCURRENCES=1）。
   { id: 'persist-setFilter 不写盘', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs'],
+    judgeTests: ['记住上次选中的导航项、filter 与左栏显隐，重开后恢复', '写盘串行化：前一次慢、后一次快时，最终的记忆是「后一次动作」'],
     from: "\t\t\t\t\tfilter,\n\t\t\t\t\tnavCursor: {\n\t\t\t\t\t\tkind: \"filter\",\n\t\t\t\t\t\tfilter\n\t\t\t\t\t}\n\t\t\t\t});\n\t\t\t\trelocateSelection();\n\t\t\t\tpersistView();",
     to: "\t\t\t\t\tfilter,\n\t\t\t\t\tnavCursor: {\n\t\t\t\t\t\tkind: \"filter\",\n\t\t\t\t\t\tfilter\n\t\t\t\t\t}\n\t\t\t\t});\n\t\t\t\trelocateSelection();" },
   { id: 'persist-selectNav 不写盘', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs'],
+    judgeTests: ['记住上次选中的导航项、filter 与左栏显隐，重开后恢复', '选中的标签会记住：重开后回到同一个标签，而不是静默掉回「全部」', '写盘串行化：前一次慢、后一次快时，最终的记忆是「后一次动作」'],
     from: 'relocateSelection();\n\t\t\t\tpersistView();\n\t\t\t\tresetSearchPage();\n\t\t\t\tconst scopeChanged = current.kind === "folder" || next.kind === "folder" || current.kind === "tag" || next.kind === "tag";',
     to: 'relocateSelection();\n\t\t\t\tresetSearchPage();\n\t\t\t\tconst scopeChanged = current.kind === "folder" || next.kind === "folder" || current.kind === "tag" || next.kind === "tag";' },
   { id: 'persist-toggleNav 不写盘', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs'],
+    judgeTests: ['记住上次选中的导航项、filter 与左栏显隐，重开后恢复', '写盘失败必须可见：进 error 而不是被吞掉', '恢复是异步的：用户在它到达之前的手势不会被旧记忆盖掉（整份让位）', '只在关键动作时写盘：移动光标（每次按键）不产生写入'],
     from: 'set({ navVisible: !state.navVisible });\n\t\t\t\tpersistView();',
     to: 'set({ navVisible: !state.navVisible });' },
   // ── 标读回包的每源账目（2026-10-10 两列布局任务 9 收尾）──────────────────────────
@@ -775,6 +885,7 @@ const MUTATIONS = [
   // 锚点唯一性实测 OCCURRENCES=1（`if (spec.carriesAccount === true` 在产物里只有分发核这一处）。
   { id: 'endpoints-标读回包不带每源账目', file: 'lib/endpoints.js',
     judges: ['overview-scale.test.mjs', 'unread-accounting.test.mjs'],
+    judgeTests: ['10 万行：标读回包（accountOf）也不物化全表，回包与 overview 同口径', '10 万行：cleanup 的候选集由 SQL 选（不再全表），且释放量与删除数如实', 'host：markRead / unmarkRead 的回包必须带 perFeedUnread（客户端在截断场景下只能靠它）'],
     from: 'return ok({ ...result.value, unread: account.unread, perFeedUnread: account.perFeedUnread });',
     to: 'return ok({ ...result.value, unread: account.unread });' },
   // 客户端这一侧的承重点：回包到手必须**整体覆盖**。退回「只覆盖 unread」= 又用本地那份
@@ -782,6 +893,7 @@ const MUTATIONS = [
   // from 照**编译产物**的真实形状写：lib/client.js:416-421 的 applyAccount，独立实测 OCCURRENCES=1。
   { id: 'client-标读回包不整体覆盖每源账目', file: 'lib/client.js',
     judges: ['nav-selection.test.mjs', 'unread-accounting.test.mjs'],
+    judgeTests: ['分页：每一页都以宿主回包为准整体覆盖账目，绝不在第二页开始派生', '截断场景下「全部标已读」：以宿主回包的 perFeedUnread 为准，守恒式不破', '截断场景下撤销：同样以宿主回包为准'],
     from: 'unread: account.unread,\n\t\t\t\t\tperFeedUnread: account.perFeedUnread',
     to: 'unread: account.unread' },
   // ⑨ 域 global 槽的 schema 必须拒绝 null。放宽它 ⇒ 存进去的 null 与「从未写过」不可区分，
@@ -799,6 +911,7 @@ const MUTATIONS = [
   // 这条变异给 'all' 重新加上那个例外，①② 会同时被它守住。
   { id: 'client-过滤行对 all 特殊对待（三个标签不一致）', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['左栏渲染：虚拟视图三行 + 每个订阅源一行', '点击某个源：右栏列表只剩该源条目', '选了「未读」再选源：源与过滤两条轴各自生效，未读行仍亮着（用户实测反馈）', 'shift+n / shift+p 在左栏导航里移动选中（不是右栏文章列表的 j/k）'],
     from: 'const selected = filter === view.key;',
     to: 'const selected = filter === view.key && filter !== "all";' },
   // 失败标记必须只反映**最近一次**结果（2026-10-10 用户实测：横幅一直写「月光博客（HTTP 502）」，
@@ -806,6 +919,7 @@ const MUTATIONS = [
   // 变异把 lastFailure 塞回 304 分支的写回对象：一旦恢复「展开 previous」的写法，标记就再没人清。
   { id: 'refresh-304 成功不残留上次失败标记', file: 'lib/feed-intent.js',
     judges: ['refresh.test.mjs'],
+    judgeTests: ['304 走 not-modified：不发全量重抓，只更新抓取时间', '失败标记只反映最近一次：先 500 失败、再 304 成功 ⇒ 标记必须清掉'],
     // H4 重锚（2026-10-18）：变异把 lastFailure 塞回 304 分支的合并结果 —— 一旦恢复「展开 previous」
     // 的写法，标记就再没人清（月光博客横幅残留事故）。
     from: "case 'refresh-not-modified':",
@@ -818,6 +932,7 @@ const MUTATIONS = [
   // 原锚会变「未应用」（比幸存更隐蔽）。语义不变：仍是「用抓取前的快照整体写回覆盖并发写入」。
   { id: 'article-用旧快照整体写回覆盖并发写入', file: 'lib/endpoints.js',
     judges: ['article-markread-race.test.mjs'],
+    judgeTests: ['正文写入期间并发 markRead：readAt 不得被陈旧快照覆盖'],
     from: 'await ctx.store.updateItem(itemId, (current) => ({ ...current, articleFailure: fetched.reason }));',
     to: 'await ctx.store.saveItem(itemId, { ...existing, articleFailure: fetched.reason });' },
   // 刷新期间的写同样必须合并进当前记录（2026-10-10 与 article 端点同类）：
@@ -825,10 +940,12 @@ const MUTATIONS = [
   // 判据：tests/refresh.test.mjs 的两条「并发标已读」用例（各自注入一次窗口内并发写）。
   { id: 'refresh-缓存淘汰用旧快照覆盖并发写入', file: 'lib/refresh.js',
     judges: ['refresh.test.mjs'],
+    judgeTests: ['正文缓存淘汰期间并发标已读：不得用旧快照整体写回（丢失更新）'],
     from: "await store.updateItem(itemId, (current) => rebuildItem(current, { omit: ['article', 'articleFailure'] }));",
     to: "await store.saveItem(itemId, rebuildItem(store.item(itemId), { omit: ['article', 'articleFailure'] }));" },
   { id: 'refresh-正文回填用旧快照覆盖并发写入', file: 'lib/refresh.js',
     judges: ['refresh.test.mjs'],
+    judgeTests: ['正文回填期间并发标已读：不得用旧快照整体写回（丢失更新）'],
     from: "await store.updateItem(itemId, (current) => ({ ...current, summary }));",
     to: "await store.saveItem(itemId, { ...store.item(itemId), summary });" },
   // ── 快捷键帮助浮窗（2026-10-10）──────────────────────────────────────────────
@@ -846,11 +963,13 @@ const MUTATIONS = [
   // 每条 from 均照**编译产物的真实形状**写（docs/pitfalls.md 一、1.4），并已独立核对出现次数。
   { id: 'keys-? 不认帮助键', file: 'lib/keys.js',
     judges: ['keys.test.mjs'],
+    judgeTests: ['? 是快捷键帮助（GR §3.8 第 255 行）', '帮助表逐条反查：每一行声明的动作都必须与实现解析出来的完全一致'],
     // lib/keys.js:65，产物里唯一一处。
     from: "case '?': return 'help';",
     to: "case '?': return 'none';" },
   { id: 'client-? 不接浮窗', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['? 开合帮助浮窗：浮窗逐行画出来自 keys.ts 的帮助表', 'Esc 关浮窗且不穿透：正文页里只收浮窗，不把文章一起关掉', '✕ 关闭；焦点落在浮窗里之后 ? 与 Esc 仍然有效（非模态不许被自己的守卫吃掉）', '非模态：浮窗开着时 j 仍然作用于背后的列表（这是拍板结论，不是默认行为）'],
     // lib/client.js:2470-2471。删掉 run(...) 之后 ? 既不 preventDefault 也不开浮窗 ——
     // 「被吞掉」与「毫无反应」是两种不同的病，都由这条变异造出来。
     // ⚠️ 2026-10-15（C1）重锚：搬进 keyboard-routing.ts 后是 ctx.setHelpOpen(!ctx.helpOpen)（函数式更新 → 直接取反）。
@@ -864,6 +983,7 @@ const MUTATIONS = [
     to: 'if (false) {' },
   { id: 'client-浮窗标成 dialog 角色', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['✕ 关闭；焦点落在浮窗里之后 ? 与 Esc 仍然有效（非模态不许被自己的守卫吃掉）'],
     // lib/client.js:2269，唯一一处。isTypingTarget 会把 [role=dialog] 内的按键全吞掉（含 Esc）——
     // 鼠标点过一次 ✕ 之后，? 与 Esc 双双失效。判据是「✕ 关闭；焦点落在浮窗里之后…」那条用例。
     from: 'role: "region",',
@@ -883,18 +1003,21 @@ const MUTATIONS = [
   // 三条 from 均照**编译产物的真实形状**写（docs/pitfalls.md 一、1.4），并已独立实测 OCCURRENCES=1。
   { id: 'storage-版本闸把好库一起拒了', file: 'lib/storage/db.js',
     judges: ['storage-skeleton.test.mjs'],
+    judgeTests: ['openDatabase 能重开已经建好的库（第二次装载不许把好库当坏库拒绝）', 'config.json 缺失且库里有条目 ⇒ 装载必须响亮失败（订阅丢了不许静默变空面板）', 'P2-3 config.json 在但订阅为空、库里却有条目 ⇒ 响亮失败（与 verify-backup 同一条判据）'],
     // 删掉「且不是当前版本」这半边后，闸变成「非 0 即拒」⇒ **已经迁移好的库第二次装载就打不开**。
     // 判据：tests/storage-skeleton.test.mjs 的「openDatabase 能重开已经建好的库」。
     from: 'if (onDisk !== 0 && onDisk !== SCHEMA_VERSION && !UPGRADABLE_VERSIONS.has(onDisk)) {',
     to: 'if (onDisk !== 0 && !UPGRADABLE_VERSIONS.has(onDisk)) {' },
   { id: 'storage-订阅文件版本闸失效', file: 'lib/storage/config-file.js',
     judges: ['storage-skeleton.test.mjs', 'store-sqlite.test.mjs'],
+    judgeTests: ['readConfigFile 对损坏/形状不对/版本不认的 config.json 一律抛错，不返回空订阅', 'saveViewPreferences 写前校验并落 config.json，且不碰订阅映射；config.json 读不出来时响亮失败'],
     // 版本不认时必须响亮失败（未来格式硬按 v1 解释会丢掉本版不认识的字段）。
     // 判据：tests/storage-skeleton.test.mjs 的「readConfigFile 对损坏/形状不对/版本不认的 config.json 一律抛错」。
     from: 'if (record.version !== CURRENT_CONFIG_VERSION) {',
     to: 'if (false) {' },
   { id: 'storage-目录权限放宽到 0777', file: 'lib/storage/paths.js',
     judges: ['storage-skeleton.test.mjs'],
+    judgeTests: ['ensureStorageRoot 递归建出 0700 目录，且可重复调用'],
     // 库里是用户的订阅与已读态；权限放宽后同机其他账户可读，而这一点在界面上完全不可见。
     // 判据：tests/storage-skeleton.test.mjs 的「ensureStorageRoot 递归建出 0700 目录」。
     from: 'mkdirSync(root, { recursive: true, mode: 0o700 });',
@@ -909,6 +1032,7 @@ const MUTATIONS = [
   // `fetched_at TEXT NOT NULL\n  );` 独立实测 OCCURRENCES=1。
   { id: 'storage-正文抓取时间可空', file: 'lib/storage/db.js',
     judges: ['storage-skeleton.test.mjs', 'store-sqlite.test.mjs'],
+    judgeTests: ['migrateSchema 物化 items/texts/cursors，recency = COALESCE(published_at, fetched_at)', 'texts.fetched_at 声明 NOT NULL：NULL 写不进去，且读路径确实消费这一列'],
     from: 'fetched_at TEXT NOT NULL',
     to: 'fetched_at TEXT' },
   // ── SQLite 版 ReaderStore（2026-10-11 大规模存储任务 3）───────────────────────────
@@ -918,6 +1042,7 @@ const MUTATIONS = [
   // 并已独立实测 OCCURRENCES=1（在 /tmp 隔离副本里跑过一轮：11/11 全部被抓到）。
   { id: 'store-listItems 退回 JS 全表过滤', file: 'lib/store-sqlite.js',
     judges: ['store-sqlite.test.mjs'],
+    judgeTests: ['listItems 只返回该源的条目，且源条件是真的写在 SQL 里（spec §3.1 的扫描族修复）', 'allItems / listItems 按 recency 降序 + id 升序；缺 publishedAt 的行按 fetchedAt 归位（Review Focus 2）'],
     // 这是**扫描族的结构性修复**（spec §3.1）：把源条件从 SQL 挪走之后，选中哪些行不再由 SQL 决定
     // —— 所以判据是 tests/store-sqlite.test.mjs 里录 prepared SQL 的那条（行为层的「快」不可靠：
     // 一个把全表读回来再过滤的实现同样「快」）。
@@ -927,6 +1052,7 @@ const MUTATIONS = [
     to: 'listItems: (feedId) => sql(SELECT_ALL_ITEMS).all().map((row) => {' },
   { id: 'store-排序退回 published_at', file: 'lib/store-sqlite.js',
     judges: ['store-sqlite.test.mjs'],
+    judgeTests: ['listItems 只返回该源的条目，且源条件是真的写在 SQL 里（spec §3.1 的扫描族修复）', 'allItems / listItems 按 recency 降序 + id 升序；缺 publishedAt 的行按 fetchedAt 归位（Review Focus 2）', 'listRecent / unreadPerFeed / listCleanupCandidates 的排序、聚合与筛选真的写在 SQL 里（扫描族归零）'],
     // publishedAt 是可选字段：直接对它排序会让缺发布时间的条目落进 SQL 的 NULL 段
     // （SQLite 中 NULL 最小），列表顺序与迁移前不一致（Review Focus 2）。
     // 判据：tests/store-sqlite.test.mjs 的「缺 publishedAt 的行按 fetchedAt 归位」。
@@ -934,6 +1060,7 @@ const MUTATIONS = [
     to: "const ITEM_ORDER = ' ORDER BY i.published_at DESC, i.id ASC';" },
   { id: 'store-updateItem 抹掉并发已读态', file: 'lib/store-sqlite.js',
     judges: ['store-sqlite.test.mjs'],
+    judgeTests: ['updateItem 是原子读改写：窗口期内并发写进去的 readAt / 星标不被旧快照抹掉（Review Focus 4）'],
     // 这条守的是**接口存在的理由**（src/store.ts:21-31）：fn 算出的记录被原地覆盖时若丢了
     // 窗口期内并发写进去的 readAt，表现就是 2026-10-10 用户实测的「详情页逐篇读，已读状态丢失」。
     // 判据：tests/store-sqlite.test.mjs 的「原子读改写」那条。
@@ -941,6 +1068,7 @@ const MUTATIONS = [
     to: 'const next = itemRecordSchema.parse({ ...fn(toItemRecord(row)), readAt: undefined });' },
   { id: 'store-updateItem 缺失键顺手创建', file: 'lib/store-sqlite.js',
     judges: ['store-sqlite.test.mjs'],
+    judgeTests: ['updateItem 对缺失键拒绝：写一次不等于创建（src/store.ts:29）'],
     // 「写一次就等于创建」会让调用方失去「这条还在不在」的信号（src/store.ts:29）。
     // 判据：tests/store-sqlite.test.mjs 的「对缺失键拒绝」那条。
     from: "throw new Error('updateItem 拒绝：条目 ' + itemId + ' 不在库里。",
@@ -958,6 +1086,7 @@ const MUTATIONS = [
   // 判据测试仍在（tests/store-sqlite.test.mjs 的正文级联与孤儿两条），只是它们无法区分这三种写法。
   { id: 'store-版本握手失效', file: 'lib/store-sqlite.js',
     judges: ['store-sqlite.test.mjs'],
+    judgeTests: ['建 store 先做版本握手：没盖章的库当场响亮失败，不许等第一次写入才发现（顺序颠倒）'],
     // 顺序颠倒（先建 store、后 migrateSchema）若不在构造时拦下，症状是「插件装载成功、
     // 第一次刷新才失败」——那时用户已经白等了一轮网络。
     // 判据：tests/store-sqlite.test.mjs 的「没盖章的库当场响亮失败」。
@@ -965,12 +1094,14 @@ const MUTATIONS = [
     to: 'if (false) {' },
   { id: 'store-读偏好不校验形状', file: 'lib/store-sqlite.js',
     judges: ['nav-persistence.test.mjs', 'store-sqlite.test.mjs'],
+    judgeTests: ['真实 createSqliteStore：读侧校验坏值、写侧归一后才落库（cutover 后的生产路径）', 'viewPreferences：标签被删之后回落虚拟视图（读侧校验，与已退订的源同一条）', 'viewPreferences 读侧一定给可信形状：坏值逐字段回落，已退订的源回落虚拟视图且不抛错'],
     // src/store.ts:41-45 的承诺是「返回的保证是可信形状」；不校验就把媒介里的垃圾透给调用方去兜。
     // 判据：tests/store-sqlite.test.mjs 的「坏值逐字段回落」。
     from: 'viewPreferences: () => {\n            const current = readConfigFile(configPath);\n            const knownFeeds = new Set(Object.keys(current.feeds));\n            const knownFolders = new Set(current.folders ?? []);\n            return sanitizeViewPreferences(current.viewPreferences, (feedId) => knownFeeds.has(feedId), (folder) => knownFolders.has(folder), isKnownTag);\n        },',
     to: 'viewPreferences: () => readConfigFile(configPath).viewPreferences,' },
   { id: 'store-写偏好覆盖掉订阅映射', file: 'lib/store-sqlite.js',
     judges: ['nav-persistence.test.mjs', 'store-sqlite.test.mjs'],
+    judgeTests: ['真实 createSqliteStore：读侧校验坏值、写侧归一后才落库（cutover 后的生产路径）', 'saveViewPreferences 写前校验并落 config.json，且不碰订阅映射；config.json 读不出来时响亮失败'],
     // config.json 是用户订阅的**唯一**可备份副本：写偏好时若不先把旧文件读出来，
     // 一次「切了个 filter」就会把订阅列表清空 —— 且不抛错、不留痕。
     // 判据：tests/store-sqlite.test.mjs 的「写偏好不许动订阅映射」。
@@ -980,6 +1111,7 @@ const MUTATIONS = [
     to: 'updateConfig(configPath, () => ({ feeds: {}, version: 1, viewPreferences: safe }));' },
   { id: 'store-缺席字段写成 undefined 键', file: 'lib/store-sqlite.js',
     judges: ['store-sqlite.test.mjs'],
+    judgeTests: ['saveItem 覆盖整条；可选字段缺席时不留 null / undefined 键（.strict() 与 isUnread 都靠它）'],
     // readAt === undefined 是本仓库对「未读」的定义（src/shared.ts:62）。多一个 undefined 值
     // 的键会让 .strict() 的读侧校验与 isUnread 同时失准 —— 「所有条目看起来都没读过」。
     // 判据：tests/store-sqlite.test.mjs 的「可选字段缺席时不留 null / undefined 键」。
@@ -994,6 +1126,7 @@ const MUTATIONS = [
   // 谁把库操作挪到 config 前面，那条当场翻红。下面这条守的是另一半（失败后写回）。
   { id: 'store-退订失败不写回订阅', file: 'lib/store-sqlite.js',
     judges: ['store-sqlite.test.mjs'],
+    judgeTests: ['deleteSubscription：库事务失败时把订阅原样写回（失败 = 什么都没发生）'],
     // 库事务失败时不把订阅写回 ⇒ config 已经删了、条目还在。退掉最后一个源时，下次装载会被
     // 「订阅映射丢了」的守卫判死，插件直接起不来（2026-11-14 评审发现的最坏形态）。
     // 判据：store-sqlite 的「deleteSubscription：库事务失败时把订阅原样写回」。
@@ -1001,18 +1134,21 @@ const MUTATIONS = [
     to: '' },
   { id: 'store-退订不删条目', file: 'lib/store-sqlite.js',
     judges: ['store-sqlite.test.mjs', 'tag-endpoints.test.mjs'],
+    judgeTests: ['listFeeds / feed / saveFeed / deleteSubscription 与旧实现同形（条件请求字段一个都不能丢）', 'deleteSubscription 先写 config、再删条目与游标：config 写不进去时库里一条都不许动（跨介质顺序）', '清理与退订生命周期：文章删除只清标签关联，标签本身保留'],
     // 退订只删订阅项与游标、把条目留下 ⇒ 用户退了订，条目还在库里占着（且成了孤儿）。
     // 判据：store-sqlite 的「i-1/i-2 必须跟着消失」与 tag-endpoints 的「removeFeed 后条目没了」。
     from: '                sql(DELETE_ITEMS_BY_FEED).run(feedId);\n',
     to: '' },
   { id: 'store-退订不删游标', file: 'lib/store-sqlite.js',
     judges: ['store-sqlite.test.mjs'],
+    judgeTests: ['listFeeds / feed / saveFeed / deleteSubscription 与旧实现同形（条件请求字段一个都不能丢）', 'deleteSubscription 先写 config、再删条目与游标：config 写不进去时库里一条都不许动（跨介质顺序）'],
     // 游标留下 ⇒ 下次重新订阅同一个源时 seen 还在，老条目被当成「见过」而跳过，用户看不到它们。
     // 判据：store-sqlite 的「cursor 必须跟着退订一起消失」。
     from: '                sql(DELETE_CURSOR).run(feedId);\n',
     to: '' },
   { id: 'client-标签选中落盘成虚拟视图', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs'],
+    judgeTests: ['选中的标签会记住：重开后回到同一个标签，而不是静默掉回「全部」'],
     // 就是 2026-11-14 之前的那个缺陷本身：投影把 tag 写回 virtual ⇒ 按标签筛选生效、落盘却成了
     // 「全部」，还顺手覆盖掉上次记住的源/文件夹。判据：nav-persistence 的
     // 「选中的标签会记住：重开后回到同一个标签」——它断言落盘那一份的 navSelection.kind === 'tag'。
@@ -1023,14 +1159,31 @@ const MUTATIONS = [
       '\t\t\t\t};',
     ].join('\n'),
     to: '\t\t\t\tcase "tag": return { kind: "virtual" };' },
+  { id: 'client-展开永不收起', file: 'lib/client.js',
+    judges: ['keyboard-routing.test.mjs', 'scroll-dom.test.mjs'],
+    judgeTests: ['o 键在列表页翻转展开：已展开则收起，否则展开当前行并标已读', 'o 键：同一行连按两次必须收起（依赖数组里的 expanded 是承重的）'],
+    // 把「再按一次 = 收起」退化成「恒展开」——这正是 2026-11-14 之前行内 Enter/Space 的行为，
+    // 也是 o 键在有它自己的 toggle 时不该有的样子。判据：keyboard-routing 的「已展开则收起」
+    // 与 scroll-dom 的「Enter 必须收起」。
+    from: '\t\t\treturn current === itemId ? void 0 : itemId;',
+    to: '\t\t\treturn itemId;' },
+  { id: 'client-activate 不标已读', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['C4-b 迁入：o 展开并触发 markRead 端点（副作用不能漏）', '行内 Enter / Space 与 o 同义：再按一次收起（GR 规范 o / enter = open/close）'],
+    // activate 少了标已读 ⇒ 「打开即已读」整条规则消失，而界面上看不出任何异常（角标只是不减）。
+    // 判据：scroll-dom 的「点击即标已读 —— store.activate 是唯一触发点」。
+    from: '\t\t\t\tset({ selectedId: itemId });\n\t\t\t\tmarkRead(itemId);',
+    to: '\t\t\t\tset({ selectedId: itemId });' },
   { id: 'store-viewPreferences 不校验标签', file: 'lib/store-sqlite.js',
     judges: ['store-sqlite.test.mjs'],
+    judgeTests: ['viewPreferences：标签被删之后回落虚拟视图（读侧校验，与已退订的源同一条）'],
     // 读侧丢掉 isKnownTag ⇒ 标签删了之后记忆里仍指向一个不存在的标签，界面打开一个空范围。
     // 判据：store-sqlite 的「标签被删之后回落虚拟视图」。
     from: '(folder) => knownFolders.has(folder), isKnownTag);',
     to: '(folder) => knownFolders.has(folder));' },
   { id: 'store-老形态正文静默丢正文', file: 'lib/store-sqlite.js',
     judges: ['store-sqlite.test.mjs'],
+    judgeTests: ['拒绝写入老形态正文（只有 paragraphs）：不许静默把正文丢掉（兼容读的保险，不再有正常调用方）'],
     // 库里没有存 paragraphs 的列。放开这道闸后，一条「只有 paragraphs、没有 blocks」的老记录会被
     // **当成长度为零的新记录**写下去：items 行落库、正文行被删掉，用户在详情页看到正文凭空消失，
     // 而测试若只断言「写入没抛错」就全绿。转换口径只有 domain.ts 的 normalizeLegacyArticle 一处。
@@ -1060,6 +1213,7 @@ const MUTATIONS = [
   // ⚠️ 2026-10-15（H2）只改了 file：守卫搬进 lib/lifecycle.js，from 逐字未变。
   { id: 'storage-订阅丢了却不报错', file: 'lib/lifecycle.js',
     judges: ['storage-skeleton.test.mjs'],
+    judgeTests: ['config.json 缺失且库里有条目 ⇒ 装载必须响亮失败（订阅丢了不许静默变空面板）', 'P2-3 config.json 在但订阅为空、库里却有条目 ⇒ 响亮失败（与 verify-backup 同一条判据）'],
     // 把「订阅文件不在（且库里有条目）就抛错」改成「永远放行」⇒ 一次读取失败被静默当成
     // 首次安装，插件带着「有数据、没订阅」的库继续跑，用户看到订阅列表空白而日志里没有一行错。
     // 这正是迁移闸门二当初存在的原因，所以它必须仍然有人看着。
@@ -1079,6 +1233,7 @@ const MUTATIONS = [
   // OCCURRENCES=1（docs/pitfalls.md 一、1.4）。
   { id: 'unreadPerFeed-SQL 判据反过来', file: 'lib/store-sqlite.js',
     judges: ['overview-paging.test.mjs', 'store-sqlite.test.mjs'],
+    judgeTests: ['逐方法同义性：unreadPerFeed 与旧实现逐键相等（0 未读的源两边都留 0 值键）', 'unreadPerFeed：与 shared.ts 的唯一口径在同一夹具上逐键相等，且键域 = 传入的 feeds 表（Ruling P-6）', 'listRecent / unreadPerFeed / listCleanupCandidates 的排序、聚合与筛选真的写在 SQL 里（扫描族归零）'],
     // 未读判据一旦写反（read_at IS NOT NULL），账目就变成「已读数」——而它与「各源之和 === 总未读」
     // 的关系看着仍然自洽（两边一起错），所以只有那条**与 shared.ts 逐键对账**的用例能抓到它。
     // 判据：tests/store-sqlite.test.mjs 的「unreadPerFeed：与 shared.ts 的唯一口径…逐键相等」。
@@ -1086,6 +1241,7 @@ const MUTATIONS = [
     to: "const SELECT_UNREAD_PER_FEED = 'SELECT feed_id AS feed_id, COUNT(*) AS unread FROM items WHERE read_at IS NOT NULL GROUP BY feed_id';" },
   { id: 'unreadPerFeed-丢键域（0 未读的源不留键）', file: 'lib/store-sqlite.js',
     judges: ['overview-paging.test.mjs', 'overview-scale.test.mjs', 'store-sqlite.test.mjs'],
+    judgeTests: ['逐方法同义性：unreadPerFeed 与旧实现逐键相等（0 未读的源两边都留 0 值键）', '10 万行：overview 不再物化全表，且账目守恒（键域 = feeds 表）', 'unreadPerFeed：与 shared.ts 的唯一口径在同一夹具上逐键相等，且键域 = 传入的 feeds 表（Ruling P-6）'],
     // 这是本仓库栽过两次的那条（任务 1 的键域、任务 5 的口径）：删掉「先按传进来的键铺 0」之后，
     // 只有**有未读的源**才留键，左栏那一行渲染出来是「角标空白」而不是「角标 0」——
     // 与「角标 0」在界面上无从分辨，是最贵的那类沉默失败。判据是 tests/unread-accounting.test.mjs
@@ -1100,18 +1256,21 @@ const MUTATIONS = [
   // 谓词现在只做成本筛选，放宽它只会让候选更宽、由判据挡回去，行为不变。
   { id: 'cleanup-候选行的保持未读按谓词回填', file: 'lib/store-sqlite.js',
     judges: ['overview-scale.test.mjs', 'store-sqlite.test.mjs', 'overview-paging.test.mjs'],
+    judgeTests: ['逐方法同义性：listCleanupCandidates 在两个适配器上得出同一个最终删除集（候选宽度可以不同）', '10 万行：cleanup 的候选集由 SQL 选（不再全表），且释放量与删除数如实', 'listCleanupCandidates：SQL 只做成本筛选，判定由 selectCleanup 做出（候选 ⊇ 判定集）'],
     // 旧写法按谓词回填 `kept: false` —— SQL 一旦放宽，判据看见的仍是 false，用户说「别动它」的条目被删。
     // 2026-11-14 的隔离实验实测过这条路径；现在候选行必须照列读真实状态。
     from: "kept: booleanAt(row.kept_unread, 'items.kept_unread'),",
     to: 'kept: false,' },
   { id: 'cleanup-候选集直接当删除集', file: 'lib/endpoints.js',
     judges: ['overview-scale.test.mjs', 'overview-paging.test.mjs'],
+    judgeTests: ['10 万行：cleanup 的候选集由 SQL 选（不再全表），且释放量与删除数如实'],
     // 跳过判据 = 让 SQL 的宽容度决定用户数据。SQL 现在只筛「已读 + 够旧」，
     // 星标与保持未读的旧条目都在候选里 —— 少了这一句，它们会被直接删掉。
     from: 'const doomed = new Set(selectCleanup(candidates, cutoff));',
     to: 'const doomed = new Set(candidates.map((row) => row.id));' },
   { id: 'listRecent-负数上限下传给 SQLite', file: 'lib/store-sqlite.js',
     judges: ['store-sqlite.test.mjs'],
+    judgeTests: ['listRecent：按 recency 降序 + id 升序取前 N 条，与 allItems 的前缀逐字相等（语义不变）'],
     // SQLite 把 LIMIT -1 当「无上限」。删掉 JS 侧短路后，「取 300 条」在一处算错成负数时
     // 会静默变成「读回整表」——结果看着还挺对，只有耗时爆炸。
     // 判据：tests/store-sqlite.test.mjs 的「listRecent：… 负数上限 ⇒ 空列表」。
@@ -1122,6 +1281,7 @@ const MUTATIONS = [
   // 判据：tests/endpoints-perfeed-unread.test.mjs 的「已退订源的残留条目…不许把列表的截断窗口占掉」。
   { id: 'overview-列表窗口不再放大重取', file: 'lib/endpoints.js',
     judges: ['endpoints-perfeed-unread.test.mjs'],
+    judgeTests: ['已退订源的残留条目：既不进账目，也不许把列表的截断窗口占掉（退订后没清干净 / 手工改库）'],
     // 首轮取回的 5 条里 4 条是残留行 ⇒ 列表只剩 1 条，而用户看不出少在哪（原实现是先滤后截，不会少）。
     // ⚠️ 2026-10-11 任务 6：取数循环重写（多取一行以判断「后面还有没有」），原锚串消失 ⇒ 本条
     // 改锚到新产物的同一处判定（window 不再放大 = 残留行会被当成「已到底」）。
@@ -1135,6 +1295,7 @@ const MUTATIONS = [
   // 每条 from 均照**编译产物**的真实形状逐字抄，并已独立核对 OCCURRENCES=1（docs/pitfalls.md 一、1.4）。
   { id: 'paging-续页谓词的 id 方向写反', file: 'lib/store-sqlite.js',
     judges: ['overview-paging.test.mjs'],
+    judgeTests: ['overview 分页：第 300 与第 301 条的边界不重不漏，末页没有 nextCursor', 'overview 分页：页边界正好压在 recency 打平组上时不重不漏（同批抓取是常态）', 'overview 续页：边界行随后被删掉也不影响翻页（游标是一对值，不是行引用）'],
     // **缺陷本体**（spec §10.3 的实测）：分页的边界条件是「recency 降序、同 recency 内 id 升序」，
     // 于是下一页的第二个条件是 id **>** id0。方向写反（id < id0）在 recency 打平点上会**重复 + 漏**：
     // 实测 6 行每页 2 条返回 `a d e f`（a 重复、c 漏掉），正确是 `c d e f`。
@@ -1149,12 +1310,14 @@ const MUTATIONS = [
     to: "' WHERE i.recency < ? OR (i.recency = ? AND i.id < ?)'" },
   { id: 'paging-游标不校验形状（垃圾当第一页）', file: 'lib/shared.js',
     judges: ['overview-paging.test.mjs'],
+    judgeTests: ['游标编解码：格式 "<recency>|<id>"，认不出的必须返回 undefined（不许当成从头开始）', 'overview：游标认不出时响亮拒绝（bad-request），绝不静默从头开始'],
     // 认不出的游标若被解出一个值，调用方就不再失败 —— 客户端回带的垃圾游标会被当成正常续页。
     // 判据：tests/overview-paging.test.mjs 的「游标认不出时响亮拒绝」与「游标编解码」两条。
     from: "if (!ISO_INSTANT.test(recency) || Number.isNaN(Date.parse(recency)))",
     to: 'if (false)' },
   { id: 'paging-端点不拒绝坏游标', file: 'lib/endpoints.js',
     judges: ['overview-paging.test.mjs', 'overview-scale.test.mjs'],
+    judgeTests: ['overview：游标认不出时响亮拒绝（bad-request），绝不静默从头开始'],
     // 「解不出就从第一页开始」会让翻页永远翻不完：每页都回同一批条目，界面无限追加重复行，
     // 而用户看到的是一份「永远滚不到底」的列表，不是一句报错。
     // 判据：tests/overview-paging.test.mjs 的「游标认不出时响亮拒绝（bad-request）」。
@@ -1165,6 +1328,7 @@ const MUTATIONS = [
     to: "            if (cursor === undefined) return ok(buildOverview(ctx, false));" },
   { id: 'paging-到底也硬给续页游标', file: 'lib/endpoints.js',
     judges: ['overview-paging.test.mjs', 'overview-scale.test.mjs'],
+    judgeTests: ['overview 分页：第 300 与第 301 条的边界不重不漏，末页没有 nextCursor'],
     // 到底时还给游标 ⇒ 客户端一直显示「加载更多」，点下去得到空页（界面上的死按钮）。
     // 判据：tests/overview-paging.test.mjs 的「末页没有 nextCursor」。
     from: 'const nextCursor = lastDelivered >= 0 && (lastDelivered + 1 < rows.length || !exhausted)',
@@ -1174,18 +1338,21 @@ const MUTATIONS = [
   // 判据都在 tests/endpoint-registry.test.mjs（新增文件，见该文件头注释）。
   { id: 'endpoint-表漏掉一个端点', file: 'lib/endpoints.js',
     judges: ['endpoint-registry.test.mjs'],
+    judgeTests: ['注册表覆盖全部端点名字，不多不少', '金标准：toggleStar 回包含 starred 且翻转', 'carriesAccount：标记集合恰好是那 5 个端点（声明本身有判据）', 'carriesAccount：每个标记的端点走成功路径都带回未读账'],
     // 病象：表里少一个 key ⇒ 该端点名下落到 undefined ⇒ 用户点它得到 unknown-endpoint。
     // 类型层本该拦住（Record<Endpoint,…> 穷尽），但产物是 JS，运行时只有这条断言看得见。
     from: '    toggleStar: {',
     to: '    toggleStarX: {' },
   { id: 'endpoint-未就绪守卫被绕过', file: 'lib/endpoints.js',
     judges: ['endpoint-registry.test.mjs'],
+    judgeTests: ['not-ready 先于 unknown-endpoint：未就绪时任何名字都回 not-ready'],
     // 病象：守卫被绕过 ⇒ 存储没起来时先撞「未知端点」或直接抛错，而不是稳定回 not-ready。
     // 判据：endpoint-registry.test.mjs 的「not-ready 先于 unknown-endpoint」用例（三个名字都试）。
     from: "            if (!target)\n                return fail('not-ready', '存储域尚未就绪，稍后重试');",
     to: "            if (false)\n                return fail('not-ready', '存储域尚未就绪，稍后重试');" },
   { id: 'paging-旧实现谓词的 id 方向写反', file: 'lib/store.js',
     judges: ['overview-paging.test.mjs'],
+    judgeTests: ['旧实现（createStore）：listRecent 的游标谓词与自持实现逐条同义'],
     // 与自持实现那条同一个失效面（P-7 把游标加在**接口**上 ⇒ 两份实现都得守）。只钉 SQL 一侧的话，
     // 两份谓词哪天分家不会有断言翻红 —— 而生产早已是 createSqliteStore，这份「不用的实现」会悄悄坏掉。
     // 判据：tests/overview-paging.test.mjs 的「旧实现（createStore）：listRecent 的游标谓词…」。
@@ -1199,6 +1366,7 @@ const MUTATIONS = [
   // ⚠️ from 照**编译产物**的真实形状写（docs/pitfalls.md 一、1.4），OCCURRENCES 均独立实测 = 1。
   { id: 'store-旧实现每源账目不铺键域', file: 'lib/store.js',
     judges: ['overview-paging.test.mjs'],
+    judgeTests: ['逐方法同义性：unreadPerFeed 与旧实现逐键相等（0 未读的源两边都留 0 值键）'],
     // 键域退回「条目里出现过的源」⇒ 0 未读的源丢键（左栏那一行的角标变空白而不是 0），
     // 与自持实现「先按 feeds 表铺 0」不再同义。
     // 判据：tests/overview-paging.test.mjs 的「逐方法同义性：unreadPerFeed…逐键相等」。
@@ -1206,6 +1374,7 @@ const MUTATIONS = [
     to: 'unreadPerFeed: (feedIds) => countUnreadPerFeed([...items.entries()].map(([, record]) => record.feedId), [...items.entries()].map(([, record]) => record)),' },
   { id: 'store-旧实现正文清单字符数恒 0', file: 'lib/store.js',
     judges: ['overview-paging.test.mjs'],
+    judgeTests: ['逐方法同义性：listArticleCacheEntries 与旧实现逐条相等（只交出 { id, chars, fetchedAt }）'],
     // 清算原料的 chars 退回 0 ⇒ 正文缓存闸门以为整库正文一文不值，淘汰名单算出来与自持实现不同
     //（chars 是 articleCharsOf 的第二处调用点，两处分家时这条要翻红）。
     // 判据：tests/overview-paging.test.mjs 的「逐方法同义性：listArticleCacheEntries…」。
@@ -1216,30 +1385,35 @@ const MUTATIONS = [
   // 它守的行为改由 retention-清理的保持未读保护 覆盖 —— 两个适配器都走同一个判据。
   { id: 'paging-续页不追加而是替换', file: 'lib/client.js',
     judges: ['client-bundle.test.mjs', 'nav-selection.test.mjs'],
+    judgeTests: ['分页接线：续页游标在时渲染「加载更多」，点它真的取下一页（并追加到当前列表）', '分页：续页是追加到列表尾部，不是替换（第一页必须还在）', '分页：在途时忽略重复的 loadMore（防连点堆请求）'],
     // 替换 ⇒ 翻到第二页时第一页整个消失（用户找不到刚读的那条）。
     // 判据：tests/nav-selection.test.mjs 的「续页是追加到列表尾部，不是替换」。
     from: 'items: [...state.items, ...overview.items],',
     to: 'items: overview.items,' },
   { id: 'paging-续页改按本地 items 派生账目', file: 'lib/client.js',
     judges: ['nav-selection.test.mjs'],
+    judgeTests: ['分页：每一页都以宿主回包为准整体覆盖账目，绝不在第二页开始派生'],
     // 缺陷本体在翻页处的复现：第二页开始又拿截断视图当真相 ⇒ 左栏各源之和 ≠ 顶栏总未读。
     // 判据：tests/nav-selection.test.mjs 的「每一页都以宿主回包为准整体覆盖账目」。
     from: 'applyAccount(overview);',
     to: 'set({ unread: overview.items.filter((i) => i.readAt === void 0).length, perFeedUnread: state.perFeedUnread });' },
   { id: 'paging-首屏游标不落 state', file: 'lib/client.js',
     judges: ['client-bundle.test.mjs', 'nav-selection.test.mjs'],
+    judgeTests: ['分页接线：续页游标在时渲染「加载更多」，点它真的取下一页（并追加到当前列表）', '分页：续页是追加到列表尾部，不是替换（第一页必须还在）', '分页：每一页都以宿主回包为准整体覆盖账目，绝不在第二页开始派生', '分页：在途时忽略重复的 loadMore（防连点堆请求）'],
     // 首屏不记游标 ⇒ 界面上永远不出现「加载更多」，第 301 条之后仍然到不了（本任务的缺陷原样留下）。
     // 判据：tests/client-bundle.test.mjs 的「分页接线」+ tests/nav-selection.test.mjs 的分页族。
     from: 'nextCursor: overview.nextCursor,',
     to: 'nextCursor: void 0,' },
   { id: 'paging-客户端不回带游标', file: 'lib/client.js',
     judges: ['client-bundle.test.mjs', 'nav-selection.test.mjs'],
+    judgeTests: ['分页接线：续页游标在时渲染「加载更多」，点它真的取下一页（并追加到当前列表）', '分页：续页是追加到列表尾部，不是替换（第一页必须还在）', '分页：每一页都以宿主回包为准整体覆盖账目，绝不在第二页开始派生', '分页：在途时忽略重复的 loadMore（防连点堆请求）'],
     // 回了 undefined ⇒ 宿主当成第一页，列表原地重复同一批 300 条（用户看到重复而不是报错）。
     // 判据：tests/nav-selection.test.mjs 的「续页是追加…」里的 pageCalls 断言。
     from: 'const overview = await callRpc("overview", {\n\t\t\t\t\t\tcursor,\n\t\t\t\t\t\t...state.navSelection.kind === "folder" ? { folder: state.navSelection.folder } : {},\n\t\t\t\t\t\t...state.navSelection.kind === "tag" ? { tagId: state.navSelection.tagId } : {}\n\t\t\t\t\t});',
     to: 'const overview = await callRpc("overview", {});' },
   { id: 'paging-在途不挡重复请求', file: 'lib/client.js',
     judges: ['nav-selection.test.mjs'],
+    judgeTests: ['分页：在途时忽略重复的 loadMore（防连点堆请求）'],
     // 连点堆请求：每次都要过一次 SQL + 一次 feeds 文件读，且会把同一页追加两遍。
     // 判据：tests/nav-selection.test.mjs 的「在途时忽略重复的 loadMore」。
     from: 'if (cursor === void 0 || state.loadingMore)',
@@ -1254,6 +1428,7 @@ const MUTATIONS = [
   // lib/storage/log-file.js 的真实形状逐字抄，并已独立核对 OCCURRENCES=1（docs/pitfalls.md 一、1.4）。
   { id: 'log-文件名判据放宽成前缀匹配', file: 'lib/storage/log-file.js',
     judges: ['log-file.test.mjs'],
+    judgeTests: ['pruneOldLogs 只删超期的 reader-*.log，绝不碰 config.json / rss.db 及其边车', 'pruneOldLogs 的保留窗口是闭区间：今天 + 前 13 天留，第 14 天前删', 'pruneOldLogs 对认不出的文件名既不删也不崩，且判据只看文件名不看 mtime', 'pruneOldLogs 匹配到同名目录时跳过（EISDIR 不许升级成整次清理失败）'],
     // 正则放宽成 `/^reader-/` 后，捕获组 matched[1..3] 全是 undefined ⇒ Date.UTC(NaN,…) 是 NaN ⇒
     // dayMsOf 对**每一个**名字都返回 undefined ⇒ 判据里的 day === undefined 把全部条目跳过。
     // ⚠️ 所以它的真实失效**不是**「删掉 reader- 前缀的邻居」（那需要 dayMsOf 返回一个数字才会走到
@@ -1266,6 +1441,7 @@ const MUTATIONS = [
     to: 'const LOG_NAME = /^reader-/;' },
   { id: 'log-认不出的名字被当成可删', file: 'lib/storage/log-file.js',
     judges: ['log-file.test.mjs', 'storage-skeleton.test.mjs'],
+    judgeTests: ['pruneOldLogs 只删超期的 reader-*.log，绝不碰 config.json / rss.db 及其边车', 'pruneOldLogs 对认不出的文件名既不删也不崩，且判据只看文件名不看 mtime', 'config.json 缺失且库里有条目 ⇒ 装载必须响亮失败（订阅丢了不许静默变空面板）', 'P2-3 config.json 在但订阅为空、库里却有条目 ⇒ 响亮失败（与 verify-backup 同一条判据）'],
     // ⚠️ 本条曾被我按「等价变异」错误地排除过一轮，推导方向是反的：少了 `day === undefined ||` 之后，
     // 判据只剩 `if (day >= cutoff) continue`，而 undefined >= 数字 **恒为 false** ⇒ continue 不执行
     // ⇒ 直接落到 unlinkSync。凡是**认不出的名字**（config.json / rss.db / rss.db-wal / rss.db-shm /
@@ -1278,6 +1454,7 @@ const MUTATIONS = [
     to: 'if (day >= cutoff)' },
   { id: 'log-同名目录不再跳过（EISDIR 抬升为整次失败）', file: 'lib/storage/log-file.js',
     judges: ['log-file.test.mjs'],
+    judgeTests: ['pruneOldLogs 匹配到同名目录时跳过（EISDIR 不许升级成整次清理失败）'],
     // 去掉「只删普通文件」这道闸后，一个名字恰好合形、且超期的**目录**会直接进 unlinkSync ⇒
     // EISDIR ⇒ 整次 prune 抛错。危害不是「删错东西」，而是**清理从此每次都失败**：
     // 用户会看到反复的清理告警，而真正该删的超期日志一个都删不掉（紧随其后的 unlinkSync 被跳过）。
@@ -1287,6 +1464,7 @@ const MUTATIONS = [
     to: 'if (false)' },
   { id: 'log-保留窗口多留一天（边界偏移）', file: 'lib/storage/log-file.js',
     judges: ['log-file.test.mjs'],
+    judgeTests: ['pruneOldLogs 的保留窗口是闭区间：今天 + 前 13 天留，第 14 天前删'],
     // keepDays 少减一天 ⇒ 窗口变成「今天 + 前 14 天」= 15 份。这类错**没有症状**：日志多留一份
     // 看起来永远是对的，只有钉在两侧的边界用例能抓到它（只断言「有老文件被删」的用例放走它）。
     // 判据：tests/log-file.test.mjs 的「保留窗口是闭区间：今天 + 前 13 天留，第 14 天前删」——
@@ -1326,12 +1504,14 @@ const MUTATIONS = [
   // 各有了一条可直测的判据（tests/lifecycle.test.mjs），下面三条把它们钉进变异门槛。
   { id: 'lifecycle-重复 stop 不再是空操作', file: 'lib/lifecycle.js',
     judges: ['lifecycle.test.mjs'],
+    judgeTests: ['Review Focus 4：stop 重复调用是安全的空操作（不放宽断言、不吞错）'],
     // 病象：effect 重放或异常路径二次进入时，第二次 stop 抛错 ⇒ teardown 抛出去会让宿主把
     // 「资源已回收」报成失败（index.ts 的旧注释里就有这条纪律）。
     from: "if (stopped) {\n            await Promise.all([generation, inFlight]);\n            return;\n        }",
     to: "if (stopped) {\n            throw new Error('重复 stop');\n        }" },
   { id: 'lifecycle-停止后仍交出 store', file: 'lib/lifecycle.js',
     judges: ['lifecycle.test.mjs'],
+    judgeTests: ['生命周期：start 走完装载链后 ready() 给出 store，停掉后给 undefined', 'Review Focus 1：start 期间 stop —— 不误关、不泄漏、且落定后不交出 store', 'Review Focus 4：stop 重复调用是安全的空操作（不放宽断言、不吞错）', 'Review Focus 3：stop 之后 refreshNow 报 not-ready，不许拿一个正在关的 store', 'Review Focus 2：重复 start 不会把状态搅乱（幂等：第二次不重跑装载链）'],
     // 病象：cancelled 没参与 ready() 判定 ⇒ 关停之后仍能把正在关的 store 交出去（悬垂句柄）。
     from: 'const ready = () => (cancelled ? undefined : store);',
     to: 'const ready = () => store;' },
@@ -1345,6 +1525,7 @@ const MUTATIONS = [
   // 它是正确性所需，缺的只是一个在本平台抓不到它的判据；该失效面记在 ledger 的「已知不可观测」一节。
   { id: 'teardown-不等在途刷新就关库', file: 'lib/lifecycle.js',
     judges: ['teardown-race.test.mjs'],
+    judgeTests: ['启动刷新在飞时 teardown：不得把库关在正在写的刷新底下（无「装载失败 / database is not open」）', '面板触发（RPC）的在飞刷新同样受 teardown 保护：不得写在已关闭的句柄上'],
     from: "try {\n            await Promise.all([generation, inFlight]);\n        }\n        catch (error) {\n            log('等待在途刷新结束时出错",
     to: "try {\n            await Promise.resolve();\n        }\n        catch (error) {\n            log('等待在途刷新结束时出错" },
   // C3 未读账镜像（2026-10-16）：六动作共用「乐观 → RPC → 覆盖 / 回滚」管线。两条判据：
@@ -1356,10 +1537,12 @@ const MUTATIONS = [
   //   client-bundle 的「C3：undoMarkAll 失败恢复撤销条并重新武装 5 秒窗口」用它看守。
   { id: 'client-回包账目必须落地', file: 'lib/client.js',
     judges: ['client-bundle.test.mjs'],
+    judgeTests: ['C3：toggleStar 成功后账目以宿主回包为准落地（旧实现把回包整个丢掉）'],
     from: 'deps.applyAccount(await deps.callRpc(action.endpoint, action.payload));',
     to: 'void (await deps.callRpc(action.endpoint, action.payload));' },
   { id: 'client-撤销失败必须恢复撤销条', file: 'lib/client.js',
     judges: ['client-bundle.test.mjs'],
+    judgeTests: ['C3：undoMarkAll 失败恢复撤销条并重新武装 5 秒窗口（只塞回 state 会常驻）'],
     // from 照产物实测（7 个 tab，进了 rollback 的 if 块后缩进加深；2026-10-16 实测 5-tab 旧串让该变异「未应用」假幸存——锚串必须随产物形状走，docs/pitfalls.md 一、1.4 同款坑）
     from: 'set({ undo: { ids: undo.ids } });\n\t\t\t\t\t\t\tarmUndoExpiry();',
     to: 'armUndoExpiry();' },
@@ -1368,6 +1551,7 @@ const MUTATIONS = [
   //   A2 的条目并把窗口重置。client-bundle 的「C3：撤销在飞…」用 shouldFail 时序闸门看守。
   { id: 'client-撤销条恢复带身份 CAS', file: 'lib/client.js',
     judges: ['client-bundle.test.mjs'],
+    judgeTests: ['C3：撤销在飞时更晚的 A 写下自己的撤销条，U 失败不得用旧 batch 盖掉它（身份 CAS）'],
     from: 'if (state.undo === void 0) {',
     to: 'if (true) {' },
   // C4-b（2026-10-16）：候选清单「基线零覆盖」8 类判定的守门变异 —— 先经 --probes 反向
@@ -1375,31 +1559,38 @@ const MUTATIONS = [
   // 未入表。锚串照 lib/client.js 实际形状（tab 缩进 ×5；「未应用」假幸存 = 锚串过期的形态）。
   { id: 'client-probe-弹层守卫', file: 'lib/client.js',
     judges: ['keyboard-routing.test.mjs'],
+    judgeTests: ['C4-b 判定：弹层开着时按键被弹层守卫挡住（closest dialog/modal）'],
     // from 照产物 :1448 的真实字节（双引号包 selector、内层转义引号）——首版锚到 :1439 注释里的单引号形状，「改了不生效的行」照样全绿（幸存清单教训：注释不是判定）。
     from: 'if (target.closest("[role=\\\"dialog\\\"], [aria-modal=\\\"true\\\"], dialog") !== null) return true;',
     to: 'if (false) return true;' },
   { id: 'client-probe-isContentEditable', file: 'lib/client.js',
     judges: ['keyboard-routing.test.mjs'],
+    judgeTests: ['C4-b 判定：isContentEditable 的元素挡住按键'],
     from: 'target.isContentEditable', to: 'false' },
   // ⚠️ 2026-10-18：judges 从 scroll-dom 改到 client-bundle —— 实测该变异下 scroll-dom 全绿、
   // client-bundle 翻红 7 条（「未读筛选下打开条目…」那一族）。judges 指错文件不报错，
   // 只会让这条变异被**别的**文件判「幸存」。
   { id: 'client-probe-sticky 选中', file: 'lib/client.js',
     judges: ['client-bundle.test.mjs'],
+    judgeTests: ['未读筛选下打开条目：条目不该当场消失（sticky 选中），移开后才让位', '正文页 j/k：尊重当前过滤（未读筛选下不跳到已读条目）', '详情页按钮：尊重当前过滤（未读筛选下按钮也跳过已读条目）'],
     from: 'if (item.id === selectedId) return true', to: 'return inScope(item)' },
   { id: 'client-probe-openArticle 视图守卫', file: 'lib/client.js',
     judges: ['keyboard-routing.test.mjs'],
+    judgeTests: ['C4-b 判定：正文视图里 V/openArticle 被视图守卫挡住'],
     from: 'case "openArticle":\n\t\t\t\t\tif (view !== "list") return;',
     to: 'case "openArticle":' },
   { id: 'client-probe-expandedView 守卫', file: 'lib/client.js',
     judges: ['keyboard-routing.test.mjs'],
+    judgeTests: ['C4-b 判定：expandedView/listView 只在列表页切布局（正文/订阅管理不接管）'],
     from: 'case "expandedView":\n\t\t\t\t\tif (view === "list") store.setLayout("expanded");',
     to: 'case "expandedView":\n\t\t\t\t\tstore.setLayout("expanded");' },
   { id: 'client-probe-Esc 订阅页', file: 'lib/client.js',
     judges: ['keyboard-routing.test.mjs'],
+    judgeTests: ['C4-b 判定：订阅管理页按 Esc 不得穿透成 toggleFeeds'],
     from: 'if (view === "feeds") {', to: 'if (false) {' },
   { id: 'client-probe-删 star', file: 'lib/client.js',
     judges: ['keyboard-routing.test.mjs'],
+    judgeTests: ['C4-b 判定：s 键星标动作真实接线（star 分支删除时整条红）'],
     from: 'case "star":', to: 'case "star_never":' },
   // ── 文件夹目录与变更接口（M2 02）────────────────────────────────────────
   // 病象：文件夹改名只改了目录、没改成员归属；删除文件夹顺手把订阅也删了；
@@ -1408,9 +1599,11 @@ const MUTATIONS = [
   // 每条 from 均照**编译产物**的真实形状逐字抄（docs/pitfalls.md 一、1.4）。
   { id: 'folder-新名称不去空白', file: 'lib/folders.js',
     judges: ['folder-storage.test.mjs', 'folder-endpoints.test.mjs'],
+    judgeTests: ['文件夹端点：增删改移的返回值与错误码（payload 形状在端点层拦住）', '空文件夹可创建，并在重启后保留（目录不是 feed.folder 的派生物）', '名称校验：空白、超长、重复精确拒绝；80 码点边界按 Unicode 计'],
     from: 'const name = raw.trim();', to: 'const name = raw;' },
   { id: 'folder-创建不拒重复', file: 'lib/folders.js',
     judges: ['folder-storage.test.mjs', 'folder-endpoints.test.mjs'],
+    judgeTests: ['文件夹端点：增删改移的返回值与错误码（payload 形状在端点层拦住）', '名称校验：空白、超长、重复精确拒绝；80 码点边界按 Unicode 计'],
     from: 'if (folders.includes(name)) {', to: 'if (false) {' },
   { id: 'folder-创建空目录不落盘', file: 'lib/folders.js',
     judges: ['folder-storage.test.mjs', 'folder-endpoints.test.mjs'],
@@ -1418,28 +1611,35 @@ const MUTATIONS = [
     to: 'return { ...file, folders };' },
   { id: 'folder-改名不拒碰撞', file: 'lib/folders.js',
     judges: ['folder-storage.test.mjs', 'folder-endpoints.test.mjs'],
+    judgeTests: ['文件夹端点：增删改移的返回值与错误码（payload 形状在端点层拦住）', '改名原子更新目录与成员归属，重启后一致；碰撞拒绝且不改盘'],
     from: 'if (folders.includes(to)) {', to: 'if (false) {' },
   { id: 'folder-改名不更新成员归属', file: 'lib/folders.js',
     judges: ['folder-storage.test.mjs', 'folder-endpoints.test.mjs'],
+    judgeTests: ['文件夹端点：增删改移的返回值与错误码（payload 形状在端点层拦住）', '改名原子更新目录与成员归属，重启后一致；碰撞拒绝且不改盘'],
     from: 'feeds[feedId] = folderOf(feed) === from ? { ...feed, folder: to } : feed;',
     to: 'feeds[feedId] = feed;' },
   { id: 'folder-删除清掉所有归属', file: 'lib/folders.js',
     judges: ['folder-storage.test.mjs', 'folder-endpoints.test.mjs'],
+    judgeTests: ['删除文件夹只解除分类：订阅、条目、已读/星标/保持未读都在'],
     from: 'if (folderOf(feed) !== name) {', to: 'if (false) {' },
   { id: 'folder-移出不清归属', file: 'lib/folders.js',
     judges: ['folder-storage.test.mjs', 'folder-endpoints.test.mjs'],
+    judgeTests: ['移动出入：进目录、同位置幂等、目标/源缺失失败、移出清字段'],
     from: 'if (target === undefined)\n        delete next.folder;\n    else\n        next.folder = target;',
     to: 'if (target === undefined)\n        next.folder = current.folder;\n    else\n        next.folder = target;' },
   { id: 'folder-旧配置不派生目录', file: 'lib/storage/config-file.js',
     judges: ['folder-storage.test.mjs'],
+    judgeTests: ['旧配置没有 folders 字段：目录从 feed.folder 派生，读取不改写文件', '配置版本策略：v1 可选 folders 与成员分组取并集，写入不升版本', '视图记忆可保存文件夹选中；文件夹删除后回落虚拟视图'],
     from: 'folders: mergeFolderDirectory(explicitFolders, valid),',
     to: 'folders: mergeFolderDirectory(explicitFolders, {}),' },
   { id: 'folder-OPML已存在源套用分组', file: 'lib/feed-intent.js',
     judges: ['folder-endpoints.test.mjs'],
+    judgeTests: ['OPML：新源继承分组，重复导入保留本地未分类，导出保持分组'],
     from: 'folder: previous === undefined ? initialFolder : previous.folder,',
     to: 'folder: initialFolder,' },
   { id: 'folder-刷新写入丢目录', file: 'lib/store-sqlite.js',
     judges: ['folder-storage.test.mjs'],
+    judgeTests: ['横切不变量：刷新、订阅写入、偏好保存、退订都不得丢目录'],
     from: 'updateConfig(configPath, (current) => ({ ...current, feeds: change(current.feeds) }));',
     to: 'updateConfig(configPath, (current) => ({ version: 1, feeds: change(current.feeds) }));' },
   // ⚠️ 刻意没有「缺 folder 键当未分类」这条变异：它实测是**等价变异** —— 删掉缺键守卫后，
@@ -1450,42 +1650,52 @@ const MUTATIONS = [
   // 每条 from 均照编译产物逐字抄，且用测试钉住可观察结果。
   { id: 'folder-浏览忽略来源范围', file: 'lib/store-sqlite.js',
     judges: ['folder-browse.test.mjs'],
+    judgeTests: ['文件夹浏览先按成员筛选再限页：成员条目不会落到跨源首页之外'],
     from: 'const scoped = feedIds === undefined\n                ? undefined\n                : JSON.stringify([...new Set(feedIds)]);',
     to: 'const scoped = undefined;' },
   { id: 'folder-空范围回落全表', file: 'lib/endpoints.js',
     judges: ['folder-browse.test.mjs'],
+    judgeTests: ['空文件夹返回空列表与完整目录；不存在的文件夹明确 not-found'],
     from: 'rows = target.listRecent(window + 1, cursor, scope?.feedIds, scope?.tagId);',
     to: 'rows = target.listRecent(window + 1, cursor, scope?.feedIds.length ? scope.feedIds : undefined, scope?.tagId);' },
   { id: 'folder-游标不校验范围', file: 'lib/endpoints.js',
     judges: ['folder-browse.test.mjs'],
+    judgeTests: ['文件夹游标绑定范围与成员：无范围/别的文件夹/成员变动后的旧游标全部 bad-request'],
     from: 'if (!raw.startsWith(prefix)) {', to: 'if (false) {' },
   { id: 'folder-左栏不显示空目录', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['文件夹浏览：空目录可见，进入后只显示成员条目，空目录有明确空状态'],
     from: 'for (const name of folderNames) if (!folders.has(name)) folders.set(name, []);',
     to: 'for (const name of []) if (!folders.has(name)) folders.set(name, []);' },
   { id: 'folder-进入按钮变成折叠', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['文件夹浏览：空目录可见，进入后只显示成员条目，空目录有明确空状态', '当前浏览文件夹：改名迁移范围，删除回到跨源列表'],
     // 第一个 onSelectFolder 是「进入文件夹」按钮的点击处理器；改成折叠后点击文件夹名不会切范围。
     from: 'onSelectFolder(row.folder);', to: 'onToggleFolder(row.folder);' },
   { id: 'folder-改名不迁移选中', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['当前浏览文件夹：改名迁移范围，删除回到跨源列表'],
     from: 'const selected = state.navSelection.kind === "folder" && state.navSelection.folder === from;',
     to: 'const selected = false;' },
   { id: 'folder-删除当前不回落', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['当前浏览文件夹：改名迁移范围，删除回到跨源列表'],
     from: 'if (selected) {\n\t\t\t\t\t\tset({\n\t\t\t\t\t\t\tnavSelection: { kind: "virtual" },',
     to: 'if (false) {\n\t\t\t\t\t\tset({\n\t\t\t\t\t\t\tnavSelection: { kind: "virtual" },' },
   { id: 'folder-搜索不按成员收窄', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['文件夹搜索：范围取成员交集，续页回带查询绑定游标'],
     from: 'const scopedFeedIds = folderIds === void 0 ? search.feedIds : search.feedIds === void 0 ? folderIds : search.feedIds.filter((feedId) => folderIds.includes(feedId));',
     to: 'const scopedFeedIds = search.feedIds;' },
   { id: 'folder-删除确认不说明未分类', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['文件夹管理：创建、改名、移动、删除二次确认与焦点恢复'],
     from: '"」？成员会变为未分类；不会退订，也不会删除文章。"',
     to: '"」？确认删除。"' },
   // ── M2 05：标签持久化与 v1→v2 迁移 ───────────────────────────────────
   { id: 'tag-v1不升级', file: 'lib/storage/db.js',
     judges: ['tag-storage.test.mjs'],
+    judgeTests: ['v1→v4 升级：只加表与派生列，条目/正文/游标/阅读状态原样保留，且回填 link_key', '升级失败回滚：版本与新建 DDL 一起回滚，旧表数据不动，修复冲突后可重试'],
     from: 'if (onDisk === 1) {', to: 'if (false) {' },
   // ⚠️ 2026-11-16（M5 02）重锚：v1 的升级从「一次 applyDdl(TAGS_DDL)」改成
   // 「一次 applyDdl(TAGS_DDL + PROGRESS_DDL)」（两步 DDL 同一事务），旧 from 会报**未应用**。
@@ -1494,6 +1704,7 @@ const MUTATIONS = [
   // 语义不变：v1 升上来必须把标签表建上。
   { id: 'tag-升级不建标签表', file: 'lib/storage/db.js',
     judges: ['tag-storage.test.mjs'],
+    judgeTests: ['v1→v4 升级：只加表与派生列，条目/正文/游标/阅读状态原样保留，且回填 link_key', '升级失败回滚：版本与新建 DDL 一起回滚，旧表数据不动，修复冲突后可重试'],
     from: "applyDdl(db, 'v1→v4 升级', TAGS_DDL + PROGRESS_DDL + LINK_KEY_DDL, backfillLinkKeys);",
     to: "applyDdl(db, 'v1→v4 升级', PROGRESS_DDL + LINK_KEY_DDL, backfillLinkKeys);" },
   { id: 'tag-升级后版本仍为1', file: 'lib/storage/db.js',
@@ -1501,47 +1712,59 @@ const MUTATIONS = [
     from: 'db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);', to: "db.exec('PRAGMA user_version = 1');" },
   { id: 'tag-重名误报bad-request', file: 'lib/store-sqlite.js',
     judges: ['tag-storage.test.mjs', 'tag-endpoints.test.mjs'],
+    judgeTests: ['标签端点：创建/改名/列表/删除与错误码', '标签 CRUD：空标签可见、改名保 id 与关联、删标签不影响文章与阅读状态'],
     from: "throw new TagError('conflict', '标签已存在：' + safeName);",
     to: "throw new TagError('bad-request', '标签已存在：' + safeName);" },
   { id: 'tag-空标签列表丢失', file: 'lib/store-sqlite.js',
     judges: ['tag-storage.test.mjs', 'tag-endpoints.test.mjs'],
+    judgeTests: ['标签端点：创建/改名/列表/删除与错误码', '清理与退订生命周期：文章删除只清标签关联，标签本身保留', '标签 CRUD：空标签可见、改名保 id 与关联、删标签不影响文章与阅读状态'],
     from: 'FROM tags t LEFT JOIN item_tags it ON it.tag_id = t.id',
     to: 'FROM tags t JOIN item_tags it ON it.tag_id = t.id' },
   { id: 'tag-setItemTags不清旧', file: 'lib/store-sqlite.js',
     judges: ['tag-storage.test.mjs', 'tag-endpoints.test.mjs'],
+    judgeTests: ['setItemTags：重复去重、混合无效回滚、空数组清空，列表计数同步', 'setItemTags 幂等且混合无效请求不留下部分关联'],
     from: 'runInTransaction(() => {\n                sql(DELETE_ITEM_TAGS).run(target);',
     to: 'runInTransaction(() => {\n                void target;' },
   { id: 'tag-setItemTags不校验标签', file: 'lib/store-sqlite.js',
     judges: ['tag-storage.test.mjs', 'tag-endpoints.test.mjs'],
+    judgeTests: ['setItemTags：重复去重、混合无效回滚、空数组清空，列表计数同步', 'setItemTags 幂等且混合无效请求不留下部分关联'],
     from: 'for (const tagId of ids) {\n                if (sql(TAG_BY_ID).get(tagId) === undefined)\n                    throw new TagError(\'not-found\', \'标签不存在：\' + tagId);\n            }',
     to: 'for (const tagId of ids) { if (tagId.length < 0) sql(TAG_BY_ID).get(tagId); }' },
   { id: 'tag-合并丢loser标签', file: 'lib/store-sqlite.js',
     judges: ['tag-storage.test.mjs'],
+    judgeTests: ['身份修复合并：幸存条目保留两侧标签并去重，loser 的关联不丢'],
     from: 'sql(COPY_ITEM_TAGS).run(keeperId, loserId);', to: 'void keeperId;' },
   { id: 'tag-改名返回新ID', file: 'lib/store-sqlite.js',
     judges: ['tag-storage.test.mjs'],
+    judgeTests: ['标签 CRUD：空标签可见、改名保 id 与关联、删标签不影响文章与阅读状态'],
     from: 'return tagRecordSchema.parse({ ...toTagRecord(current), name: safeName });',
     to: 'return tagRecordSchema.parse({ ...toTagRecord(current), id: randomUUID(), name: safeName });' },
   // ── M2 06：标签浏览/搜索/界面接线 ─────────────────────────────────────
   { id: 'tag-浏览忽略tagId', file: 'lib/store-sqlite.js',
     judges: ['tag-browse.test.mjs'],
+    judgeTests: ['标签浏览先按 id 筛选再限页：深页文章不漏，目录保留空标签'],
     from: 'const rows = tagId !== undefined', to: 'const rows = false' },
   { id: 'tag-搜索忽略tagId', file: 'lib/search-worker.js',
     judges: ['tag-browse.test.mjs'],
+    judgeTests: ['搜索 + 标签 + 未读取交集，搜索结果也带 tagIds'],
     from: 'if (query.tagId !== undefined) {', to: 'if (false) {' },
   { id: 'tag-浏览游标绑名称', file: 'lib/endpoints.js',
     judges: ['tag-browse.test.mjs'],
+    judgeTests: ['标签浏览先按 id 筛选再限页：深页文章不漏，目录保留空标签'],
     from: "key: 'tag:' + found.id", to: "key: 'tag:' + found.name" },
   { id: 'tag-左栏丢空标签', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['标签浏览与编辑：左栏行、空标签、列表/正文共用标签栏，频繁切换不高亮成已读'],
     from: '...tags.map((tag) => ({',
     to: '...tags.filter((tag) => (tag.itemCount ?? 0) > 0).map((tag) => ({' },
   { id: 'tag-搜索请求漏tagId', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['标签 + 搜索：搜索请求携带标签 id，结果仍按标签范围显示'],
     from: '...tagId === void 0 ? {} : { tagId },',
     to: '...{},' },
   { id: 'tag-切换标签不重载', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['文件夹浏览：空目录可见，进入后只显示成员条目，空目录有明确空状态'],
     from: 'if (!state.search && scopeChanged) load("overview");',
     to: 'if (false) load("overview");' },
   // ── M3 02：只读模型工具（rss_search / rss_list_feeds / rss_read_article）──────
@@ -1550,77 +1773,92 @@ const MUTATIONS = [
   // ① 上限夹取：PRD §8.2 的「硬上限 30」只在这里生效，去掉就是「调用方要多少给多少」。
   { id: 'tools-搜索上限不夹取', file: 'lib/tools.js',
     judges: ['tools.test.mjs'],
+    judgeTests: ['rss_search：默认 10 条、超过 30 夹到 30、非法 limit 响亮失败'],
     from: 'const limit = Math.min(typeof rawLimit === \'number\' ? rawLimit : SEARCH_DEFAULT_ITEMS, SEARCH_MAX_ITEMS);',
     to: 'const limit = typeof rawLimit === \'number\' ? rawLimit : SEARCH_DEFAULT_ITEMS;' },
   // ② 游标栅栏：没有它，换一组筛选条件后拿旧页游标续页会**静默**从别处接着翻。
   { id: 'tools-游标不校验条件', file: 'lib/tools.js',
     judges: ['tools.test.mjs'],
+    judgeTests: ['rss_search：游标必须被查询条件栅栏住，换条件续页响亮失败'],
     from: "if (supplied !== undefined && (!supplied.startsWith(key) || inner === undefined || decodeCursor(inner) === undefined)) {",
     to: 'if (supplied !== undefined && inner === undefined) {' },
   // ③ 片段截断：不截就是「一次搜索把整篇摘要灌进上下文」，PRD §8.2 的长度上限靠它兜。
   { id: 'tools-片段不截断', file: 'lib/tools.js',
     judges: ['tools.test.mjs'],
+    judgeTests: ['rss_search：筛选条件原样进查询，结果按 PRD §8.2 的字段表投影', 'rss_read_article：四种 cached:false 各有可解释原因，命中时给正文并截断', '可变长字段按预算截断并逐字段标记（标题、源标题、链接、失败原因）'],
     from: "return { text: chars.slice(0, max).join(''), truncated: true };",
     to: 'return { text, truncated: false };' },
   // ④ 正文缓存版本：不校验就会把**旧抽取器**抓的正文当成当前正文交给模型（影子内容）。
   { id: 'tools-正文版本不校验', file: 'lib/tools.js',
     judges: ['tools.test.mjs'],
+    judgeTests: ['rss_read_article：四种 cached:false 各有可解释原因，命中时给正文并截断'],
     from: 'if (article.revision !== EXTRACTOR_REVISION) {',
     to: 'if (article.revision === -1) {' },
   // ⑤ 未就绪：静默返回空列表会让模型把「存储没打开」当成「一条都没有」。
   { id: 'tools-未就绪静默返回空', file: 'lib/tools.js',
     judges: ['tools.test.mjs'],
+    judgeTests: ['未就绪：store 还没打开时三个工具都响亮失败，不返回空列表冒充结果'],
     from: "if (store === undefined)\n        throw new Error('RSS 阅读器尚未就绪（存储未打开），请稍后重试');",
     to: 'if (store === undefined)\n        return { listFeeds: () => [], unreadPerFeed: () => ({}), listFolders: () => [], listTags: () => [], feed: () => undefined, item: () => undefined };' },
   // ⑥ 未知源 id：不拒绝就等于允许模型用一个拼错的 id 搜索并拿到「空结果」。
   { id: 'tools-未知源不拒绝', file: 'lib/tools.js',
     judges: ['tools.test.mjs'],
+    judgeTests: ['rss_search：未知源 id / 非真实日期 / 超长关键词都在查询前被拒'],
     from: 'if (feedId !== undefined && store.feed(feedId) === undefined) {',
     to: 'if (false) {' },
   // ⑦ 目录截断：源/文件夹/标签三个目录共用这一处判据，不截就是 300+ 条元数据一次灌进上下文。
   { id: 'tools-目录不截断', file: 'lib/tools.js',
     judges: ['tools.test.mjs'],
+    judgeTests: ['rss_list_feeds：大目录按预算截断并如实报告（不静默丢源/目录/标签）'],
     from: 'return { total: items.length, truncated: items.length > max, items: items.slice(0, max) };',
     to: 'return { total: items.length, truncated: false, items };' },
   // ⑧ 每源未读：退回常量 0 会让模型看到的「未读」永远是空账（左栏与工具口径分裂）。
   { id: 'tools-每源未读恒零', file: 'lib/tools.js',
     judges: ['tools.test.mjs'],
+    judgeTests: ['rss_list_feeds：三个目录各自成信封（total / truncated / items），带未读与健康'],
     from: 'unread: unread[id] ?? 0,',
     to: 'unread: 0,' },
   // ⑨ 日期验真：只查正则的话 2026-02-30 会被 Date 悄悄滚成 3 月 2 日，查询会返回一批「合理」结果。
   { id: 'tools-日期不验真', file: 'lib/tools.js',
     judges: ['tools.test.mjs'],
+    judgeTests: ['rss_search：未知源 id / 非真实日期 / 超长关键词都在查询前被拒'],
     from: 'return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;',
     to: 'return true;' },
   // ⑩ 订阅归属：退订只删源与游标，残留条目仍在 items 表；不挡就会把已退订来源的正文继续发给模型。
   { id: 'tools-退订源残留照发', file: 'lib/tools.js',
     judges: ['tools.test.mjs'],
+    judgeTests: ['rss_read_article：退订源的残留条目不得泄漏标题、链接或正文'],
     from: 'if (!subscribed.has(record.feedId)) {',
     to: 'if (false) {' },
   // ⑪ 参数类型：退回「类型不对就当没传」，query/feedId 类型错时会静默变成全库查询。
   { id: 'tools-参数类型静默回落', file: 'lib/tools.js',
     judges: ['tools.test.mjs'],
+    judgeTests: ['rss_search：类型错误的参数明确失败，绝不退回全库查询'],
     from: "    if (typeof value !== 'string')\n        throw new Error(name + ' 必须是字符串');",
     to: "    if (typeof value !== 'string')\n        return undefined;" },
   // ── M3 03：写工具的授权与幂等 ─────────────────────────────────────────
   // ⑫ 无动作调用：不拦就回一个「成功」，调用方以为写了、其实什么都没发生。
   { id: 'tools-写工具无动作也放行', file: 'lib/tools.js',
     judges: ['tools.test.mjs'],
+    judgeTests: ['rss_update_item：无动作 / 非布尔 / 未知条目 / 退订源条目一律拒绝'],
     from: 'if (setRead === undefined && setStarred === undefined) {',
     to: 'if (false) {' },
   // ⑬ 归属判据：退订源的残留条目不挡就会被 Agent 改写。
   { id: 'tools-写工具不查订阅归属', file: 'lib/tools.js',
     judges: ['tools.test.mjs'],
+    judgeTests: ['rss_update_item：无动作 / 非布尔 / 未知条目 / 退订源条目一律拒绝'],
     from: 'if (!subscribed.has(existing.feedId)) {',
     to: 'if (false) {' },
   // ⑭ 幂等：已读条目再标已读若刷新时间戳，重试就会改写「最近已读」。
   { id: 'tools-已读重复写刷新时间戳', file: 'lib/tools.js',
     judges: ['tools.test.mjs'],
+    judgeTests: ['rss_update_item：setRead / setStarred 显式动作生效，重复调用状态不变（幂等，不是 toggle）'],
     from: 'if (setRead === true && current.readAt === undefined) {',
     to: 'if (setRead === true) {' },
   // ⑮ 逐次审批：钩子若对写工具也放行，等于写工具没有任何授权门槛。
   { id: 'tools-写工具绕过审批', file: 'lib/tools.js',
     judges: ['tools.test.mjs'],
+    judgeTests: ['写工具的逐次审批：pre-execute 只对本工具 ask，其它工具必须放行（waterfall 不许漏 next）'],
     from: "        if (exec.name !== 'rss_update_item')",
     to: '        if (true)' },
 ]
@@ -1674,16 +1912,26 @@ function hostFreeMB() {
   }
 }
 
-// 「跑一次套件」。root 参数化（隔离副本跑副本、源目录跑基线）；files 省缺 = 全量内环 glob。
-function runSuite(root, files) {
-  const spec = files === undefined ? 'tests/*.test.mjs' : files.join(' ')
+// 「跑一次套件」。root 参数化（隔离副本跑副本、源目录跑基线）。
+// spec 省缺 = 全量内环 glob；{ files } = 只跑这些文件；{ files, patterns } 再叠加测试名过滤（P1）。
+// 为什么把测试名过滤放在这一层：runSuite 是 gate / fast / 基线三条路径共用的唯一执行点，
+// 过滤只有落在这里，才不会出现「gate 跑一套、fast 跑另一套」的双份语义。
+function runSuite(root, spec) {
+  const files = spec?.files
+  // 测试名过滤（P1）：judgeTests 是**子串**，node 的 --test-name-pattern 按正则吃，所以逐个转义。
+  const patterns = (spec?.patterns ?? []).map((name) => String(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+  // 显式文件列表：不经过 shell，就没有引号转义这一层（测试名里有 ：+ ? ( ) 这些字符）。
+  const targets = files ?? readdirSync(path.join(root, "tests")).filter((name) => name.endsWith(".test.mjs")).sort().map((name) => "tests/" + name)
+  const argv = ["--test", "--test-concurrency=" + SUITE_CONCURRENCY]
+  for (const pattern of patterns) argv.push("--test-name-pattern=" + pattern)
+  argv.push(...targets)
   // 子进程显式带上堆上限：NODE_OPTIONS 会被 execSync → node → node --test 三层原样继承
   // （实测：父设 512 时孙进程 heap_size_limit 也是 704 MB）。继承来的堆上限必须先**摘掉**再追加——
   // 只靠「后面的覆盖前面的」虽然实测有效（4096+1024 ⇒ 1216 MB），但那依赖 V8 的取值次序，太脆。
   const inherited = (process.env.NODE_OPTIONS ?? '').replace(/--max-old-space-size=\d+/g, '').trim()
   const nodeOptions = (inherited + ' --max-old-space-size=' + SUITE_HEAP_MB).trim()
   try {
-    const out = execSync('node --test --test-concurrency=' + SUITE_CONCURRENCY + ' ' + spec + ' 2>&1', { cwd: root, encoding: 'utf8', maxBuffer: 128 * 1024 * 1024, timeout: SUITE_TIMEOUT_MS, env: { ...process.env, NODE_OPTIONS: nodeOptions } })
+    const out = execFileSync(process.execPath, argv, { cwd: root, encoding: "utf8", maxBuffer: 128 * 1024 * 1024, timeout: SUITE_TIMEOUT_MS, env: { ...process.env, NODE_OPTIONS: nodeOptions } })
     return { ok: true, out: out }
   } catch (error) {
     // 超时（SIGTERM 杀）也是「判定无效」：分类器见 timeout 标志记 crashed——红 ≠ 被抓住。
@@ -1743,7 +1991,9 @@ function judgesFromFails(out) {
 //     快照里 138 条全部带噪声（探针：keys 变异下两用例必炸，非断言看见缺陷）。
 // .git / .worktrees 不拷（worktree 里是整份检出副本，拷了既慢又可能级联）。
 function seedWorkerCopy(workerRoot) {
-  for (const entry of ['lib', 'tests', 'scripts', 'src', 'node_modules', 'package.json']) {
+  // .gitignore 也在清单里：tests/mutation-runner.test.mjs 会读它（P2 的缓存文件必须不入 VCS），
+  // 副本少这一份 ⇒ 副本基线红 ⇒ 全部门槛记「判定无效」（2026-11-15 实测踩到）。
+  for (const entry of ['lib', 'tests', 'scripts', 'src', 'node_modules', 'package.json', '.gitignore']) {
     cpSync(path.join(ROOT, entry), path.join(workerRoot, entry), { recursive: true, preserveTimestamps: true })
   }
 }
@@ -1774,8 +2024,8 @@ function partitionMutations(mutations, n) {
 // 结果用 postMessage 回传；worker 内任何异常都记成 crashed，不许静默吞掉一条变异。
 function buildWorkerScript(workerRoot, mutations) {
   return `
-const { execSync } = require('node:child_process')
-const { readFileSync, writeFileSync, existsSync } = require('node:fs')
+const { execFileSync } = require('node:child_process')
+const { readFileSync, writeFileSync, existsSync, readdirSync } = require('node:fs')
 const path = require('node:path')
 const { parentPort } = require('node:worker_threads')
 const root = ${JSON.stringify(workerRoot)}
@@ -1798,11 +2048,23 @@ const applyMutation = ${applyMutation.toString()}
 //（helpOpen/Esc 的 scroll-dom 挂死形态拖过 120s 悬崖的现场），也让 fast 绿 ≠ gate 绿。
 // 保守回落：judges 缺失（漂移）⇒ 回落全量 —— 判据变窄比判定无效更危险，漂移兜底交给
 // 主进程的「未应用」通道与 mutation:calibrate。
-function judgeFiles(m) {
+// 判据入口：judges（文件级，权威）+ 可选 judgeTests（测试名子串，P1 的细化）。
+// 漂移兜底与以前一致：judges 缺失或指向不存在的文件 ⇒ 回落全量。
+// judgeTests 缺失/为空 ⇒ 整文件（老行为）；有则交给 runSuite 走 --test-name-pattern。
+function judgeSpec(m) {
   const declared = [...new Set(m.judges ?? [])]
   if (declared.length === 0) return undefined
   const files = declared.filter((f) => existsSync(path.join(root, 'tests', f)))
-  return files.length === declared.length ? files.map((f) => 'tests/' + f) : undefined
+  if (files.length !== declared.length) return undefined
+  const patterns = (m.judgeTests ?? []).filter((name) => typeof name === 'string' && name.length > 0)
+  if (patterns.length === 0) return { files: files.map((f) => 'tests/' + f), patterns: [], drift: false }
+  // 漂移校验必须在跑之前做：node --test 在「pattern 一条都没匹配上」时**照样报 pass**
+  // （它把文件本身算成一条通过的测试，实测 tests=1 / pass=1），所以靠输出识别不出来。
+  // 判据取「名字字面量是否还在这些 judge 文件里」—— 改名/删除都会当场被抓到。
+  const sources = files.map((f) => readFileSync(path.join(root, 'tests', f), 'utf8'))
+  const missing = patterns.filter((name) => !sources.some((src) => src.includes("test('" + name + "'") || src.includes('test("' + name + '"')))
+  if (missing.length > 0) return { files: files.map((f) => 'tests/' + f), patterns: [], drift: true, missing }
+  return { files: files.map((f) => 'tests/' + f), patterns, drift: false }
 }
 const base = runSuite(root)
 if (!base.ok) {
@@ -1811,16 +2073,24 @@ if (!base.ok) {
   try {
     const applied = applyMutation(root, m)
     if (!applied.ok) { parentPort.postMessage({ id: m.id, status: 'unapplied' }); continue }
+    const spec = judgeSpec(m)
     let res
+    let narrowed = false
     const startedAt = Date.now()
     try {
-      res = runSuite(root, judgeFiles(m))
+      res = runSuite(root, spec)
+      // 测试名漂移兜底（P1）：judgeSpec 在跑之前已经校验过名字还在不在。
+      // 名字找不到 ⇒ 退回整文件（老语义），并在输出里点名缺了哪条 —— 不许静默跳过。
+      if (spec?.drift) {
+        console.log('  · ' + m.id.padEnd(26) + ' → judgeTests 与测试文件漂移（缺：' + (spec.missing ?? []).join(' / ') + '），回退整文件')
+      }
+      narrowed = (spec?.patterns?.length ?? 0) > 0
       // P2（gate 调优轮）：超时重试一次 —— C4-a 实测过并行负载下的**偶发**假超时（2 条），
       // 与 C4-b 的**确定性**超时（jsdom×runner 挂死）必须区分：偶发重试即愈，确定性连超 2 次
       // 仍记 crashed 且文案标「确定性」，人工判读不再需要复跑排除。
       if (res.timeout) {
         console.log('  · ' + m.id.padEnd(26) + ' → 套件超时，重试一次…')
-        res = runSuite(root, judgeFiles(m))
+        res = runSuite(root, spec)
         if (res.timeout) res = { ...res, deterministic: true }
       }
     } finally { writeFileSync(path.join(root, m.file), applied.original) }
@@ -1829,7 +2099,7 @@ if (!base.ok) {
     const verdict = classify(res, m)
     // 逐条回传即打印（终审 C1 教训：挂死 40 分钟零输出——进度必须实时可见；worker stdout 直通主进程）
     console.log('  · ' + m.id.padEnd(26) + ' → ' + verdict + '（' + (Date.now() - startedAt) + 'ms）')
-    parentPort.postMessage(verdict === 'crashed' ? { id: m.id, status: 'crashed', crash: crashName(res), fails, judges } : { id: m.id, status: verdict, fails, judges })
+    parentPort.postMessage(verdict === 'crashed' ? { id: m.id, status: 'crashed', crash: crashName(res), fails, judges, narrowed, ms: Date.now() - startedAt } : { id: m.id, status: verdict, fails, judges, narrowed, ms: Date.now() - startedAt })
   } catch (error) {
     parentPort.postMessage({ id: m.id, status: 'crashed', crash: 'worker 内异常：' + error.message, fails: [] })
   }
@@ -1872,7 +2142,7 @@ function runWorker(workerRoot, mutations) {
 function parseArgs(argv) {
   // 默认 K 由宿主编译期约束算出（见 defaultWorkers）：旧口径固定 min(6, cpus-2) 在本机会给到 6，
   // 叠加 node --test 的文件级并发 10 ⇒ 约 60 个 node 进程，16 GB 无 swap 的机器扛不住。
-  const args = { mode: 'gate', workers: defaultWorkers(), dumpJudges: undefined, only: undefined }
+  const args = { mode: 'gate', workers: defaultWorkers(), dumpJudges: undefined, only: undefined, changed: false, incremental: false, timings: undefined, meta: undefined }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--mode') args.mode = argv[++i]
@@ -1886,16 +2156,126 @@ function parseArgs(argv) {
       if (Number.isFinite(asked) && asked > ceiling) console.error('--workers ' + asked + ' 超过宿主资源闸上限 ' + ceiling + '，已夹到 ' + args.workers + '（保护整机）')
     }
     else if (a === '--dump-judges') args.dumpJudges = argv[++i] ?? true
+    else if (a === '--changed') args.changed = true
+    else if (a === '--timings') args.timings = argv[++i] ?? true
+    else if (a === '--incremental') args.incremental = true
     else if (a === '--mutations') args.only = String(argv[++i]).split(',').map((s) => s.trim()).filter(Boolean)
     else { console.error('未知参数: ' + a); process.exit(2) }
   }
   return args
 }
 
+// ── P2：增量模式（opt-in）────────────────────────────────────────────────
+// 为什么默认关：gate 的判据是「这一轮真的把每条都改坏了一次」。缓存只服务开发内环
+//（改一个文件后只重跑受影响的那几条），全量 gate 永远走完整路径（不传 --changed/--incremental）。
+const CACHE_PATH = path.join(ROOT, '.mutation-cache.json')
+
+// 脚本自身进 key：判定逻辑或条目改过，旧缓存必须整体失效。
+function scriptVersion() {
+  return createHash('sha256').update(readFileSync(new URL(import.meta.url))).digest('hex').slice(0, 16)
+}
+
+// src/x.ts → lib/x.js；src/client/** 整体产物是单文件 lib/client.js。
+function libOfSource(file) {
+  if (file.startsWith('src/client/')) return 'lib/client.js'
+  const matched = /^src\/(.+)\.tsx?$/.exec(file)
+  return matched === null ? undefined : 'lib/' + matched[1] + '.js'
+}
+
+// git 里的改动 → 受影响的变异。判据只有两条（用户裁决的口径）：
+//   改了某个 lib 文件 → 跑该文件的全部变异；改了测试文件 → 让所有 judge 含该测试的变异失效。
+// 其余（文档/AGENTS 等）不影响判据。
+function affectedPredicate(files) {
+  const libFiles = new Set()
+  const testFiles = new Set()
+  let all = false
+  for (const file of files) {
+    if (file.startsWith('lib/')) libFiles.add(file)
+    else if (file.startsWith('tests/')) testFiles.add(file.split('/').pop())
+    else if (file.startsWith('src/')) {
+      const lib = libOfSource(file)
+      if (lib === undefined) all = true
+      else libFiles.add(lib)
+    } else if (file === 'package.json' || file === 'scripts/mutation-test.mjs' || file === 'scripts/build.sh') all = true
+  }
+  return (m) => all || libFiles.has(m.file) || (m.judges ?? []).some((judge) => testFiles.has(judge))
+}
+
+function gitChangedFiles() {
+  try {
+    const tracked = execSync('git diff --name-only HEAD', { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+    const untracked = execSync('git ls-files --others --exclude-standard', { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+    const lines = (tracked + String.fromCharCode(10) + untracked).split(String.fromCharCode(10))
+    return [...new Set(lines.map((line) => line.trim()).filter(Boolean))]
+  } catch (error) {
+    console.error('--changed 需要可用的 git：' + error.message)
+    return undefined
+  }
+}
+
+function sha256OfFile(file) {
+  return existsSync(file) ? createHash('sha256').update(readFileSync(file)).digest('hex') : 'missing'
+}
+
+// key 至少含：变异 id / from / to / 目标文件内容 / judge 文件内容 / Node 主版本 / 脚本版本。
+function mutationCacheKey(m, version) {
+  const parts = [m.id, m.file, m.from, m.to, process.versions.node.split('.')[0], version, sha256OfFile(path.join(ROOT, m.file))]
+  for (const judge of [...new Set(m.judges ?? [])].sort()) parts.push(judge + ':' + sha256OfFile(path.join(ROOT, 'tests', judge)))
+  return createHash('sha256').update(parts.join(String.fromCharCode(0))).digest('hex')
+}
+
+function loadCache() {
+  try {
+    const raw = JSON.parse(readFileSync(CACHE_PATH, 'utf8'))
+    return raw !== null && typeof raw === 'object' && typeof raw.entries === 'object' ? raw : { entries: {} }
+  } catch {
+    // 缓存损坏/不存在都退回空缓存：它是加速件，不是判据（entries 为空 ⇒ 全部重跑）
+    return { entries: {} }
+  }
+}
+
+function saveCache(cache) {
+  // 只缓存 caught：survived / crashed / unapplied 永远重跑（它们本来就该让 gate 红）。
+  writeFileSync(CACHE_PATH, JSON.stringify({ version: 1, generatedAt: new Date().toISOString(), entries: cache.entries }, null, 2) + String.fromCharCode(10))
+}
+// ── 耗时报表（opt-in，--timings <file>）──────────────────────────────────
+// 为什么要它：门槛快下去之后，「下次改动会不会又变慢」只能靠**趋势**回答。
+// 报表记的是每条变异的墙钟与分档（<=300ms / 300ms–1s / >=1s）——
+// 优化空间几乎总在「>=1s 的那几条占了多少比例」这个数上，而不是平均值。
+function writeTimings(file, results, wallMs, workers) {
+  const rows = results
+    .filter((r) => typeof r.ms === 'number')
+    .map((r) => ({ id: r.id, ms: r.ms, status: r.status, narrowed: r.narrowed === true }))
+    .sort((a, b) => b.ms - a.ms)
+  const totalMs = rows.reduce((acc, r) => acc + r.ms, 0)
+  const slow = rows.filter((r) => r.ms >= 1000)
+  const slowMs = slow.reduce((acc, r) => acc + r.ms, 0)
+  const report = {
+    generatedAt: new Date().toISOString(),
+    node: process.versions.node,
+    workers,
+    wallMs,
+    mutationMs: totalMs,
+    count: rows.length,
+    slowCount: slow.length,
+    slowShare: totalMs === 0 ? 0 : Math.round((slowMs / totalMs) * 100),
+    narrowedCount: rows.filter((r) => r.narrowed).length,
+    etaSecondsByWorkers: Object.fromEntries([1, 2, 3, 4].map((n) => [n, Math.round(totalMs / n / 1000)])),
+    slowest: rows.slice(0, 15),
+  }
+  writeFileSync(file, JSON.stringify(report, null, 2) + String.fromCharCode(10))
+  console.log('')
+  console.log('耗时报表已写入 ' + file + '（' + rows.length + ' 条，合计 ' + (totalMs / 1000).toFixed(1) + 's，墙钟 ' + (wallMs / 1000).toFixed(1) + 's）')
+  console.log('  >=1s 的 ' + slow.length + ' 条占了 ' + report.slowShare + '%：')
+  for (const r of slow.slice(0, 8)) console.log('    ' + String(r.ms).padStart(6) + 'ms  ' + r.id)
+  console.log('  按当前分布估算（不含基线）：1 worker ≈ ' + report.etaSecondsByWorkers[1] + 's · 2 ≈ ' + report.etaSecondsByWorkers[2] + 's · 3 ≈ ' + report.etaSecondsByWorkers[3] + 's')
+}
+
 // 汇总（原 :1032-1040 的判定与文案逐字保留；applied 口径 = 除「未应用」外全部计入，同原实现）。
 function collectResults(results) {
   const survivors = []
   let applied = 0
+  let cached = 0
   for (const r of results) {
     if (r.status === 'unapplied') {
       console.log('  ?  ' + r.id.padEnd(26) + ' 未应用（产物里形状与预期不符，请同步更新本条）')
@@ -1908,6 +2288,10 @@ function collectResults(results) {
       applied += 1
       console.log('  !  ' + r.id.padEnd(26) + ' 副本基线红（判定无效——先修副本忠实化，重跑门槛）')
       survivors.push(r.id + '（副本基线红）')
+    } else if (r.status === 'cached') {
+      // 缓存命中：**独立计数**，既不进 applied，也不进 survivors ——
+      // 它证明的是「这条以前被抓到过」，不是「本轮抓到了」。两者混在一起就是伪绿。
+      cached += 1
     } else if (r.status === 'survived') {
       applied += 1
       console.log('  x  ' + r.id.padEnd(26) + ' 幸存（套件仍然全绿）')
@@ -1917,18 +2301,30 @@ function collectResults(results) {
       console.log('  v  ' + r.id.padEnd(26) + ' 被抓到（' + (r.fails?.length ?? 0) + ' 条翻红：' + (r.fails?.[0] || '').slice(0, 44) + '）')
     }
   }
-  return { applied, survivors }
+  return { applied, survivors, cached }
 }
 
 // judges 快照落盘（杠杆 A 前置）：gate 全量轮的实测翻红就是「哪些测试看着这条变异」的快照——
 // fast 只跑这些文件的前提是快照采自 gate（gateRed ⊆ judges 由构造成立，spec §5）。
 // crashed / survived / unapplied 不进快照：它们本来就令 gate exit 1，没有「看着谁」可言。
+// 翻红用例名：worker 回传的是原始 ✖ 行（含 "✖ failing tests:" 表头、重复项、尾部耗时），
+// 校准要的是「能直接当 --test-name-pattern 用的名字」，所以在这里统一清洗。
+function cleanFails(raw) {
+  const names = []
+  for (const line of raw ?? []) {
+    const name = String(line).replace(/^\s*✖\s*/, '').replace(/\s*\(\d+(\.\d+)?ms\)\s*$/, '').trim()
+    if (name === '' || name === 'failing tests:' || names.includes(name)) continue
+    names.push(name)
+  }
+  return names
+}
+
 function writeJudgesDump(file, results, selected) {
   const mutations = {}
   for (const r of results) {
     if (r.status !== 'caught') continue
     const m = selected.find((x) => x.id === r.id)
-    mutations[r.id] = { file: m ? m.file : '', judges: r.judges ?? [] }
+    mutations[r.id] = { file: m ? m.file : '', judges: r.judges ?? [], judgeTests: m?.judgeTests ?? [], fails: cleanFails(r.fails) }
   }
   writeFileSync(file, JSON.stringify({ generatedAt: new Date().toISOString(), suiteGlob: 'tests/*.test.mjs', mutations }, null, 2))
   console.log('judges 快照已写入 ' + file + '（' + Object.keys(mutations).length + ' 条）')
@@ -1972,7 +2368,8 @@ async function runFast(args, selected) {
           continue
         }
         let res
-        try { res = runSuite(sub, files.map((f) => 'tests/' + f)) } finally { writeFileSync(path.join(sub, m.file), applied.original) }
+        const patterns = (m.judgeTests ?? []).filter((name) => typeof name === 'string' && name.length > 0)
+        try { res = runSuite(sub, { files: files.map((f) => 'tests/' + f), patterns }) } finally { writeFileSync(path.join(sub, m.file), applied.original) }
         const fails = res.out.split('\n').filter((l) => /^\s*✖/.test(l)).map((l) => l.trim().replace(/\s*\(\d.*$/, ''))
         const verdict = classify(res, m)
         const redJudges = judgesFromFails(res.out).filter((j) => files.includes(j))
@@ -2000,9 +2397,21 @@ async function runFast(args, selected) {
 }
 
 async function main() {
+  const runStartedAt = Date.now()
   const args = parseArgs(process.argv.slice(2))
   let selected = args.only ? MUTATIONS.filter((m) => args.only.includes(m.id)) : MUTATIONS
   if (selected.length === 0) { console.error('--mutations 没匹配到任何条目'); process.exitCode = 2; return }
+  // P2（opt-in）：--changed 只跑受影响的那几条；--incremental 允许复用缓存里的 caught 结论。
+  // 两者都不传 = 全量 gate 的原路径（完全不知道缓存存在）。
+  const useCache = args.changed || args.incremental
+  if (args.changed) {
+    const changed = gitChangedFiles()
+    if (changed === undefined) { process.exitCode = 2; return }
+    const predicate = affectedPredicate(changed)
+    selected = selected.filter(predicate)
+    console.log('--changed：' + changed.length + ' 个改动文件 → 命中 ' + selected.length + ' 条变异')
+    if (selected.length === 0) { console.log('没有受影响的变异（改动的文件不进判据）。'); return }
+  }
   if (args.mode === 'fast') { await runFast(args, selected); return }
   if (args.mode !== 'gate') { console.error('--mode ' + args.mode + ' 不认识（gate | fast）'); process.exitCode = 2; return }
 
@@ -2016,20 +2425,43 @@ async function main() {
   console.log('基线绿。逐条改坏关键判定，看套件是否见红：')
   console.log('')
 
+  // 缓存命中在这时结算：只认 caught，其余一律重跑（survived/crashed/unapplied 不缓存）。
+  let cachedResults = []
+  let toRun = selected
+  let cache = { entries: {} }
+  if (useCache) {
+    cache = loadCache()
+    const version = scriptVersion()
+    const residual = []
+    for (const m of selected) {
+      const key = mutationCacheKey(m, version)
+      m.cacheKey = key
+      if (cache.entries[key]?.status === 'caught') cachedResults.push({ id: m.id, status: 'cached', key })
+      else residual.push(m)
+    }
+    toRun = residual
+    console.log('缓存命中 ' + cachedResults.length + ' 条（不重跑，不计入本轮抓到）')
+  }
+
   const workerRoot = mkdtempSync(path.join(os.tmpdir(), 'mutation-gate-'))
   let results
   try {
-    const n = Math.max(1, Math.min(args.workers || 1, selected.length))
-    const buckets = partitionMutations(selected, n)
-    const running = []
-    for (let i = 0; i < buckets.length; i++) {
-      if (buckets[i].length === 0) continue
-      const sub = path.join(workerRoot, 'w' + i)
-      mkdirSync(sub, { recursive: true })
-      seedWorkerCopy(sub)
-      running.push(runWorker(sub, buckets[i]))
+    // 全部命中缓存时不建 worker：连副本基线那一次都省掉（否则「零变更」还要跑一遍空集）。
+    if (toRun.length === 0) {
+      results = [...cachedResults]
+    } else {
+      const n = Math.max(1, Math.min(args.workers || 1, toRun.length))
+      const buckets = partitionMutations(toRun, n)
+      const running = []
+      for (let i = 0; i < buckets.length; i++) {
+        if (buckets[i].length === 0) continue
+        const sub = path.join(workerRoot, 'w' + i)
+        mkdirSync(sub, { recursive: true })
+        seedWorkerCopy(sub)
+        running.push(runWorker(sub, buckets[i]))
+      }
+      results = [...cachedResults, ...(await Promise.all(running)).flat()]
     }
-    results = (await Promise.all(running)).flat()
   } finally {
     rmSync(workerRoot, { recursive: true, force: true })
   }
@@ -2037,12 +2469,29 @@ async function main() {
   // 打印顺序对齐 MUTATIONS 定义序（并行回传顺序不定）
   const order = new Map(selected.map((m, i) => [m.id, i]))
   results.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0))
-  const { applied, survivors } = collectResults(results)
+  // 把 key 贴回结果（worker 不需要知道缓存的存在）：缓存落盘只认本轮真跑过的 caught。
+  const keyById = new Map(selected.filter((m) => typeof m.cacheKey === 'string').map((m) => [m.id, m.cacheKey]))
+  for (const r of results) if (keyById.has(r.id)) r.key = keyById.get(r.id)
+  const { applied, survivors, cached } = collectResults(results)
+  if (args.timings !== undefined) writeTimings(args.timings === true ? 'mutation-timings.json' : args.timings, results, Date.now() - runStartedAt, args.workers)
   if (args.dumpJudges !== undefined) writeJudgesDump(args.dumpJudges === true ? 'judges-dump.json' : args.dumpJudges, results, selected)
+
+  // 落盘缓存：只收「本轮真的抓到」的那部分，且只收带 key 的（= 增量路径）。
+  if (useCache) {
+    const now = new Date().toISOString()
+    for (const r of results) {
+      if (r.status !== 'caught') continue
+      if (typeof r.key !== 'string') continue
+      cache.entries[r.key] = { status: 'caught', id: r.id, at: now }
+    }
+    saveCache(cache)
+  }
 
   const after = runSuite(ROOT)
   console.log('')
-  console.log('应用 ' + applied + '/' + selected.length + ' 条 · 幸存 ' + survivors.length + ' 条 · 恢复后基线 ' + (after.ok ? '仍然绿' : '没恢复干净！'))
+  console.log('应用 ' + applied + '/' + selected.length + ' 条 · 幸存 ' + survivors.length + ' 条' +
+    (useCache ? ' · 缓存命中 ' + cached + ' 条（未重跑，不计入本轮抓到）' : '') +
+    ' · 恢复后基线 ' + (after.ok ? '仍然绿' : '没恢复干净！'))
   if (survivors.length > 0) {
     console.error('幸存清单：' + survivors.join('、'))
     console.error('-> 标「幸存」的是测试没覆盖到的判定（补一条会翻红的断言，或确认它是等价变异）；')

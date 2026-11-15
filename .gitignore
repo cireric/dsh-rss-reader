@@ -11,3 +11,6 @@ HANDOFF.md
 
 .worktrees/
 .codegraph/
+
+# P2 增量模式的结论缓存（只存 caught；不进 VCS）
+.mutation-cache.json

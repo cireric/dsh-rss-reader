@@ -78,7 +78,7 @@ PATH=<checkout>/node_modules/.bin:$PATH npm run mutation -- --workers 1
 | `npm run build:client`（PATH += checkout/.bin） | **0** | 0.3 s | `lib/client.js` 202.75 kB |
 | `npm run typecheck` | **0** | 1.3 s | 两个工程 |
 | `npm test` | **0** | 15.6 s | 537 通过 / 0 失败 |
-| `npm run mutation`（第 1 批 76 条，`--workers 1`） | **0** | 336 s | 76/76 被抓到、幸存 0、基线仍绿 |
+| `npm run mutation`（第 1 批 76 条，`--workers 1`） | **0** | 336 s | 76/76 被抓到、幸存 0、基线仍绿（2026-11-15 提速前口径；现行全量 240 条约 2.5 min，见 §5.5） |
 
 ## 4. 构建的确定性（实测）
 
@@ -95,7 +95,22 @@ PATH=<checkout>/node_modules/.bin:$PATH npm run mutation -- --workers 1
 3. **`scripts/build.sh` 探测路径写死四个候选**：换个 checkout 位置就必须显式传 `DSH_CHECKOUT`。
 4. **两个 tsc 版本并存**（6.0.3 构建 / 7.0.2 复检）：这是刻意的类型边界检查（pitfalls §1.11），但也意味着
    「构建通过的编译器版本」只有一个 —— CI 里必须固定用 checkout 的那个。
-5. **变异门槛的时长**：230 条在本机（4–5 GB 可用内存）要 `--workers 1` + 分 3 批，约 15 分钟 —— 这是 CI 分层的主要约束。
+5. **变异门槛的时长**：240 条在本机（~5 GB 可用内存）要 `--workers 1`。**2026-11-15 提速后全量实测 152 s**（judge 合计 138 s + 3 次基线），
+   旧口径约 15 分钟。提速来自三处，都不改判据：① `scroll-dom` 的 212 处固定 `sleep` 换成 `waitFor`/`settle`（14.9 s → ~3 s）；
+   ② `client-bundle` / `unread-accounting` 夹具不再真排程 5000 ms 撤销窗口（各 5.4 s / 5.1 s → 0.4 s / 0.1 s）；
+   ③ `judgeTests`（可选）按校准出的翻红用例名过滤，`--test-name-pattern` 单条命中约 0.1–0.4 s。
+   内环可用 `npm run mutation -- --changed`（只跑受影响变异，opt-in，走 `.mutation-cache.json`），全量 gate 不受影响。
+
+   **观察口径（防「又变慢」）**：
+
+   | 工具 | 命令 | 看什么 |
+   |---|---|---|
+   | 耗时报表 | `node scripts/mutation-test.mjs --workers N --timings <file>` | `slowShare`（≥1s 变异占总耗时的比例）、`slowCount`、`narrowedCount`、`etaSecondsByWorkers`、`slowest` 前 15 |
+   | judge 墙钟预算 | `npm run test:perf` | `tests/perf/mutation-judge-budget.test.mjs`：scroll-dom 8s / client-bundle 2s / unread 1s / refresh 1s（当前 2.9s / 0.35s / 0.09s / 0.22s） |
+   | 结构锚点 | `npm test` | `tests/mutation-runner.test.mjs`：judge 文件不得出现裸 `await sleep(`；撤销窗口必须只捕获不排程；judgeTests 必须有跑前漂移校验 |
+
+   判读规则（`实测` 基线：240 条 / 141s，slowShare 72%，中位 103ms）：`slowShare` 上升说明时间集中在少数变异（先看它们是不是「广谱翻红」或「文件级回退」）；
+   `slowCount` 上升说明新变异落进了重文件；`narrowedCount` 下降说明 `judgeTests` 漂移或新增条目没校准；中位数上升而 slowShare 不变 = 夹具层回归（sleep 回来了）。
 
 ## 6. 一个容易误删的条目
 
@@ -122,7 +137,7 @@ B/C 都会改变「依赖从哪来」这个公共契约，**没有动**。
 | 层 | 内容 | 触发 | 预算 |
 |---|---|---|---|
 | L1 快速 | `bash scripts/gate.sh` —— `build` + `build:client` + `typecheck`（两个编译器）+ `test`，逐条打印退出码 | 每次改动 / push | **19.2 s**（本机实测） |
-| L2 门槛 | `npm run mutation -- --workers 1`（分 3 批） | 每天 / release 前 | ~15 min（本机） |
+| L2 门槛 | `npm run mutation -- --workers 1`（分 3 批；2026-11-15 起单批即可跑完） | 每天 / release 前 | **~2.5 min**（本机实测 152 s） |
 | L3 真机 | 注入器装载 + 当天日志 + 401 | release 前，人工 | — |
 
 L1 可以在任何有 checkout 的机器上跑；L2/L3 需要一台有内存与活体宿主的环境。

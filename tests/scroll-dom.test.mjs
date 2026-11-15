@@ -73,6 +73,22 @@ const STACK = loadStack()
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 /**
+ * 等到 predicate() 为真。
+ *
+ * 为什么不用 sleep(n)：固定毫秒是在赌机器速度 —— 赌赢了白等，赌输了 flaky。
+ * 这里的判据是**业务可见状态**（view === 'article'、正文容器在 DOM 里、请求真的发出去了），
+ * 状态一到就往下走，超时才失败（失败信息带 label，能直接看出在等什么）。
+ */
+async function waitFor(predicate, { timeout = 1000, interval = 5, label = '条件' } = {}) {
+  const deadline = Date.now() + timeout
+  for (;;) {
+    if (await predicate()) return
+    if (Date.now() >= deadline) throw new Error('等待超时（' + timeout + 'ms）：' + label)
+    await new Promise((resolve) => setTimeout(resolve, interval))
+  }
+}
+
+/**
  * 桩 overview：一份**守宿主契约**的返回值（feeds 表 + items + perFeedUnread）。
  *
  * 为什么封装成一份而不是三处各拼一个对象：perFeedUnread 的**键域严格 = feeds 表**（0 未读的源
@@ -301,8 +317,55 @@ async function mountReader({ items = [], feeds, folders, tags = [], article, hol
     }
     return ok({ changed: 1, unread: 0 })
   }
-  globalThis.fetch = fetchStub
-  win.fetch = fetchStub
+  // 在飞请求计数：settle() 用它判断「这一串异步链走完了没有」。
+  // 没有它，一个点击触发的 fetch 还没回来，settle 会因为「DOM 暂时没变」提前返回。
+  let pendingFetches = 0
+  const trackedFetch = async (...args) => {
+    pendingFetches += 1
+    try { return await fetchStub(...args) } finally { pendingFetches -= 1 }
+  }
+  globalThis.fetch = trackedFetch
+  win.fetch = trackedFetch
+
+  // 让出一次「任务」：React 18 的调度器走 MessageChannel，timers 与它不在同一条队尾。
+  // 用同一条通道让路，能保证「先排的 React 工作」在我们这一跳之前跑完 —— 花费是 0，
+  // 不是「等 5ms 碰运气」。环境没有 MessageChannel 时退回 0ms 定时器（同一条宏任务）。
+  const nextTask = () => new Promise((resolve) => {
+    if (typeof win.MessageChannel !== "function") { setTimeout(resolve, 0); return }
+    const channel = new win.MessageChannel()
+    channel.port1.onmessage = () => { channel.port1.close(); channel.port2.close(); resolve() }
+    channel.port2.postMessage(0)
+  })
+  const settle = async ({ timeout = 1000, quietTicks = 2, allowPending = false } = {}) => {
+    let mutations = 0
+    const observer = new win.MutationObserver(() => { mutations += 1 })
+    observer.observe(win.document, { subtree: true, childList: true, attributes: true, characterData: true })
+    try {
+      let seen = -1
+      let quiet = 0
+      let ticks = 0
+      const deadline = Date.now() + timeout
+      while (Date.now() < deadline) {
+        // 两个不同任务源各让一跳：React 的调度消息走 MessageChannel，而定时器队列是另一条线，
+        // 只让其中一条会漏掉「排在另一条前面的提交」（实测并发下 1/6 轮偶发早退）。
+        await nextTask()
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        ticks += 1
+        if (!allowPending && pendingFetches > 0) { quiet = 0; continue }
+        if (mutations === seen) {
+          quiet += 1
+          // 至少两跳：第一跳可能只是把 React 的调度消息排到队尾（此刻 DOM 还没动）。
+          if (quiet >= quietTicks && ticks >= 2) return
+        } else {
+          seen = mutations
+          quiet = 0
+        }
+      }
+      throw new Error('等界面稳定超时（' + timeout + 'ms）：在飞请求 ' + pendingFetches + ' 个，DOM 变更 ' + mutations + ' 次')
+    } finally {
+      observer.disconnect()
+    }
+  }
 
   let captured = null
   win.__ModuleLoader__ = { load: (entry) => { captured = entry } }
@@ -317,7 +380,10 @@ async function mountReader({ items = [], feeds, folders, tags = [], article, hol
   const store = exportsObj.createReaderStore()
   const rootRef = createRoot(win.document.getElementById('root'))
   rootRef.render(React.createElement(exportsObj.createReader(store)))
-  await sleep(50)
+  // 首次上屏 = React 真的把 Reader 挂上去了（root 有子节点），不是「睡够 50ms」。
+  await waitFor(() => win.document.getElementById('root').childNodes.length > 0, { timeout: 2000, label: 'Reader 首次上屏' })
+  // 挂载后组件自己会走一次 refresh（index.tsx:184）—— 等它落地再交给用例。
+  await settle()
 
   /** 按标记属性现取容器 —— 与按键处理器读的是同一个属性，所以它顺带钉住了标记。 */
   const box = (kind) => win.document.querySelector('[data-rss-scroll="' + kind + '"]')
@@ -374,6 +440,14 @@ async function mountReader({ items = [], feeds, folders, tags = [], article, hol
    * 整个 judge 套件被拖过 gate 的 120s 悬崖 ⇒ 变异记「套件超时」= 判定无效。
    * 挂起不是判据问题，是夹具的资源泄漏 —— cleanup 把泄漏本体消灭。
    */
+  /**
+   * 等到「界面把这次动作落地」：没有在飞请求，且 DOM 连续两个 5ms 刻度没有变化。
+   *
+   * 它不是「等一个猜出来的时长」——它等的是可观测的事件（请求计数归零 + 变更停止）。
+   * 之所以需要它而不是每条都写 waitFor：一半以上的动作只产生「重渲染」这一种结果，
+   * 没有比「界面不再变化」更精确、又不把测试写成实现细节的业务信号。
+   * 超时抛错：界面一直在变（渲染死循环 / 异步链没落地）必须响亮失败，不许静默通过。
+   */
   const cleanup = () => {
     try { rootRef.unmount() } catch { /* 已卸载 */ }
     try { dom.window.close() } catch { /* 已关 */ }
@@ -383,7 +457,7 @@ async function mountReader({ items = [], feeds, folders, tags = [], article, hol
   }
   // 登记到模块级收尾表：afterEach 统一调用（用例无需逐一改）
   liveCleanups.push(cleanup)
-  return { store, win, endpoints, requests, server: { feeds: serverFeeds, folders: serverFolders }, box, byLabel, arm, observeContent, userScroll, press, exports: exportsObj, release: () => { if (releaseArticle !== undefined) releaseArticle() }, scrollTop: (el) => (geometry.get(el) ?? (() => el.scrollTop))(), cleanup }
+  return { store, win, endpoints, requests, server: { feeds: serverFeeds, folders: serverFolders }, box, byLabel, arm, observeContent, userScroll, press, exports: exportsObj, release: () => { if (releaseArticle !== undefined) releaseArticle() }, scrollTop: (el) => (geometry.get(el) ?? (() => el.scrollTop))(), cleanup, settle, waitFor }
 }
 
 /** 一条最小可用条目。 */
@@ -417,7 +491,7 @@ test('详情页空格翻页：容器必须在 DOM 里、且按键真的改了它
   // 进详情页后空格是 no-op —— 而旧夹具对此全绿。
   const h = await mountReader({ items: [item({ id: 'a' }), item({ id: 'b' })] })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
 
   // 列表页：空格应当滚动
   const list = h.arm(h.box('list'))
@@ -426,8 +500,8 @@ test('详情页空格翻页：容器必须在 DOM 里、且按键真的改了它
 
   // 进详情页（走真实按键路径，不走 store 直调 —— 要覆盖「按 V 之后」这个真实时序）
   h.press('V', true)
-  for (let i = 0; i < 40 && h.store.get().view !== 'article'; i += 1) await sleep(20)
-  await sleep(60)
+  await h.waitFor(() => h.store.get().view === 'article', { timeout: 900, label: '进入正文页' })
+  await h.settle()
   assert.equal(h.store.get().view, 'article', 'V 应当进入详情页')
 
   const article = h.box('article')
@@ -440,10 +514,10 @@ test('详情页空格翻页：容器必须在 DOM 里、且按键真的改了它
 test('详情页 n/p 按「正文一行」滚动，而不是回落到列表行高（48px = 一行半）', skip, async () => {
   const h = await mountReader({ items: [item({ id: 'a' }), item({ id: 'b' })] })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
   h.press('V', true)
-  for (let i = 0; i < 40 && h.store.get().view !== 'article'; i += 1) await sleep(20)
-  await sleep(60)
+  await h.waitFor(() => h.store.get().view === 'article', { timeout: 900, label: '进入正文页' })
+  await h.settle()
 
   const article = h.arm(h.box('article'))
   assert.equal(h.press('n'), true, '详情页 n 应当被接管')
@@ -462,10 +536,10 @@ test('详情页 n/p 按「正文一行」滚动，而不是回落到列表行高
 test('详情页 d / shift+d 翻半页（整屏的一半，且夹得住边界）', skip, async () => {
   const h = await mountReader({ items: [item({ id: 'a' }), item({ id: 'b' })] })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
   h.press('V', true)
-  for (let i = 0; i < 40 && h.store.get().view !== 'article'; i += 1) await sleep(20)
-  await sleep(60)
+  await h.waitFor(() => h.store.get().view === 'article', { timeout: 900, label: '进入正文页' })
+  await h.settle()
 
   const article = h.arm(h.box('article'))
   assert.equal(h.press('d'), true, 'd 应当被接管')
@@ -479,9 +553,10 @@ test('详情页 d / shift+d 翻半页（整屏的一半，且夹得住边界）'
 test('正文加载中也有容器：空格不再是 no-op（此前容器只存在于加载完成的分支）', skip, async () => {
   const h = await mountReader({ items: [item({ id: 'a' }), item({ id: 'b' })], holdArticle: true })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
   h.press('V', true)
-  await sleep(80)
+  // allowPending：正文请求被 gate 故意挂住（这就是被测形态），不能等它回来
+  await h.settle({ allowPending: true })
   assert.equal(h.store.get().article?.loading, true, '此刻正文应当还在抓取中')
 
   const article = h.box('article')
@@ -494,10 +569,10 @@ test('正文加载中也有容器：空格不再是 no-op（此前容器只存�
 test('切换文章后阅读位置归零（DOM 节点被复用，scrollTop 不会自己重置）', skip, async () => {
   const h = await mountReader({ items: [item({ id: 'a' }), item({ id: 'b' }), item({ id: 'c' })] })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
   h.press('V', true)
-  for (let i = 0; i < 40 && h.store.get().view !== 'article'; i += 1) await sleep(20)
-  await sleep(60)
+  await h.waitFor(() => h.store.get().view === 'article', { timeout: 900, label: '进入正文页' })
+  await h.settle()
 
   const article = h.arm(h.box('article'))
   h.press(' ')
@@ -510,7 +585,7 @@ test('切换文章后阅读位置归零（DOM 节点被复用，scrollTop 不会
   // 那样读到的是刚装上去的 0，而不是组件有没有归零 —— 断言永远通过，等于没测。
   // （这条是变异门槛查出来的：client-换文章不归零 一开始是幸存者。）
   h.press('j') // 切下一条
-  await sleep(200)
+  await h.settle()
   assert.equal(h.store.get().article.itemId, 'b', 'j 应当切到下一条')
   assert.equal(h.box('article'), article, 'React 会复用同一个 DOM 节点（正是需要显式归零的原因）')
   assert.equal(h.scrollTop(article), 0, '换文章后应当从顶部开始读')
@@ -519,13 +594,13 @@ test('切换文章后阅读位置归零（DOM 节点被复用，scrollTop 不会
 test('订阅管理页按翻页键不该刷警告（无容器的视图是正常状态，不是异常）', skip, async () => {
   const h = await mountReader({ items: [item({ id: 'a' })] })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
   const warnings = []
   const original = console.warn
   console.warn = (...args) => { warnings.push(args.join(' ')) }
   try {
     h.press('F') // 进订阅管理
-    await sleep(30)
+    await h.settle()
     assert.equal(h.store.get().view, 'feeds', 'F 应当切到订阅管理')
     h.press(' ')
     h.press('d')
@@ -543,7 +618,7 @@ test('按键守卫不依赖环境全局：本 realm 没有 HTMLElement 时，快
   // 判定改为只看节点自身的 nodeType 之后，这条路径与环境全局完全无关。
   const h = await mountReader({ items: [item({ id: 'a' })] })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
 
   const list = h.arm(h.box('list'))
   assert.equal(h.press(' '), true, '基线：正常环境下空格可用')
@@ -571,10 +646,10 @@ test('右下角箭头按钮：上方回顶部、下方去底部（作用在真�
   // 且点击真的改变了容器的 scrollTop。
   const h = await mountReader({ items: [item({ id: 'a' }), item({ id: 'b' })] })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
   h.press('V', true)
-  for (let i = 0; i < 40 && h.store.get().view !== 'article'; i += 1) await sleep(20)
-  await sleep(60)
+  await h.waitFor(() => h.store.get().view === 'article', { timeout: 900, label: '进入正文页' })
+  await h.settle()
 
   const article = h.arm(h.box('article'), { scrollHeight: 3000, clientHeight: 300 })
   const buttons = h.byLabel('回到文章顶部', '前往文章底部')
@@ -593,9 +668,10 @@ test('右下角箭头按钮：上方回顶部、下方去底部（作用在真�
 test('右下角箭头按钮：加载中/抓取失败时不渲染（那时没有正文可跳）', skip, async () => {
   const h = await mountReader({ items: [item({ id: 'a' })], holdArticle: true })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
   h.press('V', true)
-  await sleep(80)
+  // allowPending：正文请求被 gate 故意挂住（这就是被测形态），不能等它回来
+  await h.settle({ allowPending: true })
   assert.equal(h.store.get().article?.loading, true, '前置条件：正文仍在抓取中')
   assert.equal(h.byLabel('回到文章顶部', '前往文章底部').length, 0, '加载中不该出现跳转按钮')
   h.release()
@@ -607,10 +683,10 @@ test('点「↓去底部」后内容长高（懒加载图片进场）：必须�
   // 图片随后的加载把内容撑高，而 scrollTop 留在原地。这条用**受控的 ResizeObserver** 复现它。
   const h = await mountReader({ items: [item({ id: 'a' }), item({ id: 'b' })] })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
   h.press('V', true)
-  for (let i = 0; i < 40 && h.store.get().view !== 'article'; i += 1) await sleep(20)
-  await sleep(60)
+  await h.waitFor(() => h.store.get().view === 'article', { timeout: 900, label: '进入正文页' })
+  await h.settle()
 
   // 装上可控几何 + 可控观察器：内容「长高」由测试显式触发，不依赖真实图片加载
   const article = h.box('article')
@@ -634,10 +710,10 @@ test('点「↓去底部」后内容长高（懒加载图片进场）：必须�
 test('用户自己滚走后就解除「贴底」：不该把读者硬拽回去', skip, async () => {
   const h = await mountReader({ items: [item({ id: 'a' }), item({ id: 'b' })] })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
   h.press('V', true)
-  for (let i = 0; i < 40 && h.store.get().view !== 'article'; i += 1) await sleep(20)
-  await sleep(60)
+  await h.waitFor(() => h.store.get().view === 'article', { timeout: 900, label: '进入正文页' })
+  await h.settle()
 
   const article = h.box('article')
   h.arm(article, { scrollHeight: 3000, clientHeight: 300 })
@@ -680,10 +756,10 @@ test('正文页阅读偏好：时长标「估算」、字号/栏宽落到正文�
   }
   const h = await mountReader({ items: [item({ id: 'a' }), item({ id: 'b' })], article: payload })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
   h.press('V', true)
-  for (let i = 0; i < 40 && h.store.get().view !== 'article'; i += 1) await sleep(20)
-  await sleep(80)
+  await h.waitFor(() => h.store.get().view === 'article', { timeout: 900, label: '进入正文页' })
+  await h.settle()
 
   const badge = h.win.document.querySelector('[data-rss-reading-minutes]')
   assert.ok(badge !== null, '正文页必须显示预计阅读时长')
@@ -699,7 +775,7 @@ test('正文页阅读偏好：时长标「估算」、字号/栏宽落到正文�
   const sizeSelect = h.win.document.querySelector('select[aria-label="正文字号"]')
   assert.ok(sizeSelect !== null, '正文页要有字号选择')
   setControlValue(h.win, sizeSelect, '20')
-  await sleep(80)
+  await h.settle()
   assert.equal(body().style.fontSize, '20px', '改字号必须当场生效')
 
   const saved = h.requests.filter((entry) => entry.endpoint === 'saveViewPreferences').at(-1)
@@ -728,16 +804,16 @@ test('阅读进度：切走再回来接着读、滚动不写盘、离开时落�
     : { itemId: 'b', title: 'ART B', blocks: [{ kind: 'p', text: '另一篇' }], contentVersion: '3:bbbb' }
   const h = await mountReader({ items: [item({ id: 'a' }), item({ id: 'b' })], article: articleOf, holdArticle: true })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
   h.press('V', true)
-  for (let i = 0; i < 40 && h.store.get().view !== 'article'; i += 1) await sleep(20)
+  await h.waitFor(() => h.store.get().view === 'article', { timeout: 900, label: '进入正文页' })
 
   // 容器必须**在正文到达之前**装上几何：恢复发生在「内容真的画出来」那一刻
   // React 的重渲染是异步的：view 已切过去但 DOM 还没提交时 box 仍是 null（既有用例都在这里 sleep）
-  for (let i = 0; i < 40 && h.box('article') === null; i += 1) await sleep(20)
+  await h.waitFor(() => h.box('article') !== null, { timeout: 900, label: '正文容器出现' })
   const box = h.arm(h.box('article'), { scrollHeight: 3000, clientHeight: 300 })
   h.release()
-  await sleep(150)
+  await h.settle()
 
   assert.equal(h.scrollTop(box), 1350, '0.5 × (3000-300) = 1350：重开同版缓存要回到上次的位置')
 
@@ -745,12 +821,12 @@ test('阅读进度：切走再回来接着读、滚动不写盘、离开时落�
   const saves = () => h.requests.filter((entry) => entry.endpoint === 'saveReadingProgress')
   h.userScroll(box, 2100)
   h.userScroll(box, 2400)
-  await sleep(60)
+  await h.settle()
   assert.equal(saves().length, 0, '滚动过程不许产生任何写盘请求')
 
   // 切换文章 = 离开这篇：此刻落盘，比例就是离开时屏幕上的那一段
   h.press('j')
-  await sleep(200)
+  await h.settle()
   const saved = saves()
   assert.equal(saved.length, 1, '切换一次应当且只应当写一次')
   assert.equal(saved[0].payload.itemId, 'a', '写的是**离开的那一篇**')
@@ -762,7 +838,7 @@ test('阅读进度：切走再回来接着读、滚动不写盘、离开时落�
 
   // 关掉正文（组件卸载）= 另一条落盘路径：ref 已经被置空，节点引用要另存
   h.press('Escape')
-  await sleep(120)
+  await h.settle()
   assert.equal(h.store.get().view, 'list', 'Esc 回列表')
   const afterClose = saves()
   assert.equal(afterClose.length, 2, '卸载也要落盘一次')
@@ -779,7 +855,7 @@ test('跨源重复提示：行内可展开看别的来源，且展开不会把�
     }],
   })
   await h.store.load('overview')
-  await sleep(80)
+  await h.settle()
 
   const hint = h.win.document.querySelector('[data-rss-duplicates="a"]')
   assert.ok(hint !== null, 'a 那一行应当出现跨源重复提示')
@@ -793,7 +869,7 @@ test('跨源重复提示：行内可展开看别的来源，且展开不会把�
   assert.equal(h.store.get().items.find((entry) => entry.id === 'a').readAt, undefined, '前置条件：未读')
   const summary = hint.querySelector('summary')
   summary.dispatchEvent(new h.win.MouseEvent('click', { bubbles: true, cancelable: true }))
-  await sleep(30)
+  await h.settle()
   assert.equal(h.store.get().items.find((entry) => entry.id === 'a').readAt, undefined,
     '展开提示不该把那篇文章标成已读（stopPropagation 是承重的）')
 
@@ -813,7 +889,7 @@ test('左栏渲染：虚拟视图三行 + 每个订阅源一行', skip, async ()
     feeds: [{ id: 'f1', title: '源一' }, { id: 'f2', title: '源二' }, { id: 'f3', title: '源三' }],
   })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
 
   const nav = h.win.document.querySelector('[data-rss-nav]')
   assert.ok(nav !== null, '左栏容器必须带 data-rss-nav 标记（任务 4 靠它区分「不是滚动容器」）')
@@ -841,7 +917,7 @@ test('隐藏未读计数时左栏角标也消失（GR spec 不变量 8）', skip
     feeds: [{ id: 'f1', title: '源一' }],
   })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
 
   const feedRow = () => h.win.document.querySelector('[data-rss-nav-row="feed:f1"]')
   assert.equal(feedRow().getAttribute('data-rss-nav-badge'), '1', '前置条件：默认显示角标')
@@ -851,7 +927,7 @@ test('隐藏未读计数时左栏角标也消失（GR spec 不变量 8）', skip
   const toggle = [...h.win.document.querySelectorAll('input[type="checkbox"]')][0]
   assert.ok(toggle !== undefined, '应当有「显示未读计数」复选框')
   toggle.dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
-  await sleep(30)
+  await h.settle()
 
   assert.equal(h.store.get().showUnread, false, '前置条件：计数已隐藏')
   assert.equal(feedRow().getAttribute('data-rss-nav-badge'), null,
@@ -870,7 +946,7 @@ test('点击某个源：右栏列表只剩该源条目', skip, async () => {
     feeds: [{ id: 'f1', title: '源一' }, { id: 'f2', title: '源二' }],
   })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
 
   const listTitles = () => [...h.win.document.querySelectorAll('[data-rss-row]')].map((row) => row.getAttribute('data-rss-row'))
   assert.deepEqual(listTitles(), ['a', 'b', 'c'], '前置条件：聚合视图下三条都在')
@@ -878,7 +954,7 @@ test('点击某个源：右栏列表只剩该源条目', skip, async () => {
   // 真实 MouseEvent 派发：走的是 onClick → store.selectNav 的完整接线，不是直调 store
   const row = h.win.document.querySelector('[data-rss-nav-row="feed:f1"]')
   row.dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
-  await sleep(30)
+  await h.settle()
 
   assert.deepEqual(h.store.get().navSelection, { kind: 'feed', feedId: 'f1' }, '点击应当把导航选中切到该源')
   assert.deepEqual(listTitles(), ['a', 'c'], '右栏应当只剩该源的条目')
@@ -906,7 +982,7 @@ test('点击某个源：右栏列表只剩该源条目', skip, async () => {
 
   // 再点同一个源 = 取消（任务 2 已裁决的语义：点亮的项再点一次回到聚合视图）
   h.win.document.querySelector('[data-rss-nav-row="feed:f1"]').dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
-  await sleep(30)
+  await h.settle()
   assert.deepEqual(h.store.get().navSelection, { kind: 'virtual' }, '再点同一个源应当取消选中')
   assert.deepEqual(listTitles(), ['a', 'b', 'c'], '取消后应当回到聚合视图')
 })
@@ -925,19 +1001,19 @@ test('选了「未读」再选源：源与过滤两条轴各自生效，未读�
     feeds: [{ id: 'f1', title: '源一' }, { id: 'f2', title: '源二' }],
   })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
 
   const row = (key) => h.win.document.querySelector('[data-rss-nav-row="' + key + '"]')
   const marked = (key) => row(key).getAttribute('data-rss-nav-selected') === ''
 
   // ① 先点左栏「未读」
   row('filter:unread').dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
-  await sleep(30)
+  await h.settle()
   assert.equal(h.store.get().filter, 'unread', '前置条件：过滤切到未读')
 
   // ② 再点源一
   row('feed:f1').dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
-  await sleep(30)
+  await h.settle()
 
   // ③ 功能：源 × filter 相乘，右栏只剩「源一的未读」
   assert.deepEqual(h.store.get().navSelection, { kind: 'feed', feedId: 'f1' }, '前置条件：已选中源一')
@@ -954,7 +1030,7 @@ test('选了「未读」再选源：源与过滤两条轴各自生效，未读�
   assert.equal(marked('filter:all'), false, '前置条件：此刻生效的是「未读」，所以「全部」不该亮')
   // 真正的一致性判据：把 filter 切回 all，该亮的换成「全部」
   row('filter:all').dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
-  await sleep(30)
+  await h.settle()
   assert.equal(h.store.get().filter, 'all', '前置条件：过滤切回全部')
   assert.equal(marked('filter:all'), true, '「全部」生效时必须点亮 —— 它与其他两个标签同等对待')
 })
@@ -968,7 +1044,7 @@ test('过滤三连只显示一处：左栏可见时顶栏不重复（收起左�
     feeds: [{ id: 'f1', title: '源一' }],
   })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
 
   // 左栏那份：虚拟视图三行（带 data-rss-nav-row="filter:*"）
   const navFilterRows = () => h.win.document.querySelectorAll('[data-rss-nav-row^="filter:"]').length
@@ -982,7 +1058,7 @@ test('过滤三连只显示一处：左栏可见时顶栏不重复（收起左�
 
   // 收起左栏：入口必须回落到顶栏，不能因为「收起导航」就没有过滤入口了
   h.store.toggleNav()
-  await sleep(30)
+  await h.settle()
   assert.equal(navFilterRows(), 0, '前置条件：左栏已收起')
   assert.equal(toolbarFilterButtons(), 3, '左栏收起后过滤入口应回落到顶栏（3 个按钮）')
 })
@@ -998,7 +1074,7 @@ test('折叠左栏：容器整个从 DOM 消失（不是 width:0 留一条缝）
     feeds: [{ id: 'f1', title: '源一' }],
   })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
 
   // 只断言「在不在 DOM 里」这个布尔量，不要把 jsdom 节点本身交给 assert.equal：
   // 断言失败时 node 会 inspect 实参，而 inspect 一个 jsdom 元素会跑到超时被 SIGKILL
@@ -1012,7 +1088,7 @@ test('折叠左栏：容器整个从 DOM 消失（不是 width:0 留一条缝）
   // 走 store 的 toggleNav —— 折叠开关的唯一状态源就是这个字段；
   // 本任务不接键位（那是任务 6 的 u 键），所以这里直接翻状态，不虚构一个还不存在的按键。
   h.store.toggleNav()
-  await sleep(30)
+  await h.settle()
 
   assert.equal(h.store.get().navVisible, false, '前置条件：已折叠')
   assert.equal(navPresent(), false,
@@ -1042,7 +1118,7 @@ test('滚动不误命中左栏：n/p 与空格只滚右栏', skip, async () => {
     feeds: [{ id: 'f1', title: '源一' }],
   })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
 
   // 只取布尔量再断言：把 jsdom 节点本身交给 assert，失败时 node 会 inspect 它直到超时被 SIGKILL，
   // 断言文案永远打不出来（docs/pitfalls.md §2.8 实测 31s）。变异门槛天天走「断言会失败」这条路。
@@ -1086,24 +1162,24 @@ test('u 键折叠/展开左栏：走真实按键路径，且正文页不接管�
     feeds: [{ id: 'f1', title: '源一' }],
   })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
 
   const navPresent = () => h.win.document.querySelector('[data-rss-nav]') !== null
   assert.equal(navPresent(), true, '前置条件：默认展开，左栏在 DOM 里')
 
   assert.equal(h.press('u'), true, 'u 应当被接管 —— 2026-10-10 之前它在这里是「向上半页」')
-  await sleep(30)
+  await h.settle()
   assert.equal(h.store.get().navVisible, false, 'u 第一次按下应当折叠左栏')
   assert.equal(navPresent(), false, '折叠后左栏容器必须整个消失（不是 width:0）')
 
   assert.equal(h.press('u'), true, '再按一次 u 仍应被接管')
-  await sleep(30)
+  await h.settle()
   assert.equal(navPresent(), true, '再按 u 应当把左栏找回来')
 
   // 正文页里 u 不改「背后那个看不见的左栏」（与 o 键同一裁决，见 keys 帮助行旁的注释）
   h.press('V', true)
-  for (let i = 0; i < 40 && h.store.get().view !== 'article'; i += 1) await sleep(20)
-  await sleep(60)
+  await h.waitFor(() => h.store.get().view === 'article', { timeout: 900, label: '进入正文页' })
+  await h.settle()
   assert.equal(h.store.get().view, 'article', '前置条件：已进正文页')
   assert.equal(h.press('u'), false, '正文页的 u 不该被接管（左栏属于背后的东西）')
   assert.equal(h.store.get().navVisible, true, '正文页按 u 不该动左栏 —— 否则回列表时导航莫名没了')
@@ -1121,7 +1197,7 @@ test('shift+n / shift+p 在左栏导航里移动选中（不是右栏文章列�
     feeds: [{ id: 'f1', title: '源一' }, { id: 'f2', title: '源二' }],
   })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
 
   /**
    * 左栏**光标**行（键盘高亮）与**生效**行（选中项）是两个标记，刻意分开：
@@ -1147,7 +1223,7 @@ test('shift+n / shift+p 在左栏导航里移动选中（不是右栏文章列�
   // 移动光标之后：左栏高亮走一行，而**生效视图与右栏内容一个字都不许变**。
   // 这条断言就是「移动 ≠ 打开」的可断言形式（第一版实现让两者塌缩，这条会当场红）。
   assert.equal(h.press('N', true), true, 'shift+n 应当被接管')
-  await sleep(30)
+  await h.settle()
   assert.equal(cursorRow(), 'filter:unread', 'shift+n 应当把左栏光标移到下一行')
   assert.equal(selectedRow(), 'filter:all', '而「生效」那一行仍是「全部」—— 光标与生效是两件事')
   assert.equal(h.store.get().filter, 'all', '移动光标**不改变**生效的 filter（打开才改 —— 规格 §2.4）')
@@ -1156,35 +1232,35 @@ test('shift+n / shift+p 在左栏导航里移动选中（不是右栏文章列�
 
   // 小写 n 是「扫视」：滚动视野但**不改变选中**，尤其不该动左栏高亮（两条轴不能互相顶掉）
   assert.equal(h.press('n'), true, '小写 n 仍应被接管（扫视）')
-  await sleep(30)
+  await h.settle()
   assert.equal(cursorRow(), 'filter:unread', '小写 n 不得改变左栏光标')
   assert.equal(h.store.get().filter, 'all', '小写 n 不得改变生效的 filter')
 
   // 继续向下走到源列表，再往回；到头/到尾要夹住而不是绕回。全程右栏纹丝不动。
-  h.press('N', true); await sleep(20)
+  h.press('N', true); await h.settle()
   assert.equal(cursorRow(), 'filter:starred', '第三行是星标')
-  h.press('N', true); await sleep(20)
+  h.press('N', true); await h.settle()
   assert.equal(cursorRow(), 'feed:f1', '跳过虚拟视图三行后进入源列表')
-  h.press('N', true); await sleep(20)
+  h.press('N', true); await h.settle()
   assert.equal(cursorRow(), 'feed:f2', '再下一行是第二个源')
   assert.deepEqual(listIds(), ['a', 'b'], '一路移动到底，右栏仍是聚合视图 —— 光标走过谁都不等于打开谁')
-  h.press('N', true); await sleep(20)
+  h.press('N', true); await h.settle()
   assert.equal(cursorRow(), 'feed:f2', '已经是最后一行，shift+n 应当夹住不动')
   assert.equal(h.press('N', true), true, '夹住时按键仍应被接管（不是「键坏了」）')
 
-  h.press('P', true); await sleep(20)
+  h.press('P', true); await h.settle()
   assert.equal(cursorRow(), 'feed:f1', 'shift+p 应当回到上一行')
-  for (let i = 0; i < 4; i += 1) { h.press('P', true); await sleep(20) }
+  for (let i = 0; i < 4; i += 1) { h.press('P', true); await h.settle() }
   assert.equal(cursorRow(), 'filter:all', '一路向上应当停在第一行（到头夹住，不绕回）')
   assert.equal(selectedRow(), 'filter:all', '全程没打开过任何一行，「生效」始终是「全部」')
 
   // ── 只有 shift+o 才让光标那一行生效 ────────────────────────────────────────────────
-  h.press('N', true); await sleep(20)          // 光标 → 未读
-  h.press('N', true); await sleep(20)          // 光标 → 星标
-  h.press('N', true); await sleep(20)          // 光标 → 源一
+  h.press('N', true); await h.settle()          // 光标 → 未读
+  h.press('N', true); await h.settle()          // 光标 → 星标
+  h.press('N', true); await h.settle()          // 光标 → 源一
   assert.deepEqual(listIds(), ['a', 'b'], '前置条件：光标走到源一，右栏仍是聚合视图')
   assert.equal(h.press('O', true), true, 'shift+o 应当被接管')
-  await sleep(30)
+  await h.settle()
   assert.deepEqual({ ...h.store.get().navSelection }, { kind: 'feed', feedId: 'f1' }, 'shift+o 打开源一 = 选中它')
   assert.deepEqual(listIds(), ['a'], '打开之后右栏才切到源一（a 是它的条目）')
 })
@@ -1209,7 +1285,7 @@ test('shift+o 打开光标所在行 = 等价于点击它（虚拟视图 → setF
   const mount = async () => {
     const h = await mountReader({ items, feeds })
     await h.store.load('overview')
-    await sleep(30)
+    await h.settle()
     return h
   }
   const snapshot = (h) => {
@@ -1228,18 +1304,18 @@ test('shift+o 打开光标所在行 = 等价于点击它（虚拟视图 → setF
   assert.deepEqual(snapshot(h), { navSelection: { kind: 'virtual' }, filter: 'all', selectedId: 'a', list: ['a', 'b'] },
     '前置条件：初始是聚合视图')
   assert.equal(h.press('O', true), true, 'shift+o 应当被接管')
-  await sleep(30)
+  await h.settle()
   assert.deepEqual(snapshot(h), { navSelection: { kind: 'virtual' }, filter: 'all', selectedId: 'a', list: ['a', 'b'] },
     '虚拟视图行上的 shift+o 应当等价于打开「全部」，不产生副作用')
 
   // ② 键盘路径：移动到「星标」行（移动本身不生效），再 shift+o —— 此刻才落作用域。
   const viaKey = await mount()
-  const keyMoves = (h, n) => (async () => { for (let i = 0; i < n; i += 1) { h.press('N', true); await sleep(20) } })()
+  const keyMoves = (h, n) => (async () => { for (let i = 0; i < n; i += 1) { h.press('N', true); await h.settle() } })()
   await keyMoves(viaKey, 2) // 全部→未读→星标
   assert.deepEqual(snapshot(viaKey), { navSelection: { kind: 'virtual' }, filter: 'all', selectedId: 'a', list: ['a', 'b'] },
     '走到「星标」行时右栏必须还是聚合视图 —— 移动不等于打开')
   assert.equal(viaKey.press('O', true), true, 'shift+o 应当被接管')
-  await sleep(30)
+  await viaKey.settle()
   const afterKey = snapshot(viaKey)
   assert.equal(afterKey.filter, 'starred', '打开「星标」行之后 filter 才变成 starred')
   assert.deepEqual(afterKey.list, ['a'], '右栏随之只剩星标条目')
@@ -1248,21 +1324,21 @@ test('shift+o 打开光标所在行 = 等价于点击它（虚拟视图 → setF
   const viaMouse = await mount()
   viaMouse.win.document.querySelector('[data-rss-nav-row="filter:starred"]')
     .dispatchEvent(new viaMouse.win.MouseEvent('click', { bubbles: true }))
-  await sleep(30)
+  await viaMouse.settle()
   assert.deepEqual(snapshot(viaMouse), afterKey, '键盘「移动到该行 + shift+o」与鼠标点击该行必须落到同一份状态')
 
   // ④ 源行同样等价于点击：键盘移动 + shift+o 对比鼠标点击同一行
   const viaKeyFeed = await mount()
   await keyMoves(viaKeyFeed, 3) // 全部→未读→星标→源一
   assert.equal(viaKeyFeed.press('O', true), true, '源行上的 shift+o 应当被接管')
-  await sleep(30)
+  await viaKeyFeed.settle()
   const afterKeyFeed = snapshot(viaKeyFeed)
   assert.deepEqual(afterKeyFeed.navSelection, { kind: 'feed', feedId: 'f1' }, '打开源一 = 选中它')
 
   const viaMouseFeed = await mount()
   viaMouseFeed.win.document.querySelector('[data-rss-nav-row="feed:f1"]')
     .dispatchEvent(new viaMouseFeed.win.MouseEvent('click', { bubbles: true }))
-  await sleep(30)
+  await viaMouseFeed.settle()
   assert.deepEqual(snapshot(viaMouseFeed), afterKeyFeed, '源行上两条路径必须落到同一份状态')
 })
 
@@ -1272,19 +1348,19 @@ test('左栏折叠时 shift+n/p/o 不生效：不许改一个看不见的导航'
     feeds: [{ id: 'f1', title: '源一' }],
   })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
 
-  h.press('u'); await sleep(30)
+  h.press('u'); await h.settle()
   assert.equal(h.store.get().navVisible, false, '前置条件：左栏已折叠')
   const before = JSON.stringify(snapshotState(h))
 
   assert.equal(h.press('N', true), false, '折叠时 shift+n 不该被接管')
   assert.equal(h.press('P', true), false, '折叠时 shift+p 不该被接管')
   assert.equal(h.press('O', true), false, '折叠时 shift+o 不该被接管')
-  await sleep(30)
+  await h.settle()
   assert.equal(JSON.stringify(snapshotState(h)), before, '折叠时左栏导航键不得改动任何状态')
 
-  h.press('u'); await sleep(30)
+  h.press('u'); await h.settle()
   assert.equal(h.store.get().navVisible, true, '前置条件：左栏已展开')
   assert.equal(h.press('N', true), true, '展开后 shift+n 恢复可用')
 })
@@ -1323,12 +1399,12 @@ function snapshotState(h) {
 test('? 开合帮助浮窗：浮窗逐行画出来自 keys.ts 的帮助表', skip, async () => {
   const h = await mountReader({ items: [item({ id: 'a' })] })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
   const help = () => h.win.document.querySelector('[data-rss-help]')
   assert.equal(help(), null, '前置条件：默认不该有浮窗')
 
   assert.equal(h.press('?'), true, '? 应当被接管（不被宿主或浏览器抢走）')
-  await sleep(30)
+  await h.settle()
   assert.notEqual(help(), null, '按 ? 之后应当出现帮助浮窗')
 
   // 内容逐行核对而不是抽查两个词：少的正是「表里有一行、浮窗没画」这类脱节
@@ -1340,14 +1416,14 @@ test('? 开合帮助浮窗：浮窗逐行画出来自 keys.ts 的帮助表', ski
   }
 
   assert.equal(h.press('?'), true, '再按一次 ? 仍应被接管')
-  await sleep(30)
+  await h.settle()
   assert.equal(help(), null, '再按 ? 应当关闭浮窗（开合同一个键）')
 })
 
 test('头部只留最右端一个 ? 入口：那行塞满键位的提示行必须真的没了', skip, async () => {
   const h = await mountReader({ items: [item({ id: 'a' })] })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
 
   // 提示行的指纹：删掉之后这两个词不该再出现在面板里（浮窗里的写法是「j / k」与「n / p」，不会误命中）
   const body = h.win.document.body.textContent ?? ''
@@ -1358,7 +1434,7 @@ test('头部只留最右端一个 ? 入口：那行塞满键位的提示行必�
   assert.notEqual(entry, null, '头部应当有 ? 帮助入口')
   assert.equal(entry.getAttribute('aria-expanded'), 'false', '收起态应当反映到 aria-expanded')
   entry.dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
-  await sleep(30)
+  await h.settle()
   assert.notEqual(h.win.document.querySelector('[data-rss-help]'), null, '点击 ? 入口应当打开浮窗')
   assert.equal(entry.getAttribute('aria-expanded'), 'true', '展开态应当反映到 aria-expanded')
 })
@@ -1370,31 +1446,31 @@ test('Esc 关浮窗且不穿透：正文页里只收浮窗，不把文章一起�
   // 变成「响亮的红」——红才是被抓住；判据本身（断言序列）未动。
   const h = await mountReader({ items: [item({ id: 'a' }), item({ id: 'b' })] })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
   h.press('V', true)
-  for (let i = 0; i < 40 && h.store.get().view !== 'article'; i += 1) await sleep(20)
-  await sleep(60)
+  await h.waitFor(() => h.store.get().view === 'article', { timeout: 900, label: '进入正文页' })
+  await h.settle()
   assert.equal(h.store.get().view, 'article', '前置条件：已进正文页')
 
   assert.equal(h.press('?'), true, '正文页里 ? 也该能用（帮助不随视图分流）')
-  await sleep(30)
+  await h.settle()
   assert.notEqual(h.win.document.querySelector('[data-rss-help]'), null, '前置条件：浮窗已开')
 
   assert.equal(h.press('Escape'), true, 'Esc 应当被接管')
-  await sleep(30)
+  await h.settle()
   assert.equal(h.win.document.querySelector('[data-rss-help]'), null, 'Esc 应当关掉浮窗')
   assert.equal(h.store.get().view, 'article', '第一次 Esc 只关浮窗 —— 不许顺手把文章也关了')
 
   h.press('Escape')
-  await sleep(30)
+  await h.settle()
   assert.equal(h.store.get().view, 'list', '浮窗已关，第二次 Esc 回到原来的语义（正文 → 列表）')
 })
 
 test('✕ 关闭；焦点落在浮窗里之后 ? 与 Esc 仍然有效（非模态不许被自己的守卫吃掉）', skip, async () => {
   const h = await mountReader({ items: [item({ id: 'a' })] })
   await h.store.load('overview')
-  await sleep(30)
-  h.press('?'); await sleep(30)
+  await h.settle()
+  h.press('?'); await h.settle()
 
   const close = h.win.document.querySelector('button[aria-label="关闭快捷键帮助"]')
   assert.notEqual(close, null, '浮窗应当有一个 ✕ 关闭按钮')
@@ -1404,61 +1480,61 @@ test('✕ 关闭；焦点落在浮窗里之后 ? 与 Esc 仍然有效（非模�
   close.focus()
   assert.equal(h.win.document.activeElement, close, '前置条件：焦点在 ✕ 上')
   assert.equal(pressFrom(h, close, '?'), true, '焦点在浮窗里时 ? 仍应被接管')
-  await sleep(30)
+  await h.settle()
   assert.equal(h.win.document.querySelector('[data-rss-help]'), null, '再按 ? 应当关掉浮窗')
 
-  h.press('?'); await sleep(30)
+  h.press('?'); await h.settle()
   const close2 = h.win.document.querySelector('button[aria-label="关闭快捷键帮助"]')
   close2.focus()
   assert.equal(pressFrom(h, close2, 'Escape'), true, '焦点在浮窗里时 Esc 仍应被接管')
-  await sleep(30)
+  await h.settle()
   assert.equal(h.win.document.querySelector('[data-rss-help]'), null, 'Esc 应当关掉浮窗')
 
-  h.press('?'); await sleep(30)
+  h.press('?'); await h.settle()
   h.win.document.querySelector('button[aria-label="关闭快捷键帮助"]')
     .dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
-  await sleep(30)
+  await h.settle()
   assert.equal(h.win.document.querySelector('[data-rss-help]'), null, '点 ✕ 应当关掉浮窗')
 })
 
 test('非模态：浮窗开着时 j 仍然作用于背后的列表（这是拍板结论，不是默认行为）', skip, async () => {
   const h = await mountReader({ items: [item({ id: 'a' }), item({ id: 'b' })] })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
   const before = h.store.get().selectedId
-  h.press('?'); await sleep(30)
+  h.press('?'); await h.settle()
   assert.notEqual(h.win.document.querySelector('[data-rss-help]'), null, '前置条件：浮窗已开')
   assert.equal(h.press('j'), true, '浮窗开着时 j 仍应被接管')
-  await sleep(30)
+  await h.settle()
   assert.notEqual(h.store.get().selectedId, before, '浮窗开着时 j 必须照旧移动背后的选中项（非模态）')
 })
 
 test('输入框里的 ? 不触发帮助（别抢正在打字的人的键）', skip, async () => {
   const h = await mountReader({ items: [item({ id: 'a' })] })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
   // 头部那个「显示未读计数」复选框是面板里真实存在的 input（左栏角标用例也在用它定位）
   const checkbox = [...h.win.document.querySelectorAll('input[type="checkbox"]')][0]
   assert.notEqual(checkbox, undefined, '前置条件：头部有复选框')
   assert.equal(pressFrom(h, checkbox, '?'), false, '从输入框发出的 ? 不该被接管')
-  await sleep(30)
+  await h.settle()
   assert.equal(h.win.document.querySelector('[data-rss-help]'), null, '输入框里的 ? 不该弹出帮助')
 })
 
 test('o 键：同一行连按两次必须收起（依赖数组里的 expanded 是承重的）', skip, async () => {
   const h = await mountReader({ items: [item({ id: 'a', summary: '这一段正文摘录，展开之后才出现在行里' })] })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
   const row = h.win.document.querySelector('[data-rss-row="a"]')
   assert.ok(row !== null, '前置条件：列表里有这一行')
   // 展开态会多渲染一段摘录（index.tsx 的 isOpen 分支），所以行长度就是「是否展开」的可观察量。
   const sizeNow = () => row.innerHTML.length
 
-  h.press('o'); await sleep(30)
+  h.press('o'); await h.settle()
   const afterOpen = sizeNow()
   assert.ok(afterOpen > 0, '前置条件：第一次按 o 应当展开')
 
-  h.press('o'); await sleep(30)
+  h.press('o'); await h.settle()
   const afterSecondO = sizeNow()
 
   assert.ok(afterSecondO < afterOpen, '第二次按 o 必须收起 —— 若 expanded 不在依赖数组里，监听器读到的是注册那一刻的 undefined，于是永远「展开」而收不起来（行长度 ' + afterOpen + ' → ' + afterSecondO + '）')
@@ -1500,7 +1576,7 @@ test('C4-b 迁入：o 展开并触发 markRead 端点（副作用不能漏）', 
   const h = await mountReader({ items: [item({ id: 'a' }), item({ id: 'b' })] })
   await h.store.load('overview')
   h.press('o')
-  await sleep(30)
+  await h.settle()
   assert.ok(
     h.endpoints.includes('markRead'),
     'o 必须触发 markRead 端点；实际端点：[' + h.endpoints.join(', ') + ']',
@@ -1512,10 +1588,10 @@ test('C4-b 迁入：1 切展开视图、2 切回列表（且默认是列表 = �
   await h.store.load('overview')
   assert.equal(h.store.get().layout, 'list', '默认必须是紧凑列表 —— 这是本插件既有行为')
   h.press('1')
-  await sleep(30)
+  await h.settle()
   assert.equal(h.store.get().layout, 'expanded', '1 必须切到展开视图')
   h.press('2')
-  await sleep(30)
+  await h.settle()
   assert.equal(h.store.get().layout, 'list', '2 必须切回列表视图')
 })
 
@@ -1524,10 +1600,10 @@ test('C4-b 迁入：j / k 经真实监听器驱动选中项（接线判据在真
   await h.store.load('overview')
   const before = h.store.get().selectedId
   h.press('j')
-  await sleep(30)
+  await h.settle()
   assert.notEqual(h.store.get().selectedId, before, 'j 必须移动选中项 —— 不动说明接线的某一环断了')
   h.press('k')
-  await sleep(30)
+  await h.settle()
   assert.equal(h.store.get().selectedId, before, 'k 必须移回来')
 })
 
@@ -1536,7 +1612,7 @@ test('C4-b 迁入：未绑定的键不动任何状态（不误触发）', skip, 
   await h.store.load('overview')
   const snapshot = JSON.stringify(h.store.get())
   h.press('z')
-  await sleep(30)
+  await h.settle()
   assert.equal(JSON.stringify(h.store.get()), snapshot, '未绑定的键不该改任何状态')
 })
 
@@ -1554,7 +1630,7 @@ test('C4-b 判定：行高量不到（offsetHeight=0）时按列表兜底 48 滚
   assert.ok(row !== null, '前置：列表里有一行 [data-rss-row]')
   Object.defineProperty(row, 'offsetHeight', { get: () => 0, configurable: true })
   h.press('n')
-  await sleep(30)
+  await h.settle()
   assert.equal(h.scrollTop(listBox), 48, '行高量到 0 必须走兜底 48（offsetHeight 判定取反时这条会按 0 滚而红）')
 })
 
@@ -1563,7 +1639,7 @@ test('刷新搜索后相同选中项移出视口时，列表跟随其新位置',
   let hits = [current]
   const h = await mountReader({ items: [current], search: () => ({ items: hits }) })
   h.store.submitSearch({ text: '支付' })
-  await sleep(50)
+  await h.settle()
   assert.equal(h.store.get().selectedId, 'current')
   const list = h.arm(h.box('list'), { clientHeight: 100 })
   const row = list.querySelector('[data-rss-row="current"]')
@@ -1571,7 +1647,7 @@ test('刷新搜索后相同选中项移出视口时，列表跟随其新位置',
   Object.defineProperty(row, 'offsetHeight', { value: 40 })
   hits = [item({ id: 'new' }), current]
   await h.store.load('refresh')
-  await sleep(50)
+  await h.settle()
   assert.equal(h.store.get().selectedId, 'current')
   assert.equal(list.querySelector('[data-rss-row="current"]'), row)
   assert.equal(h.scrollTop(list), 60)
@@ -1601,26 +1677,26 @@ test('文件夹展开与折叠同步键盘行序，汇总未读且保留订阅�
   h.store.selectNav({ kind: 'feed', feedId: 'a' })
   assert.deepEqual(visible(), ['first'])
   h.press('P', true)
-  await sleep(30)
+  await h.settle()
   assert.equal(cursor(), key)
   h.press('O', true)
-  await sleep(30)
+  await h.settle()
   assert.deepEqual(rows(), [...top, 'feed:c'])
   assert.equal(folder().getAttribute('aria-expanded'), 'false')
   assert.equal(folder().getAttribute('data-rss-nav-badge'), '2')
   h.press('N', true)
-  await sleep(30)
+  await h.settle()
   assert.equal(cursor(), 'feed:c')
   assert.deepEqual(visible(), ['first'])
 
   folder().click()
-  await sleep(30)
+  await h.settle()
   assert.deepEqual(rows(), [...top, 'feed:a', 'feed:b', 'feed:c'])
   h.press('N', true)
-  await sleep(30)
+  await h.settle()
   assert.equal(cursor(), 'feed:a')
   h.store.setShowUnread(false)
-  await sleep(30)
+  await h.settle()
   assert.equal(folder().hasAttribute('data-rss-nav-badge'), false)
 })
 
@@ -1639,7 +1715,7 @@ test('文件夹浏览：空目录可见，进入后只显示成员条目，空�
     folders: [{ name: '技术', feedIds: ['a', 'b'] }, { name: '空文件夹', feedIds: [] }],
   })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
   const doc = h.win.document
   const rows = () => Array.from(doc.querySelectorAll('[data-rss-nav-row]'), (row) => row.getAttribute('data-rss-nav-row'))
 
@@ -1650,7 +1726,7 @@ test('文件夹浏览：空目录可见，进入后只显示成员条目，空�
   const openTech = doc.querySelector('[data-rss-folder-open="技术"]')
   assert.ok(openTech, '进入文件夹必须有独立可聚焦按钮')
   openTech.click()
-  await sleep(80)
+  await h.settle()
   assert.deepEqual(h.store.get().navSelection, { kind: 'folder', folder: '技术' })
   assert.equal(doc.querySelector('.dsh-rss-toolbar-title strong').textContent, '技术', '标题切到文件夹名')
   assert.deepEqual(h.store.visible().map((entry) => entry.id), ['a1', 'b1'], '只显示成员源的条目')
@@ -1658,7 +1734,7 @@ test('文件夹浏览：空目录可见，进入后只显示成员条目，空�
   assert.equal(lastOverview.payload.folder, '技术', '宿主必须先按成员筛选再分页（请求带 folder）')
 
   doc.querySelector('[data-rss-folder-open="空文件夹"]').click()
-  await sleep(80)
+  await h.settle()
   assert.deepEqual(h.store.visible(), [], '空文件夹没有条目')
   assert.match(doc.querySelector('[data-rss-scroll="list"]').textContent, /这个文件夹还没有订阅源/)
 })
@@ -1684,11 +1760,11 @@ test('文件夹搜索：范围取成员交集，续页回带查询绑定游标',
     },
   })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
   h.store.selectNav({ kind: 'folder', folder: '技术' })
-  await sleep(60)
+  await h.settle()
   h.store.submitSearch({ text: '支付' })
-  await sleep(80)
+  await h.settle()
 
   assert.equal(calls.length, 1, '第一页一次搜索')
   assert.deepEqual([...calls[0].feedIds], ['a', 'b'], '搜索范围收窄到文件夹成员')
@@ -1696,7 +1772,7 @@ test('文件夹搜索：范围取成员交集，续页回带查询绑定游标',
   assert.deepEqual(h.store.visible().map((entry) => entry.id), ['a1'])
 
   await h.store.loadMore()
-  await sleep(60)
+  await h.settle()
   assert.equal(calls[1].cursor, 'C1', '续页原样回带宿主游标')
   assert.deepEqual(h.store.visible().map((entry) => entry.id), ['a1', 'b1'], '第二页追加而不是替换')
 })
@@ -1711,49 +1787,49 @@ test('文件夹管理：创建、改名、移动、删除二次确认与焦点�
     folders: [{ name: '旧文件夹', feedIds: ['a'] }],
   })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
   h.press('f')
-  await sleep(50)
+  await h.settle()
   const doc = h.win.document
 
   const newInput = doc.querySelector('[data-rss-folder-new]')
   setControlValue(h.win, newInput, ' 新文件夹 ')
   doc.querySelector('[data-rss-folder-create] button[type="submit"]').click()
-  await sleep(100)
+  await h.settle()
   assert.ok(doc.querySelector('[data-rss-folder-manage="新文件夹"]'), '创建后管理面板里出现空文件夹')
 
   doc.querySelector('[data-rss-folder-rename="新文件夹"]').click()
-  await sleep(20)
+  await h.settle()
   const renameInput = doc.querySelector('[data-rss-folder-rename-input="新文件夹"]')
   setControlValue(h.win, renameInput, '改名后')
   doc.querySelector('[data-rss-folder-rename-save="新文件夹"]').click()
-  await sleep(100)
+  await h.settle()
   assert.ok(doc.querySelector('[data-rss-folder-manage="改名后"]'), '改名后目录项更新')
 
   const moveSelectB = doc.querySelector('[data-rss-feed-folder="b"]')
   setControlValue(h.win, moveSelectB, '改名后')
-  await sleep(100)
+  await h.settle()
   assert.equal(h.server.feeds.find((feed) => feed.id === 'b').folder, '改名后', '移动落到宿主状态')
   const moveSelectA = doc.querySelector('[data-rss-feed-folder="a"]')
   setControlValue(h.win, moveSelectA, '改名后')
-  await sleep(100)
+  await h.settle()
   assert.equal(h.server.feeds.find((feed) => feed.id === 'a').folder, '改名后', '已有成员也能移动')
   assert.match(doc.querySelector('[data-rss-folder-manage="改名后"]').textContent, /2 个订阅/)
 
   const deleteButton = doc.querySelector('[data-rss-folder-delete="改名后"]')
   deleteButton.click()
-  await sleep(20)
+  await h.settle()
   assert.ok(doc.querySelector('[data-rss-folder-confirm="改名后"]'), '删除先出确认条')
   assert.match(doc.querySelector('[data-rss-folder-confirm="改名后"]').textContent, /成员会变为未分类/)
   doc.querySelector('[data-rss-folder-confirm-no="改名后"]').click()
-  await sleep(20)
+  await h.settle()
   assert.ok(doc.querySelector('[data-rss-folder-manage="改名后"]'), '取消删除不改变目录')
   assert.equal(doc.activeElement, deleteButton, '取消后焦点回到触发删除的按钮')
 
   deleteButton.click()
-  await sleep(20)
+  await h.settle()
   doc.querySelector('[data-rss-folder-confirm-yes="改名后"]').click()
-  await sleep(120)
+  await h.settle()
   assert.equal(doc.querySelector('[data-rss-folder-manage="改名后"]'), null, '确认后目录项消失')
   assert.equal(h.server.feeds.find((feed) => feed.id === 'a').folder, undefined, '删除只解除分类（a）')
   assert.equal(h.server.feeds.find((feed) => feed.id === 'b').folder, undefined, '删除只解除分类（b）')
@@ -1769,29 +1845,29 @@ test('当前浏览文件夹：改名迁移范围，删除回到跨源列表', sk
     folders: [{ name: '技术', feedIds: ['a'] }],
   })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
   const doc = h.win.document
   doc.querySelector('[data-rss-folder-open="技术"]').click()
-  await sleep(80)
+  await h.settle()
   assert.deepEqual(h.store.get().navSelection, { kind: 'folder', folder: '技术' })
 
   h.press('f')
-  await sleep(50)
+  await h.settle()
   doc.querySelector('[data-rss-folder-rename="技术"]').click()
-  await sleep(20)
+  await h.settle()
   const input = doc.querySelector('[data-rss-folder-rename-input="技术"]')
   setControlValue(h.win, input, '技术二')
   doc.querySelector('[data-rss-folder-rename-save="技术"]').click()
-  await sleep(100)
+  await h.settle()
   assert.deepEqual(h.store.get().navSelection, { kind: 'folder', folder: '技术二' }, '改名后当前浏览范围跟着迁移')
 
   doc.querySelector('[data-rss-folder-delete="技术二"]').click()
-  await sleep(20)
+  await h.settle()
   doc.querySelector('[data-rss-folder-confirm-yes="技术二"]').click()
-  await sleep(120)
+  await h.settle()
   assert.deepEqual(h.store.get().navSelection, { kind: 'virtual' }, '删除当前文件夹后回到跨源列表')
   h.press('Escape')
-  await sleep(50)
+  await h.settle()
   assert.deepEqual(h.store.visible().map((entry) => entry.id), ['a1', 'c1'], '跨源列表恢复')
 })
 
@@ -1812,14 +1888,14 @@ test('文件夹管理失败可恢复：创建失败保留原数据，重试成�
     },
   })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
   h.press('f')
-  await sleep(50)
+  await h.settle()
   const doc = h.win.document
   const input = doc.querySelector('[data-rss-folder-new]')
   setControlValue(h.win, input, '重复名')
   doc.querySelector('[data-rss-folder-create] button[type="submit"]').click()
-  await sleep(80)
+  await h.settle()
 
   assert.match(h.store.get().error ?? '', /文件夹已存在/, '失败必须可见')
   assert.ok(doc.querySelector('[data-rss-folder-manage="旧文件夹"]'), '失败不改变原有目录')
@@ -1828,7 +1904,7 @@ test('文件夹管理失败可恢复：创建失败保留原数据，重试成�
   failCreate = false
   setControlValue(h.win, doc.querySelector('[data-rss-folder-new]'), '重复名')
   doc.querySelector('[data-rss-folder-create] button[type="submit"]').click()
-  await sleep(120)
+  await h.settle()
   assert.ok(doc.querySelector('[data-rss-folder-manage="重复名"]'), '重试成功后新目录出现')
   assert.equal(h.store.get().error, undefined, '成功刷新后错误条被清掉')
 })
@@ -1844,14 +1920,14 @@ test('标签浏览与编辑：左栏行、空标签、列表/正文共用标签�
     tags: [{ id: 't1', name: '待读' }, { id: 't2', name: '参考' }, { id: 'empty', name: '空标签' }],
   })
   await h.store.load('overview')
-  await sleep(40)
+  await h.settle()
   const doc = h.win.document
   assert.ok(doc.querySelector('[data-rss-nav-row="tag:t1"]'), '标签行进入左栏')
   assert.ok(doc.querySelector('[data-rss-nav-row="tag:empty"]'), '空标签仍可见')
   assert.equal(doc.querySelector('[data-rss-nav-row="tag:t1"]').textContent.includes('待读'), true)
 
   doc.querySelector('[data-rss-nav-row="tag:t1"]').click()
-  await sleep(100)
+  await h.settle()
   assert.deepEqual(h.store.get().navSelection, { kind: 'tag', tagId: 't1' })
   assert.deepEqual(h.store.visible().map((entry) => entry.id), ['a1', 'a2'], '标签范围只含成员')
   assert.ok(doc.querySelector('[data-rss-tag-editor]'), '列表视图有共用标签栏')
@@ -1868,20 +1944,20 @@ test('标签浏览与编辑：左栏行、空标签、列表/正文共用标签�
   // 频繁点击：先加 t2 再移除 t1；写入串行队列按点击后的快照覆盖，最后服务端与界面一致。
   doc.querySelector('[data-rss-tag-toggle="t2"]').click()
   doc.querySelector('[data-rss-tag-toggle="t1"]').click()
-  await sleep(150)
+  await h.settle()
   assert.deepEqual(h.store.visible().find((entry) => entry.id === 'a1').tagIds, ['t2'])
   assert.ok(h.requests.filter((entry) => entry.endpoint === 'setItemTags').length >= 2)
   assert.equal(h.requests.some((entry) => entry.endpoint === 'markRead'), false, '标签编辑不许标读')
 
   // 正文视图复用同一个标签栏：打开 a1 后仍可编辑，且选区仍是 a1。
   h.press('V', true)
-  for (let i = 0; i < 40 && h.store.get().view !== 'article'; i += 1) await sleep(20)
-  await sleep(60)
+  await h.waitFor(() => h.store.get().view === 'article', { timeout: 900, label: '进入正文页' })
+  await h.settle()
   assert.equal(h.store.get().view, 'article')
   assert.ok(doc.querySelector('[data-rss-tag-editor]'), '正文视图有同一标签栏')
   assert.equal(doc.querySelector('[data-rss-tag-toggle="t2"]').getAttribute('aria-pressed'), 'true')
   doc.querySelector('[data-rss-tag-toggle="t2"]').click()
-  await sleep(100)
+  await h.settle()
   assert.deepEqual(h.store.get().items.find((entry) => entry.id === 'a1').tagIds, [])
 })
 
@@ -1893,15 +1969,15 @@ test('标签行纳入 Shift+N/P/O 的可见行序，空标签也可到达', asyn
     tags: [{ id: 't1', name: '待读' }, { id: 'empty', name: '空标签' }],
   })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
   // 行序：全部 / 未读 / 星标 / 源 A / 标签 待读 / 标签 空标签。
-  h.press('N', true); await sleep(15)
-  h.press('N', true); await sleep(15)
-  h.press('N', true); await sleep(15)
-  h.press('N', true); await sleep(15)
+  h.press('N', true); await h.settle()
+  h.press('N', true); await h.settle()
+  h.press('N', true); await h.settle()
+  h.press('N', true); await h.settle()
   assert.deepEqual(h.store.get().navCursor, { kind: 'tag', tagId: 't1' }, '标签行在统一行序里，Shift+N 能到达')
   assert.equal(h.press('O', true), true, 'Shift+O 在标签行上被接管')
-  await sleep(60)
+  await h.settle()
   assert.deepEqual(h.store.get().navSelection, { kind: 'tag', tagId: 't1' })
 })
 
@@ -1912,26 +1988,26 @@ test('标签管理：创建、改名、删除只清关联，不改文章与阅�
     tags: [{ id: 't1', name: '旧标签' }],
   })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
   h.press('f')
-  await sleep(50)
+  await h.settle()
   const doc = h.win.document
   setControlValue(h.win, doc.querySelector('[data-rss-tag-new]'), '新标签')
   doc.querySelector('[data-rss-tag-create] button[type="submit"]').click()
-  await sleep(100)
+  await h.settle()
   assert.ok(h.store.get().tags.some((tag) => tag.name === '新标签'), '创建后目录出现新标签')
 
   doc.querySelector('[data-rss-tag-rename="t1"]').click()
-  await sleep(20)
+  await h.settle()
   setControlValue(h.win, doc.querySelector('[data-rss-tag-rename-input="t1"]'), '改名后')
   doc.querySelector('[data-rss-tag-rename-save="t1"]').click()
-  await sleep(100)
+  await h.settle()
   assert.equal(h.store.get().tags.find((tag) => tag.id === 't1').name, '改名后', '改名保留 id')
 
   doc.querySelector('[data-rss-tag-delete="t1"]').click()
-  await sleep(20)
+  await h.settle()
   doc.querySelector('[data-rss-tag-confirm-yes="t1"]').click()
-  await sleep(120)
+  await h.settle()
   assert.equal(h.store.get().tags.some((tag) => tag.id === 't1'), false, '标签从目录移除')
   assert.deepEqual(h.store.get().items.find((entry) => entry.id === 'a1').tagIds, [], '只清文章关联')
   assert.equal(h.store.get().items.find((entry) => entry.id === 'a1').readAt, '2026-10-06T00:00:00.000Z', '阅读状态不变')
@@ -1952,11 +2028,11 @@ test('标签 + 搜索：搜索请求携带标签 id，结果仍按标签范围�
     }),
   })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
   h.win.document.querySelector('[data-rss-nav-row="tag:t1"]').click()
-  await sleep(80)
+  await h.settle()
   h.store.submitSearch({ text: '甲' })
-  await sleep(120)
+  await h.settle()
   const searchRequest = h.requests.filter((entry) => entry.endpoint === 'searchItems').at(-1)
   assert.equal(searchRequest.payload.tagId, 't1', '标签范围随搜索请求下发，宿主先在 SQL 里取交集')
   assert.deepEqual(h.store.visible().map((entry) => entry.id), ['a1'])
@@ -1976,16 +2052,16 @@ test('标签写入失败：乐观关联回滚、错误可见，重试成功后�
     },
   })
   await h.store.load('overview')
-  await sleep(40)
+  await h.settle()
   const doc = h.win.document
   doc.querySelector('[data-rss-tag-toggle="t1"]').click()
-  await sleep(160)
+  await h.settle()
   assert.match(h.store.get().error ?? '', /写标签失败/, '失败必须可见')
   assert.deepEqual(h.store.get().items.find((entry) => entry.id === 'a1').tagIds, [], '失败回取服务端真值，不留乐观脏状态')
 
   fail = false
   doc.querySelector('[data-rss-tag-toggle="t1"]').click()
-  await sleep(140)
+  await h.settle()
   assert.deepEqual(h.store.get().items.find((entry) => entry.id === 'a1').tagIds, ['t1'], '重试成功后关联落盘')
   assert.equal(h.store.get().error, undefined, '成功路径清掉错误')
 })
@@ -2001,23 +2077,23 @@ test('删除当前标签范围：回到跨源列表，标签从目录消失但�
     tags: [{ id: 't1', name: '待读' }],
   })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
   const doc = h.win.document
   doc.querySelector('[data-rss-nav-row="tag:t1"]').click()
-  await sleep(80)
+  await h.settle()
   assert.deepEqual(h.store.get().navSelection, { kind: 'tag', tagId: 't1' })
 
   h.press('f')
-  await sleep(50)
+  await h.settle()
   doc.querySelector('[data-rss-tag-delete="t1"]').click()
-  await sleep(20)
+  await h.settle()
   doc.querySelector('[data-rss-tag-confirm-yes="t1"]').click()
-  await sleep(140)
+  await h.settle()
   assert.deepEqual(h.store.get().navSelection, { kind: 'virtual' }, '删除当前标签后回到跨源列表')
   assert.equal(h.store.get().tags.some((tag) => tag.id === 't1'), false, '标签从目录消失')
   assert.deepEqual(h.store.get().items.find((entry) => entry.id === 'a1').tagIds, [], '只清关联')
   h.press('Escape')
-  await sleep(60)
+  await h.settle()
   assert.deepEqual(h.store.visible().map((entry) => entry.id).sort(), ['a1', 'a2'], '文章保留')
 })
 
@@ -2051,19 +2127,19 @@ test('订阅发现：候选逐条列出、选中的那条走 addFeed、取消不
     },
   })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
   h.press('f')
-  await sleep(50)
+  await h.settle()
   const doc = h.win.document
   const input = doc.querySelector('[data-rss-add-input]')
   setControlValue(h.win, input, 'https://site.test/')
-  await sleep(20)
+  await h.settle()
 
   doc.querySelector('[data-rss-discover]').click()
   // 加载态：点下去当场进 busy —— 既有的「正在逐源抓取校验…」提示与各按钮的 disabled 都由这
   // 一个标志驱动（这里只钉标志本身：按钮的 disabled 是渲染的派生结果，瞬时读 DOM 会读到上一帧）。
   assert.equal(h.store.get().feedsBusy, true, '发现期间必须进入 busy 态（加载反馈的承重点）')
-  await sleep(100)
+  await h.settle()
   assert.equal(h.store.get().feedsBusy, false, '结果到达后退出 busy')
   assert.deepEqual(h.requests.filter((request) => request.endpoint === 'discoverFeeds').map((request) => request.payload.url),
     ['https://site.test/'], '发现请求带的是用户填的那个 URL')
@@ -2075,15 +2151,15 @@ test('订阅发现：候选逐条列出、选中的那条走 addFeed、取消不
 
   // 取消：清单收起，且**一个源都没加**
   doc.querySelector('[data-rss-discovery-cancel]').click()
-  await sleep(40)
+  await h.settle()
   assert.equal(doc.querySelector('[data-rss-discovery]'), null, '取消后候选清单消失')
   assert.equal(h.requests.filter((request) => request.endpoint === 'addFeed').length, 0, '取消不添加任何源')
 
   // 再发现一次，这次挑一条添加：只有被选中的那个 URL 落库
   doc.querySelector('[data-rss-discover]').click()
-  await sleep(100)
+  await h.settle()
   doc.querySelector('[data-rss-candidate-add="https://site.test/a.xml"]').click()
-  await sleep(140)
+  await h.settle()
   assert.deepEqual(h.requests.filter((request) => request.endpoint === 'addFeed').map((request) => request.payload.url),
     ['https://site.test/a.xml'], '只添加用户选中的那一条')
   assert.equal(doc.querySelector('[data-rss-discovery]'), null, '选完清单收起')
@@ -2091,9 +2167,9 @@ test('订阅发现：候选逐条列出、选中的那条走 addFeed、取消不
   // 手填入口仍在：回车 = 直接添加（既有语义，不强迫每个源都先发现一遍）
   const inputAgain = doc.querySelector('[data-rss-add-input]')
   setControlValue(h.win, inputAgain, 'https://direct.test/feed.xml')
-  await sleep(20)
+  await h.settle()
   inputAgain.dispatchEvent(new h.win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
-  await sleep(140)
+  await h.settle()
   assert.deepEqual(h.requests.filter((request) => request.endpoint === 'addFeed').map((request) => request.payload.url),
     ['https://site.test/a.xml', 'https://direct.test/feed.xml'], '输入框回车仍走既有的直接添加')
 })
@@ -2116,22 +2192,22 @@ test('订阅发现：零候选与通道错误都有明确反馈（错误时不�
     },
   })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
   h.press('f')
-  await sleep(50)
+  await h.settle()
   const doc = h.win.document
   setControlValue(h.win, doc.querySelector('[data-rss-add-input]'), 'https://site.test/')
-  await sleep(20)
+  await h.settle()
 
   doc.querySelector('[data-rss-discover]').click()
-  await sleep(100)
+  await h.settle()
   assert.match(doc.querySelector('[data-rss-discovery-empty]').textContent, /没有发现可订阅的源/,
     '零候选要说清下一步（继续手填），而不是留白')
   assert.match(doc.querySelector('[data-rss-discovery]').textContent, /未发现公开声明的订阅源/)
 
   mode = 'fail'
   doc.querySelector('[data-rss-discover]').click()
-  await sleep(100)
+  await h.settle()
   assert.equal(doc.querySelector('[data-rss-discovery]'), null, '失败时不许留着上一次的候选（那会让人以为刚才那次没发生）')
   assert.match(doc.querySelector('.dsh-rss-status--error').textContent, /页面抓取失败/, '通道失败要可见')
 })
@@ -2149,9 +2225,9 @@ test('M4 02：管理页显示健康、连败次数、最近尝试与上次成功
     ],
   })
   await h.store.load('overview')
-  await sleep(30)
+  await h.settle()
   h.press('f')
-  await sleep(60)
+  await h.settle()
   const doc = h.win.document
 
   const a = doc.querySelector('[data-rss-feed-health="a"]')
@@ -2172,11 +2248,11 @@ test('M4 02：管理页显示健康、连败次数、最近尝试与上次成功
 test('P0-1：条目链接是 javascript: 时，列表行与正文页都不渲染可点的原站链接（历史脏数据兜底）', skip, async () => {
   const h = await mountReader({ items: [item({ id: 'bad', link: 'javascript:alert(1)' })] })
   await h.store.load('overview')
-  await sleep(50)
+  await h.settle()
   const row = h.win.document.querySelector('[data-rss-row="bad"] .dsh-rss-row-main')
   assert.ok(row !== null, '条目行必须渲染出来')
   row.dispatchEvent(new h.win.MouseEvent('click', { bubbles: true, cancelable: true }))
-  await sleep(30)
+  await h.settle()
 
   assert.equal(h.win.document.querySelector('a[href^="javascript:"]'), null,
     '列表行展开后不许出现 javascript: 的 href（白名单把它当成无链接）')
@@ -2184,7 +2260,7 @@ test('P0-1：条目链接是 javascript: 时，列表行与正文页都不渲染
   // 正文页的「打开原站」：link 来自同一条脏记录，必须同样挡掉。
   h.store.select('bad')
   await h.store.openArticle()
-  await sleep(50)
+  await h.settle()
   assert.equal(h.win.document.querySelector('a[href^="javascript:"]'), null,
     '正文页的「打开原站」同样不许出现 javascript:')
 })

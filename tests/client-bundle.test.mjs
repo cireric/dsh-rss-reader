@@ -31,6 +31,14 @@ const BUNDLE = join(ROOT, 'lib', 'client.js')
  */
 const BUNDLE_NAME = 'client.js'
 
+/**
+ * 撤销窗口时长（src/client/store.ts:328 的 5000ms）。
+ *
+ * 与 scroll-dom.test.mjs 的假时钟用例同一条口径：窗口**时长**由断言钉住，墙钟等待不参与。
+ * 夹具只捕获这个定时器、不排程（理由见 loadClientBundle 里 sandbox.setTimeout 的注释）。
+ */
+const UNDO_WINDOW_MS = 5000
+
 function loadClientBundle() {
   const source = readFileSync(BUNDLE, 'utf8')
   let captured = null
@@ -39,6 +47,22 @@ function loadClientBundle() {
   // isTypingTarget 会对 event.target 做 instanceof HTMLElement —— 沙箱里没有这个全局，
   // 不给就会让按键处理器直接抛 ReferenceError（实测踩到）。空类即可：null 不是它的实例。
   class HTMLElementStub {}
+  // 撤销窗口定时器的捕获表（见下面 sandbox.setTimeout 的注释）。
+  const undoWindowTimers = []
+  let undoWindowSeq = 0
+  const sandboxSetTimeout = (fn, ms, ...args) => {
+    if (ms === UNDO_WINDOW_MS) {
+      undoWindowSeq -= 1
+      undoWindowTimers.push({ id: undoWindowSeq, fn, ms })
+      return undoWindowSeq
+    }
+    return setTimeout(fn, ms, ...args)
+  }
+  const sandboxClearTimeout = (handle) => {
+    const index = undoWindowTimers.findIndex((entry) => entry.id === handle)
+    if (index >= 0) { undoWindowTimers.splice(index, 1); return }
+    clearTimeout(handle)
+  }
   const sandbox = {
     document: {
       addEventListener: (type, handler) => { if (type === 'keydown') listeners.push(handler) },
@@ -54,8 +78,13 @@ function loadClientBundle() {
     HTMLElement: HTMLElementStub,
     // 组件的某些 effect 用 setTimeout 做消抖（SLOW_LOADING_MS），沙箱里不给会直接抛
     // ReferenceError —— 实测踩到，表现为三条接线测试全部报错而不是断言失败。
-    setTimeout,
-    clearTimeout,
+    //
+    // 但撤销窗口那一条（5000ms）**不许真排程**：它唯一的作用是「N 秒后自动收起撤销条」，
+    // 没有任何用例等这 5 秒；真排程的代价是 node:test 要等事件循环排空 —— 实测每条 judge
+    // 白等 5.01s（文件总时长 5.4s 里 5.01s 是空转）。捕获而不排程，窗口是否武装改由用例
+    // 显式断言（见「markAllRead 必须武装 5000ms 撤销窗口」那条）。
+    setTimeout: sandboxSetTimeout,
+    clearTimeout: sandboxClearTimeout,
     Date,
     JSON,
     // 浏览器全局：客户端白名单判据（shared.ts 的 httpUrlOrEmpty）用 new URL 校验协议。
@@ -95,6 +124,7 @@ function loadClientBundle() {
     opened,
     listeners,
     hookCalls,
+    undoWindowTimers,
   }
 }
 
@@ -106,7 +136,7 @@ function loadClientBundle() {
  * 真的调了 markRead」这类问题变成可断言的，而不是靠读代码确认。
  */
 async function driveStore({ items = [], article, hostTruth, failEndpoints = [], shouldFail, refreshRun } = {}) {
-  const { exports, sandbox, opened } = loadClientBundle()
+  const { exports, sandbox, opened, undoWindowTimers } = loadClientBundle()
   const endpoints = []
   // calls 是加法式的：给「请求体本身也要断言」的用例用（例如 markRead 的 skipKept）
   const calls = []
@@ -153,7 +183,7 @@ async function driveStore({ items = [], article, hostTruth, failEndpoints = [], 
   }
   const store = exports.createReaderStore()
   await store.load('overview')
-  return { store, endpoints, calls, opened, sandbox }
+  return { store, endpoints, calls, opened, sandbox, undoWindowTimers }
 }
 
 /**
@@ -640,6 +670,17 @@ test('C3：undoMarkAll 失败恢复撤销条并重新武装 5 秒窗口（只塞
   assert.equal(timers[timers.length - 1].ms, 5000, '窗口仍是 5 秒（README 承诺）')
 })
 
+test('C3：markAllRead 必须武装 5000ms 撤销窗口（夹具捕获不排程，不拿墙钟当判据）', async () => {
+  // 为什么单独立一条：本夹具把 5000ms 定时器改成「捕获不排程」以消灭每条 judge 的 5s 空转
+  // （见 loadClientBundle 里 sandbox.setTimeout 的注释）。省掉墙钟等待之后，「窗口到底有没有
+  // 被武装」就从隐式行为变成了必须显式钉住的契约 —— 不钉等于把判据交给夹具的实现细节。
+  // 断的是两件事：武装一次、窗口仍是 5000ms；撤销条本身也在同一刻出现。
+  const { store, undoWindowTimers } = await driveStore({ items: [item({ id: 'a' })] })
+  await store.markAllRead()
+  assert.equal(undoWindowTimers.length, 1, 'markAll 必须武装且只武装一个撤销窗口')
+  assert.equal(undoWindowTimers[0].ms, UNDO_WINDOW_MS, '窗口仍是 5000ms（README 承诺）')
+  assert.ok(store.get().undo !== undefined, '窗口武装的同时必须给出撤销条')
+})
 test('C3：撤销在飞时更晚的 A 写下自己的撤销条，U 失败不得用旧 batch 盖掉它（身份 CAS）', async () => {
   // 时序：A1（只标 a，b 太新）→ U 撤销在飞（挂起）→ A2 全量标 [a,b] 挤进来写下 U2 → U 回失败。
   // 若 rollback 不做身份 CAS，U 会把撤销条恢复成自己那个旧 batch ['a']，把 A2 的 ['a','b'] 盖掉，
