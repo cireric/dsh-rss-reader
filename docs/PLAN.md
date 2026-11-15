@@ -123,41 +123,40 @@ o / v / 正文加载五处全部走它。展开规则收成导出的纯函数 `n
 
 ## 阶段 4 —— 客户端 store：48 项平铺名单，依赖全在暗处
 
-**状态**：部分完成（接缝与假通道已落地；48 项动作分家未做）· **规模**：大 · **来源**：评审卡 #4
+**状态**：已完成（2026-11-15）· **规模**：大 · **来源**：评审卡 #4
 
 **原来的问题**：`createReaderStore()` 收零参数，实际依赖 fetch / AbortController / setTimeout / Date /
 Blob / document / window.open / console；四份测试沙箱各复制一遍装配；改一次 overview 回包形状要动四个
 测试文件。
 
-**已落地**
-
 | 提交 | 内容 |
 |---|---|
-| `5de290d` | **ReaderStoreDeps 接缝**：8 个依赖（rpc / now / setTimeout / clearTimeout / open / saveFile / log / newAbortController）全部可注入，默认实现与改动前逐条一致 |
-| `29aa58f` | 共享假通道 `tests/helpers/client-channel.mjs`；nav-selection 接入 |
-| `f994336` | unread-accounting 接入（撤销窗口定时器改由 deps 注入） |
-| `986c955` | nav-persistence 接入；假通道按「线上传输」归一化 payload（跨 realm 的原型差异） |
-| `8d5fd6e` | 导航域纯模型抽出 `src/client/nav-model.ts`（七个纯函数；公开接口不变） |
+| `5de290d` | **ReaderStoreDeps 接缝**：8 个依赖全部可注入，默认实现与改动前逐条一致 |
+| `29aa58f` `f994336` `986c955` `bc119a8` | 共享假通道；nav-selection / unread-accounting / nav-persistence / client-bundle 四份沙箱全部接入 |
 | `16c0bb0` | 假通道加编排层（script / hold / release）+ 自己的四条单测 |
-| `ba219ff` | 插件入口接受可选 deps：`apply(ctx, deps?)` —— 解开「经由入口建的 store 无法注入通道」的阻塞 |
-| `bc119a8` | client-bundle 两段 fault-injection 桩退役，四份沙箱全部改走假通道 |
-| `37ac2f2` | 48 个成员的**四块边界表**（谁写谁的 state）写成文 |
-| `2db1f31` | 标签域搬进 `src/client/tag-actions.ts`（第一块真的搬走了） |
+| `ba219ff` | 插件入口接受可选 deps：`apply(ctx, deps?)` |
+| `764f83f` | overview 回包桩收成一份共享工厂（`tests/helpers/overview-fixture.mjs`） |
 
-**两处真问题（都是用例当场红的）**：假通道漏传 abort signal（两条「迟到的旧回包」用例翻红）；
-payload 未过 JSON（五条 deepStrictEqual 因原型不同翻红，值却一模一样）。
+**验收**
+- [x] 四份沙箱收成一份假通道（client-bundle 的失败从「报错」变回「断言」）
+- [x] 换一次 overview 回包形状，只改一处（`overview-fixture.mjs` 是唯一实现，四份文件只做委派）
+- [x] 回归：client-bundle / nav-* / unread-accounting / scroll-dom 全绿；mutation 242/242 幸存 0
 
-**没做完的一件**
+**两处偏离**：① 窄接口（`Pick` 派生）见阶段 3；② 「48 项按域分家」超出本阶段验收，已拆成**阶段 4b**
+（见下）—— 不把它混进「已完成」里。
 
-`03-split-store.md` 的剩余部分：**列表 / 搜索 / 订阅**三块还没搬（标签域已搬，见 `2db1f31`）。
-按边界表顺序搬、每搬一块跑一次全量；列表域依赖最多（items / selectedId / nextCursor / 账目 / 撤销窗口），
-建议最后搬。
+---
 
-**验收（当前状态）**
-- [x] 接缝：8 个依赖可注入，默认行为不变（全量 637 绿）
-- [x] 三份沙箱收进一份假通道（nav-selection / unread-accounting / nav-persistence）
-- [x] client-bundle 接入（`ba219ff` `bc119a8`）
-- [x] 回归：nav-* / unread-accounting / scroll-dom / client-bundle 全绿；mutation 242/242 幸存 0
+## 阶段 4b —— 48 项动作按域分家
+
+**状态**：进行中（标签域已搬，其余三块待搬）· **规模**：大 · **来源**：阶段 4 的方案超出验收的那部分
+
+**已做**：`37ac2f2` 四块边界表（谁写谁的 state 写成文）；`2db1f31` 标签域搬进
+`src/client/tag-actions.ts`（含 `tagWrite` 写盘队列与 `tagEpoch` 失败代数两个内部不变量）。
+
+**待做**：搜索（约 120 行）→ 订阅（约 300 行）→ 列表（约 400 行，依赖最多，最后搬）。
+搜索域的前置耦合已分析清楚（`listVersion` 共享、`refreshDuplicateHints` 定义在后、`resetSearchPage`
+被别的域调用），写在票据 `.scratch/client-store-seams/issues/03-split-store.md` 里。
 
 ---
 
