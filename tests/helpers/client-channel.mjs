@@ -59,8 +59,11 @@ export function loadClientModule(globals = {}) {
  * @param overview  overview 回包；若含 `pages`，按 payload.cursor 分派（分页断言要能看见回带了哪个游标）
  * @param request   其它端点的自定义回包：(endpoint, payload) => 值 | undefined（undefined = 走默认）
  */
-export function createFakeChannel({ overview, request } = {}) {
+export function createFakeChannel({ overview, request, script = [] } = {}) {
   const calls = []
+  // 被挂起的请求（票据 02b 的编排层）：release('失败') 时统一 reject，release('放行') 时按原逻辑继续 ——
+  // 但继续需要重新走一遍处理，所以挂起时先算好「正常回包」再扣住，放行只是把它交出去。
+  const held = []
   const pages = overview?.pages ?? {}
   const pageCalls = []
   const base = pages.base ?? overview
@@ -70,6 +73,12 @@ export function createFakeChannel({ overview, request } = {}) {
   const rpc = async (endpoint, payload, signal) => {
     const body = wire(payload)
     calls.push([endpoint, body])
+    // 编排：命中规则的调用要么直接失败，要么先扣住、由测试决定何时放行/失败。
+    for (const rule of script) {
+      if (rule.when?.({ endpoint, call: calls.length, calls }) !== true) continue
+      if (rule.hold !== true) throw new Error(rule.message ?? 'injected')
+      return new Promise((resolve, reject) => { held.push({ resolve, reject, endpoint, body }) })
+    }
     // 搜索用例要看「旧请求被 abort」：把 signal 原样交给自定义处理器（与真实通道同形）。
     if (endpoint === 'searchItems' && overview?.search) return overview.search(body, signal)
     if (request !== undefined) {
@@ -86,5 +95,20 @@ export function createFakeChannel({ overview, request } = {}) {
     }
     return { changed: 1, unread: 0 }
   }
-  return { rpc, calls, pageCalls }
+  return {
+    rpc,
+    calls,
+    pageCalls,
+    /** 放行所有挂起的请求：给回包就走正常路径，给 Error 就走失败路径。 */
+    release(value) {
+      const queue = held.splice(0)
+      for (const entry of queue) {
+        if (value instanceof Error) entry.reject(value)
+        else entry.resolve(value)
+      }
+      return queue.length
+    },
+    /** 当前挂起的请求数（断言「真的扣住了」用）。 */
+    get heldCount() { return held.length },
+  }
 }
