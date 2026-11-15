@@ -24,7 +24,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-slots'
 // 用到的槽位键由这两个包声明进 SlotMap（main 来自 layout，sidebar.* 来自 sidebar）
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
-import { createReaderStore, nextExpandedOf, relativeTime, useReaderStore, VIRTUAL_VIEWS, type Filter, type MarkAllRange, type ReaderStore } from './store.js'
+import { createReaderStore, nextExpandedOf, relativeTime, useReaderStore, VIRTUAL_VIEWS, type Filter, type MarkAllRange, type ReaderStore, type ReaderStoreDeps } from './store.js'
 // 导出面是构建产物对外的契约（契约测试直接调它），store 搬家后仍要从入口转出去
 export { createReaderStore }
 // **仅供单测取用的 re-export**：键盘路由住在 ./keyboard-routing.ts，而 client 半只出单文件
@@ -758,8 +758,16 @@ function Badge({ store }: { store: ReaderStore }): ReactNode {
   return <span title={state.unread + ' 条未读'} style={{ fontSize: 10 }}>{state.unread > 99 ? '99+' : state.unread}</span>
 }
 
-export function apply(ctx: ClientContext): void {
-  const store = createReaderStore()
+/**
+ * 插件入口。
+ *
+ * @param deps 可选的依赖覆盖（与 createReaderStore 同一个 ReaderStoreDeps）。生产宿主只传 ctx；
+ *   测试传第二个参数就能换掉通道 / 定时器 / opener —— 否则「经由 apply 建的 store」永远只能用
+ *   浏览器默认实现，而那种用例要么伪造全局 fetch，要么根本没得测（2026-11-15 实测：client-bundle
+ *   的 apply 路径在沙箱里直接 ReferenceError: fetch is not defined）。
+ */
+export function apply(ctx: ClientContext, deps?: Partial<ReaderStoreDeps>): void {
+  const store = createReaderStore(deps)
   const Reader = createReader(store)
 
   // 阅读器本体进主栏；id 必须与 panellist 图标的 id 相同，否则点图标会抛错

@@ -279,6 +279,22 @@ function collectRegistrations() {
   return { id, exports, registrations }
 }
 
+test('入口接受可选 deps：apply(ctx, { rpc }) 走注入的通道，不碰全局 fetch', async () => {
+  // 2026-11-15：apply 此前只收 ctx，内部自己 createReaderStore() —— 经由入口建的 store 永远只能用
+  // 浏览器默认实现，沙箱里没有 fetch 就直接 ReferenceError。加了可选 deps 之后这条路径才可测。
+  const { exports } = loadClientBundle()
+  const seen = []
+  const ctx = {
+    slots: { inject: (_slot, callback) => callback(), register: () => () => {} },
+    effect: (callback) => callback(),
+  }
+  exports.apply(ctx, {
+    rpc: async (endpoint) => { seen.push(endpoint); return { feeds: [], folders: [], tags: [], items: [], unread: 0, perFeedUnread: {}, refreshed: false } },
+  })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.ok(seen.includes('overview'), 'apply 启动时的 load(overview) 必须走注入的通道（实际：' + seen.join(',') + '）')
+})
+
 test('bundle 以包名注册，且声明所需的浏览器服务', () => {
   const { id, exports } = collectRegistrations()
   assert.equal(id, '@dsh-external/dsh-rss-reader')
