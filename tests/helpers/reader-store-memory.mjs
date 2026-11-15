@@ -1,35 +1,22 @@
 /**
- * 阅读器 store 测试的共享内存桩（2026-10-16 C4-a 从三个大文件抽出）。
+ * 测试用的共享存储夹具（2026-10-16 抽出；2026-11-15 票据 02/04 之后它只剩下三件事）。
  *
- * 为什么独立成模块而不是各文件留一份：与 overview-scale-fixture.mjs 同一条理由 ——
- * 桩是「合成数据的形状 + 契约的另一份实现」，分家后行为判据与桩的理解会各测各的世界
- * （docs/pitfalls.md 二、2.5 / 2.6），改一处必须两处同步的重复是漂移温床。
+ * 现在这里只放「只有测试才知道怎么造」的东西：临时目录、带真 SQLite 的 freshStore、以及并发注入。
+ * **内存实现本身在 src/memory-store.ts** —— 它由 tsc 盯着（少一个方法就编译失败）并通过
+ * tests/store-contract.test.mjs 的整套契约，因此不再是「某个测试文件的私货」。
  *
- * 本轮的真实收敛面（逐字 diff 实测，比候选清单的原描述更细）：
- *  - `deps` **五份**逐字一致（overview-scale-fixture / endpoints-perfeed-unread /
- *    unread-accounting / article-markread-race + 本轮已接的 overview-paging）⇒ 直接收一份；
- *    例外：nav-persistence.test.mjs 的 deps(store) 是**不同形状**（单参、内联 Config({})）——
- *    C4-a' 接它不是机械动作（调用点传 config 或 helper 加默认参，届时单独裁决）。
- *    其余三份同形文件（epf / race / unread-accounting）已于 C4-a' 接入（各删 10 行本地桩）；
- *    全仓仍保留独立 deps 的只剩 nav-persistence（不同形状）与 overview-scale-fixture（本身
- *    就是 helper 性质的夹具，不反向依赖）。
- *  - `memoryStore` 六份是**带能力漂移的近亲**（nav-persistence 版多 global、race 版多
- *    articleWriteDelayMs、endpoints-perfeed-unread 与 unread-accounting 版少了 cursors、
- *    identity 版的 listCleanupCandidates 真实累计 articleChars 而非桩的恒 0 且无 viewPreferences），
- *    全部并成一份要靠 options 驱动，桩就变成第二个被测对象 —— 刻意**不合并**，这里只收
- *    refresh 的全量版（唯一带「桩也必须守契约」完整注释的一份）。
- *  - store-sqlite 的 freshStore / overview-paging 的 freshRows 没有跨文件重复，
- *    收进来只是让「一个临时库怎么造」只有一个家。
+ * 历史（免得下次有人重新发明）：2026-11-15 之前这里有六份带能力漂移的 memoryStore 副本
+ * （nav 版多 global 槽、race 版多正文写入延迟、另外几份少 cursors / 少 viewPreferences），
+ * 五份在票据 04 里退役，剩下的一份在票据 02 里升格为 src/memory-store.ts。
  *
  * 三个 Map（feeds / cursors / items）**刻意裸露**：用例大量直接断言 `store.items.size` /
  * `store.items.get(id)`，armConcurrentRead 也靠 `store.items.set` 做窗口注入 ——
- * 包一层访问器只会让 40+ 处用例跟着改，违背「纯搬移」。
+ * 包一层访问器只会让 40+ 处用例跟着改。
  */
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { openDatabase, migrateSchema } from '../../lib/storage/db.js'
-import { applyFeedIntent } from '../../lib/feed-intent.js'
 import { writeConfigFile } from '../../lib/storage/config-file.js'
 import { createSqliteStore } from '../../lib/store-sqlite.js'
 
