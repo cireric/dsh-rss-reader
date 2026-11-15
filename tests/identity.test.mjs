@@ -13,113 +13,13 @@
  * 与用户实际跑的路径一致。修复前它们必须见红——「分叉」这条断言就是量尺。
  */
 import { test } from 'node:test'
-import { applyFeedIntent } from '../lib/feed-intent.js'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { refreshFeeds } from '../lib/refresh.js'
 import { repairIdentities, duplicateGroups, mergeItemRecords } from '../lib/identity-repair.js'
+import { createMemoryStore } from '../lib/memory-store.js'
 
-function memoryStore() {
-  const feeds = new Map()
-  const cursors = new Map()
-  const items = new Map()
-  return {
-    feeds, cursors, items,
-    feed: (id) => feeds.get(id),
-    saveFeed: async (id, record) => { feeds.set(id, record) },
-    // 按意图变更（H4）：与生产实现同一条合并规则（桩不自己造第二套语义）；previous undefined 合法。
-    updateFeed: async (id, intent) => { feeds.set(id, applyFeedIntent(feeds.get(id), intent)) },
-    cursor: (id) => cursors.get(id),
-    saveCursor: async (id, record) => { cursors.set(id, record) },
-    item: (id) => items.get(id),
-    allItems: () => [...items.entries()],
-    deleteSubscription: async (feedId) => { feeds.delete(feedId); cursors.delete(feedId); return { items: 0 } },
-    saveItem: async (id, record) => { items.set(id, record) },
-    // 原子读改写（ReaderStore 契约的一部分）：fn 在写入槽位看到当前记录，见 src/store.ts 的注释
-    updateItem: async (id, fn) => { items.set(id, fn(items.get(id))) },
-    deleteItem: async (id) => { items.delete(id) },
-    // 身份合并的原子入口；这个桩没有标签表，只保条目语义（标签合并在 tag-storage 真库里测）。
-    mergeItems: async (keeperId, loserIds, record) => {
-      items.set(keeperId, record)
-      for (const loserId of loserIds) items.delete(loserId)
-    },
-    listItems: (feedId) => [...items.entries()].filter(([, record]) => record.feedId === feedId),
-    /**
-     * 清算原料（src/store.ts 的契约）：只交出 { id, chars, fetchedAt }，正文不进清单。
-     * 桩必须守同一条契约（docs/pitfalls.md 二、2.6）：否则测的是「桩把正文摊开了」，
-     * 而生产实现单列这条方法正是为了不让正文进堆（实测堆峰值 1865 MB vs 验收线 300 MB）。
-     */
-    listArticleCacheEntries: () => {
-      const entries = []
-      for (const [itemId, record] of items.entries()) {
-        if (record.article === undefined) continue
-        const chars = (record.article.paragraphs ?? []).reduce((sum, paragraph) => sum + paragraph.length, 0)
-          + (record.article.blocks ?? []).reduce((sum, block) => {
-            const text = block.text
-            if (typeof text === 'string') return sum + text.length
-            const listItems = block.items
-            if (Array.isArray(listItems)) return sum + listItems.reduce((inner, i) => inner + String(i).length, 0)
-            return sum
-          }, 0)
-        entries.push({ id: itemId, chars, fetchedAt: record.article.fetchedAt ?? '' })
-      }
-      return entries
-    },
-    listFeeds: () => [...feeds.entries()],
-    // 文件夹目录（ReaderStore 契约，M2 03）：测试桩按订阅的 folder 派生；这些用例不涉及空目录。
-    listFolders: () => {
-      const folders = []
-      for (const [id, record] of feeds.entries()) {
-        if (record.folder === undefined || record.folder === '') continue
-        let folder = folders.find((entry) => entry.name === record.folder)
-        if (folder === undefined) { folder = { name: record.folder, feedIds: [] }; folders.push(folder) }
-        folder.feedIds.push(id)
-      }
-      return folders
-    },
-    /**
-     * 与自持实现同形（Task 5 的三条 SQL 取数方法）。
-     *
-     * 桩也必须守**同一条契约**：unreadPerFeed 先按传进来的键铺 0（0 未读的源留键）、
-     * listCleanupCandidates 把 SQL 谓词多守的「保持未读不删」一并实现 —— 桩与实现各写一套
-     * 语义，测出来的就只是桩的理解（docs/pitfalls.md 二、2.5 / 2.6）。
-     */
-    unreadPerFeed: (feedIds) => {
-      const unread = {}
-      for (const feedId of feedIds) unread[feedId] = 0
-      for (const record of items.values()) {
-        if (unread[record.feedId] === undefined || record.readAt !== undefined) continue
-        unread[record.feedId] += 1
-      }
-      return unread
-    },
-    listTags: () => [],
-    tagIdsForItems: (itemIds) => Object.fromEntries(itemIds.map((id) => [id, []])),
-    listRecent: (limit) => {
-      if (limit <= 0) return []
-      const rows = [...items.entries()]
-      rows.sort(([idA, a], [idB, b]) => {
-        const byTime = (b.publishedAt ?? b.fetchedAt).localeCompare(a.publishedAt ?? a.fetchedAt)
-        return byTime !== 0 ? byTime : idA.localeCompare(idB)
-      })
-      return rows.slice(0, limit)
-    },
-    listCleanupCandidates: (cutoffIso) => {
-      const rows = []
-      for (const [id, record] of items.entries()) {
-        const recency = record.publishedAt ?? record.fetchedAt
-        // 判据 = retention.ts 的 selectCleanup（已读 + 未星标 + 早于阈值）另加「保持未读」保护
-        if (record.readAt === undefined || record.starred || record.keptUnread === true) continue
-        if (recency >= cutoffIso) continue
-        rows.push({
-          id, starred: false, kept: false, read: true, recency,
-          articleChars: 0, summaryChars: record.summary?.length ?? 0,
-        })
-      }
-      return rows
-    },
-  }
-}
+const memoryStore = () => createMemoryStore()
 
 const LIMITS = { timeoutMs: 2000, maxBytes: 1_000_000, trustedTarget: true }
 const OPTIONS = { limits: LIMITS, maxItemsPerFeed: 100, maxSeenPerFeed: 1000, maxContentChars: 100000, maxArticleCacheChars: 1000000, refreshConcurrency: 2 }

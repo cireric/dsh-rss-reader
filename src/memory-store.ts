@@ -25,6 +25,14 @@ export interface MemoryStore extends ReaderStore {
   readonly cursors: Map<string, CursorRecord>
   readonly items: Map<string, ItemRecord>
   readonly tags: Map<string, TagRecord>
+  /**
+   * 测试用：**绕过归一**直接写视图偏好，造「存储里本来就有坏值」这一形态。
+   * 正常路径写不进坏值（saveViewPreferences 会归一），所以坏值只能这样注入 —— 与 sqlite 侧
+   * 直接在 config.json 里塞垃圾是同一件事。
+   */
+  putRawPreferences(value: unknown): void
+  /** 测试用：读**未经归一**的媒介值 —— 用来断言「落进媒介的确实是归一后的那份」。 */
+  getRawPreferences(): unknown
 }
 
 export interface MemoryStoreOptions {
@@ -35,10 +43,18 @@ export interface MemoryStoreOptions {
    * **要判生产行为的新用例**必须开 —— 宽容桩会把生产上的抛错变成「悄悄创建」，那是假绿。
    */
   readonly strictFeedUpdates?: boolean
+  /**
+   * 正文写入的模拟延迟（毫秒）。只给并发用例用：正文那一次写慢一点，才来得及在窗口里插进别的写。
+   * 0 = 不延迟（默认）。它模拟的是**传输耗时**，不是行为差异 —— 语义不许随它变。
+   */
+  readonly articleWriteDelayMs?: number
 }
 
 export function createMemoryStore(options: MemoryStoreOptions = {}): MemoryStore {
   const strictFeedUpdates = options.strictFeedUpdates === true
+  const articleWriteDelayMs = options.articleWriteDelayMs ?? 0
+  const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+  const isArticleWrite = (record: ItemRecord): boolean => record.article !== undefined || record.articleFailure !== undefined
   const feeds = new Map<string, FeedRecord>()
   const cursors = new Map<string, CursorRecord>()
   const items = new Map<string, ItemRecord>()
@@ -105,8 +121,12 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): MemoryStore
     },
 
     item: (itemId) => items.get(itemId),
-    saveItem: async (itemId, record) => { items.set(itemId, record) },
+    saveItem: async (itemId, record) => {
+      if (articleWriteDelayMs > 0 && isArticleWrite(record)) await sleep(articleWriteDelayMs)
+      items.set(itemId, record)
+    },
     updateItem: async (itemId, fn) => {
+      if (articleWriteDelayMs > 0) await sleep(articleWriteDelayMs)
       const current = items.get(itemId)
       // 与生产同一条纪律：写一次不等于创建（缺失键按存储域语义拒绝）。
       if (current === undefined) throw new Error('updateItem：条目不存在（' + itemId + '）')
@@ -268,6 +288,8 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): MemoryStore
       if (merged.size > 0) itemTagIds.set(keeperId, [...merged])
     },
 
+    putRawPreferences: (value) => { preferences = value as ViewPreferences },
+    getRawPreferences: () => preferences,
     viewPreferences: () => sanitizeViewPreferences(
       preferences,
       (feedId) => feeds.has(feedId),

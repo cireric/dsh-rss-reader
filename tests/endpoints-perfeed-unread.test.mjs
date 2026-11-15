@@ -17,86 +17,10 @@ import { articleCharsOf } from '../lib/retention.js'
 import { createDispatch } from '../lib/endpoints.js'
 import { Config } from '../lib/config.js'
 import { deps } from './helpers/reader-store-memory.mjs' // C4-a'：与原本地桩逐字一致（214 字节体），契约注释随 helper
+import { createMemoryStore } from '../lib/memory-store.js'
 
 /** 与 src/store.ts 的 ReaderStore 同形的内存实现（本文件只用到 listFeeds / allItems）。 */
-function memoryStore() {
-  const feeds = new Map()
-  const items = new Map()
-  return {
-    feeds,
-    items,
-    feed: (id) => feeds.get(id),
-    saveFeed: async (id, record) => { feeds.set(id, record) },
-    cursor: () => undefined,
-    saveCursor: async () => {},
-    deleteSubscription: async (feedId) => { feeds.delete(feedId); return { items: 0 } },
-    item: (id) => items.get(id),
-    saveItem: async (id, record) => { items.set(id, record) },
-    // 原子读改写（ReaderStore 契约的一部分）：fn 在写入槽位看到当前记录，见 src/store.ts 的注释
-    updateItem: async (id, fn) => { items.set(id, fn(items.get(id))) },
-    deleteItem: async (id) => { items.delete(id) },
-    listItems: (feedId) => [...items.entries()].filter(([, record]) => record.feedId === feedId),
-    allItems: () => [...items.entries()],
-    listFeeds: () => [...feeds.entries()],
-    // 文件夹目录（ReaderStore 契约，M2 03）：测试桩按订阅的 folder 派生；这些用例不涉及空目录。
-    listFolders: () => {
-      const folders = []
-      for (const [id, record] of feeds.entries()) {
-        if (record.folder === undefined || record.folder === '') continue
-        let folder = folders.find((entry) => entry.name === record.folder)
-        if (folder === undefined) { folder = { name: record.folder, feedIds: [] }; folders.push(folder) }
-        folder.feedIds.push(id)
-      }
-      return folders
-    },
-    /**
-     * 与自持实现同形（Task 5 的三条 SQL 取数方法）。
-     *
-     * 桩也必须守**同一条契约**：unreadPerFeed 先按传进来的键铺 0（0 未读的源留键）、
-    listCleanupCandidates 把 SQL 谓词多守的「保持未读不删」一并实现 —— 桩与实现各写一套
-    语义，测出来的就只是桩的理解（docs/pitfalls.md 二、2.5 / 2.6）。
-     */
-    unreadPerFeed: (feedIds) => {
-      const unread = {}
-      for (const feedId of feedIds) unread[feedId] = 0
-      for (const record of items.values()) {
-        if (unread[record.feedId] === undefined || record.readAt !== undefined) continue
-        unread[record.feedId] += 1
-      }
-      return unread
-    },
-    listTags: () => [],
-    tagIdsForItems: (itemIds) => Object.fromEntries(itemIds.map((id) => [id, []])),
-    listRecent: (limit) => {
-      if (limit <= 0) return []
-      const rows = [...items.entries()]
-      rows.sort(([idA, a], [idB, b]) => {
-        const byTime = (b.publishedAt ?? b.fetchedAt).localeCompare(a.publishedAt ?? a.fetchedAt)
-        return byTime !== 0 ? byTime : idA.localeCompare(idB)
-      })
-      return rows.slice(0, limit)
-    },
-    listCleanupCandidates: (cutoffIso) => {
-      const rows = []
-      for (const [id, record] of items.entries()) {
-        const recency = record.publishedAt ?? record.fetchedAt
-        // 判据 = retention.ts 的 selectCleanup（已读 + 未星标 + 早于阈值）另加「保持未读」保护
-        if (record.readAt === undefined || record.starred || record.keptUnread === true) continue
-        if (recency >= cutoffIso) continue
-        rows.push({
-          id,
-          starred: false,
-          kept: false,
-          read: true,
-          recency,
-          articleChars: articleCharsOf(record.article),
-          summaryChars: record.summary?.length ?? 0,
-        })
-      }
-      return rows
-    },
-  }
-}
+const memoryStore = () => createMemoryStore()
 
 /** 与 src/domain.ts 的 itemRecordSchema 同形；未读 = readAt 缺省。 */
 function item(feedId, over = {}) {

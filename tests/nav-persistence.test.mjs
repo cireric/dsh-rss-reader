@@ -28,6 +28,7 @@ import { createStore } from '../lib/store.js'
 import { openDatabase, migrateSchema } from '../lib/storage/db.js'
 import { createSqliteStore } from '../lib/store-sqlite.js'
 import { sanitizeViewPreferences, DEFAULT_VIEW_PREFERENCES, DEFAULT_READING_PREFERENCES, READING_FONT_SIZES, READING_LINE_WIDTHS } from '../lib/shared.js'
+import { createMemoryStore } from '../lib/memory-store.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const BUNDLE = join(ROOT, 'lib', 'client.js')
@@ -236,94 +237,7 @@ test('真实 createSqliteStore：读侧校验坏值、写侧归一后才落库�
 
 /* ============================ ② 宿主端点层 ============================ */
 
-function memoryStore() {
-  const feeds = new Map()
-  const items = new Map()
-  let global = undefined
-  return {
-    feeds, items,
-    globalGet: () => global,
-    /** 绕过归一直接写媒介 —— 造「存储里本来就有坏值」这一形态用（真实路径下写不进坏值）。 */
-    globalPut: (value) => { global = value },
-    feed: (id) => feeds.get(id),
-    saveFeed: async (id, record) => { feeds.set(id, record) },
-    cursor: () => undefined,
-    saveCursor: async () => {},
-    deleteSubscription: async (feedId) => { feeds.delete(feedId); return { items: 0 } },
-    item: (id) => items.get(id),
-    saveItem: async (id, record) => { items.set(id, record) },
-    // 原子读改写（ReaderStore 契约的一部分）：fn 在写入槽位看到当前记录，见 src/store.ts 的注释
-    updateItem: async (id, fn) => { items.set(id, fn(items.get(id))) },
-    deleteItem: async (id) => { items.delete(id) },
-    listItems: (feedId) => [...items.entries()].filter(([, record]) => record.feedId === feedId),
-    allItems: () => [...items.entries()],
-    listFeeds: () => [...feeds.entries()],
-    // 文件夹目录（ReaderStore 契约，M2 03）：测试桩按订阅的 folder 派生；这些用例不涉及空目录。
-    listFolders: () => {
-      const folders = []
-      for (const [id, record] of feeds.entries()) {
-        if (record.folder === undefined || record.folder === '') continue
-        let folder = folders.find((entry) => entry.name === record.folder)
-        if (folder === undefined) { folder = { name: record.folder, feedIds: [] }; folders.push(folder) }
-        folder.feedIds.push(id)
-      }
-      return folders
-    },
-    /**
-     * 与自持实现同形（Task 5 的三条 SQL 取数方法）。
-     *
-     * 桩也必须守**同一条契约**：unreadPerFeed 先按传进来的键铺 0（0 未读的源留键）、
-    listCleanupCandidates 把 SQL 谓词多守的「保持未读不删」一并实现 —— 桩与实现各写一套
-    语义，测出来的就只是桩的理解（docs/pitfalls.md 二、2.5 / 2.6）。
-     */
-    unreadPerFeed: (feedIds) => {
-      const unread = {}
-      for (const feedId of feedIds) unread[feedId] = 0
-      for (const record of items.values()) {
-        if (unread[record.feedId] === undefined || record.readAt !== undefined) continue
-        unread[record.feedId] += 1
-      }
-      return unread
-    },
-    listTags: () => [],
-    tagIdsForItems: (itemIds) => Object.fromEntries(itemIds.map((id) => [id, []])),
-    listRecent: (limit) => {
-      if (limit <= 0) return []
-      const rows = [...items.entries()]
-      rows.sort(([idA, a], [idB, b]) => {
-        const byTime = (b.publishedAt ?? b.fetchedAt).localeCompare(a.publishedAt ?? a.fetchedAt)
-        return byTime !== 0 ? byTime : idA.localeCompare(idB)
-      })
-      return rows.slice(0, limit)
-    },
-    listCleanupCandidates: (cutoffIso) => {
-      const rows = []
-      for (const [id, record] of items.entries()) {
-        const recency = record.publishedAt ?? record.fetchedAt
-        // 判据 = retention.ts 的 selectCleanup（已读 + 未星标 + 早于阈值）另加「保持未读」保护
-        if (record.readAt === undefined || record.starred || record.keptUnread === true) continue
-        if (recency >= cutoffIso) continue
-        rows.push({
-          id,
-          starred: false,
-          kept: false,
-          read: true,
-          recency,
-          articleChars: articleCharsOf(record.article),
-          summaryChars: record.summary?.length ?? 0,
-        })
-      }
-      return rows
-    },
-    // 与 src/store.ts 的 createStore 逐条同形：读侧归一（未知源回落）、写侧也归一后落库并**返回**它
-    viewPreferences: () => sanitizeViewPreferences(global, (feedId) => feeds.has(feedId)),
-    saveViewPreferences: async (preferences) => {
-      const safe = sanitizeViewPreferences(preferences, (feedId) => feeds.has(feedId))
-      global = safe
-      return safe
-    },
-  }
-}
+const memoryStore = () => createMemoryStore()
 
 /** EndpointDeps 的桩（形状照 src/endpoints.ts 的 EndpointDeps，不增减字段）。 */
 const deps = (store) => ({
@@ -355,7 +269,7 @@ test('端点：saveViewPreferences 存下偏好，viewPreferences 原样读回',
 
   const read = await callEndpoint(store, 'viewPreferences', {})
   assert.deepEqual(read.preferences, preferences, '重开面板读到的必须与写下去的一致')
-  assert.deepEqual(store.globalGet(), preferences, '真的落到域的 global 槽上')
+  assert.deepEqual(store.getRawPreferences(), preferences, '真的落到域的 global 槽上')
 })
 
 test('端点：未知 feedId / 非法形状写进来时回落默认，不抛错也不把垃圾存进域', async () => {
@@ -365,7 +279,7 @@ test('端点：未知 feedId / 非法形状写进来时回落默认，不抛错�
   const unknownFeed = await callEndpoint(store, 'saveViewPreferences', { preferences: { navSelection: { kind: 'feed', feedId: 'gone' }, filter: 'unread', navVisible: false } })
   assert.deepEqual(unknownFeed.preferences, { navSelection: { kind: 'virtual' }, filter: 'unread', navVisible: false, reading: DEFAULT_READING_PREFERENCES },
     '已退订的源要回落虚拟视图，而 filter / navVisible 这两条仍然保得住')
-  assert.deepEqual(store.globalGet(), unknownFeed.preferences, '存进域的必须是回落后的值 —— 不许把认不出的原值原样塞进去')
+  assert.deepEqual(store.getRawPreferences(), unknownFeed.preferences, '存进域的必须是回落后的值 —— 不许把认不出的原值原样塞进去')
 
   const junk = await callEndpoint(store, 'saveViewPreferences', { preferences: 'not-an-object' })
   assert.deepEqual(junk.preferences, DEFAULT_VIEW_PREFERENCES, '整份认不出就整份回落')
@@ -373,7 +287,7 @@ test('端点：未知 feedId / 非法形状写进来时回落默认，不抛错�
   assert.deepEqual(missing.preferences, DEFAULT_VIEW_PREFERENCES, '读侧同样不许抛错')
 
   // 域里存着坏值时，读端点必须回落而不是把它透出去（绕过写侧归一，直接往媒介里塞坏值）
-  store.globalPut({ navSelection: { kind: 'feed', feedId: 'gone' }, filter: 'bogus', navVisible: 1 })
+  store.putRawPreferences({ navSelection: { kind: 'feed', feedId: 'gone' }, filter: 'bogus', navVisible: 1 })
   const read = await callEndpoint(store, 'viewPreferences', {})
   assert.deepEqual(read.preferences, DEFAULT_VIEW_PREFERENCES, '诚实回落到默认，而不是编造或透传')
 })
