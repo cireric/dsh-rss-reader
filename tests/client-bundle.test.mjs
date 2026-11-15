@@ -18,6 +18,7 @@ import assert from 'node:assert/strict'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createFakeChannel } from './helpers/client-channel.mjs'
 import vm from 'node:vm'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -145,43 +146,40 @@ async function driveStore({ items = [], article, hostTruth, failEndpoints = [], 
   // 交错用例的时序闸门（单线程桩里这是唯一能让「A2 在 U 的 RPC 在飞时挤进来」成立的办法）。
   const held = []
   const failEnvelope = () => ({ ok: true, status: 200, json: async () => ({ ok: false, error: { code: 'injected', message: '注入失败' } }) })
-  sandbox.fetch = async (_url, init) => {
-    const body = JSON.parse(init.body)
-    endpoints.push(body.endpoint)
-    calls.push(body)
-    const ok = (value) => ({ ok: true, status: 200, json: async () => ({ ok: true, value }) })
-    // 释放已满足条件的挂起请求（每来一个新请求都重新判定一次）
-    for (let i = held.length - 1; i >= 0; i--) {
-      if (shouldFail?.when?.(calls) === true) { held[i].resolve(failEnvelope()); held.splice(i, 1) }
-    }
-    // 失败注入：统一回滚判据的触发器。回**分发核 fail() 的真实形状**——HTTP 200 + ok:false 信封
-    //（若回 HTTP 500，callRpc 在 HTTP 层就 throw，正文信封根本不被读，错误文本变成 'HTTP 500'）
-    if (failEndpoints.includes(body.endpoint)) return failEnvelope()
-    if (shouldFail !== undefined && body.endpoint === shouldFail.endpoint) {
-      if (shouldFail.when === undefined || shouldFail.when(calls) === true) return failEnvelope()
-      return new Promise((resolve) => { held.push({ resolve }) })
-    }
-    // refresh 与 overview 都回完整 Overview（src/endpoints.ts:112-118）：面板挂载时走的是
-    // refresh（index.tsx:184），桩件若把 refresh 回成 {changed,unread}，applyOverview 会拿到
-    // 一堆 undefined。这是夹具要守的契约，不是代码该容忍的形状。
-    if (body.endpoint === 'overview' || body.endpoint === 'refresh') {
-      // refreshRun（M4 02）：「本轮尝试 X/Y」与节流/并入在途的措辞由**回包里的 refresh 字段**驱动，
-      // 桩件必须能表达它；缺省不带 = overview 的契约（overview 不给本轮统计）。
-      const stub = overviewStub(items)
-      return ok(refreshRun === undefined
-        ? stub
-        : { ...stub, refresh: refreshRun, refreshed: refreshRun.outcome === 'ran' })
-    }
-    if (body.endpoint === 'article') return ok(article ?? { itemId: body.payload.itemId, cached: false, paragraphs: ['正文'] })
-    if (body.endpoint === 'markRead' || body.endpoint === 'unmarkRead') {
-      const ids = Array.isArray(body.payload?.itemIds) ? body.payload.itemIds : []
-      return ok(host.reply(body.endpoint, ids))
-    }
-    // toggleStar / toggleKeepUnread 的回包同样带账（分发核按 carriesAccount 合并）——
-    // 旧桩只回 {changed, unread:0} 是契约上不存在的形状；新管线照单全收，桩必须守契约
-    return ok({ changed: 1, ...host.snapshot() })
+  // 2026-11-15 票据 02b：fetch 桩换成共享假通道；编排（挂起 / 失败注入）留在本文件的 request 里。
+  const channel = createFakeChannel({
+    request: async (endpoint, payload) => {
+      for (let i = held.length - 1; i >= 0; i--) {
+        if (shouldFail?.when?.(calls) === true) { held[i].reject(new Error('injected')); held.splice(i, 1) }
+      }
+      if (failEndpoints.includes(endpoint)) throw new Error('injected')
+      if (shouldFail !== undefined && endpoint === shouldFail.endpoint) {
+        if (shouldFail.when === undefined || shouldFail.when(calls) === true) throw new Error('injected')
+        return new Promise((_resolve, reject) => { held.push({ reject }) })
+      }
+      if (endpoint === 'overview' || endpoint === 'refresh') {
+        const stub = overviewStub(items)
+        return refreshRun === undefined ? stub : { ...stub, refresh: refreshRun, refreshed: refreshRun.outcome === 'ran' }
+      }
+      if (endpoint === 'article') return article ?? { itemId: payload.itemId, cached: false, paragraphs: ['正文'] }
+      if (endpoint === 'markRead' || endpoint === 'unmarkRead') {
+        const ids = Array.isArray(payload?.itemIds) ? payload.itemIds : []
+        return host.reply(endpoint, ids)
+      }
+      return { changed: 1, ...host.snapshot() }
+    },
+  })
+  const rpc = async (endpoint, payload, signal) => {
+    endpoints.push(endpoint)
+    calls.push({ endpoint, payload: payload === undefined ? undefined : JSON.parse(JSON.stringify(payload)) })
+    return channel.rpc(endpoint, payload, signal)
   }
-  const store = exports.createReaderStore()
+  const store = exports.createReaderStore({
+    rpc,
+    open: (url) => opened.push(url),
+    setTimeout: (fn, ms, ...rest) => sandbox.setTimeout(fn, ms, ...rest),
+    clearTimeout: (handle) => sandbox.clearTimeout(handle),
+  })
   await store.load('overview')
   return { store, endpoints, calls, opened, sandbox, undoWindowTimers }
 }
@@ -275,7 +273,7 @@ function collectRegistrations() {
       return disposer
     },
   }
-  exports.apply(ctx)
+  exports.apply(ctx, { rpc: async () => ({ feeds: [], folders: [], tags: [], items: [], unread: 0, perFeedUnread: {}, refreshed: false }) })
   return { id, exports, registrations }
 }
 
@@ -781,19 +779,11 @@ test('分页接线：续页游标在时渲染「加载更多」，点它真的�
   const first = [item({ id: 'a1' }), item({ id: 'a2' })]
   const second = [item({ id: 'a3' })]
   const endpoints = []
-  sandbox.fetch = async (_url, init) => {
-    const body = JSON.parse(init.body)
-    endpoints.push(body.endpoint)
-    const ok = (value) => ({ ok: true, status: 200, json: async () => ({ ok: true, value }) })
-    if (body.endpoint === 'overview' || body.endpoint === 'refresh') {
-      if (body.payload?.cursor === 'C1') return ok(overviewStub(second))
-      return ok({ ...overviewStub(first), nextCursor: 'C1' })
-    }
-    // 兜底同样守回包契约（本用例不会打到这些端点，但这条桩常被复制当模板 —— 别把契约上
-    // 不存在的形状传给下一代用例，与 driveStore / mountReader 的桩同一条纪律）
-    return ok({ changed: 1, unread: 0, perFeedUnread: {} })
-  }
-  const store = exports.createReaderStore()
+  // 2026-11-15 票据 02b：本用例自己的分页桩也走假通道（游标分派由通道负责）。
+  const channel = createFakeChannel({
+    overview: { ...overviewStub(first), nextCursor: 'C1', pages: { C1: overviewStub(second) } },
+  })
+  const store = exports.createReaderStore({ rpc: channel.rpc })
   const Reader = exports.createReader(store)
   /**
    * 从渲染树里收集所有 button 元素桩。
@@ -821,7 +811,7 @@ test('分页接线：续页游标在时渲染「加载更多」，点它真的�
   more.props.onClick()
   await new Promise((resolve) => setTimeout(resolve, 20))
 
-  assert.ok(endpoints.includes('overview'), '「加载更多」必须走 overview 端点')
+  assert.ok(channel.calls.some(([endpoint]) => endpoint === 'overview'), '「加载更多」必须走 overview 端点')
   assert.deepEqual([...store.get().items].map((entry) => entry.id), ['a1', 'a2', 'a3'],
     '续页必须追加到当前列表尾部（接线判据：点击真的驱动了 loadMore）')
   assert.equal(store.get().nextCursor, undefined, '到底之后按钮要从界面上消失（游标缺省）')
