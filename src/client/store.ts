@@ -256,7 +256,7 @@ export interface ReaderState {
  * endpoint 收的是 shared.ts 的 Endpoint（= ENDPOINT_NAMES 派生）：拼错名字从「运行时收一个
  * unknown-endpoint」变成**编译错误**。这是本文件与宿主之间唯一的那条 seam，值得有类型。
  */
-async function callRpc<T>(endpoint: Endpoint, payload?: unknown, signal?: AbortSignal): Promise<T> {
+async function browserRpc<T>(endpoint: Endpoint, payload?: unknown, signal?: AbortSignal): Promise<T> {
   const response = await fetch(ROUTE_PATH, {
     method: 'POST',
     ...(signal === undefined ? {} : { signal }),
@@ -292,7 +292,58 @@ export function relativeTime(iso: string | undefined): string {
  * 真实 store（喂桩 fetch / window.open），把「按 v 打开并标已读」这类**接线**钉住——
  * 历史上多次故障都出在接线上，而不是算法上。
  */
-export function createReaderStore() {
+
+/**
+ * 客户端 store 的**显式依赖**（阶段 4 的真接缝）。
+ *
+ * 为什么要有它：`createReaderStore()` 此前收零参数，却偷偷用着 fetch / AbortController / setTimeout /
+ * Date / Blob / document / window.open / console —— 于是四份测试沙箱各复制一遍这些桩，
+ * 「换一次 overview 回包形状要改四个文件」。接缝画在构造处之后，测试只需喂一条假通道；
+ * 浏览器里跑的时候用下面的 browserDeps（与改动前的行为逐条对应）。
+ */
+export interface ReaderStoreDeps {
+  /** 与宿主的唯一通道。默认实现发 POST 到 ROUTE_PATH 并解信封。 */
+  rpc: <T>(endpoint: Endpoint, payload?: unknown, signal?: AbortSignal) => Promise<T>
+  /** 现在几点（毫秒）。默认 Date.now —— 测试可以冻结它。 */
+  now: () => number
+  /** 撤销窗口的定时器。默认全局 setTimeout。 */
+  setTimeout: (handler: () => void, ms: number) => unknown
+  clearTimeout: (handle: unknown) => void
+  /** 打开外站（v 键）。默认 window.open(_blank, noopener)。 */
+  open: (url: string) => void
+  /** 触发文件下载（OPML 导出）。默认 Blob + <a download>。 */
+  saveFile: (name: string, text: string, mime: string) => void
+  /** 诊断输出。默认 console。 */
+  log: (level: 'warn' | 'error', message: string, failure?: unknown) => void
+  /** 搜索请求的取消器。默认真 AbortController。 */
+  newAbortController: () => AbortController
+}
+
+/** 浏览器里的真实实现 —— 与接缝出现之前的行为逐条一致（没有任何新语义）。 */
+const browserDeps: ReaderStoreDeps = {
+  rpc: browserRpc,
+  now: () => Date.now(),
+  setTimeout: (handler, ms) => setTimeout(handler, ms),
+  clearTimeout: (handle) => { clearTimeout(handle as ReturnType<typeof setTimeout>) },
+  open: (url) => { window.open(url, '_blank', 'noopener') },
+  saveFile: (name, text, mime) => {
+    const blob = new Blob([text], { type: mime })
+    const href = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = href
+    anchor.download = name
+    anchor.click()
+    URL.revokeObjectURL(href)
+  },
+  log: (level, message, failure) => {
+    if (level === 'error') console.error(message, failure)
+    else console.warn(message, failure)
+  },
+  newAbortController: () => new AbortController(),
+}
+
+export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
+  const deps: ReaderStoreDeps = { ...browserDeps, ...overrides }
   let state: ReaderState = {
     items: [], feeds: [], folders: [], tags: [], unread: 0, filter: 'all',
     selectedId: undefined, loading: true, error: undefined, undo: undefined,
@@ -316,16 +367,16 @@ export function createReaderStore() {
    * 2026-10-07 修：原先只往 state.undo.until 写了个时间戳，全仓没有任何地方读它，于是
    * 「5 秒撤销窗口」名存实亡——撤销条一直挂着，想撤多久撤多久（README 承诺的是 5 秒）。
    */
-  let undoExpiry: ReturnType<typeof setTimeout> | undefined
+  let undoExpiry: unknown
   const clearUndoExpiry = (): void => {
     if (undoExpiry !== undefined) {
-      clearTimeout(undoExpiry)
+      deps.clearTimeout(undoExpiry)
       undoExpiry = undefined
     }
   }
   const armUndoExpiry = (): void => {
     clearUndoExpiry()
-    undoExpiry = setTimeout(() => {
+    undoExpiry = deps.setTimeout(() => {
       undoExpiry = undefined
       set({ undo: undefined })
     }, UNDO_WINDOW_MS)
@@ -340,7 +391,7 @@ export function createReaderStore() {
     const search = state.search
     if (!search) return
     searchRequest?.abort()
-    const request = new AbortController()
+    const request = deps.newAbortController()
     searchRequest = request
     const version = ++listVersion
     const firstPage = cursor === undefined
@@ -370,7 +421,7 @@ export function createReaderStore() {
       let nextCursor = cursor
       let received = 0
       do {
-        const page: SearchPage = emptyScope ? { items: [] } : await callRpc<SearchPage>('searchItems', {
+        const page: SearchPage = emptyScope ? { items: [] } : await deps.rpc<SearchPage>('searchItems', {
           ...search,
           ...(feedId === undefined ? {} : { feedId }),
           ...(scopedFeedIds === undefined ? {} : { feedIds: scopedFeedIds }),
@@ -497,14 +548,14 @@ export function createReaderStore() {
       if (Object.keys(state.duplicates).length > 0) set({ duplicates: {} })
       return
     }
-    void callRpc<{ hints?: DuplicateHintView[] }>('duplicateHints', { itemIds })
+    void deps.rpc<{ hints?: DuplicateHintView[] }>('duplicateHints', { itemIds })
       .then((result) => {
         const next: Record<string, DuplicateHintView['others']> = {}
         for (const hint of result.hints ?? []) next[hint.itemId] = hint.others
         set({ duplicates: next })
       })
       .catch((failure: unknown) => {
-        console.warn('[rss-reader] 跨源重复提示查询失败，本次不显示', failure)
+        deps.log('warn', '[rss-reader] 跨源重复提示查询失败，本次不显示', failure)
       })
   }
 
@@ -608,7 +659,7 @@ export function createReaderStore() {
       reading: state.reading,
     }
     viewWriteChain = viewWriteChain
-      .then(() => callRpc('saveViewPreferences', { preferences }))
+      .then(() => deps.rpc('saveViewPreferences', { preferences }))
       // 写盘失败要有可见后果（AGENTS.md 禁空 catch）：进 error 让面板说出来。
       // 界面状态不回滚 —— 它与「能不能记住」是两件事，把左栏再翻回去只会让用户更困惑。
       .then(() => {}, (failure: unknown) => {
@@ -637,10 +688,10 @@ export function createReaderStore() {
    */
   const readViewPreferences = async (): Promise<unknown> => {
     try {
-      const result = await callRpc<{ preferences?: unknown }>('viewPreferences')
+      const result = await deps.rpc<{ preferences?: unknown }>('viewPreferences')
       return result?.preferences
     } catch (failure) {
-      console.warn('[rss-reader] 读取视图记忆失败，本次按默认态使用', failure)
+      deps.log('warn', '[rss-reader] 读取视图记忆失败，本次按默认态使用', failure)
       return undefined
     }
   }
@@ -664,7 +715,7 @@ export function createReaderStore() {
         : state.navSelection.kind === 'tag'
           ? { tagId: state.navSelection.tagId }
           : undefined
-      const overview = await callRpc<Overview>(endpoint, scopePayload)
+      const overview = await deps.rpc<Overview>(endpoint, scopePayload)
       if (version !== overviewVersion) return
       if (state.search) {
         const tags = overview.tags ?? []
@@ -751,7 +802,7 @@ export function createReaderStore() {
     const version = listVersion
     set({ loadingMore: true })
     try {
-      const overview = await callRpc<Overview>('overview', {
+      const overview = await deps.rpc<Overview>('overview', {
         cursor,
         ...(state.navSelection.kind === 'folder' ? { folder: state.navSelection.folder } : {}),
         ...(state.navSelection.kind === 'tag' ? { tagId: state.navSelection.tagId } : {}),
@@ -790,7 +841,7 @@ export function createReaderStore() {
    * 动作 × 行为的判据之家在 src/client/account-mirror.ts 头部 —— 这里只留守卫与载荷组装。
    */
   const mirror = createAccountMirror({
-    callRpc,
+    callRpc: deps.rpc,
     applyAccount,
     fail: (failure) => { set({ error: failure instanceof Error ? failure.message : String(failure) }) },
   })
@@ -800,7 +851,7 @@ export function createReaderStore() {
     if (target?.readAt !== undefined) return
     // 快照在按下前取：失败回滚 = 恢复到「动作没发生」（account-mirror 不变量 ②——
     // 不用反向增量：Math.max 夹到 0 的减量没法用加法精确还原）
-    const stamp = new Date().toISOString()
+    const stamp = new Date(deps.now()).toISOString()
     const beforeUnread = state.unread
     const beforePerFeed = state.perFeedUnread
     await mirror.run({
@@ -872,7 +923,7 @@ export function createReaderStore() {
     // 认不出就当「无链接」——不打开新窗口、也不标已读（动作没发生）。
     const href = httpUrlOrEmpty(item.link)
     if (href === '') return
-    window.open(href, '_blank', 'noopener')
+    deps.open(href)
     activate(item.id)
   }
 
@@ -937,14 +988,14 @@ export function createReaderStore() {
     // **保持未读的条目要活下来**（规格 §3.3）——这正是 kept-unread 的存在理由。本地乐观更新与请求
     // 两处都要跳过；宿主侧也会按 skipKept 再挡一次（客户端列表只是快照）。
     const days = RANGE_DAYS[state.markAllRange]
-    const before = days === undefined ? undefined : new Date(Date.now() - days * 24 * 3600 * 1000).toISOString()
+    const before = days === undefined ? undefined : new Date(deps.now() - days * 24 * 3600 * 1000).toISOString()
     const ids = visible()
       .filter((item) => item.readAt === undefined && item.keptUnread !== true)
       // 范围阈值同样判两次：这里决定乐观更新与名单，宿主那边再按 before 挡一次
       .filter((item) => before === undefined || recencyOf(item) < before)
       .map((item) => item.id)
     if (ids.length === 0) return
-    const stamp = new Date().toISOString()
+    const stamp = new Date(deps.now()).toISOString()
     const beforeUnread = state.unread
     const beforePerFeed = state.perFeedUnread
     const beforeItems = state.items
@@ -1025,7 +1076,7 @@ export function createReaderStore() {
     set({ view: 'article', selectedId: item.id, article: { itemId: item.id, loading: true } })
     activate(item.id)
     try {
-      const result = await callRpc<ArticlePayload>('article', { itemId: item.id })
+      const result = await deps.rpc<ArticlePayload>('article', { itemId: item.id })
       // 期间用户可能已经换到别的条目：丢弃过期结果，避免把 A 的正文显示成 B 的
       if (state.article?.itemId !== item.id) return
       if (result.failure !== undefined) {
@@ -1057,8 +1108,8 @@ export function createReaderStore() {
    * 会让「每切一篇红一次」比丢一次进度更烦人。
    */
   const saveArticleProgress = (itemId: string, contentVersion: string, ratio: number): void => {
-    void callRpc('saveReadingProgress', { itemId, contentVersion, ratio }).catch((failure: unknown) => {
-      console.warn('[rss-reader] 阅读进度保存失败（不影响继续阅读；下一次切换会再写一次）', failure)
+    void deps.rpc('saveReadingProgress', { itemId, contentVersion, ratio }).catch((failure: unknown) => {
+      deps.log('warn', '[rss-reader] 阅读进度保存失败（不影响继续阅读；下一次切换会再写一次）', failure)
     })
   }
 
@@ -1208,15 +1259,10 @@ export function createReaderStore() {
   /** 导出 OPML：拿到文本后交给浏览器下载（File System Access 不可用时退化为 blob 下载）。 */
   const exportOpml = async (): Promise<void> => {
     try {
-      const result = await callRpc<OpmlExportResult>('opmlExport')
-      const blob = new Blob([result.opml], { type: 'text/x-opml;charset=utf-8' })
-      const href = URL.createObjectURL(blob)
-      const anchor = document.createElement('a')
-      anchor.href = href
-      anchor.download = 'dsh-rss-subscriptions.opml'
-      anchor.click()
-      URL.revokeObjectURL(href)
-      set({ notice: '已导出 ' + result.feedCount + ' 个订阅（' + anchor.download + '）' })
+      const result = await deps.rpc<OpmlExportResult>('opmlExport')
+      const name = 'dsh-rss-subscriptions.opml'
+      deps.saveFile(name, result.opml, 'text/x-opml;charset=utf-8')
+      set({ notice: '已导出 ' + result.feedCount + ' 个订阅（' + name + '）' })
     } catch (failure) {
       set({ error: failure instanceof Error ? failure.message : String(failure) })
     }
@@ -1226,7 +1272,7 @@ export function createReaderStore() {
   const importOpml = async (text: string): Promise<void> => {
     set({ feedsBusy: true, importReport: undefined })
     try {
-      const report = await callRpc<OpmlImportResult>('opmlImport', { opml: text })
+      const report = await deps.rpc<OpmlImportResult>('opmlImport', { opml: text })
       set({ importReport: report, feedsBusy: false })
       await load('overview')
     } catch (failure) {
@@ -1241,7 +1287,7 @@ export function createReaderStore() {
   const discover = async (url: string): Promise<void> => {
     set({ feedsBusy: true, discovery: undefined, importReport: undefined, error: undefined })
     try {
-      const result = await callRpc<DiscoveryResult>('discoverFeeds', { url })
+      const result = await deps.rpc<DiscoveryResult>('discoverFeeds', { url })
       set({ feedsBusy: false, discovery: result })
     } catch (failure) {
       set({ feedsBusy: false, error: failure instanceof Error ? failure.message : String(failure) })
@@ -1255,7 +1301,7 @@ export function createReaderStore() {
   const addFeed = async (url: string): Promise<void> => {
     set({ feedsBusy: true, importReport: undefined })
     try {
-      const report = await callRpc<OpmlImportResult>('addFeed', { url })
+      const report = await deps.rpc<OpmlImportResult>('addFeed', { url })
       // 落库成功即收掉候选清单：用户已经在清单里做过选择，留着它只会让人怀疑「到底加了没」。
       set({ importReport: report, feedsBusy: false, discovery: undefined })
       await load('overview')
@@ -1267,7 +1313,7 @@ export function createReaderStore() {
   /** 退订：连带删除该源条目（宿主侧执行），不可撤销，界面要二次确认。 */
   const removeFeed = async (url: string): Promise<void> => {
     try {
-      const result = await callRpc<{ removed: number; items: number }>('removeFeed', { url })
+      const result = await deps.rpc<{ removed: number; items: number }>('removeFeed', { url })
       set({ notice: '已退订（连带删除 ' + result.items + ' 条条目）' })
       await load('overview')
     } catch (failure) {
@@ -1283,7 +1329,7 @@ export function createReaderStore() {
    */
   const cleanup = async (): Promise<void> => {
     try {
-      const result = await callRpc<CleanupResult>('cleanup')
+      const result = await deps.rpc<CleanupResult>('cleanup')
       set({
         notice: result.deleted === 0
           ? '没有可清理的条目（只清「已读且未星标」且早于阈值的旧条目）'
@@ -1303,7 +1349,7 @@ export function createReaderStore() {
 
   const createFolder = async (name: string): Promise<void> => {
     try {
-      const result = await callRpc<{ folders: FolderView[] }>('createFolder', { name })
+      const result = await deps.rpc<{ folders: FolderView[] }>('createFolder', { name })
       applyFolders(result.folders)
       set({ notice: '已创建文件夹「' + name.trim() + '」' })
       await load('overview')
@@ -1314,7 +1360,7 @@ export function createReaderStore() {
 
   const renameFolder = async (from: string, to: string): Promise<void> => {
     try {
-      const result = await callRpc<{ folders: FolderView[] }>('renameFolder', { from, to })
+      const result = await deps.rpc<{ folders: FolderView[] }>('renameFolder', { from, to })
       // 当前正在浏览这个文件夹：范围必须跟着迁移，否则右栏会变成一个不存在的名字。
       const selected = state.navSelection.kind === 'folder' && state.navSelection.folder === from
       applyFolders(result.folders)
@@ -1331,7 +1377,7 @@ export function createReaderStore() {
 
   const deleteFolder = async (name: string): Promise<void> => {
     try {
-      const result = await callRpc<{ folders: FolderView[]; detached: number }>('deleteFolder', { name })
+      const result = await deps.rpc<{ folders: FolderView[]; detached: number }>('deleteFolder', { name })
       const selected = state.navSelection.kind === 'folder' && state.navSelection.folder === name
       const cursorOnIt = state.navCursor.kind === 'folder' && state.navCursor.folder === name
       applyFolders(result.folders)
@@ -1351,7 +1397,7 @@ export function createReaderStore() {
 
   const moveFeedToFolder = async (feedId: string, folder: string | undefined): Promise<void> => {
     try {
-      const result = await callRpc<{ folders: FolderView[] }>('moveFeedToFolder', {
+      const result = await deps.rpc<{ folders: FolderView[] }>('moveFeedToFolder', {
         feedId,
         // 协议里 null 才是「移出到未分类」；undefined 会被 JSON 丢掉，宿主看不到这个键。
         folder: folder ?? null,
@@ -1371,7 +1417,7 @@ export function createReaderStore() {
 
   const createTag = async (name: string): Promise<void> => {
     try {
-      const result = await callRpc<{ tag: TagView }>('createTag', { name })
+      const result = await deps.rpc<{ tag: TagView }>('createTag', { name })
       set({ tags: [...state.tags, { ...result.tag, itemCount: 0 }], notice: '已创建标签「' + result.tag.name + '」' })
     } catch (failure) {
       set({ error: failure instanceof Error ? failure.message : String(failure) })
@@ -1380,7 +1426,7 @@ export function createReaderStore() {
 
   const renameTag = async (id: string, name: string): Promise<void> => {
     try {
-      const result = await callRpc<{ tag: TagView }>('renameTag', { id, name })
+      const result = await deps.rpc<{ tag: TagView }>('renameTag', { id, name })
       // 改名不换 id：当前标签范围与文章关联都保持不变，只替换显示名。
       set({
         tags: state.tags.map((tag) => tag.id === id ? { ...tag, name: result.tag.name } : tag),
@@ -1393,7 +1439,7 @@ export function createReaderStore() {
 
   const deleteTag = async (id: string): Promise<void> => {
     try {
-      await callRpc<{ deleted: true }>('deleteTag', { id })
+      await deps.rpc<{ deleted: true }>('deleteTag', { id })
       const selected = state.navSelection.kind === 'tag' && state.navSelection.tagId === id
       set({
         tags: state.tags.filter((tag) => tag.id !== id),
@@ -1431,7 +1477,7 @@ export function createReaderStore() {
     tagWrite = tagWrite.then(async () => {
       if (epoch !== tagEpoch) return
       try {
-        const result = await callRpc<{ itemId: string; tags: TagView[] }>('setItemTags', { itemId, tagIds: nextIds })
+        const result = await deps.rpc<{ itemId: string; tags: TagView[] }>('setItemTags', { itemId, tagIds: nextIds })
         if (state.items.some((entry) => entry.id === itemId)) {
           set({ error: undefined, items: state.items.map((entry) => entry.id === itemId
             ? { ...entry, tagIds: result.tags.map((tag) => tag.id) }
@@ -1446,7 +1492,7 @@ export function createReaderStore() {
         set({ error: message })
       }
     }).catch((error: unknown) => {
-      console.error('标签写入队列异常', error)
+      deps.log('error', '标签写入队列异常', error)
     })
   }
 
