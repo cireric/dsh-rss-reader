@@ -108,6 +108,20 @@ test('sanitizeViewPreferences：文件夹选中按目录判据恢复，未知文
   )
 })
 
+test('sanitizeViewPreferences：标签选中按「标签还在不在」恢复，未知标签回落虚拟视图', () => {
+  const knownTag = (tagId) => tagId === 't1'
+  assert.deepEqual(
+    sanitizeViewPreferences({ navSelection: { kind: 'tag', tagId: 't1' } }, undefined, undefined, knownTag).navSelection,
+    { kind: 'tag', tagId: 't1' }, '还在的标签必须原样保留')
+  assert.deepEqual(
+    sanitizeViewPreferences({ navSelection: { kind: 'tag', tagId: 'gone' } }, undefined, undefined, knownTag).navSelection,
+    { kind: 'virtual' }, '被删掉的标签必须回落 —— 与已退订的源同一条规则')
+  // 不传判据 = 只验形状（与 feed 那条同义）
+  assert.deepEqual(
+    sanitizeViewPreferences({ navSelection: { kind: 'tag', tagId: 'gone' } }).navSelection,
+    { kind: 'tag', tagId: 'gone' })
+})
+
 test('sanitizeViewPreferences：给了「源是否还在订」的判据时，未知 feedId 回落虚拟视图', () => {
   const known = (feedId) => feedId === 'A'
   assert.deepEqual(
@@ -375,19 +389,19 @@ function item(id, overrides = {}) {
 }
 
 /** 守宿主契约的 overview 桩（键域 = feeds 表，0 未读的源也留键）。 */
-function overviewOf(items) {
+function overviewOf(items, tags = []) {
   const feeds = [...new Set(items.map((entry) => entry.feedId))].map((feedId) => ({ id: feedId, title: feedId }))
   const perFeedUnread = {}
   for (const feed of feeds) perFeedUnread[feed.id] = 0
   for (const entry of items) if (entry.readAt === undefined) perFeedUnread[entry.feedId] += 1
-  return { feeds, items, folders: [], unread: items.filter((entry) => entry.readAt === undefined).length, perFeedUnread, refreshed: false }
+  return { feeds, items, folders: [], tags, unread: items.filter((entry) => entry.readAt === undefined).length, perFeedUnread, refreshed: false }
 }
 
 /**
  * 加载真实 bundle / 驱动真实 store。prefs 是「宿主那一侧的域 global」：跨两次 store 实例共享，
  * 这样「重开面板」在测试里就是「再建一个 store、读同一份 prefs」。
  */
-function loadExports({ items, prefs, failSave = false, writeDelayMs = [] }) {
+function loadExports({ items, tags = [], prefs, failSave = false, writeDelayMs = [] }) {
   const source = readFileSync(BUNDLE, 'utf8')
   let captured = null
   class HTMLElementStub {}
@@ -403,7 +417,7 @@ function loadExports({ items, prefs, failSave = false, writeDelayMs = [] }) {
     const body = JSON.parse(init.body)
     const ok = (value) => ({ ok: true, status: 200, json: async () => ({ ok: true, value }) })
     const bad = (code, message) => ({ ok: true, status: 200, json: async () => ({ ok: false, error: { code, message, details: {} } }) })
-    if (body.endpoint === 'overview' || body.endpoint === 'refresh') return ok(overviewOf(items))
+    if (body.endpoint === 'overview' || body.endpoint === 'refresh') return ok(overviewOf(items, tags))
     if (body.endpoint === 'viewPreferences') return ok({ preferences: prefs.value })
     if (body.endpoint === 'saveViewPreferences') {
       if (failSave) return bad('internal', '写盘失败')
@@ -486,6 +500,32 @@ test('记住上次选中的导航项、filter 与左栏显隐，重开后恢复'
   // 光标刻意**不**持久化：恢复时按既有规则落到「生效的那一行」（见 src/client/store.ts 的注释）
   assert.deepEqual({ ...second.get().navCursor }, { kind: 'feed', feedId: 'B' },
     '光标落在生效的源那一行 —— 与鼠标点源、shift+o 打开源行同一规则')
+})
+
+test('选中的标签会记住：重开后回到同一个标签，而不是静默掉回「全部」', async () => {
+  // 这条钉的就是 2026-11-14 之前的缺陷：persistView 的手写三元把 tag 投影成 virtual，
+  // 按标签筛选生效、落盘却写成「全部」，还顺手覆盖掉上次记住的源/文件夹。
+  const prefs = { value: undefined, writes: [] }
+  const tags = [{ id: 't1', name: '工作', itemCount: 1 }]
+  const first = await openPanel({ items: twoFeeds(), tags, prefs })
+  first.selectNav({ kind: 'tag', tagId: 't1' })
+  await flush()
+  assert.deepEqual(prefs.value.navSelection, { kind: 'tag', tagId: 't1' },
+    '落盘必须是 tag —— 写成 virtual 就是这条缺陷本身')
+
+  const second = await openPanel({ items: twoFeeds(), tags, prefs })
+  assert.equal(second.get().navSelection.kind, 'tag', '重开后必须回到标签')
+  assert.equal(second.get().navSelection.tagId, 't1')
+  assert.deepEqual({ ...second.get().navCursor }, { kind: 'tag', tagId: 't1' }, '光标落到标签那一行')
+})
+
+test('标签被删掉之后：记忆里的选中态回落虚拟视图，面板照常打开', async () => {
+  const prefs = {
+    value: { navSelection: { kind: 'tag', tagId: 'gone' }, filter: 'all', navVisible: true, reading: DEFAULT_READING_PREFERENCES },
+    writes: [],
+  }
+  const store = await openPanel({ items: twoFeeds(), tags: [], prefs })
+  assert.equal(store.get().navSelection.kind, 'virtual', '标签没了 ⇒ 回落，不抛错也不留一个指向空标签的选中态')
 })
 
 test('改字号只动排版：导航、过滤与左栏显隐一项都不许被覆盖（重开后排版也恢复）', async () => {

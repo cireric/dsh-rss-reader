@@ -735,12 +735,13 @@ const MUTATIONS = [
   // ⑥ 宿主写侧不归一再落库 ⇒ 认不出的原值进媒介（存储里攒垃圾，只被读侧遮住）
   { id: 'persist-宿主写侧不归一', file: 'lib/store.js',
     judges: ['nav-persistence.test.mjs'],
-    from: 'const safe = sanitizeViewPreferences(preferences, (feedId) => feeds.get(feedId) !== undefined, isKnownFolder);',
+    // 2026-11-14 重锚：视图偏好新增了第三个判据（isKnownTag），旧 from 报「未应用」。
+    from: 'const safe = sanitizeViewPreferences(preferences, (feedId) => feeds.get(feedId) !== undefined, isKnownFolder, (tagId) => tags.get(tagId) !== undefined);',
     to: 'const safe = preferences;' },
   // ⑦ 宿主读侧不校验 ⇒ 媒介里的坏值被透出去（回落承诺的第二道闸失效）
   { id: 'persist-宿主读侧不校验', file: 'lib/store.js',
     judges: ['nav-persistence.test.mjs', 'overview-scale.test.mjs'],
-    from: 'viewPreferences: () => sanitizeViewPreferences(global.get(), (feedId) => feeds.get(feedId) !== undefined, isKnownFolder),',
+    from: 'viewPreferences: () => sanitizeViewPreferences(global.get(), (feedId) => feeds.get(feedId) !== undefined, isKnownFolder, (tagId) => tags.get(tagId) !== undefined),',
     to: 'viewPreferences: () => global.get(),' },
   // ⑧⑨⑩ 三个关键动作各自写一次盘：**三个调用点各一条**，否则任一条漏写都会被另一条的
   // 整份写入盖过去（persistView 落的是整个 state）。判据在「记住上次选中的导航项…」里
@@ -966,7 +967,7 @@ const MUTATIONS = [
     judges: ['nav-persistence.test.mjs', 'store-sqlite.test.mjs'],
     // src/store.ts:41-45 的承诺是「返回的保证是可信形状」；不校验就把媒介里的垃圾透给调用方去兜。
     // 判据：tests/store-sqlite.test.mjs 的「坏值逐字段回落」。
-    from: 'viewPreferences: () => {\n            const current = readConfigFile(configPath);\n            const knownFeeds = new Set(Object.keys(current.feeds));\n            const knownFolders = new Set(current.folders ?? []);\n            return sanitizeViewPreferences(current.viewPreferences, (feedId) => knownFeeds.has(feedId), (folder) => knownFolders.has(folder));\n        },',
+    from: 'viewPreferences: () => {\n            const current = readConfigFile(configPath);\n            const knownFeeds = new Set(Object.keys(current.feeds));\n            const knownFolders = new Set(current.folders ?? []);\n            return sanitizeViewPreferences(current.viewPreferences, (feedId) => knownFeeds.has(feedId), (folder) => knownFolders.has(folder), isKnownTag);\n        },',
     to: 'viewPreferences: () => readConfigFile(configPath).viewPreferences,' },
   { id: 'store-写偏好覆盖掉订阅映射', file: 'lib/store-sqlite.js',
     judges: ['nav-persistence.test.mjs', 'store-sqlite.test.mjs'],
@@ -1010,6 +1011,24 @@ const MUTATIONS = [
     // 判据：store-sqlite 的「cursor 必须跟着退订一起消失」。
     from: '                sql(DELETE_CURSOR).run(feedId);\n',
     to: '' },
+  { id: 'client-标签选中落盘成虚拟视图', file: 'lib/client.js',
+    judges: ['nav-persistence.test.mjs'],
+    // 就是 2026-11-14 之前的那个缺陷本身：投影把 tag 写回 virtual ⇒ 按标签筛选生效、落盘却成了
+    // 「全部」，还顺手覆盖掉上次记住的源/文件夹。判据：nav-persistence 的
+    // 「选中的标签会记住：重开后回到同一个标签」——它断言落盘那一份的 navSelection.kind === 'tag'。
+    from: [
+      '\t\t\t\tcase "tag": return {',
+      '\t\t\t\t\tkind: "tag",',
+      '\t\t\t\t\ttagId: selection.tagId',
+      '\t\t\t\t};',
+    ].join('\n'),
+    to: '\t\t\t\tcase "tag": return { kind: "virtual" };' },
+  { id: 'store-viewPreferences 不校验标签', file: 'lib/store-sqlite.js',
+    judges: ['store-sqlite.test.mjs'],
+    // 读侧丢掉 isKnownTag ⇒ 标签删了之后记忆里仍指向一个不存在的标签，界面打开一个空范围。
+    // 判据：store-sqlite 的「标签被删之后回落虚拟视图」。
+    from: '(folder) => knownFolders.has(folder), isKnownTag);',
+    to: '(folder) => knownFolders.has(folder));' },
   { id: 'store-老形态正文静默丢正文', file: 'lib/store-sqlite.js',
     judges: ['store-sqlite.test.mjs'],
     // 库里没有存 paragraphs 的列。放开这道闸后，一条「只有 paragraphs、没有 blocks」的老记录会被

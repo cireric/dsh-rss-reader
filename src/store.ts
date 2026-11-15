@@ -486,6 +486,7 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
       global.get(),
       (feedId) => feeds.get(feedId) !== undefined,
       isKnownFolder,
+      (tagId) => tags.get(tagId) !== undefined,
     ),
     saveViewPreferences: async (preferences) => {
       // 写侧也过一遍校验：先把认不出的形状归一，再落库。否则坏值会被原样写进媒介，
@@ -494,6 +495,7 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
         preferences,
         (feedId) => feeds.get(feedId) !== undefined,
         isKnownFolder,
+        (tagId) => tags.get(tagId) !== undefined,
       )
       await global.set(safe)
       return safe

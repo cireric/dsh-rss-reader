@@ -203,6 +203,8 @@ const ITEM_TAG_VIEWS = `SELECT t.id AS id, t.name AS name, t.created_at AS creat
 const TAG_BY_ID = 'SELECT id, name, created_at FROM tags WHERE id = ?'
 const INSERT_TAG = 'INSERT INTO tags (id, name, created_at) VALUES (?, ?, ?)'
 const UPDATE_TAG_NAME = 'UPDATE tags SET name = ? WHERE id = ?'
+/** 视图偏好的「标签还在不在」判据（失效 ⇔ 回落虚拟视图，与已退订的源同一条）。 */
+const SELECT_TAG_EXISTS = 'SELECT 1 AS hit FROM tags WHERE id = ?'
 const DELETE_TAG_LINKS = 'DELETE FROM item_tags WHERE tag_id = ?'
 const DELETE_TAG = 'DELETE FROM tags WHERE id = ?'
 const DELETE_ITEM_TAGS = 'DELETE FROM item_tags WHERE item_id = ?'
@@ -634,6 +636,8 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
   const isKnownFeed = (feedId: string): boolean => readFeeds(configPath)[feedId] !== undefined
   /** 「这个文件夹还在目录里吗」——与 isKnownFeed 同一条：失效的选中态必须回落虚拟视图。 */
   const isKnownFolder = (folder: string): boolean => readConfigFile(configPath).folders?.includes(folder) === true
+  /** 「这个标签还在不在」——与上面两条同一条规则（标签删了，记忆里的选中态跟着失效）。 */
+  const isKnownTag = (tagId: string): boolean => sql(SELECT_TAG_EXISTS).get(tagId) !== undefined
 
   /** 单篇文章的标签读取；itemCount 缺省（这条查询没带 count）。 */
   const itemTagViews = (itemId: string): TagView[] => sql(ITEM_TAG_VIEWS).all(itemId).map(toTagView)
@@ -1098,6 +1102,7 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
         current.viewPreferences,
         (feedId) => knownFeeds.has(feedId),
         (folder) => knownFolders.has(folder),
+        isKnownTag,
       )
     },
 
@@ -1106,7 +1111,7 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
      * 那是用户仅有的订阅副本），再把归一后的偏好与文件的其余内容一起写回。
      */
     saveViewPreferences: async (preferences) => {
-      const safe = sanitizeViewPreferences(preferences, isKnownFeed, isKnownFolder)
+      const safe = sanitizeViewPreferences(preferences, isKnownFeed, isKnownFolder, isKnownTag)
       // `{ ...current }` 带上 folders：保存视图偏好不是「重写整份订阅文件」，
       // 空目录与订阅归属必须原样保留（M2 02 的显式回归项）。
       updateConfig(configPath, (current) => ({ ...current, viewPreferences: safe }))

@@ -320,7 +320,17 @@ export interface OpmlImportResult {
  * 是瞬时的指向，而这里记的是「上次看到哪儿」；恢复时按既有规则把它落到生效的那一行即可。
  */
 export interface ViewPreferences {
-  navSelection: { kind: 'virtual' } | { kind: 'feed'; feedId: string } | { kind: 'folder'; folder: string }
+  /**
+   * 可落盘的导航选中。**四种 kind 与 NavSelection 一一对应**（2026-11-14 收口）：
+   * 此前只有三种，tag 被一条手写三元静默投影成 virtual —— 按标签筛选生效、落盘却写成「全部」，
+   * 还顺手覆盖掉上次记住的源/文件夹。类型缺一种 kind 时编译器不会提醒（else 是合法值），
+   * 所以现在由一处**穷尽映射**负责投影（见 src/client/store.ts 的 memorableSelectionOf）。
+   */
+  navSelection:
+    | { kind: 'virtual' }
+    | { kind: 'feed'; feedId: string }
+    | { kind: 'folder'; folder: string }
+    | { kind: 'tag'; tagId: string }
   filter: 'all' | 'unread' | 'starred'
   navVisible: boolean
   /** 正文排版（M5 01）。旧配置没有这个键 ⇒ 归一化时补默认值，不许因为缺字段就回落整份记忆。 */
@@ -391,6 +401,7 @@ export function sanitizeViewPreferences(
   raw: unknown,
   isKnownFeed?: (feedId: string) => boolean,
   isKnownFolder?: (folder: string) => boolean,
+  isKnownTag?: (tagId: string) => boolean,
 ): ViewPreferences {
   const source = typeof raw === 'object' && raw !== null && !Array.isArray(raw)
     ? (raw as Record<string, unknown>)
@@ -410,6 +421,11 @@ export function sanitizeViewPreferences(
       && typeof selection['folder'] === 'string' && selection['folder'] !== ''
       && (isKnownFolder === undefined || isKnownFolder(selection['folder']))) {
       navSelection = { kind: 'folder', folder: selection['folder'] }
+    } else if (selection['kind'] === 'tag'
+      && typeof selection['tagId'] === 'string' && selection['tagId'] !== ''
+      && (isKnownTag === undefined || isKnownTag(selection['tagId']))) {
+      // 标签被删了就回落到虚拟视图 —— 与「已退订的源」同一条规则：面板打得开比记得住更重要。
+      navSelection = { kind: 'tag', tagId: selection['tagId'] }
     }
   }
 

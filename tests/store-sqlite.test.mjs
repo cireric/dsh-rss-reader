@@ -654,6 +654,24 @@ test('cursor 的 seen 是 JSON 文本；saveCursor 覆盖，缺 cursorAt 时键�
   }
 })
 
+test('viewPreferences：标签被删之后回落虚拟视图（读侧校验，与已退订的源同一条）', async () => {
+  const { store, db, dir } = freshStore('view-prefs-tag')
+  try {
+    const tag = await store.createTag('工作')
+    const saved = await store.saveViewPreferences({
+      navSelection: { kind: 'tag', tagId: tag.id }, filter: 'all', navVisible: true,
+    })
+    assert.deepEqual(saved.navSelection, { kind: 'tag', tagId: tag.id }, '在的标签必须存下')
+
+    await store.deleteTag(tag.id)
+    assert.deepEqual(store.viewPreferences().navSelection, { kind: 'virtual' },
+      '标签没了 ⇒ 回落虚拟视图（与已退订的源同一条规则）')
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('viewPreferences 读侧一定给可信形状：坏值逐字段回落，已退订的源回落虚拟视图且不抛错', async () => {
   const { store, db, configPath, dir } = freshStore('prefs-read')
   try {

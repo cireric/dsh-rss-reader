@@ -97,6 +97,22 @@ export function navCursorKey(cursor: NavCursor): string {
   return cursor.kind === 'filter' ? 'filter:' + cursor.filter : 'feed:' + cursor.feedId
 }
 
+/**
+ * 选中 → **可落盘的形状**（唯一一处投影）。
+ *
+ * 为什么是函数而不是嵌套三元：投影与 NavSelection 是同一条概念的两半，写成三元时新增一种 kind
+ * 会静默落进 else —— tag 就这么被丢进 virtual 过（按标签筛选生效、落盘写成「全部」，
+ * 还覆盖掉上次记住的源）。换成穷尽 switch 后，加第五种 kind 是**编译错误**。
+ */
+function memorableSelectionOf(selection: NavSelection): ViewPreferences['navSelection'] {
+  switch (selection.kind) {
+    case 'virtual': return { kind: 'virtual' }
+    case 'feed': return { kind: 'feed', feedId: selection.feedId }
+    case 'folder': return { kind: 'folder', folder: selection.folder }
+    case 'tag': return { kind: 'tag', tagId: selection.tagId }
+  }
+}
+
 /** 「再选同一个 = 取消」的判据；folder 与 feed 各按自己的键比较。 */
 function sameNavSelection(a: NavSelection, b: NavSelection): boolean {
   if (a.kind === 'virtual' || b.kind === 'virtual') return a.kind === b.kind
@@ -540,7 +556,14 @@ export function createReaderStore() {
     if (viewTouched) return
     const knownFeeds = new Set(state.feeds.map((feed) => feed.id))
     const knownFolders = new Set(state.folders.map((folder) => folder.name))
-    const prefs = sanitizeViewPreferences(raw, (feedId) => knownFeeds.has(feedId), (folder) => knownFolders.has(folder))
+    // 标签目录此时已经在手：恢复发生在 overview 落地之后（见 load 的顺序），所以这里能判「标签还在不在」。
+    const knownTags = new Set(state.tags.map((tag) => tag.id))
+    const prefs = sanitizeViewPreferences(
+      raw,
+      (feedId) => knownFeeds.has(feedId),
+      (folder) => knownFolders.has(folder),
+      (tagId) => knownTags.has(tagId),
+    )
     set({
       navSelection: prefs.navSelection,
       filter: prefs.filter,
@@ -550,7 +573,9 @@ export function createReaderStore() {
         ? { kind: 'feed', feedId: prefs.navSelection.feedId }
         : prefs.navSelection.kind === 'folder'
           ? { kind: 'folder', folder: prefs.navSelection.folder }
-          : { kind: 'filter', filter: prefs.filter },
+          : prefs.navSelection.kind === 'tag'
+            ? { kind: 'tag', tagId: prefs.navSelection.tagId }
+            : { kind: 'filter', filter: prefs.filter },
     })
     relocateSelection()
   }
@@ -566,11 +591,7 @@ export function createReaderStore() {
   const persistView = (): void => {
     viewTouched = true
     const preferences: ViewPreferences = {
-      navSelection: state.navSelection.kind === 'feed'
-        ? { kind: 'feed', feedId: state.navSelection.feedId }
-        : state.navSelection.kind === 'folder'
-          ? { kind: 'folder', folder: state.navSelection.folder }
-          : { kind: 'virtual' },
+      navSelection: memorableSelectionOf(state.navSelection),
       filter: state.filter,
       navVisible: state.navVisible,
       reading: state.reading,
