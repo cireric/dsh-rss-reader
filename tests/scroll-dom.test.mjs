@@ -2245,6 +2245,32 @@ test('M4 02：管理页显示健康、连败次数、最近尝试与上次成功
 })
 
 
+test('行内 Enter / Space 与 o 同义：再按一次收起（GR 规范 o / enter = open/close）', skip, async () => {
+  // 病象（2026-11-14 之前）：点击是 toggle、o 是 toggle，而行内 Enter/Space 写的是「恒展开」——
+  // 同一条 GR 规则（docs/google-reader-feature-spec.md:211「o / enter | open/close item」）
+  // 在三个入口有三种实现。这条用例钉的就是「三个入口同一条」。
+  const h = await mountReader({ items: [item({ id: 'x' })] })
+  await h.store.load('overview')
+  await h.settle()
+  const rowOf = () => h.win.document.querySelector('[data-rss-row="x"] .dsh-rss-row-main')
+  assert.ok(rowOf() !== null, '条目行必须渲染出来')
+
+  rowOf().dispatchEvent(new h.win.MouseEvent('click', { bubbles: true, cancelable: true }))
+  await h.settle()
+  assert.ok(h.win.document.querySelector('[data-rss-row="x"] .dsh-rss-summary') !== null, '点击后展开')
+  assert.notEqual(h.store.get().items.find((entry) => entry.id === 'x').readAt, undefined,
+    '点击即标已读 —— store.activate 是「打开即已读」的唯一触发点')
+
+  rowOf().dispatchEvent(new h.win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+  await h.settle()
+  assert.equal(h.win.document.querySelector('[data-rss-row="x"] .dsh-rss-summary'), null,
+    'Enter 必须收起 —— 此前这里写的是「恒展开」，按一次只会展开、永远收不起来')
+
+  rowOf().dispatchEvent(new h.win.KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true }))
+  await h.settle()
+  assert.ok(h.win.document.querySelector('[data-rss-row="x"] .dsh-rss-summary') !== null, 'Space 再展开（与 Enter 同义）')
+})
+
 test('P0-1：条目链接是 javascript: 时，列表行与正文页都不渲染可点的原站链接（历史脏数据兜底）', skip, async () => {
   const h = await mountReader({ items: [item({ id: 'bad', link: 'javascript:alert(1)' })] })
   await h.store.load('overview')

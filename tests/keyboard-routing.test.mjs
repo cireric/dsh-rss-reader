@@ -109,7 +109,7 @@ function fakeStore(state = {}) {
   for (const name of [
     'selectRelative', 'stepArticle', 'moveNavCursor', 'openNavCursor', 'toggleNav', 'openSelected',
     'openArticle', 'closeArticle', 'toggleFeeds', 'refreshCount', 'setLayout', 'toggleStar',
-    'toggleRead', 'markAllRead', 'markRead',
+    'toggleRead', 'markAllRead', 'markRead', 'activate',
   ]) store[name] = record(name)
   return store
 }
@@ -245,7 +245,12 @@ test('o 键在列表页翻转展开：已展开则收起，否则展开当前行
   const opened = makeCtx({ state: { view: 'list', selectedId: 'a1' }, expanded: undefined })
   routeKeyOf('o', opened)
   assert.deepEqual(opened.expandedCalls, ['a1'], '首次按 o 展开当前行')
-  assert.ok(opened.store.calls.some(([name]) => name === 'markRead'), '展开即标已读（GR 语义）')
+  // 「展开即标已读」现在由 store.activate 一次做完（选中 + 标已读），o 键不再自己拼这两步：
+  // 断言改成钉新的接缝，并额外钉住「不许绕过它直接调 markRead」—— 否则五处入口又会各写一遍。
+  assert.ok(opened.store.calls.some(([name, id]) => name === 'activate' && id === 'a1'),
+    '展开即标已读（GR 语义）：o 必须走 activate')
+  assert.equal(opened.store.calls.some(([name]) => name === 'markRead'), false,
+    '不许绕过 activate 直接调 markRead —— 已读的自动触发点只能有一处')
 
   const closed = makeCtx({ state: { view: 'list', selectedId: 'a1' }, expanded: 'a1' })
   routeKeyOf('o', closed)

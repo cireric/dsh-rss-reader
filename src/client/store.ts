@@ -90,6 +90,17 @@ export function navRowsOf(
   return [...rows, ...unfiled, ...tags.map((tag) => ({ kind: 'tag' as const, tagId: tag.id }))]
 }
 
+/**
+ * 「再按一次同一个 = 收起」：展开态只有这两种取值（o / Enter / Space / 点击共用）。
+ *
+ * 规则放在这里而不是三处各写一遍：2026-11-14 之前行内的 Enter 走的是「恒展开」，与 o 键的
+ * toggle 不一致 —— 而本仓库当作功能基准的 GR 规范里 o 与 enter 是同一条
+ * （docs/google-reader-feature-spec.md:211「o / enter | open/close item」）。
+ */
+export function nextExpandedOf(current: string | undefined, itemId: string): string | undefined {
+  return current === itemId ? undefined : itemId
+}
+
 /** 光标和 DOM 使用同一行键，避免折叠后两者的行序分叉。 */
 export function navCursorKey(cursor: NavCursor): string {
   if (cursor.kind === 'folder') return 'folder:' + cursor.folder
@@ -842,6 +853,18 @@ export function createReaderStore() {
    * 同一类动作（打开条目）语义相同，否则会出现「内置打开算已读、外部打开不算」这种只能靠
    * 读源码才发现的差异。GR 里的 `v`（view original）同样是阅读动作，不与已读语义冲突。
    */
+  /**
+   * 「打开一条」= 选中 + 标已读。**已读的唯一自动触发点**：行点击 / Enter / Space / o / v / 正文加载。
+   *
+   * 展开状态不进 store（2026-10-15 键盘路由轮的裁决 Q2），调用方用 nextExpandedOf 决定它。
+   * 为什么收成一个动作：此前五个入口各拼一遍「选中 + 展开 + 标已读」，其中行内 Enter 那一版
+   * 把展开写成了「恒展开」—— 同一条规则写五遍，迟早有一个版本不一样。
+   */
+  const activate = (itemId: string): void => {
+    set({ selectedId: itemId })
+    void markRead(itemId)
+  }
+
   const openSelected = (): void => {
     const item = visible().find((entry) => entry.id === state.selectedId)
     if (item === undefined) return
@@ -850,7 +873,7 @@ export function createReaderStore() {
     const href = httpUrlOrEmpty(item.link)
     if (href === '') return
     window.open(href, '_blank', 'noopener')
-    void markRead(item.id)
+    activate(item.id)
   }
 
   const toggleStar = async (): Promise<void> => {
@@ -1000,7 +1023,7 @@ export function createReaderStore() {
     const item = state.items.find((entry) => entry.id === itemId)
     if (item === undefined || item.link === '') return
     set({ view: 'article', selectedId: item.id, article: { itemId: item.id, loading: true } })
-    void markRead(item.id)
+    activate(item.id)
     try {
       const result = await callRpc<ArticlePayload>('article', { itemId: item.id })
       // 期间用户可能已经换到别的条目：丢弃过期结果，避免把 A 的正文显示成 B 的
@@ -1429,7 +1452,7 @@ export function createReaderStore() {
 
   return {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
-    get, visible, load, loadMore, submitSearch, markRead, selectRelative, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllRead, undoMarkAll,
+    get, visible, load, loadMore, submitSearch, markRead, activate, selectRelative, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllRead, undoMarkAll,
     setLayout, setMarkAllRange, setShowUnread, refreshCount, setReading,
     openArticle, closeArticle, cleanup, stepArticle, canStepArticle, saveArticleProgress,
     toggleFeeds, exportOpml, importOpml, addFeed, removeFeed, discover, clearDiscovery,

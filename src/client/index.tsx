@@ -24,7 +24,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-slots'
 // 用到的槽位键由这两个包声明进 SlotMap（main 来自 layout，sidebar.* 来自 sidebar）
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
-import { createReaderStore, relativeTime, useReaderStore, VIRTUAL_VIEWS, type Filter, type MarkAllRange, type ReaderStore } from './store.js'
+import { createReaderStore, nextExpandedOf, relativeTime, useReaderStore, VIRTUAL_VIEWS, type Filter, type MarkAllRange, type ReaderStore } from './store.js'
 // 导出面是构建产物对外的契约（契约测试直接调它），store 搬家后仍要从入口转出去
 export { createReaderStore }
 // **仅供单测取用的 re-export**：键盘路由住在 ./keyboard-routing.ts，而 client 半只出单文件
@@ -325,6 +325,17 @@ export function createReader(store: ReaderStore): () => ReactNode {
     //
     // ref 回调写成稳定引用：内联箭头每次渲染都是新函数，React 会在每次提交时先置 null 再挂载。
     const setListBox = useCallback((node: HTMLDivElement | null): void => { listBox.current = node }, [])
+
+    /**
+     * 行点击 / Enter / Space 共用：激活（选中 + 标已读）+ 展开切换。
+     *
+     * 三个入口必须走同一条：此前点击是 toggle、o 是 toggle，而 Enter/Space 写成了「恒展开」——
+     * 同一条 GR 规则（o / enter = open/close）在三个地方有三种实现。
+     */
+    const activateRow = useCallback((itemId: string): void => {
+      store.activate(itemId)
+      setExpanded((current) => nextExpandedOf(current, itemId))
+    }, [store])
 
     // 键盘流：挂在 document 上 + 输入框守卫（24 个 action 的判据与路由都在 keyboard-routing.ts）。
     // 原实现挂在面板根节点并要求其持有焦点，导致「必须先点一下页面」才响应（用户实测）。
@@ -647,12 +658,8 @@ export function createReader(store: ReaderStore): () => ReactNode {
               <div key={item.id} className="dsh-rss-row" data-rss-row={item.id}
                 data-rss-unread={unread ? '' : undefined} data-rss-selected={selected ? '' : undefined}>
                 <div role="button" tabIndex={0} className="dsh-rss-row-main"
-                  onClick={() => {
-                    store.select(item.id)
-                    setExpanded((current) => (current === item.id ? undefined : item.id))
-                    void store.markRead(item.id)
-                  }}
-                  onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); store.select(item.id); setExpanded(item.id); void store.markRead(item.id) } }}
+                  onClick={() => { activateRow(item.id) }}
+                  onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); activateRow(item.id) } }}
                   >
                   <span aria-hidden="true" className="dsh-rss-dot" />
                   <span style={{ flex: 1, minWidth: 0 }}>

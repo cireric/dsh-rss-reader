@@ -28,7 +28,7 @@ import {
   scanTop, pageTop, halfPageTop, scanStepFor, scrollSelectorFor, lineStepFrom,
 } from '../list-scroll.js'
 import { isElementNode } from './element-node.js'
-import type { ReaderStore } from './store.js'
+import { nextExpandedOf, type ReaderStore } from './store.js'
 
 export interface KeyRoutingCtx {
   /**
@@ -175,8 +175,9 @@ export function routeKey(event: KeyboardEvent, ctx: KeyRoutingCtx): void {
       run(() => {
         const selected = store.get().selectedId
         if (selected === undefined) return
-        ctx.setExpanded(ctx.expanded === selected ? undefined : selected)
-        void store.markRead(selected)
+        // 与行内 Enter / Space 同一条规则（nextExpandedOf），激活 = 选中 + 标已读。
+        ctx.setExpanded(nextExpandedOf(ctx.expanded, selected))
+        store.activate(selected)
       })
       break
     // n/p = 扫视：滚动视野但**不改变选中**（GR 原义）—— 列表页滚列表，详情页滚文章

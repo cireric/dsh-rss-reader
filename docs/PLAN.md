@@ -10,7 +10,7 @@
 |---|---|---|
 | #2 清理判据只留一个裁决者 | 判据归位 + 契约改包含关系 + 三撤三增变异 | `420bae7` `6435e04` |
 | #1 退订收成一次变更 | `deleteSubscription` 拥有条目+游标+订阅项；失败写回 | `63fdc29` `fa6aa64` |
-| 阶段 1 · tag 选中被记忆静默降级 | 四种 kind 与 NavSelection 一一对应；投影收成一个穷尽函数 | 本轮（未提交） |
+| 阶段 1 · tag 选中被记忆静默降级 | 四种 kind 与 NavSelection 一一对应；投影收成一个穷尽函数 | `1c26275` |
 
 ## 怎么用这份文件
 
@@ -54,7 +54,14 @@
 
 ## 阶段 2 —— 「打开一条」写了五遍，其中一遍语义不同
 
-**状态**：未开始 · **规模**：小到中 · **来源**：评审卡 #5
+**状态**：已完成 · **规模**：小到中 · **来源**：评审卡 #5
+
+**前置决定（已由规范回答）**：`docs/google-reader-feature-spec.md:211` 写的是「`o` / `enter` | open/close item」——
+所以行内的 Enter/Space 应当是 **toggle**，此前的「恒展开」是缺陷，不是有意行为。
+
+**实际改动**：新增 `store.activate(itemId)`（选中 + 标已读），**已读的唯一自动触发点**；行点击 / Enter / Space /
+o / v / 正文加载五处全部走它。展开规则收成导出的纯函数 `nextExpandedOf`（穷尽、可测），行内与 o 键共用；
+`expanded` 仍留组件 state（裁决 Q2）。文案与注释同步说明「GR 的 o 与 enter 是同一条」。
 
 **问题**：点击行（toggle 展开 + 标已读）、行内 Enter/Space（**恒展开**）、键 o（toggle）、键 v（外部打开 + 标已读）、
 正文加载（标已读）——五处各拼一遍「选中 + 展开 + 标已读」。`expanded` 住在面板的 React 局部 state，
@@ -67,9 +74,10 @@
 `expanded` 仍是组件 state（尊重 2026-10-15 键盘路由轮的裁决 Q2），只把**切换规则**收到一处。
 
 **验收**
-- [ ] `.dsh-rss-row-main` 的 Enter/Space 有直接用例（今天只有一处 click）
-- [ ] 「打开即已读」的自动触发点从五处收到一处
-- [ ] 回归：`scroll-dom` / `keyboard-routing` 全绿
+- [x] `.dsh-rss-row-main` 的 Enter/Space 有直接用例 —— scroll-dom「行内 Enter / Space 与 o 同义」（点击展开 → Enter 收起 → Space 再展开）
+- [x] 「打开即已读」的自动触发点从五处收到一处 —— `store.activate`；o 键的用例额外钉住「不许绕过它直接调 markRead」
+- [x] 回归：`scroll-dom` / `keyboard-routing` 全绿（全量 563/563；mutation 240/240、幸存 0）
+- [x] 变异：新增 `client-展开永不收起`、`client-activate 不标已读`（各被抓到）
 
 **风险 / 前置**：Enter/Space「恒展开」可能是有意的（仓库无文档、无测试说过）。开工前先定它该 toggle 还是恒展开，
 再谈收敛。
