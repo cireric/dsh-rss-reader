@@ -48,6 +48,7 @@ export type NavCursor =
  * 在这里一处：键盘光标的行序、顶栏按钮的顺序、左栏渲染的顺序都读它。三处各写一份迟早错位。
  */
 
+import { createSearchActions } from './search-actions.js'
 import { createTagActions } from './tag-actions.js'
 import {
   navRowsOf, navCursorKey, nextExpandedOf, memorableSelectionOf, sameNavSelection, selectionExists, VIRTUAL_VIEWS,
@@ -310,97 +311,8 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   const get = (): ReaderState => state
   let listVersion = 0
   let overviewVersion = 0
-  let searchRequest: AbortController | undefined
-  let searchPages = 0
-
-  const loadSearch = async (cursor?: string, pages = 1): Promise<void> => {
-    const search = state.search
-    if (!search) return
-    searchRequest?.abort()
-    const request = deps.newAbortController()
-    searchRequest = request
-    const version = ++listVersion
-    const firstPage = cursor === undefined
-    set({ loading: firstPage, loadingMore: !firstPage, error: undefined })
-    const nav = state.navSelection
-    const feedId = nav.kind === 'feed' ? nav.feedId : undefined
-    const tagId = nav.kind === 'tag' ? nav.tagId : search.tagId
-    // 文件夹范围 = 当前成员 id；若搜索表单另选了订阅源，取交集（两者是不可分割的「范围」条件）。
-    const folderIds = nav.kind === 'folder'
-      ? state.feeds.filter((feed) => feed.folder === nav.folder).map((feed) => feed.id)
-      : undefined
-    const scopedFeedIds = folderIds === undefined
-      ? search.feedIds
-      : search.feedIds === undefined
-        ? folderIds
-        : search.feedIds.filter((feedId) => folderIds.includes(feedId))
-    const read = state.filter === 'unread' ? 'unread' : search.read
-    const starred = state.filter === 'starred' || search.starred
-    // 空文件夹（或与源筛选交集为空）不发请求：worker 对空 feeds 本来也回空，但这里是
-    // 「范围就是空」而不是「忘了给范围」，失败形态必须区分开。
-    const emptyScope = (state.filter === 'unread' && search.read === 'read')
-      || (folderIds !== undefined && (scopedFeedIds?.length ?? 0) === 0)
-    try {
-      const found: ItemView[] = []
-      const previous = firstPage ? [] : state.items
-      const existing = new Set(previous.map((item) => item.id))
-      let nextCursor = cursor
-      let received = 0
-      do {
-        const page: SearchPage = emptyScope ? { items: [] } : await deps.rpc<SearchPage>('searchItems', {
-          ...search,
-          ...(feedId === undefined ? {} : { feedId }),
-          ...(scopedFeedIds === undefined ? {} : { feedIds: scopedFeedIds }),
-          ...(tagId === undefined ? {} : { tagId }),
-          cursor: nextCursor, read, starred,
-        }, request.signal)
-        if (version !== listVersion) return
-        for (const item of page.items) {
-          if (existing.has(item.id)) continue
-          existing.add(item.id)
-          found.push(item)
-        }
-        nextCursor = page.nextCursor
-        received++
-      } while (nextCursor !== undefined && received < pages)
-
-      // 翻页期间可能已标读，追加时保留当前列表的修改。
-      const items = firstPage ? found : [...state.items, ...found]
-      const selectedId = items.some((item) => item.id === state.selectedId) ? state.selectedId : items[0]?.id
-      searchPages = firstPage ? received : searchPages + received
-      set({
-        items, selectedId, nextCursor, loading: false, loadingMore: false,
-        searchRevision: state.searchRevision + (firstPage ? 1 : 0),
-      })
-      refreshDuplicateHints()
-    } catch (error) {
-      if (version !== listVersion) return
-      set({ loading: false, loadingMore: false, error: error instanceof Error ? error.message : String(error) })
-    } finally {
-      if (searchRequest === request) searchRequest = undefined
-    }
-  }
-
-  const resetSearchPage = (): void => {
-    if (!state.search) return
-    searchPages = 0
-    set({ items: [], selectedId: undefined, nextCursor: undefined })
-    void loadSearch()
-  }
-
-  const submitSearch = (query?: SearchQuery): void => {
-    if (!query?.text.trim()) {
-      if (!state.search) return
-      ++listVersion
-      searchRequest?.abort()
-      set({ search: undefined, items: [], nextCursor: undefined, selectedId: undefined, loadingMore: false })
-      void load('overview')
-      return
-    }
-    set({ search: { ...query, text: query.text.trim() }, view: 'list', article: undefined })
-    resetSearchPage()
-  }
-
+  // 搜索域（loadSearch / reset / submit + 在途请求与页数）已搬进 src/client/search-actions.ts。
+  let searchActions: ReturnType<typeof createSearchActions> | undefined
   /**
    * 当前过滤下的可见条目——A/j/k 都只作用于它。
    *
@@ -458,7 +370,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     set({ filter, navCursor: { kind: 'filter', filter } })
     relocateSelection()
     persistView()
-    resetSearchPage()
+    searchActions?.reset()
   }
 
   /**
@@ -484,6 +396,15 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
         deps.log('warn', '[rss-reader] 跨源重复提示查询失败，本次不显示', failure)
       })
   }
+
+  // 搜索域工厂：建在 refreshDuplicateHints 之后（它要用这个 const，不提升）。
+  searchActions = createSearchActions({
+    get, set, rpc: deps.rpc, newAbortController: deps.newAbortController,
+    nextListVersion: () => ++listVersion,
+    currentListVersion: () => listVersion,
+    reload: () => load('overview'),
+    refreshDuplicateHints,
+  })
 
   const applyOverview = (overview: Overview): void => {
     const selected = state.selectedId
@@ -626,7 +547,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     const version = ++overviewVersion
     if (state.search) {
       ++listVersion
-      searchRequest?.abort()
+      searchActions?.abort()
       set({ nextCursor: undefined, loadingMore: false })
     }
     set({ loading: true })
@@ -657,7 +578,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
       }
       if (!viewRestored) applyRestoredView(preferences)
       // 用新游标重查已加载的页数，刷新插入的新条目不会挤掉整个阅读窗口。
-      if (state.search) await loadSearch(undefined, Math.max(1, searchPages))
+      if (state.search) await searchActions?.load(undefined, Math.max(1, searchActions?.pages() ?? 1))
       // 「按了刷新没反应」是本插件最早的体验投诉：界面从不说明发生了什么。
       // 这里如实区分——真抓了 / 被最小间隔节流（附上次完成时间）。
       if (endpoint === 'refresh') {
@@ -680,7 +601,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     } catch (failure) {
       if (version !== overviewVersion) return
       set({
-        ...(searchRequest === undefined ? { loading: false } : {}),
+        ...(searchActions?.inFlight() === true ? {} : { loading: false }),
         error: failure instanceof Error ? failure.message : String(failure),
       })
     }
@@ -722,7 +643,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     const cursor = state.nextCursor
     if (cursor === undefined || state.loadingMore) return
     if (state.search) {
-      if (!state.loading) await loadSearch(cursor)
+      if (!state.loading) await searchActions?.load(cursor)
       return
     }
     const version = listVersion
@@ -1123,7 +1044,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     }
     relocateSelection()
     persistView()
-    resetSearchPage()
+    searchActions?.reset()
     // 文件夹/标签范围必须由宿主先筛再分页：进入/退出/切换范围时重取一页。
     const scopeChanged = current.kind === 'folder' || next.kind === 'folder'
       || current.kind === 'tag' || next.kind === 'tag'
@@ -1345,7 +1266,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
 
   return {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
-    get, visible, load, loadMore, submitSearch, markRead, activate, selectRelative, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllRead, undoMarkAll,
+    get, visible, load, loadMore, submitSearch: (query?: SearchQuery) => searchActions?.submit(query), markRead, activate, selectRelative, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllRead, undoMarkAll,
     setLayout, setMarkAllRange, setShowUnread, refreshCount, setReading,
     openArticle, closeArticle, cleanup, stepArticle, canStepArticle, saveArticleProgress,
     toggleFeeds, exportOpml, importOpml, addFeed, removeFeed, discover, clearDiscovery,
