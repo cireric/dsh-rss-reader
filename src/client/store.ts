@@ -48,6 +48,7 @@ export type NavCursor =
  * 在这里一处：键盘光标的行序、顶栏按钮的顺序、左栏渲染的顺序都读它。三处各写一份迟早错位。
  */
 
+import { createOpmlActions } from './opml-actions.js'
 import { createSearchActions } from './search-actions.js'
 import { createTagActions } from './tag-actions.js'
 import {
@@ -1095,28 +1096,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   const toggleFeeds = (): void => { set({ view: state.view === 'feeds' ? 'list' : 'feeds' }) }
 
   /** 导出 OPML：拿到文本后交给浏览器下载（File System Access 不可用时退化为 blob 下载）。 */
-  const exportOpml = async (): Promise<void> => {
-    try {
-      const result = await deps.rpc<OpmlExportResult>('opmlExport')
-      const name = 'dsh-rss-subscriptions.opml'
-      deps.saveFile(name, result.opml, 'text/x-opml;charset=utf-8')
-      set({ notice: '已导出 ' + result.feedCount + ' 个订阅（' + name + '）' })
-    } catch (failure) {
-      set({ error: failure instanceof Error ? failure.message : String(failure) })
-    }
-  }
-
-  /** 导入 OPML：逐源抓取校验，坏源单独列出、不阻断其余（§3.1）。 */
-  const importOpml = async (text: string): Promise<void> => {
-    set({ feedsBusy: true, importReport: undefined })
-    try {
-      const report = await deps.rpc<OpmlImportResult>('opmlImport', { opml: text })
-      set({ importReport: report, feedsBusy: false })
-      await load('overview')
-    } catch (failure) {
-      set({ feedsBusy: false, error: failure instanceof Error ? failure.message : String(failure) })
-    }
-  }
+  // OPML 导入/导出已搬进 src/client/opml-actions.ts（它们不碰 UI 状态，先于订阅域其余部分搬）。
 
   /**
    * 只发现、不订阅：拿到候选清单后等用户挑（宿主侧零写入，见 endpoints.ts 的 discoverFeeds）。
@@ -1265,12 +1245,17 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     refreshDuplicateHints,
   })
 
+  // OPML 域放在最后（const，与搜索/标签同形）。
+  const opmlActions = createOpmlActions({
+    set, rpc: deps.rpc, saveFile: deps.saveFile, reload: () => load('overview'),
+  })
+
   return {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
     get, visible, load, loadMore, submitSearch: (query?: SearchQuery) => searchActions.submit(query), markRead, activate, selectRelative, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllRead, undoMarkAll,
     setLayout, setMarkAllRange, setShowUnread, refreshCount, setReading,
     openArticle, closeArticle, cleanup, stepArticle, canStepArticle, saveArticleProgress,
-    toggleFeeds, exportOpml, importOpml, addFeed, removeFeed, discover, clearDiscovery,
+    toggleFeeds, ...opmlActions, addFeed, removeFeed, discover, clearDiscovery,
     dismissNotice: (): void => { set({ notice: undefined }) },
     setFilter,
     select: (itemId: string): void => { set({ selectedId: itemId }) },
