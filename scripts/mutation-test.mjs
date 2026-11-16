@@ -609,7 +609,8 @@ const MUTATIONS = [
     to: ';' },
   { id: 'client-切源不重落选中', file: 'lib/client.js',
     judges: ['client-bundle.test.mjs', 'nav-selection.test.mjs', 'scroll-dom.test.mjs'],
-    from: 'set({ selectedId: state.items.filter(inScope)[0]?.id });',
+    // 2026-11-16 重锚：06a 把 relocateSelection 搬进 list-actions.ts 后，闭包里只剩 get()。
+    from: 'set({ selectedId: get().items.filter(inScope)[0]?.id });',
     to: ';' },
   { id: 'client-perFeedUnread 不落 state', file: 'lib/client.js',
     judges: ['nav-selection.test.mjs', 'scroll-dom.test.mjs', 'unread-accounting.test.mjs'],

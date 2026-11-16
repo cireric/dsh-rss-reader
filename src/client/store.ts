@@ -50,6 +50,7 @@ export type NavCursor =
 
 import { createFolderActions } from './folder-actions.js'
 import { createFeedActions } from './feed-actions.js'
+import { createListActions } from './list-actions.js'
 import { createNavActions } from './nav-actions.js'
 import { createOpmlActions } from './opml-actions.js'
 import { createSearchActions } from './search-actions.js'
@@ -316,66 +317,6 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   const get = (): ReaderState => state
   let listVersion = 0
   let overviewVersion = 0
-  /**
-   * 当前过滤下的可见条目——A/j/k 都只作用于它。
-   *
-   * **钉住当前选中项**：打开条目会立即标已读，若此时正处在「未读」筛选下，该条目会当场
-   * 从列表消失——而你正要读的正是它（用户实测发现的体验 bug）。所以只要它还处于选中状态，
-   * 就一并保留；一旦移开（j/k 或点击别处）就自然让位。
-   *
-   * 实现上是「按过滤条件保留，或 id 等于当前选中」——用整表过滤而不是「过滤后再插入」，
-   * 这样保留下来的位置仍是原来的全局顺序，不会跳到列表首尾。
-   */
-  /**
-   * 「源 + 过滤」双条件是否成立——两者相乘，不是二选一。
-   *
-   * 单独抽出来是因为它有第二个使用面：切视图后要把 selectedId 落到新列表第一条
-   * （setFilter 的既有 precedent），那个判定必须与 visible() 用的**同一个**，否则迟早出现
-   * 「列表里选着一个自己都看不见的条目」。
-   */
-  const inScope = (item: ItemView): boolean => {
-    if (state.navSelection.kind === 'feed' && item.feedId !== state.navSelection.feedId) return false
-    if (state.navSelection.kind === 'folder') {
-      const feed = state.feeds.find((entry) => entry.id === item.feedId)
-      if (feed?.folder !== state.navSelection.folder) return false
-    }
-    if (state.navSelection.kind === 'tag' && !(item.tagIds ?? []).includes(state.navSelection.tagId)) return false
-    if ((state.filter === 'unread' || state.search?.read === 'unread') && item.readAt !== undefined) return false
-    if (state.search?.read === 'read' && item.readAt === undefined) return false
-    if ((state.filter === 'starred' || state.search?.starred) && !item.starred) return false
-    return true
-  }
-
-  const visible = (): ItemView[] => {
-    const selectedId = state.selectedId
-    const matches = (item: ItemView): boolean => {
-      if (item.id === selectedId) return true
-      return inScope(item)
-    }
-    return state.items.filter(matches)
-  }
-
-  /**
-   * 把 selectedId 落到当前作用域的第一条（沿用 setFilter 的既有 precedent）。
-   *
-   * 不做这一步就会出现「列表空了但还选着一个看不见的条目」，此时按 j/k 毫无反应。
-   */
-  const relocateSelection = (): void => { set({ selectedId: state.items.filter(inScope)[0]?.id }) }
-
-  /**
-   * 切换全局过滤（顶栏那组按钮 / 左栏虚拟视图三行 / 键盘打开虚拟视图行都走它）。
-   *
-   * 光标同步（2026-10-10 任务 6 返工）：换 filter 就是「当前项换了一行」，光标跟着落到那一行，
-   * 否则键盘接着 shift+n 会从旧位置跳。**无条件同步**是一条规则、没有特例：光标只表示「我停在哪行」，
-   * 而「哪一行此刻生效」由 selected 标记独立表达（选着源时它仍亮在源那一行 —— 规格 §2.1 的叠加）。
-   */
-  const setFilter = (filter: Filter): void => {
-    set({ filter, navCursor: { kind: 'filter', filter } })
-    relocateSelection()
-    persistView()
-    searchActions.reset()
-  }
-
   /**
    * 拉一次跨源重复提示（M5 03）。
    *
@@ -722,24 +663,6 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   }
 
   /**
-   * j/k：**只移动选中，不标已读**（用户 2026-10-06 明确要求）。
-   *
-   * ⚠️ 这是对 Google Reader 的**有意偏离**——GR 里 j/k 扫过即标已读。别当 bug 改回去：
-   * 已读只由「打开条目」触发（o / Enter / 鼠标点击）以及显式的 m。
-   */
-  const selectRelative = (delta: number): void => {
-    const list = visible()
-    if (list.length === 0) return
-    const current = list.findIndex((item) => item.id === state.selectedId)
-    const nextIndex = current < 0
-      ? (delta > 0 ? 0 : list.length - 1)
-      : Math.min(list.length - 1, Math.max(0, current + delta))
-    const target = list[nextIndex]
-    if (target === undefined) return
-    set({ selectedId: target.id })
-  }
-
-  /**
    * v：用系统浏览器打开原站（新标签页）。
    *
    * **打开即视为已读**（用户 2026-10-06 定）：与内置详情页 `V`、列表点击三条路径保持一致——
@@ -759,7 +682,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   }
 
   const openSelected = (): void => {
-    const item = visible().find((entry) => entry.id === state.selectedId)
+    const item = listActions.visible().find((entry) => entry.id === state.selectedId)
     if (item === undefined) return
     // 历史行可能带脏 link（修复前落库的 javascript:）：window.open 前过 shared.ts 的唯一白名单。
     // 认不出就当「无链接」——不打开新窗口、也不标已读（动作没发生）。
@@ -770,7 +693,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   }
 
   const toggleStar = async (): Promise<void> => {
-    const item = visible().find((entry) => entry.id === state.selectedId)
+    const item = listActions.visible().find((entry) => entry.id === state.selectedId)
     if (item === undefined) return
     await mirror.run({
       endpoint: 'toggleStar',
@@ -799,7 +722,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   }
 
   const toggleRead = async (): Promise<void> => {
-    const item = visible().find((entry) => entry.id === state.selectedId)
+    const item = listActions.visible().find((entry) => entry.id === state.selectedId)
     if (item === undefined) return
     if (item.readAt === undefined) {
       await markRead(item.id)
@@ -831,7 +754,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     // 两处都要跳过；宿主侧也会按 skipKept 再挡一次（客户端列表只是快照）。
     const days = RANGE_DAYS[state.markAllRange]
     const before = days === undefined ? undefined : new Date(deps.now() - days * 24 * 3600 * 1000).toISOString()
-    const ids = visible()
+    const ids = listActions.visible()
       .filter((item) => item.readAt === undefined && item.keptUnread !== true)
       // 范围阈值同样判两次：这里决定乐观更新与名单，宿主那边再按 before 挡一次
       .filter((item) => before === undefined || recencyOf(item) < before)
@@ -978,7 +901,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
    */
   const canStepArticle = (delta: number): boolean => {
     if (state.article?.loading === true) return false
-    const list = visible()
+    const list = listActions.visible()
     const index = list.findIndex((entry) => entry.id === state.article?.itemId)
     if (index < 0) return false
     return list[index + delta] !== undefined
@@ -986,7 +909,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
 
   const stepArticle = (delta: number): boolean => {
     if (!canStepArticle(delta)) return false
-    const list = visible()
+    const list = listActions.visible()
     const index = list.findIndex((entry) => entry.id === state.article?.itemId)
     const target = list[index + delta]
     if (target === undefined) return false
@@ -995,16 +918,6 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   }
 
   const closeArticle = (): void => { set({ view: 'list' }) }
-
-  /** 打开/关闭订阅管理视图。 */
-  /** 切视图密度。默认 list = 本插件既有的紧凑行为，所以切成 expanded 是「多显示」而不是改默认。 */
-  const setLayout = (layout: ReaderState['layout']): void => { set({ layout }) }
-
-  /** 切「全部标为已读」的时间范围。 */
-  const setMarkAllRange = (markAllRange: MarkAllRange): void => { set({ markAllRange }) }
-
-  /** 隐藏 / 显示未读计数（规格 §5 不变量 8）。只影响呈现，不动数据。 */
-  const setShowUnread = (showUnread: boolean): void => { set({ showUnread }) }
 
   /**
    * 刷新未读计数（规格 §5 不变量 8 的 r 键）。
@@ -1055,6 +968,12 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     refreshDuplicateHints,
   })
 
+  // 列表域工厂：setFilter 要清搜索结果（reset 只能经搜索域的入口），所以建在搜索域之后；
+  // 导航域又反过来借它的 setFilter / relocateSelection —— 工厂之间只传闭包，不含执行期副作用。
+  const { actions: listActions, relocateSelection } = createListActions({
+    get, set, persistView, resetSearch: () => searchActions.reset(),
+  })
+
   // OPML 域放在最后（const，与搜索/标签同形）。
   const opmlActions = createOpmlActions({
     set, rpc: deps.rpc, saveFile: deps.saveFile, reload: () => load('overview'),
@@ -1067,21 +986,20 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   })
 
   const navActions = createNavActions({
-    get, set, reload: () => load('overview'), persistView, relocateSelection, searchActions, setFilter,
+    get, set, reload: () => load('overview'), persistView, relocateSelection, searchActions,
+    setFilter: listActions.setFilter,
   })
 
   const feedActions = createFeedActions({ set, rpc: deps.rpc, reload: () => load('overview') })
 
   return {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
-    get, visible, load, loadMore, submitSearch: (query?: SearchQuery) => searchActions.submit(query), markRead, activate, selectRelative, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllRead, undoMarkAll,
-    setLayout, setMarkAllRange, setShowUnread, refreshCount, setReading,
+    get, load, loadMore, submitSearch: (query?: SearchQuery) => searchActions.submit(query), markRead, activate, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllRead, undoMarkAll,
+    refreshCount, setReading,
     openArticle, closeArticle, cleanup, stepArticle, canStepArticle, saveArticleProgress,
     ...navActions, ...opmlActions, ...feedActions,
     dismissNotice: (): void => { set({ notice: undefined }) },
-    setFilter,
-    select: (itemId: string): void => { set({ selectedId: itemId }) },
-    ...navActions,
+    ...listActions,
     ...folderActions,
     ...tagActions,
   }

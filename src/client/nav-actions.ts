@@ -105,6 +105,7 @@ export function createNavActions(host: NavActionHost) {
     persistView()
   }
 
+  /** 打开/关闭订阅管理视图（票据 05 搬家时这条注释留在了 store.ts 的 setLayout 头上，06a 顺手归位）。 */
   const toggleFeeds = (): void => { set({ view: get().view === 'feeds' ? 'list' : 'feeds' }) }
 
   /** 导出 OPML：拿到文本后交给浏览器下载（File System Access 不可用时退化为 blob 下载）。 */
