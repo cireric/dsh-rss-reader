@@ -267,7 +267,7 @@ const browserDeps: ReaderStoreDeps = {
  * |---|---|---|---|
  * | 列表 | `items` / `selectedId` / `nextCursor` / `loadingMore` / `filter` / `layout` / `markAllRange` | load / loadMore / visible / setFilter / setLayout / activate / selectRelative / markRead / toggleStar / toggleKeepUnread / toggleRead / markAllRead / undoMarkAll / cleanup / stepArticle | 只**读** feeds / tags；改账目一律经 account-mirror（回包整体覆盖） |
  * | 搜索 | `search` / `searchRevision` / `searchRequest` / `searchPages` | submitSearch / loadSearch / resetSearchPage | 借列表的 items / selectedId / nextCursor / loading 展示；**不许**改 filter |
- * | 订阅 | `feeds` / `folders` / `navSelection` / `navCursor` / `navVisible` / `foldedFolders` / `viewPreferences`（**deleteFolder 例外**：删掉当前所在文件夹时会把 `filter` 回落成 `all`，这条跨域写入登记在此） | addFeed / removeFeed / importOpml / exportOpml / discover / createFolder / renameFolder / deleteFolder / moveFeedToFolder / selectNav / moveNavCursor / openNavCursor / toggleNav / toggleFolder | 改 navSelection 后必须走 persistView；退订只能经 `deleteSubscription` |
+ * | 订阅 | `feeds` / `folders` / `discovery` / `feedsBusy` / `importReport` / `navSelection` / `navCursor` / `navVisible` / `foldedFolders` / `viewPreferences`（**deleteFolder 例外**：删掉当前所在文件夹时会把 `filter` 回落成 `all`，这条跨域写入登记在此） | addFeed / removeFeed / importOpml / exportOpml / discover / createFolder / renameFolder / deleteFolder / moveFeedToFolder / selectNav / moveNavCursor / openNavCursor / toggleNav / toggleFolder | 改 navSelection 后必须走 persistView；退订只能经 `deleteSubscription` |
  * | 标签 | `tags` / 条目的 `tagIds` | createTag / renameTag / deleteTag / toggleItemTag | 乐观改 tagIds，失败回取当前页拉回真相（tagWrite 串行化 + tagEpoch 身份） |
  *
  * 共享的不止三样：`deps`（通道/时钟/opener）、`set`（唯一写入口）、`state`（只读快照），
@@ -1070,7 +1070,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     get, set, reload: () => load('overview'), persistView, relocateSelection, searchActions, setFilter,
   })
 
-  const feedActions = createFeedActions({ get, set, rpc: deps.rpc, reload: () => load('overview') })
+  const feedActions = createFeedActions({ set, rpc: deps.rpc, reload: () => load('overview') })
 
   return {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },

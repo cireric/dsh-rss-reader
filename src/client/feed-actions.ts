@@ -8,14 +8,13 @@ import type { DiscoveryResult, OpmlImportResult } from '../shared.js'
 import type { ReaderStoreDeps, ReaderState } from './store.js'
 
 export interface FeedActionHost {
-  get: () => ReaderState
   set: (patch: Partial<ReaderState>) => void
   rpc: ReaderStoreDeps['rpc']
   reload: () => Promise<void>
 }
 
 export function createFeedActions(host: FeedActionHost) {
-  const { get, set, rpc, reload } = host
+  const { set, rpc, reload } = host
   /**
    * 只发现、不订阅：拿到候选清单后等用户挑（宿主侧零写入，见 endpoints.ts 的 discoverFeeds）。
    * 失败只写 error —— 候选列表保持上一次的样子会让人以为「刚才那次没发生」，所以先清空再请求。
