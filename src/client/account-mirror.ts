@@ -58,7 +58,7 @@ export interface MirrorAction {
 
 export interface AccountMirrorDeps {
   callRpc: <T>(endpoint: Endpoint, payload?: unknown) => Promise<T>
-  /** 回包整体覆盖账目 —— store.applyAccount 原样传入，不变量注释仍在它头上。 */
+  /** 回包整体覆盖账目 —— list-actions.ts 的 applyAccount 原样传入，不变量注释仍在它头上。 */
   applyAccount: (account: UnreadAccount) => void
   /** 错误可见（AGENTS.md 禁空 catch）：store 侧 `set({ error })`，由面板说出来。 */
   fail: (failure: unknown) => void

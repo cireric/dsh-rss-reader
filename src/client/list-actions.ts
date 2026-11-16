@@ -501,7 +501,8 @@ export function createListActions(host: ListActionHost) {
     set({ loading: true })
     try {
       // 恢复必须在 feeds 表到手之后生效（未知源要回落），所以**先读、后应用**：
-      // 读一次拿到记忆，等 overview 落地再按在订的源校验。两次 load 并发时也只读一次。
+      // 读一次拿到记忆，等 overview 落地再按在订的源校验。并发两次 load 会各读一次（版本号只让
+      // 最后一次落地）—— 这里没有「只读一次」的保证，别把注释当承诺。
       const preferences = viewMemory.restored() ? undefined : await viewMemory.read()
       // 文件夹浏览必须把范围带给宿主：由 SQL 先筛成员再限页，客户端拿到的才是这个文件夹的
       // 一页，而不是「跨源首页里恰好属于成员的那几条」。
@@ -722,7 +723,5 @@ export function createListActions(host: ListActionHost) {
     },
     /** 跨域入口：选中重落。nav-actions 与视图恢复共用，刻意不上 ReaderStore 的公开面。 */
     relocateSelection,
-    /** 跨域入口：账目整体覆盖。loadMore 还要用（等它随票据 06c 搬进来后这条导出即可删）。 */
-    applyAccount,
   }
 }

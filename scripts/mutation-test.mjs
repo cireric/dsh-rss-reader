@@ -790,7 +790,8 @@ const MUTATIONS = [
     judgeTests: ['客户端：打开一条的回包到达前，该源角标已当场 -1（乐观更新不许丢）'],
     // 2026-11-16 重锚：06b 把六个账目动作搬进 list-actions.ts，闭包里只剩 get()。
     from: '[target.feedId]: Math.max(0, (get().perFeedUnread[target.feedId] ?? 0) - 1)',
-    to: '[target.feedId]: state.perFeedUnread[target.feedId]' },
+    // 2026-11-16 评审修复：搬家后 list-actions 里没有 state（原 to 会 ReferenceError，属「崩了」假通过）。
+    to: '[target.feedId]: get().perFeedUnread[target.feedId]' },
   // 增量助手是 markAllRead / undoMarkAll 的账目来源。把「按宿主下发的键铺 0」删掉后，
   // 重算结果只剩空表 ⇒ 0 未读的源丢键，左栏那一行的角标变「空白」而不是「0」——
   // 与任务 1 裁决的键域契约（键域严格 = feeds 表）同一条，是最贵的那类沉默失败。
@@ -1435,7 +1436,8 @@ const MUTATIONS = [
     // 2026-11-15 重锚：同上（deps.rpc）。
     // 2026-11-16 重锚：同上一族（deps.rpc → rpc、state.navSelection → 本地 nav 快照）。
     from: 'const overview = await rpc("overview", {\n\t\t\t\t\t\tcursor,\n\t\t\t\t\t\t...nav.kind === "folder" ? { folder: nav.folder } : {},\n\t\t\t\t\t\t...nav.kind === "tag" ? { tagId: nav.tagId } : {}\n\t\t\t\t\t});',
-    to: 'const overview = await callRpc("overview", {});' },
+    // 2026-11-16 评审修复：callRpc 在产物里不存在（只有 rpc / deps.callRpc）—— 改成真的打第一页。
+    to: 'const overview = await rpc("overview", {});' },
   { id: 'paging-在途不挡重复请求', file: 'lib/client.js',
     judges: ['nav-selection.test.mjs'],
     judgeTests: ['分页：在途时忽略重复的 loadMore（防连点堆请求）'],

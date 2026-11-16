@@ -55,7 +55,7 @@ import { createOpmlActions } from './opml-actions.js'
 import { createSearchActions } from './search-actions.js'
 import { createTagActions } from './tag-actions.js'
 import {
-  navRowsOf, navCursorKey, nextExpandedOf, memorableSelectionOf, selectionExists, VIRTUAL_VIEWS,
+  navRowsOf, navCursorKey, nextExpandedOf, memorableSelectionOf, VIRTUAL_VIEWS,
 } from './nav-model.js'
 export { navRowsOf, navCursorKey, nextExpandedOf, VIRTUAL_VIEWS }
 
@@ -251,7 +251,7 @@ const browserDeps: ReaderStoreDeps = {
  *
  * | 域 | 拥有的 state | 动作 | 允许改别人的什么 |
  * |---|---|---|---|
- * | 列表 | `items` / `selectedId` / `nextCursor` / `loadingMore` / `filter` / `layout` / `markAllRange` / `undo`（账目 `unread` / `perFeedUnread` 由 account-mirror 的回包整体覆盖） | load / loadMore / visible / setFilter / setLayout / activate / selectRelative / markRead / toggleStar / toggleKeepUnread / toggleRead / markAllRead / undoMarkAll / cleanup / stepArticle / openArticle | 只**读** feeds / tags；改账目一律经 account-mirror（回包整体覆盖）。**两个例外登记在此**：① overview 整份落地（applyOverview 与 load 的搜索分支）把 feeds / folders / tags 按宿主快照原样写回；② 正文动作（openArticle / stepArticle）写 `view` / `article` —— 这两份是跨域呈现状态，不归任何一块私有 |
+ * | 列表 | `items` / `selectedId` / `nextCursor` / `loadingMore` / `filter` / `layout` / `markAllRange` / `undo`（账目 `unread` / `perFeedUnread` 由 account-mirror 的回包整体覆盖） | load / loadMore / visible / setFilter / setLayout / activate / selectRelative / markRead / toggleStar / toggleKeepUnread / toggleRead / markAllRead / undoMarkAll / cleanup / stepArticle / openArticle | 只**读** feeds / tags；改账目一律经 account-mirror（回包整体覆盖）。**跨域写入逐条登记在此**：① setFilter 同步 `navCursor`（光标跟着过滤走，2026-10-10 的既有规则）；② overview 整份落地（applyOverview 与 load 的搜索分支）把 feeds / folders / tags 按宿主快照原样写回；③ 选中项失效时 applyOverview / load 把 navSelection + navCursor 回落虚拟视图（与「源被退订」同一条规则）；④ 正文动作（openArticle / stepArticle）写 `view` / `article` —— 这两份是跨域呈现状态，不归任何一块私有 |
  * | 搜索 | `search` / `searchRevision` / `searchRequest` / `searchPages` | submitSearch / loadSearch / resetSearchPage | 借列表的 items / selectedId / nextCursor / loading 展示；**不许**改 filter |
  * | 订阅 | `feeds` / `folders` / `discovery` / `feedsBusy` / `importReport` / `navSelection` / `navCursor` / `navVisible` / `foldedFolders` / `viewPreferences`（**deleteFolder 例外**：删掉当前所在文件夹时会把 `filter` 回落成 `all`，这条跨域写入登记在此） | addFeed / removeFeed / importOpml / exportOpml / discover / createFolder / renameFolder / deleteFolder / moveFeedToFolder / selectNav / moveNavCursor / openNavCursor / toggleNav / toggleFolder | 改 navSelection 后必须走 persistView；退订只能经 `deleteSubscription` |
  * | 标签 | `tags` / 条目的 `tagIds` | createTag / renameTag / deleteTag / toggleItemTag | 乐观改 tagIds，失败回取当前页拉回真相（tagWrite 串行化 + tagEpoch 身份） |
@@ -333,8 +333,6 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
    * 光标按既有规则同步到「生效的那一行」——与鼠标点源、shift+o 打开源行同一条，恢复不会引入新规则。
    */
   const applyRestoredView = (raw: unknown): void => {
-    // 只在第一次落地（守卫从 load 搬进来 —— 票据 06c 把 load 搬去了 list-actions）。
-    if (viewRestored) return
     viewRestored = true
     if (viewTouched) return
     const knownFeeds = new Set(state.feeds.map((feed) => feed.id))
@@ -408,8 +406,6 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
    * 但**不许静默**：浏览器里 console 是本插件唯一可见的通道，静默会让「记忆怎么不恢复」无从查起。
    */
   const readViewPreferences = async (): Promise<unknown> => {
-    // 已经恢复过就不再读（两次 load 并发时也一样：第二个读到的是同一个「已恢复」事实）。
-    if (viewRestored) return undefined
     try {
       const result = await deps.rpc<{ preferences?: unknown }>('viewPreferences')
       return result?.preferences
