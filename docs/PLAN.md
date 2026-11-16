@@ -13,6 +13,7 @@
 | 阶段 1 · tag 选中被记忆静默降级 | 四种 kind 与 NavSelection 一一对应；投影收成一个穷尽函数 | `1c26275` |
 | 阶段 2 · 「打开一条」五遍 | `store.activate` 成为唯一触发点；`nextExpandedOf` 收成一条规则 | `3aff807` |
 | 阶段 3 · ReaderStore 契约与替身 | 36 方法可执行契约 + 内存实现升格 + 窄接口 + 判据归一 + 五份局部桩退役 | `6fbdeb0` `03af3ed` `ba96196` `6a3f470` |
+| 阶段 4b · 48 项动作按域分家 | 标签 / 搜索 / 订阅 / 列表四域各自成文件，store 只留装配与视图记忆 | `2db1f31` `a1d98af` `0a1d45b` `62eff6ff` `855f26c` `608d50b` `25b179c` `b98bea6` `0b34671` `0b768ae` |
 
 ## 怎么用这份文件
 
@@ -149,14 +150,21 @@ Blob / document / window.open / console；四份测试沙箱各复制一遍装�
 
 ## 阶段 4b —— 48 项动作按域分家
 
-**状态**：进行中（标签域已搬，其余三块待搬）· **规模**：大 · **来源**：阶段 4 的方案超出验收的那部分
+**状态**：已完成（2026-11-16）· **规模**：大 · **来源**：阶段 4 的方案超出验收的那部分
 
-**已做**：`37ac2f2` 四块边界表（谁写谁的 state 写成文）；`2db1f31` 标签域搬进
-`src/client/tag-actions.ts`（含 `tagWrite` 写盘队列与 `tagEpoch` 失败代数两个内部不变量）。
+**做法**：先用 `37ac2f2` 把「谁写谁的 state」写成边界表，再按依赖顺序一块一块搬（每块一个提交、
+各自跑四道门槛）：
 
-**待做**：搜索（约 120 行）→ 订阅（约 300 行）→ 列表（约 400 行，依赖最多，最后搬）。
-搜索域的前置耦合已分析清楚（`listVersion` 共享、`refreshDuplicateHints` 定义在后、`resetSearchPage`
-被别的域调用），写在票据 `.scratch/client-store-seams/issues/03-split-store.md` 里。
+| 域 | 提交 | 落点 |
+|---|---|---|
+| 标签（4 动作 + 写盘队列/失败代数） | `2db1f31` | `src/client/tag-actions.ts` |
+| 搜索（3 动作 + 在途请求/页数） | `a1d98af` `0a1d45b` | `src/client/search-actions.ts` |
+| 订阅（OPML 2 / 文件夹 4 / 导航 6 / 订阅源 4） | `62eff6ff` `855f26c` `608d50b` `25b179c` `11f2981` | `opml-actions.ts` / `folder-actions.ts` / `nav-actions.ts` / `feed-actions.ts` |
+| 列表（06a 选中 / 06b 账目 / 06c 取数正文） | `b98bea6` `0b34671` `0b768ae` | `src/client/list-actions.ts` |
+
+**结果**：`store.ts` 从 1102 行降到约 500 行，只剩 state 装配、视图记忆、跨源提示、目录落地与
+域工厂；公开接口 49 个键搬家前后逐项一致；全量 test 642、mutation 242（幸存 0、未应用 0）。
+票据与两轴评审记录在 `.scratch/client-store-seams/issues/`。
 
 ---
 
