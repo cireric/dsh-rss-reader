@@ -787,7 +787,8 @@ const MUTATIONS = [
   { id: 'client-markRead 不动每源账目', file: 'lib/client.js',
     judges: ['unread-accounting.test.mjs'],
     judgeTests: ['客户端：打开一条的回包到达前，该源角标已当场 -1（乐观更新不许丢）'],
-    from: '[target.feedId]: Math.max(0, (state.perFeedUnread[target.feedId] ?? 0) - 1)',
+    // 2026-11-16 重锚：06b 把六个账目动作搬进 list-actions.ts，闭包里只剩 get()。
+    from: '[target.feedId]: Math.max(0, (get().perFeedUnread[target.feedId] ?? 0) - 1)',
     to: '[target.feedId]: state.perFeedUnread[target.feedId]' },
   // 增量助手是 markAllRead / undoMarkAll 的账目来源。把「按宿主下发的键铺 0」删掉后，
   // 重算结果只剩空表 ⇒ 0 未读的源丢键，左栏那一行的角标变「空白」而不是「0」——
@@ -1572,7 +1573,8 @@ const MUTATIONS = [
   { id: 'client-撤销条恢复带身份 CAS', file: 'lib/client.js',
     judges: ['client-bundle.test.mjs'],
     judgeTests: ['C3：撤销在飞时更晚的 A 写下自己的撤销条，U 失败不得用旧 batch 盖掉它（身份 CAS）'],
-    from: 'if (state.undo === void 0) {',
+    // 2026-11-16 重锚：同上（undo 状态随 06b 搬进 list-actions.ts）。
+    from: 'if (get().undo === void 0) {',
     to: 'if (true) {' },
   // C4-b（2026-10-16）：候选清单「基线零覆盖」8 类判定的守门变异 —— 先经 --probes 反向
   // 复测确认幸存（无判据看守），补判定后逐条入正表。expand 不 markRead 已有判据（C1 轮），

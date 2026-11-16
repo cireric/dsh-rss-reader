@@ -6,8 +6,7 @@
  * 列表、正文、订阅管理与键盘接线，任一改动都要动同一个文件。
  */
 import { useEffect, useState } from 'react'
-import { DEFAULT_READING_PREFERENCES, httpUrlOrEmpty, ROUTE_PATH, recencyOf, sanitizeViewPreferences, type ArticlePayload, type CleanupResult, type DiscoveryResult, type Endpoint, type FeedView, type FolderView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult, type SearchPage, type SearchQuery, type TagView, type DuplicateHintView, type ReadingPreferences, type UnreadAccount, type ViewPreferences } from '../shared.js'
-import { createAccountMirror } from './account-mirror.js'
+import { DEFAULT_READING_PREFERENCES, ROUTE_PATH, sanitizeViewPreferences, type ArticlePayload, type CleanupResult, type DiscoveryResult, type Endpoint, type FeedView, type FolderView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult, type SearchPage, type SearchQuery, type TagView, type DuplicateHintView, type ReadingPreferences, type ViewPreferences } from '../shared.js'
 
 export type Filter = 'all' | 'unread' | 'starred'
 
@@ -65,7 +64,6 @@ export { navRowsOf, navCursorKey, nextExpandedOf, VIRTUAL_VIEWS }
  * 已读」）。默认 all = 全量，也就是改动前的行为 —— 不选就什么都没变。
  */
 export type MarkAllRange = 'all' | 'day' | 'week' | 'month'
-const RANGE_DAYS: Record<MarkAllRange, number | undefined> = { all: undefined, day: 1, week: 7, month: 30 }
 
 /** 按需正文的运行态（D 方案：V 进正文、Esc 回列表）。 */
 export interface ArticleState {
@@ -266,7 +264,7 @@ const browserDeps: ReaderStoreDeps = {
  *
  * | 域 | 拥有的 state | 动作 | 允许改别人的什么 |
  * |---|---|---|---|
- * | 列表 | `items` / `selectedId` / `nextCursor` / `loadingMore` / `filter` / `layout` / `markAllRange` | load / loadMore / visible / setFilter / setLayout / activate / selectRelative / markRead / toggleStar / toggleKeepUnread / toggleRead / markAllRead / undoMarkAll / cleanup / stepArticle | 只**读** feeds / tags；改账目一律经 account-mirror（回包整体覆盖） |
+ * | 列表 | `items` / `selectedId` / `nextCursor` / `loadingMore` / `filter` / `layout` / `markAllRange` / `undo`（账目 `unread` / `perFeedUnread` 由 account-mirror 的回包整体覆盖） | load / loadMore / visible / setFilter / setLayout / activate / selectRelative / markRead / toggleStar / toggleKeepUnread / toggleRead / markAllRead / undoMarkAll / cleanup / stepArticle | 只**读** feeds / tags；改账目一律经 account-mirror（回包整体覆盖） |
  * | 搜索 | `search` / `searchRevision` / `searchRequest` / `searchPages` | submitSearch / loadSearch / resetSearchPage | 借列表的 items / selectedId / nextCursor / loading 展示；**不许**改 filter |
  * | 订阅 | `feeds` / `folders` / `discovery` / `feedsBusy` / `importReport` / `navSelection` / `navCursor` / `navVisible` / `foldedFolders` / `viewPreferences`（**deleteFolder 例外**：删掉当前所在文件夹时会把 `filter` 回落成 `all`，这条跨域写入登记在此） | addFeed / removeFeed / importOpml / exportOpml / discover / createFolder / renameFolder / deleteFolder / moveFeedToFolder / selectNav / moveNavCursor / openNavCursor / toggleNav / toggleFolder | 改 navSelection 后必须走 persistView；退订只能经 `deleteSubscription` |
  * | 标签 | `tags` / 条目的 `tagIds` | createTag / renameTag / deleteTag / toggleItemTag | 乐观改 tagIds，失败回取当前页拉回真相（tagWrite 串行化 + tagEpoch 身份） |
@@ -294,26 +292,6 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   const emit = (): void => { for (const listener of listeners) listener() }
   const set = (patch: Partial<ReaderState>): void => { state = { ...state, ...patch }; emit() }
 
-  /**
-   * 撤销窗口的定时器。
-   *
-   * 2026-10-07 修：原先只往 state.undo.until 写了个时间戳，全仓没有任何地方读它，于是
-   * 「5 秒撤销窗口」名存实亡——撤销条一直挂着，想撤多久撤多久（README 承诺的是 5 秒）。
-   */
-  let undoExpiry: unknown
-  const clearUndoExpiry = (): void => {
-    if (undoExpiry !== undefined) {
-      deps.clearTimeout(undoExpiry)
-      undoExpiry = undefined
-    }
-  }
-  const armUndoExpiry = (): void => {
-    clearUndoExpiry()
-    undoExpiry = deps.setTimeout(() => {
-      undoExpiry = undefined
-      set({ undo: undefined })
-    }, UNDO_WINDOW_MS)
-  }
   const get = (): ReaderState => state
   let listVersion = 0
   let overviewVersion = 0
@@ -340,7 +318,6 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
         deps.log('warn', '[rss-reader] 跨源重复提示查询失败，本次不显示', failure)
       })
   }
-
 
   const applyOverview = (overview: Overview): void => {
     const selected = state.selectedId
@@ -543,27 +520,6 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     }
   }
 
-  /** 就地改一条的本地镜像，避免每次操作都整份重取。 */
-  const patchItem = (itemId: string, patch: Partial<ItemView>): void => {
-    set({ items: state.items.map((item) => (item.id === itemId ? { ...item, ...patch } : item)) })
-  }
-
-  /**
-   * 拿**宿主回包的那份账**整体覆盖本地未读账（unread + perFeedUnread）。
-   *
-   * ⚠️ 为什么是整体覆盖、而不是「按本地看得见的条目做增量」——这是本文件最容易踩回去的一个坑，
-   * 也是任务 9 实测复现的缺陷本体：客户端只拿得到 maxItemsShown（默认 300）条 items，而宿主按
-   * 每源 maxItemsPerFeed（默认 500）条的**全量表**记账（src/config.ts）。本地增量只能覆盖
-   * 「本地看得见的那几条」，一旦有**本地看不见的漂移**（另一个面板/标签页标掉了某些条目），
-   * 增量就把那份过期基线原样留下 ⇒ 左栏各源之和 ≠ 顶栏总未读（幽灵未读，两个数都是真实渲染的）。
-   *
-   * 所以标读端点**必须回 perFeedUnread**（src/shared.ts 的 UnreadAccount），客户端照单全收：
-   * 这与任务 1 拒绝「客户端从 items 派生 perFeedUnread」是同一条理由 —— 口径只能由宿主给。
-   * 乐观更新仍由调用方先做（手感），回包到达时以宿主为准纠正。
-   */
-  const applyAccount = (account: UnreadAccount): void => {
-    set({ unread: account.unread, perFeedUnread: account.perFeedUnread })
-  }
   /**
    * 取下一页（keyset 续页）。**不是**「重新拉一次」：它是把宿主给的下一批**追加**到列表尾部。
    *
@@ -603,230 +559,6 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   }
 
   /**
-   * **仅供乐观更新**：按本批「本地看得见、且确实被标掉」的条目增量调整本地镜像，让角标从按下那一刻
-   * 就动起来。它**不是**账目的真相来源 —— 真相只在宿主回包里（见 applyAccount）。
-   *
-   * 键域 = 宿主下发的键（0 未读的源也必须留键）；对不上号的 id（不在 items 里、或其源无键）跳过，
-   * 不猜源、不造键。回包一到就被整体覆盖，所以这里算少/算错都不会留在界面上。
-   */
-  const shiftPerFeedUnread = (ids: readonly string[], delta: number): Record<string, number> => {
-    const next: Record<string, number> = { ...state.perFeedUnread }
-    for (const id of ids) {
-      const feedId = state.items.find((item) => item.id === id)?.feedId
-      if (feedId === undefined || next[feedId] === undefined) continue
-      next[feedId] = Math.max(0, next[feedId] + delta)
-    }
-    return next
-  }
-
-  /**
-   * 六个动作共用「乐观 → RPC → 覆盖 / 回滚」管线（失败统一回滚，2026-10-16 拍板）。
-   * 动作 × 行为的判据之家在 src/client/account-mirror.ts 头部 —— 这里只留守卫与载荷组装。
-   */
-  const mirror = createAccountMirror({
-    callRpc: deps.rpc,
-    applyAccount,
-    fail: (failure) => { set({ error: failure instanceof Error ? failure.message : String(failure) }) },
-  })
-
-  const markRead = async (itemId: string): Promise<void> => {
-    const target = state.items.find((item) => item.id === itemId)
-    if (target?.readAt !== undefined) return
-    // 快照在按下前取：失败回滚 = 恢复到「动作没发生」（account-mirror 不变量 ②——
-    // 不用反向增量：Math.max 夹到 0 的减量没法用加法精确还原）
-    const stamp = new Date(deps.now()).toISOString()
-    const beforeUnread = state.unread
-    const beforePerFeed = state.perFeedUnread
-    await mirror.run({
-      endpoint: 'markRead',
-      payload: { itemIds: [itemId] },
-      optimistic: () => {
-        patchItem(itemId, { readAt: stamp })
-        // 左栏角标（perFeedUnread）与顶栏总数（unread）是同一条守恒式的两边——各源之和 === unread。
-        // 只减 unread 会让界面自相矛盾：角标还写着 3、顶栏已经 2（index.tsx:374 与 :385 分读两处）。
-        // 宿主侧 unread 由 countUnread 重算，客户端这一侧的每源账目必须跟着一起补。
-        set(target === undefined
-          ? { unread: Math.max(0, state.unread - 1) }
-          : {
-            unread: Math.max(0, state.unread - 1),
-            perFeedUnread: {
-              ...state.perFeedUnread,
-              [target.feedId]: Math.max(0, (state.perFeedUnread[target.feedId] ?? 0) - 1),
-            },
-          })
-      },
-      rollback: () => {
-        patchItem(itemId, { readAt: target?.readAt })
-        set({ unread: beforeUnread, perFeedUnread: beforePerFeed })
-      },
-    })
-  }
-
-  /**
-   * v：用系统浏览器打开原站（新标签页）。
-   *
-   * **打开即视为已读**（用户 2026-10-06 定）：与内置详情页 `V`、列表点击三条路径保持一致——
-   * 同一类动作（打开条目）语义相同，否则会出现「内置打开算已读、外部打开不算」这种只能靠
-   * 读源码才发现的差异。GR 里的 `v`（view original）同样是阅读动作，不与已读语义冲突。
-   */
-  /**
-   * 「打开一条」= 选中 + 标已读。**已读的唯一自动触发点**：行点击 / Enter / Space / o / v / 正文加载。
-   *
-   * 展开状态不进 store（2026-10-15 键盘路由轮的裁决 Q2），调用方用 nextExpandedOf 决定它。
-   * 为什么收成一个动作：此前五个入口各拼一遍「选中 + 展开 + 标已读」，其中行内 Enter 那一版
-   * 把展开写成了「恒展开」—— 同一条规则写五遍，迟早有一个版本不一样。
-   */
-  const activate = (itemId: string): void => {
-    set({ selectedId: itemId })
-    void markRead(itemId)
-  }
-
-  const openSelected = (): void => {
-    const item = listActions.visible().find((entry) => entry.id === state.selectedId)
-    if (item === undefined) return
-    // 历史行可能带脏 link（修复前落库的 javascript:）：window.open 前过 shared.ts 的唯一白名单。
-    // 认不出就当「无链接」——不打开新窗口、也不标已读（动作没发生）。
-    const href = httpUrlOrEmpty(item.link)
-    if (href === '') return
-    deps.open(href)
-    activate(item.id)
-  }
-
-  const toggleStar = async (): Promise<void> => {
-    const item = listActions.visible().find((entry) => entry.id === state.selectedId)
-    if (item === undefined) return
-    await mirror.run({
-      endpoint: 'toggleStar',
-      payload: { itemId: item.id },
-      // 此前 await 不接返回值，回包里的 unread / perFeedUnread 整个被丢 —— 现在由管线统一落账（不变量 ①）
-      optimistic: () => { patchItem(item.id, { starred: !item.starred }) },
-      // 回滚用按下前的快照，不是「再翻转一次」：并发窗口里两次翻转未必回到原值
-      rollback: () => { patchItem(item.id, { starred: item.starred }) },
-    })
-  }
-
-  /**
-   * 切换「保持未读」（规格 §3.3）。
-   *
-   * 接收显式 id：这条链接挂在每个条目下方，点的那一行未必是当前选中的那一行。
-   */
-  const toggleKeepUnread = async (itemId: string): Promise<void> => {
-    const item = state.items.find((entry) => entry.id === itemId)
-    if (item === undefined) return
-    await mirror.run({
-      endpoint: 'toggleKeepUnread',
-      payload: { itemId },
-      optimistic: () => { patchItem(itemId, { keptUnread: item.keptUnread !== true }) },
-      rollback: () => { patchItem(itemId, { keptUnread: item.keptUnread }) },
-    })
-  }
-
-  const toggleRead = async (): Promise<void> => {
-    const item = listActions.visible().find((entry) => entry.id === state.selectedId)
-    if (item === undefined) return
-    if (item.readAt === undefined) {
-      await markRead(item.id)
-      return
-    }
-    const beforeUnread = state.unread
-    const beforePerFeed = state.perFeedUnread
-    await mirror.run({
-      endpoint: 'unmarkRead',
-      payload: { itemIds: [item.id] },
-      optimistic: () => {
-        patchItem(item.id, { readAt: undefined })
-        // 同上：取消已读要把这条账加回**它所属源**，否则角标会比顶栏少一
-        set({
-          unread: state.unread + 1,
-          perFeedUnread: { ...state.perFeedUnread, [item.feedId]: (state.perFeedUnread[item.feedId] ?? 0) + 1 },
-        })
-      },
-      rollback: () => {
-        patchItem(item.id, { readAt: item.readAt })
-        set({ unread: beforeUnread, perFeedUnread: beforePerFeed })
-      },
-    })
-  }
-
-  /** A：把**当前过滤下**的未读全部标为已读，留一个短时撤销窗口。 */
-  const markAllRead = async (): Promise<void> => {
-    // **保持未读的条目要活下来**（规格 §3.3）——这正是 kept-unread 的存在理由。本地乐观更新与请求
-    // 两处都要跳过；宿主侧也会按 skipKept 再挡一次（客户端列表只是快照）。
-    const days = RANGE_DAYS[state.markAllRange]
-    const before = days === undefined ? undefined : new Date(deps.now() - days * 24 * 3600 * 1000).toISOString()
-    const ids = listActions.visible()
-      .filter((item) => item.readAt === undefined && item.keptUnread !== true)
-      // 范围阈值同样判两次：这里决定乐观更新与名单，宿主那边再按 before 挡一次
-      .filter((item) => before === undefined || recencyOf(item) < before)
-      .map((item) => item.id)
-    if (ids.length === 0) return
-    const stamp = new Date(deps.now()).toISOString()
-    const beforeUnread = state.unread
-    const beforePerFeed = state.perFeedUnread
-    const beforeItems = state.items
-    // 连按两次 A、第二次失败时，第一条的撤销窗口还没走完 —— 回滚必须恢复「按下前」的 undo。
-    // 不需要身份 CAS：A2 的 beforeUndo 在按下那一刻就是 A1 的条目（undo 是单槽），快照恢复
-    // 天然还原它；真正的并发风险在 undoMarkAll 那一侧（见其 rollback 注释）。
-    const beforeUndo = state.undo
-    await mirror.run({
-      endpoint: 'markRead',
-      payload: { itemIds: ids, skipKept: true, before },
-      optimistic: () => {
-        set({
-          items: state.items.map((item) => (ids.includes(item.id) ? { ...item, readAt: stamp } : item)),
-          unread: Math.max(0, state.unread - ids.length),
-          // 乐观更新也要带上每源账目：否则从按下 A 到宿主回包之间，左栏角标停在旧数上。
-          // 基线用宿主下发的那份（含截断之外的账），只按本批 ids 增量减。
-          perFeedUnread: shiftPerFeedUnread(ids, -1),
-          undo: { ids },
-        })
-        armUndoExpiry()
-      },
-      // 失败 = 动作没发生：界面（含撤销窗口）整体回到按下前 —— 挂着一条回不去的撤销，
-      // 按了只会再吃一次错；恢复出撤销条则必须重新武装定时器（否则常驻，见 undoMarkAll）。
-      // 恢复出的窗口从恢复时刻重新计 5s：state 刻意不存时间戳，恢复剩余秒数得先改数据形状。
-      rollback: () => {
-        set({ items: beforeItems, unread: beforeUnread, perFeedUnread: beforePerFeed, undo: beforeUndo })
-        if (beforeUndo === undefined) clearUndoExpiry()
-        else armUndoExpiry()
-      },
-    })
-  }
-
-  const undoMarkAll = async (): Promise<void> => {
-    const undo = state.undo
-    if (undo === undefined) return
-    const beforeUnread = state.unread
-    const beforePerFeed = state.perFeedUnread
-    const beforeItems = state.items
-    await mirror.run({
-      endpoint: 'unmarkRead',
-      payload: { itemIds: undo.ids },
-      optimistic: () => {
-        clearUndoExpiry()
-        set({ undo: undefined })
-        set({
-          items: state.items.map((item) => (undo.ids.includes(item.id) ? { ...item, readAt: undefined } : item)),
-          perFeedUnread: shiftPerFeedUnread(undo.ids, 1),
-        })
-      },
-      // 失败 = 撤销没发生：undo 条恢复并重新武装 5 秒窗口 —— 只把 undo 塞回 state 而不定时器，
-      // 恢复出来的撤销条会**常驻**（「5 秒撤销窗口」名存实亡，正是 2026-10-07 修过的缺陷）。
-      // 身份 CAS（状态谓词式）：仅当撤销条仍是「本动作清掉后的空态」才恢复 —— 在飞窗口里
-      // 更晚的 A 已写下自己的条目时，不许拿本动作那个旧 batch 的条目盖掉它（撤销条是单槽资源，
-      // 恢复旧 batch 会把 A2 的撤销入口整个换掉；交错用例 C3「撤销在飞」看守这条）。
-      // markAllRead 一侧不需要 CAS：undo 是单槽，A2 的 beforeUndo 按下时就是 A1 的条目。
-      rollback: () => {
-        set({ items: beforeItems, unread: beforeUnread, perFeedUnread: beforePerFeed })
-        if (state.undo === undefined) {
-          set({ undo: { ids: undo.ids } })
-          armUndoExpiry()
-        }
-      },
-    })
-  }
-
-  /**
    * 正文页的唯一真相来源：`article.itemId`。
    *
    * 这条路径同时负责：把该条目标已读（B1：显示即打开）、拉正文、按可嵌性决定默认视图。
@@ -839,7 +571,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     const item = state.items.find((entry) => entry.id === itemId)
     if (item === undefined || item.link === '') return
     set({ view: 'article', selectedId: item.id, article: { itemId: item.id, loading: true } })
-    activate(item.id)
+    listActions.activate(item.id)
     try {
       const result = await deps.rpc<ArticlePayload>('article', { itemId: item.id })
       // 期间用户可能已经换到别的条目：丢弃过期结果，避免把 A 的正文显示成 B 的
@@ -970,8 +702,9 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
 
   // 列表域工厂：setFilter 要清搜索结果（reset 只能经搜索域的入口），所以建在搜索域之后；
   // 导航域又反过来借它的 setFilter / relocateSelection —— 工厂之间只传闭包，不含执行期副作用。
-  const { actions: listActions, relocateSelection } = createListActions({
+  const { actions: listActions, relocateSelection, applyAccount } = createListActions({
     get, set, persistView, resetSearch: () => searchActions.reset(),
+    rpc: deps.rpc, now: deps.now, setTimeout: deps.setTimeout, clearTimeout: deps.clearTimeout, open: deps.open,
   })
 
   // OPML 域放在最后（const，与搜索/标签同形）。
@@ -994,7 +727,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
 
   return {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
-    get, load, loadMore, submitSearch: (query?: SearchQuery) => searchActions.submit(query), markRead, activate, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllRead, undoMarkAll,
+    get, load, loadMore, submitSearch: (query?: SearchQuery) => searchActions.submit(query),
     refreshCount, setReading,
     openArticle, closeArticle, cleanup, stepArticle, canStepArticle, saveArticleProgress,
     ...navActions, ...opmlActions, ...feedActions,
@@ -1006,9 +739,6 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
 }
 
 export type ReaderStore = ReturnType<typeof createReaderStore>
-
-/** 「全部标记已读」的撤销窗口（跟着 undo 状态走，所以在 store 这一侧）。 */
-const UNDO_WINDOW_MS = 5000
 
 /** 订阅 store 并强制重渲染。 */
 export function useReaderStore(store: ReaderStore): ReaderState {

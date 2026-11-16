@@ -14,7 +14,7 @@
  *
  *  ① **账目的口径只有宿主回包一份** —— 成功路径一律 applyAccount 整体覆盖，客户端不从
  *     items 派生 unread / perFeedUnread（截断视图当真相 ⇒ 幽灵未读，任务 9 实测；
- *     详细推导仍在 src/client/store.ts 的 applyAccount 头注释，那是这条不变量的家）。
+ *     详细推导仍在 src/client/list-actions.ts 的 applyAccount 头注释，那是这条不变量的家）。
  *  ② **失败统一回滚，回滚用按下时刻的快照**而不是「反向增量」：夹取过 0 的减量
  *     （Math.max(0, n-1) 实际减了 0）没法用 +1 精确还原；快照把 optimistic 触碰过的
  *     每个字段恢复到按下那一刻的值，与夹取无关。
