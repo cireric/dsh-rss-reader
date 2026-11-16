@@ -771,7 +771,8 @@ const MUTATIONS = [
     // 光标确实走了、可 filter 也跟着走（读者看到右栏内容变了）。整条判定的要点是「光标变了而
     // 生效视图没变」，半塌缩同样得被守。
     from: 'set({ navCursor: next });',
-    to: 'set({ navCursor: next, filter: next.kind === "filter" ? next.filter : state.filter });' },
+    // 2026-11-15 重锚：变异体落在 nav-actions.ts 的作用域里，那里没有 state 绑定（只有 get()）。
+    to: 'set({ navCursor: next, filter: next.kind === "filter" ? next.filter : get().filter });' },
   { id: 'client-打开光标不动作用域', file: 'lib/client.js',
     judges: ['nav-selection.test.mjs', 'scroll-dom.test.mjs'],
     judgeTests: ['「源 × filter 叠加」下打开虚拟视图行：filter 生效，而生效的导航项仍是那个源（叠加不塌缩）', 'shift+o 打开光标所在行 = 等价于点击它（虚拟视图 → setFilter，源 → selectNav）'],
@@ -872,7 +873,8 @@ const MUTATIONS = [
   { id: 'persist-toggleNav 不写盘', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs'],
     judgeTests: ['记住上次选中的导航项、filter 与左栏显隐，重开后恢复', '写盘失败必须可见：进 error 而不是被吞掉', '恢复是异步的：用户在它到达之前的手势不会被旧记忆盖掉（整份让位）', '只在关键动作时写盘：移动光标（每次按键）不产生写入'],
-    from: 'set({ navVisible: !state.navVisible });\n\t\t\t\tpersistView();',
+    // 2026-11-15 重锚：导航动作搬进 nav-actions.ts 后，state. 变成 get()。
+    from: 'set({ navVisible: !get().navVisible });\n\t\t\t\tpersistView();',
     to: 'set({ navVisible: !state.navVisible });' },
   // ── 标读回包的每源账目（2026-10-10 两列布局任务 9 收尾）──────────────────────────
   // 这一条守的是**缺陷本体**：客户端只拿得到 maxItemsShown（300）条 items，而宿主按每源 500 条的
@@ -1783,7 +1785,8 @@ const MUTATIONS = [
   { id: 'tag-切换标签不重载', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
     judgeTests: ['文件夹浏览：空目录可见，进入后只显示成员条目，空目录有明确空状态'],
-    from: 'if (!state.search && scopeChanged) load("overview");',
+    // 2026-11-15 重锚：导航动作搬进 nav-actions.ts 后，state.→get()、load()→reload()。
+    from: 'if (!get().search && scopeChanged) reload();',
     to: 'if (false) load("overview");' },
   // ── M3 02：只读模型工具（rss_search / rss_list_feeds / rss_read_article）──────
   // 每条守一处**承重判定**，from 一律照 lib/tools.js 的编译形状写（docs/pitfalls.md 一、1.4），
