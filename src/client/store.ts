@@ -6,7 +6,7 @@
  * 列表、正文、订阅管理与键盘接线，任一改动都要动同一个文件。
  */
 import { useEffect, useState } from 'react'
-import { DEFAULT_READING_PREFERENCES, ROUTE_PATH, sanitizeViewPreferences, type ArticlePayload, type CleanupResult, type DiscoveryResult, type Endpoint, type FeedView, type FolderView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult, type SearchPage, type SearchQuery, type TagView, type DuplicateHintView, type ReadingPreferences, type ViewPreferences } from '../shared.js'
+import { DEFAULT_READING_PREFERENCES, ROUTE_PATH, sanitizeViewPreferences, type DiscoveryResult, type Endpoint, type FeedView, type FolderView, type ItemView, type OpmlImportResult, type RpcResult, type SearchQuery, type TagView, type DuplicateHintView, type ReadingPreferences, type ViewPreferences } from '../shared.js'
 
 export type Filter = 'all' | 'unread' | 'starred'
 
@@ -182,20 +182,7 @@ async function browserRpc<T>(endpoint: Endpoint, payload?: unknown, signal?: Abo
   throw new Error(error ? error.code + ': ' + error.message : '通道返回了非预期形状')
 }
 
-/** 相对时间：列表里最需要一眼看懂的就是「多久以前」。 */
-export function relativeTime(iso: string | undefined): string {
-  if (!iso) return ''
-  const then = Date.parse(iso)
-  if (Number.isNaN(then)) return ''
-  const minutes = Math.round((Date.now() - then) / 60000)
-  if (minutes < 1) return '刚刚'
-  if (minutes < 60) return minutes + ' 分钟前'
-  const hours = Math.round(minutes / 60)
-  if (hours < 24) return hours + ' 小时前'
-  const days = Math.round(hours / 24)
-  if (days < 30) return days + ' 天前'
-  return new Date(then).toISOString().slice(0, 10)
-}
+export { relativeTime } from './relative-time.js'
 
 /**
  * 阅读器状态与动作。
@@ -259,15 +246,18 @@ const browserDeps: ReaderStoreDeps = {
  *
  * ## 四块的分界（阶段 4 票据 03 的第一份成文边界）
  *
- * 下面 48 个成员按**谁写谁的 state** 分四块。这不是目录结构，是写入权限表 —— 拆文件之前先把
+ * 下面 49 个成员按**谁写谁的 state** 分四块。这不是目录结构，是写入权限表 —— 拆文件之前先把
  * 这条边界写清楚，否则拆出来的只是四个共享同一个 state 的碎片。
  *
  * | 域 | 拥有的 state | 动作 | 允许改别人的什么 |
  * |---|---|---|---|
- * | 列表 | `items` / `selectedId` / `nextCursor` / `loadingMore` / `filter` / `layout` / `markAllRange` / `undo`（账目 `unread` / `perFeedUnread` 由 account-mirror 的回包整体覆盖） | load / loadMore / visible / setFilter / setLayout / activate / selectRelative / markRead / toggleStar / toggleKeepUnread / toggleRead / markAllRead / undoMarkAll / cleanup / stepArticle | 只**读** feeds / tags；改账目一律经 account-mirror（回包整体覆盖） |
+ * | 列表 | `items` / `selectedId` / `nextCursor` / `loadingMore` / `filter` / `layout` / `markAllRange` / `undo`（账目 `unread` / `perFeedUnread` 由 account-mirror 的回包整体覆盖） | load / loadMore / visible / setFilter / setLayout / activate / selectRelative / markRead / toggleStar / toggleKeepUnread / toggleRead / markAllRead / undoMarkAll / cleanup / stepArticle / openArticle | 只**读** feeds / tags；改账目一律经 account-mirror（回包整体覆盖）。**两个例外登记在此**：① overview 整份落地（applyOverview 与 load 的搜索分支）把 feeds / folders / tags 按宿主快照原样写回；② 正文动作（openArticle / stepArticle）写 `view` / `article` —— 这两份是跨域呈现状态，不归任何一块私有 |
  * | 搜索 | `search` / `searchRevision` / `searchRequest` / `searchPages` | submitSearch / loadSearch / resetSearchPage | 借列表的 items / selectedId / nextCursor / loading 展示；**不许**改 filter |
  * | 订阅 | `feeds` / `folders` / `discovery` / `feedsBusy` / `importReport` / `navSelection` / `navCursor` / `navVisible` / `foldedFolders` / `viewPreferences`（**deleteFolder 例外**：删掉当前所在文件夹时会把 `filter` 回落成 `all`，这条跨域写入登记在此） | addFeed / removeFeed / importOpml / exportOpml / discover / createFolder / renameFolder / deleteFolder / moveFeedToFolder / selectNav / moveNavCursor / openNavCursor / toggleNav / toggleFolder | 改 navSelection 后必须走 persistView；退订只能经 `deleteSubscription` |
  * | 标签 | `tags` / 条目的 `tagIds` | createTag / renameTag / deleteTag / toggleItemTag | 乐观改 tagIds，失败回取当前页拉回真相（tagWrite 串行化 + tagEpoch 身份） |
+ *
+ * `view` / `article` 是跨域呈现状态：列表的 openArticle / closeArticle、搜索的 submitSearch、
+ * 导航的 toggleFeeds 都会写 `view` —— 它不属于任何一块的私有 state。
  *
  * 共享的不止三样：`deps`（通道/时钟/opener）、`set`（唯一写入口）、`state`（只读快照），
  * 以及跨域入口 `listVersion`（列表与搜索共用，经 next/current 两个函数）、`reload`、`refreshDuplicateHints`。
@@ -294,7 +284,6 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
 
   const get = (): ReaderState => state
   let listVersion = 0
-  let overviewVersion = 0
   /**
    * 拉一次跨源重复提示（M5 03）。
    *
@@ -317,36 +306,6 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
       .catch((failure: unknown) => {
         deps.log('warn', '[rss-reader] 跨源重复提示查询失败，本次不显示', failure)
       })
-  }
-
-  const applyOverview = (overview: Overview): void => {
-    const selected = state.selectedId
-    const stillThere = selected !== undefined && overview.items.some((item) => item.id === selected)
-    // 文件夹可能在别的面板里被删/改名；选中项失效时回落虚拟视图，与「源被退订」同一条规则。
-    const tags = overview.tags ?? []
-    const missing = !selectionExists(state.navSelection, overview.feeds, overview.folders, tags)
-    set({
-      items: overview.items,
-      feeds: overview.feeds,
-      folders: overview.folders,
-      tags,
-      unread: overview.unread,
-      perFeedUnread: overview.perFeedUnread,
-      // 第一页的游标由宿主给（缺省 = 这一页就是全部）。整份重取时它必须**跟着换掉**：
-      // 沿用旧游标会让下一页从旧快照的边界开始，追加出一段不连续的历史。
-      nextCursor: overview.nextCursor,
-      loading: false,
-      error: undefined,
-      selectedId: stillThere ? selected : undefined,
-      ...(missing
-        ? { navSelection: { kind: 'virtual' }, filter: 'all', navCursor: { kind: 'filter', filter: 'all' } }
-        : {}),
-    })
-    if (missing) persistView()
-    refreshDuplicateHints()
-    // 兜底走 relocateSelection 而不是「取 items[0]」：后者不含源条件，选源状态下按 r 刷新
-    // 会把选中项送到源外（那一刻 visible() 里没有它，j/k 直接失灵）。
-    if (!stillThere) relocateSelection()
   }
 
   /**
@@ -374,6 +333,8 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
    * 光标按既有规则同步到「生效的那一行」——与鼠标点源、shift+o 打开源行同一条，恢复不会引入新规则。
    */
   const applyRestoredView = (raw: unknown): void => {
+    // 只在第一次落地（守卫从 load 搬进来 —— 票据 06c 把 load 搬去了 list-actions）。
+    if (viewRestored) return
     viewRestored = true
     if (viewTouched) return
     const knownFeeds = new Set(state.feeds.map((feed) => feed.id))
@@ -447,6 +408,8 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
    * 但**不许静默**：浏览器里 console 是本插件唯一可见的通道，静默会让「记忆怎么不恢复」无从查起。
    */
   const readViewPreferences = async (): Promise<unknown> => {
+    // 已经恢复过就不再读（两次 load 并发时也一样：第二个读到的是同一个「已恢复」事实）。
+    if (viewRestored) return undefined
     try {
       const result = await deps.rpc<{ preferences?: unknown }>('viewPreferences')
       return result?.preferences
@@ -456,238 +419,22 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     }
   }
 
-  const load = async (endpoint: 'overview' | 'refresh'): Promise<void> => {
-    const version = ++overviewVersion
-    if (state.search) {
-      ++listVersion
-      searchActions.abort()
-      set({ nextCursor: undefined, loadingMore: false })
-    }
-    set({ loading: true })
-    try {
-      // 恢复必须在 feeds 表到手之后生效（未知源要回落），所以**先读、后应用**：
-      // 读一次拿到记忆，等 overview 落地再按在订的源校验。两次 load 并发时也只读一次。
-      const preferences = viewRestored ? undefined : await readViewPreferences()
-      // 文件夹浏览必须把范围带给宿主：由 SQL 先筛成员再限页，客户端拿到的才是这个文件夹的
-      // 一页，而不是「跨源首页里恰好属于成员的那几条」。
-      const scopePayload = state.navSelection.kind === 'folder'
-        ? { folder: state.navSelection.folder }
-        : state.navSelection.kind === 'tag'
-          ? { tagId: state.navSelection.tagId }
-          : undefined
-      const overview = await deps.rpc<Overview>(endpoint, scopePayload)
-      if (version !== overviewVersion) return
-      if (state.search) {
-        const tags = overview.tags ?? []
-        const missing = !selectionExists(state.navSelection, overview.feeds, overview.folders, tags)
-        set({
-          feeds: overview.feeds, folders: overview.folders, tags,
-          unread: overview.unread, perFeedUnread: overview.perFeedUnread,
-          ...(missing ? { navSelection: { kind: 'virtual' }, filter: 'all', navCursor: { kind: 'filter', filter: 'all' } } : {}),
-        })
-        if (missing) persistView()
-      } else {
-        applyOverview(overview)
-      }
-      if (!viewRestored) applyRestoredView(preferences)
-      // 用新游标重查已加载的页数，刷新插入的新条目不会挤掉整个阅读窗口。
-      if (state.search) await searchActions.load(undefined, searchActions.loadedPages())
-      // 「按了刷新没反应」是本插件最早的体验投诉：界面从不说明发生了什么。
-      // 这里如实区分——真抓了 / 被最小间隔节流（附上次完成时间）。
-      if (endpoint === 'refresh') {
-        const stamp = overview.refreshedAt === undefined ? '' : '（上次完成于 ' + relativeTime(overview.refreshedAt) + '）'
-        const run = overview.refresh
-        // 「本轮尝试 X/Y」只在这一轮**真的发起**时才说。被节流 / 并入在途各有各的说法：
-        // 把它们说成「本轮 0/Y」会让人以为订阅全挂了（M4 02 的验收项：不能显示成新一轮）。
-        set({
-          notice: run === undefined
-            ? (overview.refreshed === true ? '本轮订阅源抓取已结束' + stamp : '本次未发起新抓取' + stamp)
-            : run.outcome === 'ran'
-              ? '本轮尝试 ' + run.attempted + '/' + run.total + ' 个源' + stamp
-              : run.outcome === 'throttled'
-                ? '本轮未发起抓取：距上次完成不足最小间隔' + (run.waitMs === undefined ? '' : '，还需等 ' + Math.ceil(run.waitMs / 1000) + ' 秒') + stamp
-                : run.outcome === 'in-flight'
-                  ? '已有一轮刷新在跑，本次并入等它结束（没有发起新一轮）'
-                  : '插件尚未就绪，本次未刷新',
-        })
-      }
-    } catch (failure) {
-      if (version !== overviewVersion) return
-      set({
-        ...(searchActions.inFlight() === true ? {} : { loading: false }),
-        error: failure instanceof Error ? failure.message : String(failure),
-      })
-    }
-  }
-
-  /**
-   * 取下一页（keyset 续页）。**不是**「重新拉一次」：它是把宿主给的下一批**追加**到列表尾部。
-   *
-   * ⚠️ 这一页同样**只接收回包、不从 items 派生账目**（与 applyOverview / applyAccount 同一条不变量）：
-   * 账目以宿主回包为准整体覆盖。若在这里改成「按追加后的 items 重算 perFeedUnread」，客户端又一次
-   * 拿截断视图当真相 —— 那是任务 9 实测的幽灵未读（左栏各源之和 ≠ 顶栏总未读），只是换到第二页才
-   * 发作，反而更难查（上面 applyAccount 记的就是这条路）。第一页与第 N 页走**同一个** applyAccount，
-   * 不变量才不会在翻页处破掉。
-   *
-   * 缺游标 = 已经到底：直接返回，不发请求（宿主会把缺省 cursor 当成第一页，那会让列表原地重复 300 条）。
-   */
-  const loadMore = async (): Promise<void> => {
-    const cursor = state.nextCursor
-    if (cursor === undefined || state.loadingMore) return
-    if (state.search) {
-      if (!state.loading) await searchActions.load(cursor)
-      return
-    }
-    const version = listVersion
-    set({ loadingMore: true })
-    try {
-      const overview = await deps.rpc<Overview>('overview', {
-        cursor,
-        ...(state.navSelection.kind === 'folder' ? { folder: state.navSelection.folder } : {}),
-        ...(state.navSelection.kind === 'tag' ? { tagId: state.navSelection.tagId } : {}),
-      })
-      if (version !== listVersion) return
-      // 追加拼在**当前** state 上（不是闭包里那份快照）：请求在途时用户可能已经标读/加星，
-      // 用发请求前的 items 覆盖会把那些本地动作抹掉。
-      set({ items: [...state.items, ...overview.items], nextCursor: overview.nextCursor })
-      applyAccount(overview)
-      set({ loadingMore: false, error: undefined })
-    } catch (failure) {
-      if (version !== listVersion) return
-      set({ loadingMore: false, error: failure instanceof Error ? failure.message : String(failure) })
-    }
-  }
-
-  /**
-   * 正文页的唯一真相来源：`article.itemId`。
-   *
-   * 这条路径同时负责：把该条目标已读（B1：显示即打开）、拉正文、按可嵌性决定默认视图。
-   * ⚠️ 界面上任何地方都不要再从 `selectedId` 反推正文页内容——曾经链接取自 selectedId、
-   * 内容取自 article.itemId，两者在"切换文章"时必然错位（iframe 载入新链接、可嵌性却来自旧站）。
-   *
-   * 先走宿主缓存（第二次打开不跑网络）；失败原因原样显示，不编造内容。
-   */
-  const loadArticle = async (itemId: string): Promise<void> => {
-    const item = state.items.find((entry) => entry.id === itemId)
-    if (item === undefined || item.link === '') return
-    set({ view: 'article', selectedId: item.id, article: { itemId: item.id, loading: true } })
-    listActions.activate(item.id)
-    try {
-      const result = await deps.rpc<ArticlePayload>('article', { itemId: item.id })
-      // 期间用户可能已经换到别的条目：丢弃过期结果，避免把 A 的正文显示成 B 的
-      if (state.article?.itemId !== item.id) return
-      if (result.failure !== undefined) {
-        set({ article: { itemId: item.id, loading: false, failure: result.failure } })
-      } else {
-        const frameable = result.frameable === true
-        set({
-          article: {
-            itemId: item.id, loading: false, title: result.title,
-            blocks: result.blocks,
-            paragraphs: result.paragraphs ?? [],
-            frameable,
-            contentVersion: result.contentVersion,
-            restoreRatio: result.progress,
-          },
-        })
-      }
-    } catch (error) {
-      if (state.article?.itemId !== item.id) return
-      set({ article: { itemId: item.id, loading: false, failure: error instanceof Error ? error.message : String(error) } })
-    }
-  }
-
-  /**
-   * 记一次阅读进度（M5 02）。
-   *
-   * 只在「切换文章 / 关闭正文 / 组件卸载」时调 —— **滚动本身不写盘**：逐帧写会把库写热，
-   * 而进度只要在离开这篇时是对的。失败只记录不弹错：进度是锦上添花，把它升成 error 条
-   * 会让「每切一篇红一次」比丢一次进度更烦人。
-   */
-  const saveArticleProgress = (itemId: string, contentVersion: string, ratio: number): void => {
-    void deps.rpc('saveReadingProgress', { itemId, contentVersion, ratio }).catch((failure: unknown) => {
-      deps.log('warn', '[rss-reader] 阅读进度保存失败（不影响继续阅读；下一次切换会再写一次）', failure)
-    })
-  }
-
-  /** 打开当前选中的条目为正文（列表页的 V 走这里）。 */
-  const openArticle = async (): Promise<void> => {
-    const selectedId = state.selectedId
-    if (selectedId === undefined) return
-    await loadArticle(selectedId)
-  }
-
-  /**
-   * 正文页里切上/下一条文章（B1：显示即打开，故也标已读）。
-   *
-   * - **在途防抖**：上一次抓取未结束时忽略后续按键，否则连按 j 会堆出一串请求（每条一次网络）；
-   * - **边界停住**（不回列表）：避免"多按一下突然跳回列表"的意外；
-   * - 作用范围是**当前过滤下的可见列表**，与列表页 j/k 一致（「未读」筛选下就不会跳到已读条目）。
-   * @returns 是否真的切换了
-   */
-  /**
-   * 正文页能否向该方向切换（**纯查询，不产生副作用**）。
-   *
-   * 单独抽出来的原因：界面上「上一条/下一条」按钮的禁用态必须与键盘的判断**完全一致**——
-   * 各自算一遍迟早会出现「按钮灰着但键盘能切」或反之（本插件的标签/实现错位问题已有前例）。
-   */
-  const canStepArticle = (delta: number): boolean => {
-    if (state.article?.loading === true) return false
-    const list = listActions.visible()
-    const index = list.findIndex((entry) => entry.id === state.article?.itemId)
-    if (index < 0) return false
-    return list[index + delta] !== undefined
-  }
-
-  const stepArticle = (delta: number): boolean => {
-    if (!canStepArticle(delta)) return false
-    const list = listActions.visible()
-    const index = list.findIndex((entry) => entry.id === state.article?.itemId)
-    const target = list[index + delta]
-    if (target === undefined) return false
-    void loadArticle(target.id)
-    return true
-  }
-
-  const closeArticle = (): void => { set({ view: 'list' }) }
-
   /**
    * 刷新未读计数（规格 §5 不变量 8 的 r 键）。
    *
    * 走的是 overview（宿主把已收集的条目与计数回给我们），**不触发抓取** —— 这正是规格不变量 1
    * 的区分：「Refresh 只更新本地视图，抓取由服务端按自己的节奏做」。
    */
-  const refreshCount = async (): Promise<void> => { await load('overview') }
-
-  /**
-   * 显式清理：删除「已读 + 未星标 + 早于阈值」的旧条目。
-   *
-   * 判据在宿主侧（`retention.ts` 的 selectCleanup，有单测）。客户端只负责发起与**如实回报**：
-   * 删了 0 条也要说清是 0 条，而不是让用户以为按钮坏了。
-   */
-  const cleanup = async (): Promise<void> => {
-    try {
-      const result = await deps.rpc<CleanupResult>('cleanup')
-      set({
-        notice: result.deleted === 0
-          ? '没有可清理的条目（只清「已读且未星标」且早于阈值的旧条目）'
-          : '已清理 ' + result.deleted + ' 条旧条目，释放约 ' + Math.round(result.freedChars / 1024) + ' KB',
-      })
-      await load('overview')
-    } catch (failure) {
-      set({ error: failure instanceof Error ? failure.message : String(failure) })
-    }
-  }
+  const refreshCount = async (): Promise<void> => { await listActions.load('overview') }
 
   /** 把宿主回包的目录落到 state（文件夹四动作已搬进 src/client/folder-actions.ts，仍共用这里）。 */
   const applyFolders = (folders: FolderView[]): void => { set({ folders }) }
 
   // 文件夹四动作已搬进 src/client/folder-actions.ts。
-  /** 标签写入串行队列：频繁点击时按点击顺序发 setItemTags，最后一次覆盖即为服务端结果。 */
   // 标签域（四个动作 + 写盘队列 + 失败代数）已搬进 src/client/tag-actions.ts ——
   // 按边界表，它们只碰 tags 与条目的 tagIds，共享 get / set / rpc 三样。
   const tagActions = createTagActions({
-    get, set, rpc: deps.rpc, log: deps.log, persistView, reload: () => load('overview'),
+    get, set, rpc: deps.rpc, log: deps.log, persistView, reload: () => listActions.load('overview'),
   })
 
   // 搜索域工厂放在最后：与标签域同形（const，不是 let | undefined），调用点不必写 ?. ——
@@ -696,40 +443,44 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     get, set, rpc: deps.rpc, newAbortController: deps.newAbortController,
     nextListVersion: () => ++listVersion,
     currentListVersion: () => listVersion,
-    reload: () => load('overview'),
+    reload: () => listActions.load('overview'),
     refreshDuplicateHints,
   })
 
   // 列表域工厂：setFilter 要清搜索结果（reset 只能经搜索域的入口），所以建在搜索域之后；
   // 导航域又反过来借它的 setFilter / relocateSelection —— 工厂之间只传闭包，不含执行期副作用。
-  const { actions: listActions, relocateSelection, applyAccount } = createListActions({
-    get, set, persistView, resetSearch: () => searchActions.reset(),
-    rpc: deps.rpc, now: deps.now, setTimeout: deps.setTimeout, clearTimeout: deps.clearTimeout, open: deps.open,
+  const { actions: listActions, relocateSelection } = createListActions({
+    get, set, persistView, rpc: deps.rpc, log: deps.log,
+    now: deps.now, setTimeout: deps.setTimeout, clearTimeout: deps.clearTimeout, open: deps.open,
+    search: searchActions,
+    nextListVersion: () => ++listVersion,
+    currentListVersion: () => listVersion,
+    viewMemory: { restored: () => viewRestored, read: readViewPreferences, apply: applyRestoredView },
+    refreshDuplicateHints,
   })
 
   // OPML 域放在最后（const，与搜索/标签同形）。
   const opmlActions = createOpmlActions({
-    set, rpc: deps.rpc, saveFile: deps.saveFile, reload: () => load('overview'),
+    set, rpc: deps.rpc, saveFile: deps.saveFile, reload: () => listActions.load('overview'),
   })
 
   const folderActions = createFolderActions({
     get, set, rpc: deps.rpc, applyFolders,
-    reload: () => load('overview'),
+    reload: () => listActions.load('overview'),
     persistView,
   })
 
   const navActions = createNavActions({
-    get, set, reload: () => load('overview'), persistView, relocateSelection, searchActions,
+    get, set, reload: () => listActions.load('overview'), persistView, relocateSelection, searchActions,
     setFilter: listActions.setFilter,
   })
 
-  const feedActions = createFeedActions({ set, rpc: deps.rpc, reload: () => load('overview') })
+  const feedActions = createFeedActions({ set, rpc: deps.rpc, reload: () => listActions.load('overview') })
 
   return {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
-    get, load, loadMore, submitSearch: (query?: SearchQuery) => searchActions.submit(query),
+    get, submitSearch: (query?: SearchQuery) => searchActions.submit(query),
     refreshCount, setReading,
-    openArticle, closeArticle, cleanup, stepArticle, canStepArticle, saveArticleProgress,
     ...navActions, ...opmlActions, ...feedActions,
     dismissNotice: (): void => { set({ notice: undefined }) },
     ...listActions,

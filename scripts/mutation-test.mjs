@@ -69,7 +69,8 @@ const MUTATIONS = [
     judges: ['nav-selection.test.mjs'],
     judgeTests: ['搜索刷新废弃旧续页，沿新游标恢复已加载窗口和选中项'],
     // 2026-11-15 重锚：搜索域搬进 search-actions.ts 后，store 侧只剩 `searchActions.load(..., loadedPages())`。
-    from: 'await searchActions.load(void 0, searchActions.loadedPages())', to: 'await searchActions.load()' },
+    // 2026-11-16 重锚：06c 把 load 搬进 list-actions.ts 后，搜索域只经 host 的 search 对象。
+    from: 'await search.load(void 0, search.loadedPages())', to: 'await search.load()' },
   // 限页前必须检查字面命中，否则无关文章会抢占搜索分页。
   { id: 'search-只返回字面命中', file: 'lib/search-worker.js',
     judges: ['search.test.mjs'],
@@ -833,7 +834,8 @@ const MUTATIONS = [
   { id: 'persist-恢复不落到 state', file: 'lib/client.js',
     judges: ['client-bundle.test.mjs', 'nav-persistence.test.mjs', 'overview-scale.test.mjs'],
     judgeTests: ['分页接线：续页游标在时渲染「加载更多」，点它真的取下一页（并追加到当前列表）', '记住上次选中的导航项、filter 与左栏显隐，重开后恢复', '选中的标签会记住：重开后回到同一个标签，而不是静默掉回「全部」', '改字号只动排版：导航、过滤与左栏显隐一项都不许被覆盖（重开后排版也恢复）', '持久化值不可信时（未知 feedId / 非法 shape）回落默认值且不抛错'],
-    from: 'if (!viewRestored) applyRestoredView(preferences);',
+    // 2026-11-16 重锚：视图记忆改成 host 注入的 viewMemory（load 已搬进 list-actions.ts）。
+    from: 'if (!viewMemory.restored()) viewMemory.apply(preferences);',
     to: ';' },
   // ⑤ 写盘串行化失效 ⇒ 后发的先到会让记忆回退成更早的状态
   { id: 'persist-写盘不串行化', file: 'lib/client.js',
@@ -1408,7 +1410,8 @@ const MUTATIONS = [
     judgeTests: ['分页接线：续页游标在时渲染「加载更多」，点它真的取下一页（并追加到当前列表）', '分页：续页是追加到列表尾部，不是替换（第一页必须还在）', '分页：在途时忽略重复的 loadMore（防连点堆请求）'],
     // 替换 ⇒ 翻到第二页时第一页整个消失（用户找不到刚读的那条）。
     // 判据：tests/nav-selection.test.mjs 的「续页是追加到列表尾部，不是替换」。
-    from: 'items: [...state.items, ...overview.items],',
+    // 2026-11-16 重锚：06c 搬家后 loadMore 的闭包里只剩 get()。
+    from: 'items: [...get().items, ...overview.items],',
     to: 'items: overview.items,' },
   { id: 'paging-续页改按本地 items 派生账目', file: 'lib/client.js',
     judges: ['nav-selection.test.mjs'],
@@ -1430,7 +1433,8 @@ const MUTATIONS = [
     // 回了 undefined ⇒ 宿主当成第一页，列表原地重复同一批 300 条（用户看到重复而不是报错）。
     // 判据：tests/nav-selection.test.mjs 的「续页是追加…」里的 pageCalls 断言。
     // 2026-11-15 重锚：同上（deps.rpc）。
-    from: 'const overview = await deps.rpc("overview", {\n\t\t\t\t\t\tcursor,\n\t\t\t\t\t\t...state.navSelection.kind === "folder" ? { folder: state.navSelection.folder } : {},\n\t\t\t\t\t\t...state.navSelection.kind === "tag" ? { tagId: state.navSelection.tagId } : {}\n\t\t\t\t\t});',
+    // 2026-11-16 重锚：同上一族（deps.rpc → rpc、state.navSelection → 本地 nav 快照）。
+    from: 'const overview = await rpc("overview", {\n\t\t\t\t\t\tcursor,\n\t\t\t\t\t\t...nav.kind === "folder" ? { folder: nav.folder } : {},\n\t\t\t\t\t\t...nav.kind === "tag" ? { tagId: nav.tagId } : {}\n\t\t\t\t\t});',
     to: 'const overview = await callRpc("overview", {});' },
   { id: 'paging-在途不挡重复请求', file: 'lib/client.js',
     judges: ['nav-selection.test.mjs'],
