@@ -121,7 +121,7 @@ export function createSearchActions(host: SearchActionHost) {
     reset: resetSearchPage,
     submit: submitSearch,
     abort: (): void => { searchRequest?.abort() },
-    pages: (): number => searchPages,
+    loadedPages: (): number => searchPages,
     /** 有没有搜索请求在途（load() 的 catch 据此决定要不要清 loading）。 */
     inFlight: (): boolean => searchRequest !== undefined,
   }

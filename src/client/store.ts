@@ -262,11 +262,12 @@ const browserDeps: ReaderStoreDeps = {
  * | 域 | 拥有的 state | 动作 | 允许改别人的什么 |
  * |---|---|---|---|
  * | 列表 | `items` / `selectedId` / `nextCursor` / `loadingMore` / `filter` / `layout` / `markAllRange` | load / loadMore / visible / setFilter / setLayout / activate / selectRelative / markRead / toggleStar / toggleKeepUnread / toggleRead / markAllRead / undoMarkAll / cleanup / stepArticle | 只**读** feeds / tags；改账目一律经 account-mirror（回包整体覆盖） |
- * | 搜索 | `search` / `searchRevision` | submitSearch | 用列表的 items 展示；**不许**改 filter |
+ * | 搜索 | `search` / `searchRevision` / `searchRequest` / `searchPages` | submitSearch / loadSearch / resetSearchPage | 借列表的 items / selectedId / nextCursor / loading 展示；**不许**改 filter |
  * | 订阅 | `feeds` / `folders` / `navSelection` / `navCursor` / `navVisible` / `foldedFolders` / `viewPreferences` | addFeed / removeFeed / importOpml / exportOpml / discover / createFolder / renameFolder / deleteFolder / moveFeedToFolder / selectNav / moveNavCursor / openNavCursor / toggleNav / toggleFolder | 改 navSelection 后必须走 persistView；退订只能经 `deleteSubscription` |
  * | 标签 | `tags` / 条目的 `tagIds` | createTag / renameTag / deleteTag / toggleItemTag | 乐观改 tagIds，失败回取当前页拉回真相（tagWrite 串行化 + tagEpoch 身份） |
  *
- * 共享的只有三样：`deps`（通道/时钟/opener）、`set`（唯一写入口）、`state`（只读快照）。
+ * 共享的不止三样：`deps`（通道/时钟/opener）、`set`（唯一写入口）、`state`（只读快照），
+ * 以及跨域入口 `listVersion`（列表与搜索共用，经 next/current 两个函数）、`reload`、`refreshDuplicateHints`。
  * 拆文件时的安全绳 = 现有 642 条测试；它们钉的是行为，不是文件位置。
  */
 export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
@@ -311,8 +312,6 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   const get = (): ReaderState => state
   let listVersion = 0
   let overviewVersion = 0
-  // 搜索域（loadSearch / reset / submit + 在途请求与页数）已搬进 src/client/search-actions.ts。
-  let searchActions: ReturnType<typeof createSearchActions> | undefined
   /**
    * 当前过滤下的可见条目——A/j/k 都只作用于它。
    *
@@ -370,7 +369,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     set({ filter, navCursor: { kind: 'filter', filter } })
     relocateSelection()
     persistView()
-    searchActions?.reset()
+    searchActions.reset()
   }
 
   /**
@@ -397,14 +396,6 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
       })
   }
 
-  // 搜索域工厂：建在 refreshDuplicateHints 之后（它要用这个 const，不提升）。
-  searchActions = createSearchActions({
-    get, set, rpc: deps.rpc, newAbortController: deps.newAbortController,
-    nextListVersion: () => ++listVersion,
-    currentListVersion: () => listVersion,
-    reload: () => load('overview'),
-    refreshDuplicateHints,
-  })
 
   const applyOverview = (overview: Overview): void => {
     const selected = state.selectedId
@@ -547,7 +538,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     const version = ++overviewVersion
     if (state.search) {
       ++listVersion
-      searchActions?.abort()
+      searchActions.abort()
       set({ nextCursor: undefined, loadingMore: false })
     }
     set({ loading: true })
@@ -578,7 +569,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
       }
       if (!viewRestored) applyRestoredView(preferences)
       // 用新游标重查已加载的页数，刷新插入的新条目不会挤掉整个阅读窗口。
-      if (state.search) await searchActions?.load(undefined, Math.max(1, searchActions?.pages() ?? 1))
+      if (state.search) await searchActions.load(undefined, searchActions.loadedPages())
       // 「按了刷新没反应」是本插件最早的体验投诉：界面从不说明发生了什么。
       // 这里如实区分——真抓了 / 被最小间隔节流（附上次完成时间）。
       if (endpoint === 'refresh') {
@@ -601,7 +592,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     } catch (failure) {
       if (version !== overviewVersion) return
       set({
-        ...(searchActions?.inFlight() === true ? {} : { loading: false }),
+        ...(searchActions.inFlight() === true ? {} : { loading: false }),
         error: failure instanceof Error ? failure.message : String(failure),
       })
     }
@@ -643,7 +634,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     const cursor = state.nextCursor
     if (cursor === undefined || state.loadingMore) return
     if (state.search) {
-      if (!state.loading) await searchActions?.load(cursor)
+      if (!state.loading) await searchActions.load(cursor)
       return
     }
     const version = listVersion
@@ -1044,7 +1035,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     }
     relocateSelection()
     persistView()
-    searchActions?.reset()
+    searchActions.reset()
     // 文件夹/标签范围必须由宿主先筛再分页：进入/退出/切换范围时重取一页。
     const scopeChanged = current.kind === 'folder' || next.kind === 'folder'
       || current.kind === 'tag' || next.kind === 'tag'
@@ -1264,9 +1255,19 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     get, set, rpc: deps.rpc, log: deps.log, persistView, reload: () => load('overview'),
   })
 
+  // 搜索域工厂放在最后：与标签域同形（const，不是 let | undefined），调用点不必写 ?. ——
+  // 否则任一路径在赋值前触发就整段静默 no-op，而编译器不会提醒（2026-11-15 评审指出）。
+  const searchActions = createSearchActions({
+    get, set, rpc: deps.rpc, newAbortController: deps.newAbortController,
+    nextListVersion: () => ++listVersion,
+    currentListVersion: () => listVersion,
+    reload: () => load('overview'),
+    refreshDuplicateHints,
+  })
+
   return {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
-    get, visible, load, loadMore, submitSearch: (query?: SearchQuery) => searchActions?.submit(query), markRead, activate, selectRelative, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllRead, undoMarkAll,
+    get, visible, load, loadMore, submitSearch: (query?: SearchQuery) => searchActions.submit(query), markRead, activate, selectRelative, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllRead, undoMarkAll,
     setLayout, setMarkAllRange, setShowUnread, refreshCount, setReading,
     openArticle, closeArticle, cleanup, stepArticle, canStepArticle, saveArticleProgress,
     toggleFeeds, exportOpml, importOpml, addFeed, removeFeed, discover, clearDiscovery,
