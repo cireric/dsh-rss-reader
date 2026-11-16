@@ -68,7 +68,8 @@ const MUTATIONS = [
   { id: 'search-刷新保留已加载窗口', file: 'lib/client.js',
     judges: ['nav-selection.test.mjs'],
     judgeTests: ['搜索刷新废弃旧续页，沿新游标恢复已加载窗口和选中项'],
-    from: 'await loadSearch(void 0, Math.max(1, searchPages))', to: 'await loadSearch()' },
+    // 2026-11-15 重锚：搜索域搬进 search-actions.ts 后，store 侧只剩 `searchActions.load(..., loadedPages())`。
+    from: 'await searchActions.load(void 0, searchActions.loadedPages())', to: 'await searchActions.load()' },
   // 限页前必须检查字面命中，否则无关文章会抢占搜索分页。
   { id: 'search-只返回字面命中', file: 'lib/search-worker.js',
     judges: ['search.test.mjs'],
@@ -866,7 +867,7 @@ const MUTATIONS = [
   { id: 'persist-selectNav 不写盘', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs'],
     judgeTests: ['记住上次选中的导航项、filter 与左栏显隐，重开后恢复', '选中的标签会记住：重开后回到同一个标签，而不是静默掉回「全部」', '写盘串行化：前一次慢、后一次快时，最终的记忆是「后一次动作」'],
-    from: 'relocateSelection();\n\t\t\t\tpersistView();\n\t\t\t\tresetSearchPage();\n\t\t\t\tconst scopeChanged = current.kind === "folder" || next.kind === "folder" || current.kind === "tag" || next.kind === "tag";',
+    from: 'relocateSelection();\n\t\t\t\tpersistView();\n\t\t\t\tsearchActions.reset();\n\t\t\t\tconst scopeChanged = current.kind === "folder" || next.kind === "folder" || current.kind === "tag" || next.kind === "tag";',
     to: 'relocateSelection();\n\t\t\t\tresetSearchPage();\n\t\t\t\tconst scopeChanged = current.kind === "folder" || next.kind === "folder" || current.kind === "tag" || next.kind === "tag";' },
   { id: 'persist-toggleNav 不写盘', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs'],
@@ -1691,7 +1692,8 @@ const MUTATIONS = [
   { id: 'folder-改名不迁移选中', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
     judgeTests: ['当前浏览文件夹：改名迁移范围，删除回到跨源列表'],
-    from: 'const selected = state.navSelection.kind === "folder" && state.navSelection.folder === from;',
+    // 2026-11-15 重锚：文件夹四动作搬进 src/client/folder-actions.ts 后，编译产物里先取 nav 快照再收窄。
+    from: 'const selected = nav.kind === "folder" && nav.folder === from;',
     to: 'const selected = false;' },
   { id: 'folder-删除当前不回落', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],

@@ -48,6 +48,7 @@ export type NavCursor =
  * 在这里一处：键盘光标的行序、顶栏按钮的顺序、左栏渲染的顺序都读它。三处各写一份迟早错位。
  */
 
+import { createFolderActions } from './folder-actions.js'
 import { createOpmlActions } from './opml-actions.js'
 import { createSearchActions } from './search-actions.js'
 import { createTagActions } from './tag-actions.js'
@@ -264,7 +265,7 @@ const browserDeps: ReaderStoreDeps = {
  * |---|---|---|---|
  * | 列表 | `items` / `selectedId` / `nextCursor` / `loadingMore` / `filter` / `layout` / `markAllRange` | load / loadMore / visible / setFilter / setLayout / activate / selectRelative / markRead / toggleStar / toggleKeepUnread / toggleRead / markAllRead / undoMarkAll / cleanup / stepArticle | 只**读** feeds / tags；改账目一律经 account-mirror（回包整体覆盖） |
  * | 搜索 | `search` / `searchRevision` / `searchRequest` / `searchPages` | submitSearch / loadSearch / resetSearchPage | 借列表的 items / selectedId / nextCursor / loading 展示；**不许**改 filter |
- * | 订阅 | `feeds` / `folders` / `navSelection` / `navCursor` / `navVisible` / `foldedFolders` / `viewPreferences` | addFeed / removeFeed / importOpml / exportOpml / discover / createFolder / renameFolder / deleteFolder / moveFeedToFolder / selectNav / moveNavCursor / openNavCursor / toggleNav / toggleFolder | 改 navSelection 后必须走 persistView；退订只能经 `deleteSubscription` |
+ * | 订阅 | `feeds` / `folders` / `navSelection` / `navCursor` / `navVisible` / `foldedFolders` / `viewPreferences`（**deleteFolder 例外**：删掉当前所在文件夹时会把 `filter` 回落成 `all`，这条跨域写入登记在此） | addFeed / removeFeed / importOpml / exportOpml / discover / createFolder / renameFolder / deleteFolder / moveFeedToFolder / selectNav / moveNavCursor / openNavCursor / toggleNav / toggleFolder | 改 navSelection 后必须走 persistView；退订只能经 `deleteSubscription` |
  * | 标签 | `tags` / 条目的 `tagIds` | createTag / renameTag / deleteTag / toggleItemTag | 乐观改 tagIds，失败回取当前页拉回真相（tagWrite 串行化 + tagEpoch 身份） |
  *
  * 共享的不止三样：`deps`（通道/时钟/opener）、`set`（唯一写入口）、`state`（只读快照），
@@ -1159,75 +1160,10 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     }
   }
 
-  /**
-   * 文件夹管理动作（M2 03）。所有动作都遵循同一条「错误可恢复」规则：
-   * 先等宿主确认，成功了才改 state；失败只写 error，原有选择/列表/输入一律不动。
-   */
+  /** 把宿主回包的目录落到 state（文件夹四动作已搬进 src/client/folder-actions.ts，仍共用这里）。 */
   const applyFolders = (folders: FolderView[]): void => { set({ folders }) }
 
-  const createFolder = async (name: string): Promise<void> => {
-    try {
-      const result = await deps.rpc<{ folders: FolderView[] }>('createFolder', { name })
-      applyFolders(result.folders)
-      set({ notice: '已创建文件夹「' + name.trim() + '」' })
-      await load('overview')
-    } catch (failure) {
-      set({ error: failure instanceof Error ? failure.message : String(failure) })
-    }
-  }
-
-  const renameFolder = async (from: string, to: string): Promise<void> => {
-    try {
-      const result = await deps.rpc<{ folders: FolderView[] }>('renameFolder', { from, to })
-      // 当前正在浏览这个文件夹：范围必须跟着迁移，否则右栏会变成一个不存在的名字。
-      const selected = state.navSelection.kind === 'folder' && state.navSelection.folder === from
-      applyFolders(result.folders)
-      if (selected) {
-        set({ navSelection: { kind: 'folder', folder: to.trim() }, navCursor: { kind: 'folder', folder: to.trim() } })
-        persistView()
-      }
-      set({ notice: '已把文件夹「' + from + '」改名为「' + to.trim() + '」' })
-      await load('overview')
-    } catch (failure) {
-      set({ error: failure instanceof Error ? failure.message : String(failure) })
-    }
-  }
-
-  const deleteFolder = async (name: string): Promise<void> => {
-    try {
-      const result = await deps.rpc<{ folders: FolderView[]; detached: number }>('deleteFolder', { name })
-      const selected = state.navSelection.kind === 'folder' && state.navSelection.folder === name
-      const cursorOnIt = state.navCursor.kind === 'folder' && state.navCursor.folder === name
-      applyFolders(result.folders)
-      if (selected) {
-        // 删除当前文件夹：回到跨源列表（与「源被退订」同一条回落规则）。
-        set({ navSelection: { kind: 'virtual' }, filter: 'all', navCursor: { kind: 'filter', filter: 'all' } })
-        persistView()
-      } else if (cursorOnIt) {
-        set({ navCursor: { kind: 'filter', filter: state.filter } })
-      }
-      set({ notice: '已删除文件夹「' + name + '」，' + result.detached + ' 个订阅变为未分类' })
-      await load('overview')
-    } catch (failure) {
-      set({ error: failure instanceof Error ? failure.message : String(failure) })
-    }
-  }
-
-  const moveFeedToFolder = async (feedId: string, folder: string | undefined): Promise<void> => {
-    try {
-      const result = await deps.rpc<{ folders: FolderView[] }>('moveFeedToFolder', {
-        feedId,
-        // 协议里 null 才是「移出到未分类」；undefined 会被 JSON 丢掉，宿主看不到这个键。
-        folder: folder ?? null,
-      })
-      applyFolders(result.folders)
-      set({ notice: folder === undefined ? '已把订阅移出分类' : '已把订阅移到「' + folder + '」' })
-      await load('overview')
-    } catch (failure) {
-      set({ error: failure instanceof Error ? failure.message : String(failure) })
-    }
-  }
-
+  // 文件夹四动作已搬进 src/client/folder-actions.ts。
   /** 标签写入串行队列：频繁点击时按点击顺序发 setItemTags，最后一次覆盖即为服务端结果。 */
   // 标签域（四个动作 + 写盘队列 + 失败代数）已搬进 src/client/tag-actions.ts ——
   // 按边界表，它们只碰 tags 与条目的 tagIds，共享 get / set / rpc 三样。
@@ -1250,6 +1186,12 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     set, rpc: deps.rpc, saveFile: deps.saveFile, reload: () => load('overview'),
   })
 
+  const folderActions = createFolderActions({
+    get, set, rpc: deps.rpc, applyFolders,
+    reload: () => load('overview'),
+    persistView,
+  })
+
   return {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
     get, visible, load, loadMore, submitSearch: (query?: SearchQuery) => searchActions.submit(query), markRead, activate, selectRelative, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllRead, undoMarkAll,
@@ -1263,7 +1205,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     moveNavCursor,
     openNavCursor,
     toggleNav, toggleFolder,
-    createFolder, renameFolder, deleteFolder, moveFeedToFolder,
+    ...folderActions,
     ...tagActions,
   }
 }
