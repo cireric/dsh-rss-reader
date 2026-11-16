@@ -13,7 +13,7 @@
 | 阶段 1 · tag 选中被记忆静默降级 | 四种 kind 与 NavSelection 一一对应；投影收成一个穷尽函数 | `1c26275` |
 | 阶段 2 · 「打开一条」五遍 | `store.activate` 成为唯一触发点；`nextExpandedOf` 收成一条规则 | `3aff807` |
 | 阶段 3 · ReaderStore 契约与替身 | 36 方法可执行契约 + 内存实现升格 + 窄接口 + 判据归一 + 五份局部桩退役 | `6fbdeb0` `03af3ed` `ba96196` `6a3f470` |
-| 阶段 4b · 48 项动作按域分家 | 标签 / 搜索 / 订阅 / 列表四域各自成文件，store 只留装配与视图记忆 | `2db1f31` `a1d98af` `0a1d45b` `62eff6ff` `855f26c` `608d50b` `25b179c` `b98bea6` `0b34671` `0b768ae` |
+| 阶段 4b · 48 项动作按域分家 | 标签 / 搜索 / 订阅 / 列表四域各自成文件，store 只留装配与视图记忆 | `2db1f31` `a1d98af` `0a1d45b` `62ef6ff` `855f26c` `608d50b` `25b179c` `b98bea6` `0b34671` `0b768ae` |
 
 ## 怎么用这份文件
 
@@ -144,7 +144,7 @@ Blob / document / window.open / console；四份测试沙箱各复制一遍装�
 - [x] 回归：client-bundle / nav-* / unread-accounting / scroll-dom 全绿；mutation 242/242 幸存 0
 
 **两处偏离**：① 窄接口（`Pick` 派生）见阶段 3；② 「48 项按域分家」超出本阶段验收，已拆成**阶段 4b**
-（见下）—— 不把它混进「已完成」里。
+（见下，2026-11-16 已完成）—— 它的结果不计入本阶段的验收项。
 
 ---
 
@@ -159,12 +159,17 @@ Blob / document / window.open / console；四份测试沙箱各复制一遍装�
 |---|---|---|
 | 标签（4 动作 + 写盘队列/失败代数） | `2db1f31` | `src/client/tag-actions.ts` |
 | 搜索（3 动作 + 在途请求/页数） | `a1d98af` `0a1d45b` | `src/client/search-actions.ts` |
-| 订阅（OPML 2 / 文件夹 4 / 导航 6 / 订阅源 4） | `62eff6ff` `855f26c` `608d50b` `25b179c` `11f2981` | `opml-actions.ts` / `folder-actions.ts` / `nav-actions.ts` / `feed-actions.ts` |
+| 订阅（OPML 2 / 文件夹 4 / 导航 6 / 订阅源 4） | `62ef6ff` `855f26c` `608d50b` `25b179c` `11f2981` | `opml-actions.ts` / `folder-actions.ts` / `nav-actions.ts` / `feed-actions.ts` |
 | 列表（06a 选中 / 06b 账目 / 06c 取数正文） | `b98bea6` `0b34671` `0b768ae` | `src/client/list-actions.ts` |
 
 **结果**：`store.ts` 从 1102 行降到约 500 行，只剩 state 装配、视图记忆、跨源提示、目录落地与
 域工厂；公开接口 49 个键搬家前后逐项一致；全量 test 642、mutation 242（幸存 0、未应用 0）。
 票据与两轴评审记录在 `.scratch/client-store-seams/issues/`。
+
+**评审补修（2026-11-16，`518a697`）**：四个域搬完后补跑 Standards / Spec 两个只读子代理，报出的条目已全部修完——
+两条变异的 `to` 仍引用搬家前的绑定（`state` / `callRpc`，属「崩溃式假通过」，会以 ReferenceError
+冒充「被抓到」）、死导出 `applyAccount`、`selectionExists` 死 import、两处失效注释、边界表例外补全，
+以及本文件里 `62eff6ff` 的笔误（真实 `62ef6ff`）。修复后重跑：242/242、崩了 0、未应用 0。
 
 ---
 
