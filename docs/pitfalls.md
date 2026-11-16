@@ -59,6 +59,18 @@ host 侧 `lib/*.js` 没有这种守护，旧产物会静默通过）。
 `$HOME/dsh`、`$HOME/.dsh/dsh-harness`、`$HOME/deepseek-harness`，都不命中就给
 `DSH_CHECKOUT=<path>`）。**本仓库没有锁文件** ⇒ 不可独立安装、进不了 CI。
 
+**宿主升级会换掉链接目标**（`实测`，2026-11-16）：旧实现只链 `.pnpm/<pkg>@<ver>/…`。宿主从
+`dsh-v0.2.1-rc.5` 换到 `dsh-v0.2.2-rc.3`（reflog：19:00:10）时，`pnpm install` 把 zod@4.4.3 从 store 删掉，`node_modules/zod` 变成
+悬空链接；Node 的 ESM 解析把悬空链接当「找不到包」，于是**构建期毫无动静、装载期才炸**——
+`Cannot find package 'zod' imported from lib/endpoints.js`，entry 572f7815 变 no-fiber，
+所有 import `lib/` 的测试同时红。
+**修法**：`link_pnpm` 优先链 checkout 顶层的中间层 `node_modules/<pkg>`（pnpm 每次 install 都会
+重写它，指向新版本），只在顶层没有时才回退 `.pnpm`；`link_pkg` 加「链接后必须解析到
+package.json」的硬断言，让悬空链接在构建期就失败。
+**判据**：升级宿主后重跑 `npm run build`（断言不过即红）；再跑
+`node --input-type=module -e "await import('./lib/index.js')"`，应打出
+`Config,apply,inject,name`。
+
 ### 1.7 客户端 bundle 不许引第三方库
 
 除 `tsdown.config.ts` 的 `neverBundle` 之外的东西都会被真打进 bundle，需要什么就自带实现。

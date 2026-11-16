@@ -60,6 +60,12 @@ link_pkg() {
     fs.mkdirSync(path.dirname(link), { recursive: true });
     fs.symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir');
   " "node_modules/$1" "$target"
+  # 链接必须**解析得动**：悬空链接不会在 build 期报错，而是等宿主装载时才炸成
+  # ERR_MODULE_NOT_FOUND（2026-11-16 的 zod 事故正是这样过了整轮验收的）。
+  if [ ! -e "node_modules/$1/package.json" ]; then
+    echo "build: 链接后解析不到 node_modules/$1/package.json（悬空链接？target=$target）" >&2
+    exit 1
+  fi
 }
 
 echo "=== Linking build dependencies (checkout: $CHECKOUT) ==="
@@ -93,15 +99,24 @@ if [ -z "$TYPES_REACT" ]; then
 fi
 link_pkg @types/react "${TYPES_REACT#$CHECKOUT/}/node_modules/@types/react"
 
-# 本插件自己的运行时依赖：从 checkout 的 .pnpm 里按包名取（不联网安装）
+# 本插件自己的运行时依赖（不联网安装）：优先链 checkout 顶层的中间层链接，其次才落到 .pnpm 的版本目录。
+# ⚠️ 顶层 `node_modules/<pkg>` 是 pnpm install 每次都会重写的中间层（`zod -> .pnpm/zod@<ver>/…`），
+# 我们的链接指向中间层，宿主升级换版本时依然有效；直接链 `.pnpm/zod@<ver>` 则会在升级把旧版本从
+# store 里删掉后变成悬空链接 —— 2026-11-16 事故：宿主升到 0.2.2-rc.3 后 zod@4.4.3 被删，
+# 插件 lib/endpoints.js 装载即 `Cannot find package 'zod'`，entry 572f7815 变 no-fiber。
 link_pnpm() {
-  local dest="$1" pattern="$2" found
-  found=$(find "$CHECKOUT/node_modules/.pnpm" -maxdepth 1 -type d -name "$pattern@*" 2>/dev/null | head -1)
-  if [ -z "$found" ]; then
-    echo "build: 找不到 pnpm 包 ${pattern}（checkout 里没有？）" >&2
-    exit 1
+  local dest="$1" pattern="$2" target found
+  if [ -e "$CHECKOUT/node_modules/$dest" ]; then
+    target="$CHECKOUT/node_modules/$dest"
+  else
+    found=$(find "$CHECKOUT/node_modules/.pnpm" -maxdepth 1 -type d -name "$pattern@*" 2>/dev/null | head -1)
+    if [ -z "$found" ]; then
+      echo "build: 找不到 pnpm 包 ${pattern}（checkout 里没有？）" >&2
+      exit 1
+    fi
+    target="$found/node_modules/$dest"
   fi
-  link_pkg "$dest" "${found#$CHECKOUT/}/node_modules/$dest"
+  link_pkg "$dest" "${target#"$CHECKOUT"/}"
 }
 
 link_pnpm fast-xml-parser fast-xml-parser

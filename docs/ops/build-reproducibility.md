@@ -14,7 +14,7 @@
 | 包 | 来源（相对 checkout） | 用途 |
 |---|---|---|
 | `fast-xml-parser` | `.pnpm/fast-xml-parser@5.11.1` | **运行期**（`src/opml.ts` 解析 OPML） |
-| `zod` | `.pnpm/zod@4.4.3` | **运行期**（端点参数校验） |
+| `zod` | 顶层的 `node_modules/zod`（→ `.pnpm/zod@4.6.6`） | **运行期**（端点参数校验） |
 | `schemastery` | `vendor/schemastery` | **运行期**（`Config` 的 schema 本体） |
 | `@deepseek-ai/dsh-home-paths` | `packages/util/home-paths` | **运行期**（`$DSH_HOME` 解析） |
 | `@deepseek-ai/dsh-storage-domain` | `packages/storage/storage-domain` | **运行期**（`src/domain.ts` 的 `defineDomain`，见 §6 的注） |
@@ -28,6 +28,11 @@
 | `@types/node` | checkout 的 `node_modules/@types/node`（**22.20.1**） | 编译期类型 |
 | `@types/react` | checkout 的 `.pnpm/@types+react@18.3.31` | 编译期类型（客户端半） |
 
+运行时依赖 `zod` 走 checkout **顶层的中间层链接**（`node_modules/zod` → `.pnpm/zod@<ver>`），不直接把
+`.pnpm/zod@<ver>` 钉进本仓库：顶层链接是 `pnpm install` 每次都会重写的，宿主升级换版本后仍然有效。
+直接钉版本目录会在升级把旧版本从 store 删掉后变成悬空链接，装载期才炸（2026-11-16 事故，判据见
+`docs/pitfalls.md` §1.6）。
+
 **工具链**（不在 link 列表里，必须自己在 PATH 上）：
 
 | 工具 | 位置 | 版本（本轮实测） |
@@ -37,7 +42,7 @@
 | `tsdown`（客户端打包） | `$CHECKOUT/node_modules/.bin/tsdown` | 0.22.2（**没有**被 `build.sh` link，见 pitfalls §1.12） |
 | Node.js | 系统 | v26.13.0（`node:sqlite` 要求 ≥ 22.5；dsh 0.2.2 起要求 ≥ 24.9） |
 
-本轮盘点的 checkout：`dsh-v0.2.1-rc.5`（HEAD `b830ec9`）。
+本轮盘点的 checkout：`dsh-v0.2.2-rc.3`（HEAD `38a6a5c9`）。
 
 ## 2. 硬依赖与失败形态（都实测过）
 
@@ -45,6 +50,7 @@
 |---|---|
 | `$DSH_CHECKOUT` 未设、HOME 下也没有 checkout | `npm run build` **exit 1**，消息 `build: cannot locate the dsh checkout (set DSH_CHECKOUT)` |
 | checkout 存在但缺某个 link 目标 | `build: dependency target missing: <path>`（`exit 1`） |
+| 链接建好但解析不到（悬空链接） | `build: 链接后解析不到 node_modules/<pkg>/package.json（悬空链接？target=…）`（`exit 1`） |
 | `build:client` 的 PATH 里没有 tsdown | `sh: tsdown: command not found`（`exit 127`）—— 见 pitfalls §1.12 |
 | 在**本机**的干净目录里构建（不设 `DSH_CHECKOUT`） | **exit 0**：`build.sh` 会自动探到 `~/.dsh/dsh-harness` ⇒ 「干净目录」不等于「干净环境」，要验证检出依赖必须同时换 HOME（见 §3 的表） |
 
