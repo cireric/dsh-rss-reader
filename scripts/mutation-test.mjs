@@ -1339,8 +1339,10 @@ const MUTATIONS = [
     // 「Too many parameter values」⇒ 那条变异会「因为绑定参数不匹配」被抓到，而不是因为断言看见了
     // 重复与漏（那是一条更弱的守卫）。本条把方向单独翻过来，绑定参数个数不变，于是**只有断言**能抓它。
     // 判据：tests/overview-paging.test.mjs 的「页边界正好压在 recency 打平组上」。
-    from: "' WHERE i.recency < ? OR (i.recency = ? AND i.id > ?)'",
-    to: "' WHERE i.recency < ? OR (i.recency = ? AND i.id < ?)'" },
+    // ⚠️ 2026-11-18 阶段 6：三个范围变体共用一个 AFTER_CURSOR 片段（ADR-0004 决定 4），
+    // 锚点从「某个 SELECT 的 WHERE 尾巴」改成「这个常量本身」。
+    from: "const AFTER_CURSOR = '(i.recency < ? OR (i.recency = ? AND i.id > ?))'",
+    to: "const AFTER_CURSOR = '(i.recency < ? OR (i.recency = ? AND i.id < ?))'" },
   { id: 'paging-游标不校验形状（垃圾当第一页）', file: 'lib/shared.js',
     judges: ['overview-paging.test.mjs'],
     judgeTests: ['游标编解码：格式 "<recency>|<id>"，认不出的必须返回 undefined（不许当成从头开始）', 'overview：游标认不出时响亮拒绝（bad-request），绝不静默从头开始'],
@@ -1455,14 +1457,10 @@ const MUTATIONS = [
     // 判据：endpoint-registry.test.mjs 的「not-ready 先于 unknown-endpoint」用例（三个名字都试）。
     from: "            if (!target)\n                return fail('not-ready', '存储域尚未就绪，稍后重试');",
     to: "            if (false)\n                return fail('not-ready', '存储域尚未就绪，稍后重试');" },
-  { id: 'paging-旧实现谓词的 id 方向写反', file: 'lib/store.js',
-    judges: ['overview-paging.test.mjs'],
-    judgeTests: ['旧实现（createStore）：listRecent 的游标谓词与自持实现逐条同义'],
-    // 与自持实现那条同一个失效面（P-7 把游标加在**接口**上 ⇒ 两份实现都得守）。只钉 SQL 一侧的话，
-    // 两份谓词哪天分家不会有断言翻红 —— 而生产早已是 createSqliteStore，这份「不用的实现」会悄悄坏掉。
-    // 判据：tests/overview-paging.test.mjs 的「旧实现（createStore）：listRecent 的游标谓词…」。
-    from: 'return recency < cursor.recency || (recency === cursor.recency && itemId > cursor.id);',
-    to: 'return recency < cursor.recency || (recency === cursor.recency && itemId < cursor.id);' },
+  // （2026-11-18 阶段 6 退役）原 `paging-旧实现谓词的 id 方向写反`：旧适配器的内联谓词已被
+  // `src/item-page.ts` 的 `afterCursor` 取代（ADR-0004 决定 4），代码里不再有第二份可变异的方向判定。
+  // 同一个失效面现在由 `page-JS 续页谓词方向写反` 施加，且它的 judges 里就有那条「旧实现 ↔ 自持实现
+  // 逐条同义」用例 —— 旧适配器仍被钉住，只是不再各写一份变异。
   // 另三条同义性基线（2026-10-11 终检评审 G1）：`listRecent` 的游标谓词原先**是唯一一条**
   // 「旧实现 ↔ 自持实现」的对照用例，其余三条各自只被钉在「与自己的桩一致」上 ——
   // 两份实现悄悄分家时没有任何断言翻红，而生产早已是 createSqliteStore：坏掉的那份没人用。

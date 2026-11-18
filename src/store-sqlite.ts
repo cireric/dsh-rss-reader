@@ -160,23 +160,9 @@ const SELECT_RECENT_IN_FEEDS = ITEM_SELECT
   + ' WHERE i.feed_id IN (SELECT value FROM json_each(?))'
   + ITEM_ORDER + ' LIMIT ?'
 
-/** 同上 + keyset 续页；谓词与无范围版本逐字同义，只是多了来源范围。 */
-const SELECT_RECENT_AFTER_IN_FEEDS = ITEM_SELECT
-  + ' WHERE i.feed_id IN (SELECT value FROM json_each(?))'
-  + ' AND (i.recency < ? OR (i.recency = ? AND i.id > ?))'
-  + ITEM_ORDER + ' LIMIT ?'
-
-/** 标签范围的同一页查询；标签 id 稳定，改名不换范围。 */
-const SELECT_RECENT_BY_TAG = ITEM_SELECT
-  + ' WHERE i.id IN (SELECT item_id FROM item_tags WHERE tag_id = ?)'
-  + ITEM_ORDER + ' LIMIT ?'
-const SELECT_RECENT_AFTER_BY_TAG = ITEM_SELECT
-  + ' WHERE i.id IN (SELECT item_id FROM item_tags WHERE tag_id = ?)'
-  + ' AND (i.recency < ? OR (i.recency = ? AND i.id > ?))'
-  + ITEM_ORDER + ' LIMIT ?'
-
 /**
- * 续页（keyset 分页，Task 6）：**严格排在游标之后**的那批。
+ * 续页（keyset 分页，Task 6）：**严格排在游标之后**的那批。三个范围变体（无范围 / 按源 /
+ * 按标签）都拼这**一个**片段 —— 续页关系只有一处（ADR-0004 决定 4）。
  *
  * ⚠️ 谓词**必须**写成 `recency < ? OR (recency = ? AND id > ?)`，**不许**用行值比较
  * `(i.recency, i.id) < (?, ?)`：SQLite 把行值比较按字典序展开成
@@ -189,8 +175,27 @@ const SELECT_RECENT_AFTER_BY_TAG = ITEM_SELECT
  * 退化为沿覆盖索引顺序扫描 + LIMIT 提前终止 ⇒ O(页深)。代价被「覆盖索引、无需回表、
  * 取满即停」压到毫秒级（`实测`：10 万行翻底 334 页共 493 ms，零重复零遗漏）。若日后把页大小
  * 从 300 调到 3000，末页成本按比例放大，届时要重测（spec §10.3）。
+ *
+ * JS 侧的同一份谓词是 `src/item-page.ts` 的 `afterCursor`（两份适配器共用）。
  */
-const SELECT_RECENT_AFTER = ITEM_SELECT + ' WHERE i.recency < ? OR (i.recency = ? AND i.id > ?)' + ITEM_ORDER + ' LIMIT ?'
+const AFTER_CURSOR = '(i.recency < ? OR (i.recency = ? AND i.id > ?))'
+
+/** 标签范围的同一页查询；标签 id 稳定，改名不换范围。 */
+const SELECT_RECENT_BY_TAG = ITEM_SELECT
+  + ' WHERE i.id IN (SELECT item_id FROM item_tags WHERE tag_id = ?)'
+  + ITEM_ORDER + ' LIMIT ?'
+const SELECT_RECENT_AFTER_BY_TAG = ITEM_SELECT
+  + ' WHERE i.id IN (SELECT item_id FROM item_tags WHERE tag_id = ?)'
+  + ' AND ' + AFTER_CURSOR
+  + ITEM_ORDER + ' LIMIT ?'
+
+/** 同上 + keyset 续页；谓词与无范围版本共用一个片段，只是多了来源范围。 */
+const SELECT_RECENT_AFTER_IN_FEEDS = ITEM_SELECT
+  + ' WHERE i.feed_id IN (SELECT value FROM json_each(?))'
+  + ' AND ' + AFTER_CURSOR
+  + ITEM_ORDER + ' LIMIT ?'
+
+const SELECT_RECENT_AFTER = ITEM_SELECT + ' WHERE ' + AFTER_CURSOR + ITEM_ORDER + ' LIMIT ?'
 
 // ── 标签（M2 05）────────────────────────────────────────────────────────
 const TAG_VIEWS = `SELECT t.id AS id, t.name AS name, t.created_at AS created_at,

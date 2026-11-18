@@ -248,6 +248,37 @@ export const contractCases = [
     },
   },
   {
+    name: 'listRecent：feedIds / tagId 范围在限页之前生效，且游标在范围内续页',
+    async run({ store }) {
+      const base = { link: 'https://a.example/', fetchedAt: '2026-11-02T00:00:00.000Z', starred: false }
+      // 三个源交错时间：范围若在限页之后才过滤，取 2 条就会漏掉 f3 的两条（M2 03 的硬要求）。
+      await store.saveItem('a1', { ...base, feedId: 'f1', title: 'a1', publishedAt: '2026-11-06T00:00:00.000Z' })
+      await store.saveItem('b1', { ...base, feedId: 'f2', title: 'b1', publishedAt: '2026-11-05T00:00:00.000Z' })
+      await store.saveItem('c1', { ...base, feedId: 'f3', title: 'c1', publishedAt: '2026-11-04T00:00:00.000Z' })
+      await store.saveItem('c2', { ...base, feedId: 'f3', title: 'c2', publishedAt: '2026-11-03T00:00:00.000Z' })
+      await store.saveItem('a2', { ...base, feedId: 'f1', title: 'a2', publishedAt: '2026-11-02T00:00:00.000Z' })
+
+      assert.deepEqual(store.listRecent(2, undefined, ['f3']).map(([id]) => id), ['c1', 'c2'],
+        '按源范围：先筛成员再限页（f2 的 b1 不许占窗口）')
+      assert.deepEqual(store.listRecent(2, undefined, []), [],
+        '空数组 = 空结果，绝不回落成「无范围」（那会让空文件夹查出全库）')
+
+      const scoped = store.listRecent(1, undefined, ['f1', 'f3'])
+      assert.deepEqual(scoped.map(([id]) => id), ['a1'], '前置条件：范围内第一条')
+      const afterScoped = store.listRecent(1, { recency: '2026-11-06T00:00:00.000Z', id: 'a1' }, ['f1', 'f3'])
+      assert.deepEqual(afterScoped.map(([id]) => id), ['c1'],
+        '游标在范围内续页：范围内排序键之后的下一批（f2 的 b1 仍被排除）')
+
+      const tag = await store.createTag('技术')
+      await store.setItemTags('b1', [tag.id])
+      await store.setItemTags('a2', [tag.id])
+      assert.deepEqual(store.listRecent(2, undefined, undefined, tag.id).map(([id]) => id), ['b1', 'a2'],
+        '按标签范围：只取打了该标签的条目，先筛后限页')
+      const afterTag = store.listRecent(1, { recency: '2026-11-05T00:00:00.000Z', id: 'b1' }, undefined, tag.id)
+      assert.deepEqual(afterTag.map(([id]) => id), ['a2'], '标签范围 + 游标同样只返回严格之后的行')
+    },
+  },
+  {
     name: 'unreadPerFeed：只保证传入的键都有值，数得准',
     async run({ store }) {
       const base = { feedId: 'f1', link: 'https://a.example/', fetchedAt: '2026-11-01T00:00:00.000Z', starred: false }

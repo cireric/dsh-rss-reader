@@ -16,8 +16,9 @@ import type { ReaderConfigFile } from './storage/config-file.js'
 import { applyFeedIntent } from './feed-intent.js'
 import { addFolder, deleteFolder, folderViews, moveFeedToFolder, renameFolder } from './folders.js'
 import { normalizeTagIds, normalizeTagName, requireTagId, TagError } from './tags.js'
-import { DEFAULT_VIEW_PREFERENCES, sanitizeViewPreferences, type TagView, type ViewPreferences } from './shared.js'
+import { DEFAULT_VIEW_PREFERENCES, recencyOf, sanitizeViewPreferences, type TagView, type ViewPreferences } from './shared.js'
 import { linkKeyOf } from './duplicates.js'
+import { afterCursor } from './item-page.js'
 
 export interface MemoryStore extends ReaderStore {
   /** 裸露的 Map：用例直接断言 / 注入并发写（见 tests/helpers/reader-store-memory.mjs）。 */
@@ -178,15 +179,13 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): MemoryStore
         return true
       })
       rows.sort(([idA, a], [idB, b]) => {
-        const byTime = (b.publishedAt ?? b.fetchedAt).localeCompare(a.publishedAt ?? a.fetchedAt)
+        const byTime = recencyOf(b).localeCompare(recencyOf(a))
         return byTime !== 0 ? byTime : idA.localeCompare(idB)
       })
+      // 续页谓词与另两份实现同源：JS 侧共用 src/item-page.ts 的 afterCursor（ADR-0004）。
       const after = cursor === undefined
         ? rows
-        : rows.filter(([id, record]) => {
-          const recency = record.publishedAt ?? record.fetchedAt
-          return recency < cursor.recency || (recency === cursor.recency && id > cursor.id)
-        })
+        : rows.filter(([id, record]) => afterCursor({ recency: recencyOf(record), id }, cursor))
       return after.slice(0, limit)
     },
 

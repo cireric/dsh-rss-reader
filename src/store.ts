@@ -14,6 +14,7 @@ import type { FolderView, TagView } from './shared.js'
 import { articleCharsOf, type ArticleEntry, type CleanupRow } from './retention.js'
 import { applyFeedIntent, type FeedIntent } from './feed-intent.js'
 import { clampReadingRatio, countUnreadPerFeed, recencyOf, sanitizeViewPreferences, type Cursor, type ViewPreferences } from './shared.js'
+import { afterCursor } from './item-page.js'
 import { linkKeyOf, type DuplicateRow } from './duplicates.js'
 
 /**
@@ -377,9 +378,9 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
         if (allowed !== undefined && !allowed.has(record.feedId)) return false
         if (tagId !== undefined && !(itemTagIds.get(itemId)?.has(tagId) ?? false)) return false
         if (cursor === undefined) return true
-        const recency = recencyOf(record)
-        // 与自持实现的谓词逐字同义（recency 降序、同 recency 内 id 升序的「之后」）
-        return recency < cursor.recency || (recency === cursor.recency && itemId > cursor.id)
+        // 与自持实现逐字同义：JS 侧只有一份续页谓词（src/item-page.ts 的 afterCursor），
+        // SQL 侧是 store-sqlite 的 AFTER_CURSOR —— 两种语言各一处，别在这里再写第三份。
+        return afterCursor({ recency: recencyOf(record), id: itemId }, cursor)
       })
       rows.sort(([idA, a], [idB, b]) => {
         const byTime = recencyOf(b).localeCompare(recencyOf(a))
