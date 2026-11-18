@@ -34,7 +34,7 @@ const BUNDLE = join(ROOT, 'lib', 'client.js')
 const BUNDLE_NAME = 'client.js'
 
 /**
- * 撤销窗口时长（src/client/store.ts:328 的 5000ms）。
+ * 撤销窗口时长（`src/client/list-actions.ts` 的 `UNDO_WINDOW_MS`）。
  *
  * 与 scroll-dom.test.mjs 的假时钟用例同一条口径：窗口**时长**由断言钉住，墙钟等待不参与。
  * 夹具只捕获这个定时器、不排程（理由见 loadClientBundle 里 sandbox.setTimeout 的注释）。

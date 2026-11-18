@@ -105,7 +105,7 @@ function fakeStore(state = {}) {
   const calls = []
   const record = (name) => (...args) => { calls.push([name, ...args]) }
   const store = { calls, get: () => ({ view: 'list', navVisible: true, selectedId: 'a1', ...state }) }
-  // routeKey 会碰到的全部动作（源码核对 src/client/store.ts:861-874 与 index.tsx:331-470）
+  // routeKey 会碰到的全部动作（源码核对 `src/client/list-actions.ts` 与 `index.tsx`）
   for (const name of [
     'selectRelative', 'stepArticle', 'moveNavCursor', 'openNavCursor', 'toggleNav', 'openSelected',
     'openArticle', 'closeArticle', 'toggleFeeds', 'refreshCount', 'setLayout', 'toggleStar',

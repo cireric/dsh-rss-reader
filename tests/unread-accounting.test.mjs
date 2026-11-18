@@ -30,7 +30,7 @@ const BUNDLE = join(ROOT, 'lib', 'client.js')
 // 与 client-bundle.test.mjs 的 BUNDLE_NAME 同一条理由（变异门槛的「崩了」分类器靠帧里的文件名）
 const BUNDLE_NAME = 'client.js'
 /**
- * 撤销窗口时长（src/client/store.ts:328 的 5000ms）。与 client-bundle 夹具同一条口径：
+ * 撤销窗口时长（`src/client/list-actions.ts` 的 `UNDO_WINDOW_MS`）。与 client-bundle 夹具同一条口径：
  * 窗口**时长**由断言钉住，墙钟等待不参与（夹具只捕获、不排程，见 loadStore 的 sandbox.setTimeout）。
  */
 const UNDO_WINDOW_MS = 5000
