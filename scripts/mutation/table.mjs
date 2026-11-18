@@ -637,9 +637,9 @@ export const MUTATIONS = [
   // 该循环已收敛进 shared.ts 的 countUnreadPerFeed（口径唯一化的同一件事），产物随之变化 ⇒
   // 原锚变「未应用」（docs/pitfalls.md 二、2.7：未应用比幸存更隐蔽）。照新产物重写，
   // 独立实测 lib/shared.js:41 OCCURRENCES=1，语义仍是原来那条：**丢键域**（0 未读的源不留键）。
-  { id: 'endpoints-perFeedUnread 键域铺 0', file: 'lib/shared.js',
+  { id: 'endpoints-perFeedUnread 键域铺 0', file: 'lib/unread.js',
     judges: ['overview-paging.test.mjs', 'store-sqlite.test.mjs'],
-    judgeTests: ['逐方法同义性：unreadPerFeed 与旧实现逐键相等（0 未读的源两边都留 0 值键）', 'unreadPerFeed：与 shared.ts 的唯一口径在同一夹具上逐键相等，且键域 = 传入的 feeds 表（Ruling P-6）'],
+    judgeTests: ['逐方法同义性：unreadPerFeed 与旧实现逐键相等（0 未读的源两边都留 0 值键）', 'unreadPerFeed：与 unread.ts 的唯一口径在同一夹具上逐键相等，且键域 = 传入的 feeds 表（Ruling P-6）'],
     from: 'unread[feedId] = 0;', to: ';' },
   // 左栏（2026-10-10 两列布局任务 3）。这两条是本任务新增的关键判定，各一条变异：
   // 角标门失效 ⇒ 规格不变量 8 的「三者同消」在左栏漏掉（隐藏计数后左栏还留着数字）；
@@ -1246,15 +1246,15 @@ export const MUTATIONS = [
   // OCCURRENCES=1（docs/pitfalls.md 一、1.4）。
   { id: 'unreadPerFeed-SQL 判据反过来', file: 'lib/store-sqlite.js',
     judges: ['overview-paging.test.mjs', 'store-sqlite.test.mjs'],
-    judgeTests: ['逐方法同义性：unreadPerFeed 与旧实现逐键相等（0 未读的源两边都留 0 值键）', 'unreadPerFeed：与 shared.ts 的唯一口径在同一夹具上逐键相等，且键域 = 传入的 feeds 表（Ruling P-6）', 'listRecent / unreadPerFeed / listCleanupCandidates 的排序、聚合与筛选真的写在 SQL 里（扫描族归零）'],
+    judgeTests: ['逐方法同义性：unreadPerFeed 与旧实现逐键相等（0 未读的源两边都留 0 值键）', 'unreadPerFeed：与 unread.ts 的唯一口径在同一夹具上逐键相等，且键域 = 传入的 feeds 表（Ruling P-6）', 'listRecent / unreadPerFeed / listCleanupCandidates 的排序、聚合与筛选真的写在 SQL 里（扫描族归零）'],
     // 未读判据一旦写反（read_at IS NOT NULL），账目就变成「已读数」——而它与「各源之和 === 总未读」
     // 的关系看着仍然自洽（两边一起错），所以只有那条**与 shared.ts 逐键对账**的用例能抓到它。
-    // 判据：tests/store-sqlite.test.mjs 的「unreadPerFeed：与 shared.ts 的唯一口径…逐键相等」。
+    // 判据：tests/store-sqlite.test.mjs 的「unreadPerFeed：与 unread.ts 的唯一口径…逐键相等」。
     from: "const SELECT_UNREAD_PER_FEED = 'SELECT feed_id AS feed_id, COUNT(*) AS unread FROM items WHERE read_at IS NULL GROUP BY feed_id';",
     to: "const SELECT_UNREAD_PER_FEED = 'SELECT feed_id AS feed_id, COUNT(*) AS unread FROM items WHERE read_at IS NOT NULL GROUP BY feed_id';" },
   { id: 'unreadPerFeed-丢键域（0 未读的源不留键）', file: 'lib/store-sqlite.js',
     judges: ['overview-paging.test.mjs', 'overview-scale.test.mjs', 'store-sqlite.test.mjs'],
-    judgeTests: ['逐方法同义性：unreadPerFeed 与旧实现逐键相等（0 未读的源两边都留 0 值键）', '10 万行：overview 不再物化全表，且账目守恒（键域 = feeds 表）', 'unreadPerFeed：与 shared.ts 的唯一口径在同一夹具上逐键相等，且键域 = 传入的 feeds 表（Ruling P-6）'],
+    judgeTests: ['逐方法同义性：unreadPerFeed 与旧实现逐键相等（0 未读的源两边都留 0 值键）', '10 万行：overview 不再物化全表，且账目守恒（键域 = feeds 表）', 'unreadPerFeed：与 unread.ts 的唯一口径在同一夹具上逐键相等，且键域 = 传入的 feeds 表（Ruling P-6）'],
     // 这是本仓库栽过两次的那条（任务 1 的键域、任务 5 的口径）：删掉「先按传进来的键铺 0」之后，
     // 只有**有未读的源**才留键，左栏那一行渲染出来是「角标空白」而不是「角标 0」——
     // 与「角标 0」在界面上无从分辨，是最贵的那类沉默失败。判据是 tests/unread-accounting.test.mjs

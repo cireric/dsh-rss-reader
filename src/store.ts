@@ -13,7 +13,8 @@ import { normalizeTagIds, normalizeTagName, requireTagId, TagError } from './tag
 import type { FolderView, TagView } from './shared.js'
 import { articleCharsOf, type ArticleEntry, type CleanupRow } from './retention.js'
 import { applyFeedIntent, type FeedIntent } from './feed-intent.js'
-import { clampReadingRatio, countUnreadPerFeed } from './shared.js'
+import { clampReadingRatio } from './shared.js'
+import { countUnreadPerFeed } from './unread.js'
 import { sanitizeViewPreferences } from './preferences.js'
 import type { ViewPreferences } from './preferences.js'
 import { recencyOf } from './cursor.js'
@@ -130,15 +131,15 @@ export interface ReaderStore {
    * JS 再数一遍 —— 10 万行下「点一次星标」就是一次全表遍历。存储侧聚合（自持实现是
    * `GROUP BY feed_id`）把它降到毫秒级。
    *
-   * **未读判据的定义处是 shared.ts 的 isUnread**（记录侧 `readAt === undefined`）。自持实现为了
+   * **未读判据的定义处是 unread.ts 的 isUnread**（记录侧 `readAt === undefined`）。自持实现为了
    * 不物化 10 万行，在 SQL 里写作 `read_at IS NULL` —— 那是**同一判据的第二实现，不是第二口径**；
    * 「两者确实等价」由 `tests/store-sqlite.test.mjs` 的对账用例钉住
-   * （「unreadPerFeed：与 shared.ts 的唯一口径在同一夹具上逐键相等」，同一夹具上逐键比对
+   * （「unreadPerFeed：与 unread.ts 的唯一口径在同一夹具上逐键相等」，同一夹具上逐键比对
    * SQL 结果与 countUnreadPerFeed）。**改判据时两处都要改。**
    *
    * **只保证「传进来的键都有值」，不保证「只有传进来的键」**：自持实现的 SQL 按全表聚合，
    * 已退订源的残留条目也会被数进去（只有拿到 feeds 表的人才做得准键域判定）。调用方一律
-   * 「先按 feeds 表铺 0、再用有值的覆盖」—— shared.ts 的 countUnreadPerFeed 同此约定。
+   * 「先按 feeds 表铺 0、再用有值的覆盖」—— unread.ts 的 countUnreadPerFeed 同此约定。
    */
   unreadPerFeed(feedIds: readonly string[]): Record<string, number>
   /**
@@ -361,7 +362,7 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
     },
     /**
      * 旧路径**行为不变**（Task 5 的接口扩展）：先按传进来的键铺 0，再把全表里的未读累加上去。
-     * 键域判据（`unread[feedId] === undefined` 就跳过）与 shared.ts 的 countUnreadPerFeed
+     * 键域判据（`unread[feedId] === undefined` 就跳过）与 unread.ts 的 countUnreadPerFeed
      * 逐字一致 —— 已退订源的残留条目因此不进账。代价是全表遍历，但这条是历史路径
      * （生产早已是 createSqliteStore），不拿性能目标去重写它。
      */

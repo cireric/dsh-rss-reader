@@ -224,7 +224,7 @@ const COPY_ITEM_TAGS = 'INSERT OR IGNORE INTO item_tags (item_id, tag_id) SELECT
 /**
  * 每源未读（Task 5）：`GROUP BY feed_id` + `COUNT(*)`，未读判据 `read_at IS NULL`。
  *
- * `read_at IS NULL` 就是 JS 侧 `readAt === undefined`（shared.ts 的 isUnread）在 SQL 里的说法：
+ * `read_at IS NULL` 就是 JS 侧 `readAt === undefined`（unread.ts 的 isUnread）在 SQL 里的说法：
  * 写路径把可选字段一律写成 NULL（见 writeItem），所以这两者是同一件事的两种写法。
  * 只保证「传进来的键都有值」——已退订源的残留条目也会被数进来，键域判定由拿到 feeds 表的
  * 调用方做（见 store.ts 的 unreadPerFeed 契约）。
@@ -364,7 +364,7 @@ function toItemRecord(row: Record<string, SQLOutputValue>): ItemRecord {
     starred: booleanAt(row.starred, 'items.starred'),
   }
   // 可选字段一律「有值才落键」：readAt === undefined 就是本仓库对「未读」的定义
-  // （src/shared.ts:62 的 isUnread）。写一个 undefined 值的键会让 .strict() 的读侧校验
+  // （unread.ts 的 isUnread）。写一个 undefined 值的键会让 .strict() 的读侧校验
   // 与 isUnread 同时失准 —— 表现是「所有条目看起来都读过了」或反过来。
   const publishedAt = optionalText(row.published_at, 'items.published_at')
   if (publishedAt !== undefined) record.publishedAt = publishedAt

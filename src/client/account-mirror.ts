@@ -43,7 +43,8 @@
  *
  * 纯 Node ESM、不碰 DOM：单测经 tests/client-bundle.test.mjs 加载 lib/client.js 产物驱动。
  */
-import type { Endpoint, UnreadAccount } from '../shared.js'
+import type { Endpoint } from '../shared.js'
+import type { UnreadAccount } from '../unread.js'
 
 /** 管线的一格动作：守卫与载荷组装完之后，交给 run 的三步。 */
 export interface MirrorAction {

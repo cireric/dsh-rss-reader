@@ -19,7 +19,8 @@
  * 整体覆盖（applyAccount）。feeds / tags 只读，**唯一例外**是 overview 整份落地（applyOverview
  * 与 load 的搜索分支按宿主快照原样写回目录，已在边界表登记）。
  */
-import { httpUrlOrEmpty, type ArticlePayload, type CleanupResult, type ItemView, type Overview, type UnreadAccount } from '../shared.js'
+import { httpUrlOrEmpty, type ArticlePayload, type CleanupResult, type ItemView, type Overview } from '../shared.js'
+import type { UnreadAccount } from '../unread.js'
 import { recencyOf } from '../cursor.js'
 import { createAccountMirror } from './account-mirror.js'
 import { selectionExists } from './nav-model.js'
@@ -211,7 +212,7 @@ export function createListActions(host: ListActionHost) {
    * 「本地看得见的那几条」，一旦有**本地看不见的漂移**（另一个面板/标签页标掉了某些条目），
    * 增量就把那份过期基线原样留下 ⇒ 左栏各源之和 ≠ 顶栏总未读（幽灵未读，两个数都是真实渲染的）。
    *
-   * 所以标读端点**必须回 perFeedUnread**（src/shared.ts 的 UnreadAccount），客户端照单全收：
+   * 所以标读端点**必须回 perFeedUnread**（unread.ts 的 UnreadAccount），客户端照单全收：
    * 这与任务 1 拒绝「客户端从 items 派生 perFeedUnread」是同一条理由 —— 口径只能由宿主给。
    * 乐观更新仍由调用方先做（手感），回包到达时以宿主为准纠正。
    */

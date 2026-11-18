@@ -10,7 +10,7 @@
  * - updateItem 必须是**原子读改写**，fn 看到的是库里的当前值（Review Focus 4）。本仓库为
  *   「先取快照 → await 网络 → 整体写回」付过三次学费（src/store.ts:21-31 的注释）。
  * - 可选字段缺席时必须是**键缺席**，不是 null / undefined 值的键：记录形状由 .strict() 的 zod
- *   管着，而 readAt === undefined 是「未读」的唯一定义（src/shared.ts:62）。
+ *   管着，而 readAt === undefined 是「未读」的唯一定义（src/unread.ts 的 isUnread）。
  *
  * 每条读回的记录都再过一遍 itemRecordSchema —— strict 会把「多带了一列」（feed_id / recency）
  * 当场判死，比逐个字段断言更难骗过。
@@ -24,7 +24,7 @@ import { writeConfigFile } from '../lib/storage/config-file.js'
 import { createSqliteStore } from '../lib/store-sqlite.js'
 import { feedRecordSchema, itemRecordSchema } from '../lib/domain.js'
 import { articleCharsOf, selectCleanup } from '../lib/retention.js'
-import { countUnreadPerFeed } from '../lib/shared.js'
+import { countUnreadPerFeed } from '../lib/unread.js'
 import { DEFAULT_READING_PREFERENCES } from '../lib/preferences.js'
 import { recencyOf } from '../lib/cursor.js'
 import { freshStore, strictMemoryStore, tempDir } from './helpers/reader-store-memory.mjs'
@@ -135,7 +135,7 @@ test('allItems / listItems 按 recency 降序 + id 升序；缺 publishedAt 的�
   }
 })
 
-test('unreadPerFeed：与 shared.ts 的唯一口径在同一夹具上逐键相等，且键域 = 传入的 feeds 表（Ruling P-6）', async () => {
+test('unreadPerFeed：与 unread.ts 的唯一口径在同一夹具上逐键相等，且键域 = 传入的 feeds 表（Ruling P-6）', async () => {
   const { store, db, dir } = freshStore('unread-per-feed')
   try {
     // A：2 未读 / 1 已读；B 全部已读（0 未读 ⇒ 键必须在、值为 0）；
@@ -148,13 +148,13 @@ test('unreadPerFeed：与 shared.ts 的唯一口径在同一夹具上逐键相�
 
     const feedIds = ['feed-a', 'feed-b']
     const fromSql = store.unreadPerFeed(feedIds)
-    // ★ 唯一口径对账：SQL 里的 read_at IS NULL 必须与 shared.ts 的 isUnread 得出同一个答案。
+    // ★ 唯一口径对账：SQL 里的 read_at IS NULL 必须与 unread.ts 的 isUnread 得出同一个答案。
     // 这条不变式在本仓库漂过两次（键域、unread 口径各一次），且每次都表现为「两个数各自自洽、
     // 合起来对不上」——只有在同一夹具上逐键对账才看得见。
     assert.deepEqual(
       fromSql,
       countUnreadPerFeed(feedIds, store.allItems().map(([, record]) => record)),
-      'SQL 账目必须与 shared.ts 的 countUnreadPerFeed 逐键相等（不许另立一份口径）',
+      'SQL 账目必须与 unread.ts 的 countUnreadPerFeed 逐键相等（不许另立一份口径）',
     )
     assert.deepEqual(fromSql, { 'feed-a': 2, 'feed-b': 0 },
       '0 未读的源必须留键（值为 0）——缺键在左栏表现为「角标空白」而不是「角标 0」')
@@ -359,7 +359,7 @@ test('saveItem 覆盖整条；可选字段缺席时不留 null / undefined 键�
     assert.deepEqual(
       Object.keys(replaced).sort(),
       ['feedId', 'fetchedAt', 'link', 'starred', 'title'],
-      '缺席的可选字段不许留 null / undefined 值的键：readAt === undefined 是「未读」的唯一判据（src/shared.ts:62）',
+      '缺席的可选字段不许留 null / undefined 值的键：readAt === undefined 是「未读」的唯一判据（src/unread.ts 的 isUnread）',
     )
     assert.equal(replaced.readAt, undefined, '被覆盖掉的 readAt 必须真的回到 undefined')
     const row = db.prepare('SELECT published_at, summary, read_at, kept_unread, article_failure FROM items WHERE id = ?').get('i-1')

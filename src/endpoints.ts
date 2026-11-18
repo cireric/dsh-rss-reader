@@ -45,9 +45,10 @@ import { TagError } from './tags.js'
 import { discoverCandidates, validateSubscriptions } from './subscribe.js'
 import type { ReaderStore, UnreadStore } from './store.js'
 // 未读判据（isUnread / countUnreadPerFeed）不再由本文件在 JS 侧实现：Task 5 把它交给了存储侧，
-// 自持实现里的 SQL `read_at IS NULL` 与 shared.ts 的 isUnread 是同一件事，两者的等价由
+// 自持实现里的 SQL `read_at IS NULL` 与 unread.ts 的 isUnread 是同一件事，两者的等价由
 // tests/store-sqlite.test.mjs 的「同一夹具上逐键对账」钉住。shared.ts 仍是那条规则的定义处。
-import { clampReadingRatio, fail, ok, type DuplicateHintView, type Endpoint, type ItemView, type Overview, type RefreshRun, type RpcResult, type UnreadAccount } from './shared.js'
+import { clampReadingRatio, fail, ok, type DuplicateHintView, type Endpoint, type ItemView, type Overview, type RefreshRun, type RpcResult } from './shared.js'
+import type { UnreadAccount } from './unread.js'
 import { sanitizeViewPreferences } from './preferences.js'
 import { decodeCursor, recencyOf } from './cursor.js'
 import type { Cursor } from './cursor.js'
@@ -165,7 +166,7 @@ const tagFailure = (error: unknown): RpcResult<never> | undefined =>
 
 /** 读一次完整的未读账（总数 + 每源）。只读，不改任何条目。 */
 const accountOf = (target: UnreadStore): UnreadAccount => {
-  // 键域与判据都走**存储侧那一份**实现：未读判据就是 shared.ts 的 isUnread（自持实现里写作
+  // 键域与判据都走**存储侧那一份**实现：未读判据就是 unread.ts 的 isUnread（自持实现里写作
   // `read_at IS NULL`，两者是同一件事的两种写法，有测试在同一夹具上逐键对账），键域 =
   // listFeeds() 的全量键（0 未读的源也留 0）。
   //

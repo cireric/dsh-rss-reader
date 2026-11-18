@@ -1,0 +1,66 @@
+/**
+ * 未读判据与账目：`readAt` 缺省即未读；每源账目的**唯一算法**。
+ *
+ * 为什么单独成模块（2026-11-18 shared.ts 规则归位）：这条判据在 GLOSSARY 里是「未读判据」，
+ * 在 SQL 侧有一个**第二实现**（`read_at IS NULL`），两者必须在同一夹具上逐键对账；
+ * 它和 wire 形状挤在 shared.ts 里时，「改判据要同时改 SQL」这件事没有一个固定的地址可以指。
+ */
+
+/**
+ * 未读的**唯一判据**：已读 = readAt 有值（粒度见上面的 ItemView.readAt，用户 2026-10-05 定）。
+ *
+ * 抽成函数不是为了复用代码，是为了让「未读怎么算」**只有一处**：本计划已经两次栽在
+ * 「同一条不变式在两个地方各算一遍」上（任务 1 的键域、任务 5 的 unread 口径），每次都表现为
+ * 两个数各自自洽、合起来对不上，且只在特定截断/漂移截面才显形。
+ *
+ * **本函数是这条判据的定义处**；JS 侧任何算未读的地方都必须走它（唯一现役调用方是下面的
+ * countUnreadPerFeed，createStore 的 unreadPerFeed 经它实现）。
+ *
+ * ⚠️ Task 5 之后**两条端点路径**（buildOverview / accountOf）不再有 JS 侧的全表记账：都改走存储侧的
+ * unreadPerFeed，而自持实现为了不物化 10 万行，在 SQL 里写作 `read_at IS NULL` ——
+ * 那是**同一判据的第二实现**，不是第二口径；「两者确实等价」由 tests/store-sqlite.test.mjs 的
+ * 逐键对账用例钉住（「unreadPerFeed：与 unread.ts 的唯一口径在同一夹具上逐键相等」）。
+ * ⚠️ **不是「宿主侧一处都不剩」**：旧适配器 `src/store.ts` 的 createStore 仍把整张 items 表
+ * 摊进 JS 再数一遍（它只被测试当「旧实现 ↔ 自持实现」的同义性基线驱动，不在装载路径上）。
+ * 改本条判据时，那处 SQL 与它的对账用例必须一起改。
+ */
+export const isUnread = (item: { readonly readAt?: string }): boolean => item.readAt === undefined
+
+/**
+ * 每源未读账目的**唯一算法**：键域 = feeds 表（0 未读的源也铺 0 值键），未读判据 = isUnread。
+ *
+ * 两个独立的陷阱都由这里一处挡掉：
+ *  ① **不得从 items 派生**——items 是按 maxItemsShown 截断的，而账目按全量表算（endpoints.ts 的
+ *     buildOverview 注释）：从截断后的 items 派生，各源之和必然小于顶栏总未读。
+ *  ② **已退订源的残留条目不进账**——键域严格 = feeds 表，多一个键就等于左栏多一行幽灵。
+ *
+ * @param feedIds 订阅表当前的全部源 id（只用于定键域，顺序不影响结果）
+ * @param items   条目表（宿主传全量；已退订源的残留条目会被 ① 的键域判定挡掉）
+ */
+export function countUnreadPerFeed(
+  feedIds: Iterable<string>,
+  items: Iterable<{ readonly feedId: string; readonly readAt?: string }>,
+): Record<string, number> {
+  const unread: Record<string, number> = {}
+  // 先按 feeds 表铺 0：左栏按 feeds 表逐行渲染时无条件命中，不必区分「缺键」与「0」
+  for (const feedId of feedIds) unread[feedId] = 0
+  for (const item of items) {
+    if (unread[item.feedId] === undefined) continue
+    if (isUnread(item)) unread[item.feedId] += 1
+  }
+  return unread
+}
+
+/**
+ * 未读账的 wire 形状：overview 与 markRead / unmarkRead **共用同一份**。
+ *
+ * 标读端点必须回它（不能只回 unread）：客户端只拿得到 maxItemsShown 条 items，截断之外那部分
+ * 账（含**另一个面板刚标掉的**）它看不见；只回总数会让客户端拿本地盲增量去补每源账目，
+ * 于是左栏各源之和 ≠ 顶栏总未读（spec §4 不变量 1，任务 9 实测复现：本地 3 条/宿主 20，
+ * 外部把某本地不可见的源标空 ⇒ 差 3）。
+ */
+export interface UnreadAccount {
+  unread: number
+  /** 键域 = feeds 表，见 countUnreadPerFeed */
+  perFeedUnread: Record<string, number>
+}
