@@ -17,6 +17,7 @@
 | 阶段 4b · 48 项动作按域分家 | 标签 / 搜索 / 订阅 / 列表四域各自成文件，store 只留装配与视图记忆 | `2db1f31` `a1d98af` `0a1d45b` `62ef6ff` `855f26c` `608d50b` `25b179c` `b98bea6` `0b34671` `0b768ae` |
 | 阶段 5 · 端点的入参不在 interface 里 | 28 个端点一份 payload 声明；`defineEndpoint` 解析一次 | `310ab5b` `867eacf` `7414372` `1cb3b35` `793f706` |
 | 阶段 6 · 「一页条目」没有家 | 分页协议收进 `src/item-page.ts`；store 续页谓词每种语言一处 | `33a6663` `557fcdc` `7fb9306` `252696a` |
+| 阶段 7 · mutation 工具五合一 | 数据表 / 运行器 / 入口三分；缓存哈希全部模块 | `972a869` `87da798` |
 
 ## 怎么用这份文件
 
@@ -242,9 +243,35 @@ handler 只把三态映射成原有两条文案。store 侧续页谓词收成「
 
 ---
 
+
+## 阶段 7 —— mutation 工具五合一（候选池转正）
+
+**状态**：已完成（2026-11-18）· **规模**：中 · **来源**：评审「也看到了，这轮没展开」第 5 条；
+触发条件「门槛再调一次并发或判定」已在 `d940811`（判据级并发 + 增量模式）响过一次。
+
+**问题**：2,626 行单文件 = 1,956 行数据表（246 条）+ 645 行运行器（套件判定 + worker 池 + 资源闸 +
+增量缓存 + 报表 + CLI）。加一条变异要在两千行里找一个位置；改缓存、改报表与改判定挤在同一个文件里。
+
+**实际改动**：`scripts/mutation/` 六模块 + 入口只留 `parseArgs` / `runFast` / `main`：
+`table.mjs`（246 条，理由注释原样）、`host.mjs`（ROOT + 资源闸）、`suite.mjs`（`runSuite` / `classify` /
+`crashName` / `judgesFromFails`）、`worker.mjs`（副本 / `applyMutation` / `partitionMutations` /
+`buildWorkerScript` / `runWorker`）、`incremental.mjs`（缓存 + `--changed`）、`report.mjs`（汇总 /
+`--timings` / judges 快照 / 退出码）。缓存版本改为哈希「入口 + 目录全部模块」；`--changed` 把目录算
+「全部」；`mutation:calibrate` 输出从已删除的 `docs/superpowers/` 改到 `.scratch/mutation/judges-dump.json`；
+结构测试改为读多文件（锚点不变，新增「入口不许回流」与「目录枚举」两条）。
+
+**验收**
+- [x] `npm test` 659/659（结构测试 14 条）
+- [x] 拆分前后全量 gate 各 246/246；`--dump-judges` 逐 id 一致（忽略 `generatedAt`）
+- [x] `--mode fast` / `--mutations` 子集 / `--timings` / `--incremental` / `--changed` 烟测
+- [x] 变异表与判定语义零变化（246 条、0 幸存）
+
+**偏离**：真 worker 文件与数据表分域未做（见 `.scratch/mutation-split/spec.md` 的「不在本阶段」）；
+提交号见上表。
+
 ## 未立项的观察（候选池，不是阶段）
 
-评审时有五条看到但没展开的；先记在这里，**不排期**，等触发条件出现再立项：
+评审时有五条看到但没展开的；先记在这里，**不排期**，等触发条件出现再立项（第 5 条已于 2026-11-18 转阶段 7）：
 
 | 观察 | 触发条件 |
 |---|---|
@@ -252,7 +279,6 @@ handler 只把三态映射成原有两条文案。store 侧续页谓词收成「
 | 搜索线程自开连接、自写 SQL、自做投影（`search-worker.ts:4,95,115`）—— schema 的第二个主人 | 改表结构，或搜索变慢 |
 | 左栏行序与行键各写三份（`store.ts:62` / `feed-nav.tsx:76` / 测试里硬编码） | 加第五种虚拟视图，或改行键编码 |
 | 滚动几何在 7 处现场重算（`article-pane` ×5、`keyboard-routing` ×2） | 再出一次「贴底 / 恢复位置」类缺陷 |
-| `scripts/mutation-test.mjs` 2037 行的五合一（1600 行数据表 + 判定 + worker 池 + 资源闸 + CLI） | 门槛再调一次并发或判定 |
 
 ## 维护约定
 

@@ -41,7 +41,7 @@ npm run typecheck        # 两个工程：host + client
 npm test                 # 单元/集成 + 真实 DOM 接线
 npm run mutation         # 变异门槛：默认并行 gate（整轮 ~3min 量级，副本自动建在 /tmp；
                          # K/套件并发/子进程堆上限都按宿主资源设闸，见 docs/pitfalls.md §1.10）
-npm run mutation:calibrate # 刷新 judges 快照（fast 的映射过期时重跑；快照收 docs/superpowers/plans/2026-10-15-judges-dump.json）
+npm run mutation:calibrate # 刷新 judges 快照（fast 的映射过期时重跑；快照收 .scratch/mutation/judges-dump.json（本地判据快照，不入库））
 
 bash scripts/gate.sh      # L1 一键门禁：build → build:client → typecheck → test，逐条打印退出码
 ```
