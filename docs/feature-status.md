@@ -19,7 +19,7 @@
 | `rss_update_item`（F04 写工具） | 已落地 · **真机确认** | `src/tools.ts`（逐次审批的 `pre-execute`） | `tests/tools.test.mjs`；M3 03 轮真机 |
 | 订阅前发现候选（F05） | 已落地 · **真机确认** | `src/subscribe.ts` 的 `discoverCandidates`、端点 `discoverFeeds` | `tests/discover.test.mjs`、`subscribe.test.mjs`；M4 01 轮真机 |
 | 订阅健康与刷新反馈（F06） | 已落地 · **真机确认** | `src/feed-intent.ts`、`src/shared.ts` 的 `feedHealthOf`、`RefreshRun` | `tests/refresh.test.mjs`、`store-sqlite.test.mjs`；M4 02 轮真机 |
-| 阅读偏好与预计时长（F07） | 已落地 · **真机确认** | `src/shared.ts` 的 `ReadingPreferences`/`estimateReadingMinutes`、`src/client/article-pane.tsx` | `tests/reading.test.mjs`、`nav-persistence.test.mjs`、`scroll-dom.test.mjs`；M5 01 轮真机 |
+| 阅读偏好与预计时长（F07） | 已落地 · **真机确认** | `src/preferences.ts` 的 `ReadingPreferences`、`src/shared.ts` 的 `estimateReadingMinutes`、`src/client/article-pane.tsx` | `tests/reading.test.mjs`、`nav-persistence.test.mjs`、`scroll-dom.test.mjs`；M5 01 轮真机 |
 | 已缓存正文阅读进度（F07） | 已落地 · **真机确认** | `src/article.ts` 的 `contentVersionOf`、`reading_progress` 表、端点 `saveReadingProgress` | `tests/reading-progress.test.mjs`；M5 02 轮真机（真实库已写入 1 条进度） |
 | 跨源重复提示（F08） | 已落地 · **真机确认** | `src/duplicates.ts`、`items.link_key` 派生列、端点 `duplicateHints` | `tests/duplicates.test.mjs`；M5 03 轮真机（真实库 link_key 无空值） |
 | 本地备份与恢复（F09） | 已落地 · **隔离 smoke（待真机）** | `docs/ops/backup-restore.md`、`scripts/verify-backup.mjs` | `tests/backup-verify.test.mjs` 9 条；真库副本演练（M5 04 轮）；**真灾难恢复未演练** |

@@ -12,7 +12,7 @@
 `store.ts` 与 `memory-store.ts` 的 JS 各写一遍。要测其中任何一件，都得起真库 + 真 dispatch，
 并直接写 `items` / `texts` 的列。
 
-分页协议其实是三件事的合成：**排序键**（`recency` 降序 + `id` 升序，`shared.ts` 的 `recencyOf`）、
+分页协议其实是三件事的合成：**排序键**（`recency` 降序 + `id` 升序，`src/cursor.ts` 的 `recencyOf`）、
 **续页关系**（严格排在边界之后）、**栅栏**（游标绑在范围上，范围一变就失配）。三者分居三处时，
 改动任何一处都不会让另一处的用例翻红。
 

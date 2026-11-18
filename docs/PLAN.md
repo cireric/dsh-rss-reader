@@ -18,6 +18,7 @@
 | 阶段 5 · 端点的入参不在 interface 里 | 28 个端点一份 payload 声明；`defineEndpoint` 解析一次 | `310ab5b` `867eacf` `7414372` `1cb3b35` `793f706` |
 | 阶段 6 · 「一页条目」没有家 | 分页协议收进 `src/item-page.ts`；store 续页谓词每种语言一处 | `33a6663` `557fcdc` `7fb9306` `252696a` |
 | 阶段 7 · mutation 工具五合一 | 数据表 / 运行器 / 入口三分；缓存哈希全部模块 | `972a869` `87da798` |
+| 阶段 8 · `shared.ts` 抽屉 | 规则归位：cursor / preferences / unread；shared 只留 wire + 工具 | `30fb989` `8d85811` `7260879` |
 
 ## 怎么用这份文件
 
@@ -269,13 +270,41 @@ handler 只把三态映射成原有两条文案。store 侧续页谓词收成「
 **偏离**：真 worker 文件与数据表分域未做（见 `.scratch/mutation-split/spec.md` 的「不在本阶段」）；
 提交号见上表。
 
+
+## 阶段 8 —— `shared.ts` 是 42 个导出的抽屉
+
+**状态**：已完成（2026-11-18）· **规模**：中 · **来源**：评审「也看到了」第 4 条
+（候选触发条件「阶段 3/4 落地后仍觉得概念找不到家」已满足）
+
+**问题（细化后的口径）**：42 个导出 = 7 个概念——传输契约 6、wire 形状 16、未读判据 3、
+视图/阅读偏好 7、文本工具 4、排序/游标 4、健康 2。30 个 src importer + 9 个测试文件直接 import；
+其中 21 个 importer 只取 ≤4 个符号，但**带规则的概念**（游标协议 / 偏好归一化 / 未读判据）没有地址。
+评审时说的「21 个文件 / 第三热」已过期：现为 30 个文件、全历史提交数排第 5（29 次），
+最近 30 个提交触达 0 次。
+
+**实际改动**：`src/cursor.ts`（`recencyOf` / `Cursor` / `encodeCursor` / `decodeCursor`）、
+`src/preferences.ts`（两个偏好类型 + 5 个常量 + `sanitizeViewPreferences`）、
+`src/unread.ts`（`isUnread` / `countUnreadPerFeed` / `UnreadAccount`）。
+`shared.ts` 从 42 降到 **28** 个导出（传输 6 + wire 16 + 文本 4 + 健康 2），头注释改为「wire 契约 + 纯工具」。
+`afterCursor` 按 ADR-0004 留在 `item-page.ts`（不在本轮范围内）。
+新增 `tests/shared-boundary.test.mjs`（两条结构判据：规则不许回流、三个规则模块必须存在）；
+三处变异的目标文件随符号迁移（`lib/cursor.js` / `lib/preferences.js` / `lib/unread.js`）。
+
+**验收**
+- [x] `shared.ts` 42 → 28 个导出；三个新模块各 ≤7 个导出
+- [x] `npm test` 661/661；`build` / `typecheck` / `build:client` 通过
+- [x] 客户端 bundle 体积未增（598.49 kB → 596.72 kB，**实测**）
+- [x] 三处变异锚点随迁移命中一次；结构判据防规则回流
+
+**偏离 / 未做**：`reading.ts`（估算/夹取/最小字符）与 `url.ts` 未拆——按拍板留到下一轮；
+`UnreadAccount` 搬进 `unread.ts` 后，`shared.ts` 的 `Overview` 从它 import（单向，无环）。
+
 ## 未立项的观察（候选池，不是阶段）
 
-评审时有五条看到但没展开的；先记在这里，**不排期**，等触发条件出现再立项（第 5 条已于 2026-11-18 转阶段 7）：
+评审时有五条看到但没展开的；先记在这里，**不排期**，等触发条件出现再立项（第 4 条已于 2026-11-18 转阶段 8，第 5 条已于同日转阶段 7）：
 
 | 观察 | 触发条件 |
 |---|---|
-| `src/shared.ts` 是 42 个导出的抽屉，21 个文件 import（第三热的文件） | 阶段 3/4 落地后仍觉得概念找不到家 |
 | 搜索线程自开连接、自写 SQL、自做投影（`search-worker.ts:4,95,115`）—— schema 的第二个主人 | 改表结构，或搜索变慢 |
 | 左栏行序与行键各写三份（`store.ts:62` / `feed-nav.tsx:76` / 测试里硬编码） | 加第五种虚拟视图，或改行键编码 |
 | 滚动几何在 7 处现场重算（`article-pane` ×5、`keyboard-routing` ×2） | 再出一次「贴底 / 恢复位置」类缺陷 |

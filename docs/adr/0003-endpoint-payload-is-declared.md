@@ -17,7 +17,7 @@
 代价则已经兑现。2026-11-14 评审卡 #8：28 个端点里 23 个接 payload，23 处 `payload as`、
 7 处 `String(x ?? '')`、3 处 `map(String)`；只有 `searchItems` 有 schema；「缺字段」与「空串」不可分。
 两个具体缺陷：`saveViewPreferences` 缺 `preferences` 键会把默认视图写盘
-（`src/endpoints.ts` → `src/store-sqlite.ts` 的 `saveViewPreferences` → `src/shared.ts` 的
+（`src/endpoints.ts` → `src/store-sqlite.ts` 的 `saveViewPreferences` → `src/preferences.ts` 的
 `sanitizeViewPreferences`）；`saveReadingProgress` 缺 `ratio` 会把阅读进度写回 0。
 
 ## 决定
