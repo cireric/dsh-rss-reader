@@ -16,6 +16,7 @@
 | 阶段 3 · ReaderStore 契约与替身 | 36 方法可执行契约 + 内存实现升格 + 窄接口 + 判据归一 + 五份局部桩退役 | `6fbdeb0` `03af3ed` `ba96196` `6a3f470` |
 | 阶段 4b · 48 项动作按域分家 | 标签 / 搜索 / 订阅 / 列表四域各自成文件，store 只留装配与视图记忆 | `2db1f31` `a1d98af` `0a1d45b` `62ef6ff` `855f26c` `608d50b` `25b179c` `b98bea6` `0b34671` `0b768ae` |
 | 阶段 5 · 端点的入参不在 interface 里 | 28 个端点一份 payload 声明；`defineEndpoint` 解析一次 | `310ab5b` `867eacf` `7414372` `1cb3b35` `793f706` |
+| 阶段 6 · 「一页条目」没有家 | 分页协议收进 `src/item-page.ts`；store 续页谓词每种语言一处 | `33a6663` `557fcdc` `7fb9306` `252696a` |
 
 ## 怎么用这份文件
 
@@ -209,22 +210,33 @@ H1 当时（`c901727`）的 `package.json` 已含它 —— 裁决里「新增�
 
 ## 阶段 6 —— 「一页条目」没有家：buildOverview 把六件事塞进一个闭包
 
-**状态**：未开始 · **规模**：中到大 · **来源**：评审卡 #7
+**状态**：已完成（2026-11-18）· **规模**：中到大 · **来源**：评审卡 #7
 
-**问题**：115 行里同时有范围解析、孤儿过滤、窗口放大 ×2、多取一行判尾、ItemView 投影、标签批量补、
-nextCursor 合成、未读账求和；游标围栏的编码在 `:129`、解码在 `:336`，中间隔 200 行；同一 keyset 谓词在
-`store-sqlite` 里有三个 SQL 变体、旧适配器还有一份 JS 版。要测其中任何一件，都得起真库 + 真 dispatch。
+**问题（原始）**：115 行里同时有范围解析、孤儿过滤、窗口放大 ×2、多取一行判尾、ItemView 投影、
+标签批量补、nextCursor 合成、未读账求和；游标围栏的编码在 `:129`、解码在 `:336`，中间隔 200 行；
+同一 keyset 谓词在 `store-sqlite` 里有三个 SQL 变体、旧适配器还有一份 JS 版。要测其中任何一件，
+都得起真库 + 真 dispatch。核对后谓词副本是 **5 份**（3 个 SQL 变体 + `store.ts` + `memory-store.ts`）。
 
-**证据**：`src/endpoints.ts:167`（buildOverview 到 :282）、`:217`（window *= 2）、`:255`（nextCursor 合成）；
-`src/store-sqlite.ts:163`；`src/store.ts:332`。
-
-**方案**：把「(范围, 游标, 页大小) → 条目 + 下一游标」收成一个 module，窗口补偿与游标围栏一起住进去；
-store 退化成只回答「这个范围里排在 X 之后的下一批行」。
+**实际改动**（源码核对）：新增 `src/item-page.ts`（ADR-0004）——`PageScope` 判别联合、`fenceKeyOf`、三态
+`decodePageCursor` / `encodePageCursor`、`afterCursor`、`buildItemPage`（窗口放大 + 多取一行判尾）。
+`buildOverview` 从 116 行降到 83 行，只剩目录 / 账目 / refresh 装配与 `ItemView` 投影；overview 的
+handler 只把三态映射成原有两条文案。store 侧续页谓词收成「每种语言一处」：`store-sqlite` 的
+`AFTER_CURSOR` 片段（三个范围变体共用）+ `item-page` 的 `afterCursor`（`store.ts` / `memory-store.ts`
+共用）；`ReaderStore.listRecent` 签名未动。契约补一条 scoped 分页（`feedIds` / `tagId` + 游标，三份实现同跑）。
 
 **验收**
-- [ ] 分页协议只有一个 owner（编码/解码不再隔 200 行）
-- [ ] 一页的产生可以不经真库直接测
-- [ ] 回归：`overview-paging` / `overview-scale`（10 万行）全绿
+- [x] 分页协议只有一个 owner（编码/解码不再隔 200 行）——`src/item-page.ts:27-72`
+- [x] 一页的产生可以不经真库直接测 ——`tests/item-page.test.mjs`：六个用例，纯假 `listRecent`
+- [x] 回归：`overview-paging` / `overview-scale`（10 万行）全绿（全量 657/657；mutation 246/246、幸存 0 —— 均**实测**）
+
+**与计划的偏离**：
+- `buildOverview` 预计降到 ~45 行，实际 83 行：目录 / 账目 / refresh 元信息的装配与既有注释比估计重，
+  但已不再含任何分页判定。
+- 变异总数 245 → **246** 而不是 249：新增 4 条，重锚 **5** 条（原计划 4 条，多出 `folder-空范围回落全表`
+  ——取数调用搬进 item-page 后它也要换锚），同时退役 3 条「随代码消失 / 被新条目覆盖」的
+  （`folder-游标不校验范围`、`tag-浏览游标绑名称`、`paging-旧实现谓词的 id 方向写反`），逐条理由写在
+  `scripts/mutation-test.mjs` 里——退役的是冗余或类型层面已不可表达的变异，判据本身没有减少。
+- 提交：`33a6663`（ADR）→ `557fcdc`（模块）→ `7fb9306`（端点接入）→ `252696a`（store 谓词）→ 本提交（PLAN 结项）。
 
 **风险 / 顺序**：这个文件刚经历过 H1（端点注册表）与阶段 5，排在阶段 5 之后做，避免连搬两次同一个文件。
 
