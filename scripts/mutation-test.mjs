@@ -1346,6 +1346,7 @@ const MUTATIONS = [
     // 判据：tests/overview-paging.test.mjs 的「游标认不出时响亮拒绝（bad-request）」。
     // ⚠️ 2026-10-15 端点注册表重构后重锚：overview 的 handler 体缩进从 20 格变 16 格
     // （switch case → ENDPOINTS.overview.to），且 `buildOverview` 多了 ctx 首参 ⇒ 旧 from 串失配。
+    // 2026-11-16 阶段 5 核过：defineEndpoint 只换了表项的 opener，handler 体缩进不变 ⇒ 无需重锚。
     // 语义不变：认不出游标时**响亮拒绝**，而不是静默从第一页开始。
     from: "            if (cursor === undefined) {\n                return fail('bad-request', '未知的续页游标（格式应为 \"<recency>|<id>\"）：' + raw);\n            }",
     to: "            if (cursor === undefined) return ok(buildOverview(ctx, false));" },
@@ -1364,8 +1365,30 @@ const MUTATIONS = [
     judgeTests: ['注册表覆盖全部端点名字，不多不少', '金标准：toggleStar 回包含 starred 且翻转', 'carriesAccount：标记集合恰好是那 5 个端点（声明本身有判据）', 'carriesAccount：每个标记的端点走成功路径都带回未读账'],
     // 病象：表里少一个 key ⇒ 该端点名下落到 undefined ⇒ 用户点它得到 unknown-endpoint。
     // 类型层本该拦住（Record<Endpoint,…> 穷尽），但产物是 JS，运行时只有这条断言看得见。
-    from: '    toggleStar: {',
-    to: '    toggleStarX: {' },
+    // ⚠️ 2026-11-16 阶段 5 重锚：表项从对象字面量改成 defineEndpoint({...})。
+    from: '    toggleStar: defineEndpoint({',
+    to: '    toggleStarX: defineEndpoint({' },
+  // ── 端点入参声明（2026-11-16 阶段 5 / ADR-0003）────────────────────────────
+  // 三条各守一个失效面：必需键被放宽、非空约束被放宽、解析失败被忽略。
+  // 判据都在 tests/endpoint-payloads.test.mjs（不经 handler 的契约表 + 不触达 store 的信封用例）。
+  { id: 'payload-必填键被放宽成可选', file: 'lib/endpoint-payloads.js',
+    judges: ['endpoint-payloads.test.mjs'],
+    judgeTests: ['入参声明：每条坏样本都被拒，并给出字段路径', '坏入参：统一 bad-request 信封、details.issues 指出字段，且不触达 store'],
+    // 病象：saveViewPreferences 缺 preferences 时静默把默认视图写盘（本轮修掉的那个缺陷）。
+    from: 'export const saveViewPreferencesPayload = z.object({ preferences: z.unknown() });',
+    to: 'export const saveViewPreferencesPayload = z.object({ preferences: z.unknown().optional() });' },
+  { id: 'payload-itemId 空串放行', file: 'lib/endpoint-payloads.js',
+    judges: ['endpoint-payloads.test.mjs'],
+    judgeTests: ['入参声明：每条坏样本都被拒，并给出字段路径'],
+    // 病象：非空约束被放宽 ⇒ {itemId:''} 走到 not-found，用户看到「条目不存在」而不是坏入参。
+    from: 'export const itemIdPayload = z.object({ itemId: z.string().min(1) });',
+    to: 'export const itemIdPayload = z.object({ itemId: z.string() });' },
+  { id: 'endpoint-入参解析失败被忽略', file: 'lib/endpoints.js',
+    judges: ['endpoint-payloads.test.mjs'],
+    judgeTests: ['坏入参：统一 bad-request 信封、details.issues 指出字段，且不触达 store'],
+    // 病象：safeParse 失败被忽略 ⇒ handler 拿到 undefined，坏入参变成 internal（不再是一种信封）。
+    from: '            if (!parsed.success) {',
+    to: '            if (false) {' },
   { id: 'endpoint-未就绪守卫被绕过', file: 'lib/endpoints.js',
     judges: ['endpoint-registry.test.mjs'],
     judgeTests: ['not-ready 先于 unknown-endpoint：未就绪时任何名字都回 not-ready'],

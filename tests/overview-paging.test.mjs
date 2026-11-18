@@ -225,6 +225,9 @@ test('overview：游标认不出时响亮拒绝（bad-request），绝不静默�
     // 「没有游标」的表达是**缺席**（或 null），不是空串 —— 空串被上面那条挡住
     assert.equal((await dispatch('overview', {})).ok, true, '不带游标 = 第一页')
     assert.equal((await dispatch('overview', { cursor: null })).ok, true, 'null 与缺席同义')
+    // 浏览器通道把「没给 payload」序列化成 null（browserRpc 的 payload ?? null）——
+    // 首屏（无 folder / tagId）走的就是这条路径，不能被入参声明拒掉。
+    assert.equal((await dispatch('overview', null)).ok, true, 'wire 形状 null 与 {} 同义')
   } finally {
     db.close()
     rmSync(dir, { recursive: true, force: true })
