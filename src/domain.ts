@@ -27,7 +27,7 @@
  */
 import { z } from 'zod'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
-import { DEFAULT_VIEW_PREFERENCES } from './shared.js'
+import { DEFAULT_VIEW_PREFERENCES } from './preferences.js'
 
 export const feedRecordSchema = z.object({
   url: z.string().min(1),
@@ -243,7 +243,7 @@ export const readerDomain = defineDomain({
    *    可空就会让「存进去的 null」与「没写过」不可区分，重开后静默变回 initial。
    *    所以这条细化只做一件事 —— 把 null 挡在外面。
    * ② 校验分两层：这里只管**媒介层面的合法性**（非 null、任何值都能存），形状归一化交给
-   *    shared.ts 的 sanitizeViewPreferences 在**读写两端**做。若把严格形状写在这里，一条存坏的
+   *    preferences.ts 的 sanitizeViewPreferences 在**读写两端**做。若把严格形状写在这里，一条存坏的
    *    偏好就会让整个域打不开（invalid-record 是开域失败，不是「这一项读不出来」）——
    *    拿用户的面板当赌注去换一个「schema 更严谨」的外观，不值。
    *

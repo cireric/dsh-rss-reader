@@ -31,7 +31,7 @@ export interface ReaderConfigFile {
    * 但「读旧配置」不会丢 —— 没有这个字段时，现有订阅的 folder 就是目录。
    */
   folders?: string[]
-  /** 视图偏好（两列布局的单例槽）。形状归一化在 src/shared.ts 的 sanitizeViewPreferences 做。 */
+  /** 视图偏好（两列布局的单例槽）。形状归一化在 src/preferences.ts 的 sanitizeViewPreferences 做。 */
   viewPreferences?: unknown
   /** 文件格式版本。只认 1。 */
   version: 1

@@ -17,7 +17,7 @@ import { openDatabase, migrateSchema } from '../lib/storage/db.js'
 import { readConfigFile, writeConfigFile } from '../lib/storage/config-file.js'
 import { createSqliteStore } from '../lib/store-sqlite.js'
 import { FolderError } from '../lib/folders.js'
-import { DEFAULT_READING_PREFERENCES } from '../lib/shared.js'
+import { DEFAULT_READING_PREFERENCES } from '../lib/preferences.js'
 
 /** 每个用例一份独立目录：真文件 config.json + 文件库 rss.db（重启判据要能关掉再开）。 */
 function fresh(tag, feeds = {}, rawConfig) {

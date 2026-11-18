@@ -17,7 +17,9 @@ import { edgeTopFor, readingRatioOf, restoreTopFor } from '../list-scroll.js'
  * 缩成可辨认尺寸，需要看细节时点「打开原站」。
  */
 const ARTICLE_IMAGE_MAX_HEIGHT = 640
-import { httpUrlOrEmpty, READING_FONT_SIZES, READING_LINE_WIDTHS, estimateReadingMinutes, type ItemView, type ReadingPreferences } from '../shared.js'
+import { httpUrlOrEmpty, estimateReadingMinutes, type ItemView } from '../shared.js'
+import { READING_FONT_SIZES, READING_LINE_WIDTHS } from '../preferences.js'
+import type { ReadingPreferences } from '../preferences.js'
 import type { ArticleState } from './store.js'
 
 /**

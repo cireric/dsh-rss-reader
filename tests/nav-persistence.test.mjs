@@ -28,7 +28,7 @@ import { readerDomain } from '../lib/domain.js'
 import { createStore } from '../lib/store.js'
 import { openDatabase, migrateSchema } from '../lib/storage/db.js'
 import { createSqliteStore } from '../lib/store-sqlite.js'
-import { sanitizeViewPreferences, DEFAULT_VIEW_PREFERENCES, DEFAULT_READING_PREFERENCES, READING_FONT_SIZES, READING_LINE_WIDTHS } from '../lib/shared.js'
+import { sanitizeViewPreferences, DEFAULT_VIEW_PREFERENCES, DEFAULT_READING_PREFERENCES, READING_FONT_SIZES, READING_LINE_WIDTHS } from '../lib/preferences.js'
 import { createMemoryStore } from '../lib/memory-store.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')

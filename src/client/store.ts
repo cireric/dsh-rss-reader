@@ -6,7 +6,9 @@
  * 列表、正文、订阅管理与键盘接线，任一改动都要动同一个文件。
  */
 import { useEffect, useState } from 'react'
-import { DEFAULT_READING_PREFERENCES, ROUTE_PATH, sanitizeViewPreferences, type DiscoveryResult, type Endpoint, type FeedView, type FolderView, type ItemView, type OpmlImportResult, type RpcResult, type SearchQuery, type TagView, type DuplicateHintView, type ReadingPreferences, type ViewPreferences } from '../shared.js'
+import { ROUTE_PATH, type DiscoveryResult, type Endpoint, type FeedView, type FolderView, type ItemView, type OpmlImportResult, type RpcResult, type SearchQuery, type TagView, type DuplicateHintView } from '../shared.js'
+import { DEFAULT_READING_PREFERENCES, sanitizeViewPreferences } from '../preferences.js'
+import type { ReadingPreferences, ViewPreferences } from '../preferences.js'
 
 export type Filter = 'all' | 'unread' | 'starred'
 
@@ -313,7 +315,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
    *
    * 三件事必须一起成立，所以它们挨着放：
    *
-   *  ① **读回来的东西一律不可信** —— 走 shared.ts 的 sanitizeViewPreferences，形状认不出就回落默认，
+   *  ① **读回来的东西一律不可信** —— 走 preferences.ts 的 sanitizeViewPreferences，形状认不出就回落默认，
    *     绝不抛错（存储里可能是旧版本写的、也可能是别的写入者塞的）。已退订的源在这里回落：
    *     判据用**刚下发的 feeds 表**，所以恢复发生在 applyOverview 之后（那时才看得见在订的源）。
    *  ② **恢复不写盘**：一挂载就把读到的值写回去，等于每次打开面板都写一次同一个值 —— 白热存储，

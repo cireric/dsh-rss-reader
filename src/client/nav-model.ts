@@ -9,7 +9,8 @@
  * 拆成五个文件只会让「改一处要开五个文件」。一个文件一个域。
  */
 import type { Filter, NavCursor, NavSelection } from './store.js'
-import type { FeedView, FolderView, TagView, ViewPreferences } from '../shared.js'
+import type { FeedView, FolderView, TagView } from '../shared.js'
+import type { ViewPreferences } from '../preferences.js'
 
 export const VIRTUAL_VIEWS: ReadonlyArray<{ key: Filter; label: string }> = [
   { key: 'all', label: '全部' },

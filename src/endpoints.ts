@@ -47,7 +47,8 @@ import type { ReaderStore, UnreadStore } from './store.js'
 // 未读判据（isUnread / countUnreadPerFeed）不再由本文件在 JS 侧实现：Task 5 把它交给了存储侧，
 // 自持实现里的 SQL `read_at IS NULL` 与 shared.ts 的 isUnread 是同一件事，两者的等价由
 // tests/store-sqlite.test.mjs 的「同一夹具上逐键对账」钉住。shared.ts 仍是那条规则的定义处。
-import { clampReadingRatio, fail, ok, sanitizeViewPreferences, type DuplicateHintView, type Endpoint, type ItemView, type Overview, type RefreshRun, type RpcResult, type UnreadAccount } from './shared.js'
+import { clampReadingRatio, fail, ok, type DuplicateHintView, type Endpoint, type ItemView, type Overview, type RefreshRun, type RpcResult, type UnreadAccount } from './shared.js'
+import { sanitizeViewPreferences } from './preferences.js'
 import { decodeCursor, recencyOf } from './cursor.js'
 import type { Cursor } from './cursor.js'
 import { buildItemPage, decodePageCursor, type PageScope } from './item-page.js'

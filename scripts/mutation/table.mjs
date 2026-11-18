@@ -143,7 +143,7 @@ export const MUTATIONS = [
   // ── M5 01：阅读偏好与预计时长（2026-11-16）────────────────────────────────
   // 归一化必须**放行档位内的值**：恒回落默认的实现会让「选了 20px，重开变回 16px」，
   // 而这条在类型上完全合法。判据在 tests/nav-persistence.test.mjs（档位原样通过 + 重开恢复）。
-  { id: 'reading-字号档位恒回落', file: 'lib/shared.js',
+  { id: 'reading-字号档位恒回落', file: 'lib/preferences.js',
     judges: ['nav-persistence.test.mjs'],
     judgeTests: ['sanitizeViewPreferences：正文排版逐字段归一，档位外的值一律回落默认', '端点：saveViewPreferences 存下偏好，viewPreferences 原样读回'],
     from: "fontSize: READING_FONT_SIZES.includes(readingSource['fontSize'])\n            ? readingSource['fontSize']",

@@ -17,7 +17,7 @@ import { writeConfigFile } from '../../lib/storage/config-file.js'
 import { createSqliteStore } from '../../lib/store-sqlite.js'
 import { createStore } from '../../lib/store.js'
 import { createMemoryStore } from '../../lib/memory-store.js'
-import { DEFAULT_VIEW_PREFERENCES } from '../../lib/shared.js'
+import { DEFAULT_VIEW_PREFERENCES } from '../../lib/preferences.js'
 import { FolderError } from '../../lib/folders.js'
 import { linkKeyOf } from '../../lib/duplicates.js'
 
