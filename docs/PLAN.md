@@ -19,6 +19,7 @@
 | 阶段 6 · 「一页条目」没有家 | 分页协议收进 `src/item-page.ts`；store 续页谓词每种语言一处 | `33a6663` `557fcdc` `7fb9306` `252696a` |
 | 阶段 7 · mutation 工具五合一 | 数据表 / 运行器 / 入口三分；缓存哈希全部模块 | `972a869` `87da798` |
 | 阶段 8 · `shared.ts` 抽屉 | 规则归位：cursor / preferences / unread；shared 只留 wire + 工具 | `30fb989` `8d85811` `7260879` |
+| 阶段 9 · 查询栅栏两处实现 | 搜索端点与 agent 工具共用 `src/cursor-fence.ts` | `6921e87` |
 
 ## 怎么用这份文件
 
@@ -299,15 +300,40 @@ handler 只把三态映射成原有两条文案。store 侧续页谓词收成「
 **偏离 / 未做**：`reading.ts`（估算/夹取/最小字符）与 `url.ts` 未拆——按拍板留到下一轮；
 `UnreadAccount` 搬进 `unread.ts` 后，`shared.ts` 的 `Overview` 从它 import（单向，无环）。
 
+
+## 阶段 9 —— 查询栅栏两处实现（阶段 6 欠账）
+
+**状态**：已完成（2026-11-18）· **规模**：小 · **来源**：阶段 6 的「不在本阶段」；
+触发条件「出现第三处栅栏」按字面已满足（overview 范围栅栏 + searchItems 查询栅栏 + tools.rss_search 查询栅栏）。
+
+**问题**：`endpoints.ts` 的 searchItems 与 `tools.ts` 的 rss_search 各写一份
+「哈希查询条件 → 加 `:` → 切片 → `decodeCursor` → 拼 nextCursor」。同一协议两份实现，
+改一处不会让另一处红；失效形态是「换查询条件仍按旧边界续页」——不报错，只是结果错。
+
+**实际改动**：新增 `src/cursor-fence.ts`（`queryFenceKey` / `decodeFencedCursor` / `encodeFencedCursor`）；
+两个调用方改用它，错误文案各自保留；`tests/cursor-fence.test.mjs` 三条协议判据；
+变异 `tools-游标不校验条件` 改为 `fence-查询栅栏不校验条件`（目标 `lib/cursor-fence.js`，
+judges 同时覆盖 search.test 与 tools.test）。
+
+**验收**
+- [x] `npm test` 664/664；`build` / `typecheck` 通过
+- [x] 全量 mutation：246/246、0 幸存（新锚点命中一次）
+- [x] 搜索/工具行为不变（search.test / tools.test 原用例全绿）
+
+**偏离**：`item-page` 的范围栅栏没有并入（owner 不同；wire 格式已共用）。
 ## 未立项的观察（候选池，不是阶段）
 
-评审时有五条看到但没展开的；先记在这里，**不排期**，等触发条件出现再立项（第 4 条已于 2026-11-18 转阶段 8，第 5 条已于同日转阶段 7）：
+评审时有五条看到但没展开的；两条已转阶段（第 4 条 → 阶段 8，第 5 条 → 阶段 7），两条复核后关闭，仅剩一条：
 
 | 观察 | 触发条件 |
 |---|---|
-| 搜索线程自开连接、自写 SQL、自做投影（`search-worker.ts:4,95,115`）—— schema 的第二个主人 | 改表结构，或搜索变慢 |
-| 左栏行序与行键各写三份（`store.ts:62` / `feed-nav.tsx:76` / 测试里硬编码） | 加第五种虚拟视图，或改行键编码 |
-| 滚动几何在 7 处现场重算（`article-pane` ×5、`keyboard-routing` ×2） | 再出一次「贴底 / 恢复位置」类缺陷 |
+| 搜索线程自开连接、自写 SQL、自做投影（`search-worker.ts:74-104,122`）—— schema 的第二个主人 | **加/改 `items` 列或搜索谓词时**（schema 改名/缺列会被真库用例当场抓到；新增谓词才可能悄悄漏） |
+
+**2026-11-18 复核后关闭两条**：
+- 「左栏行序与行键各写三份」——行序已单源（`nav-model.ts:27` 的 `navRowsOf`，nav-actions 与 feed-nav 共用）；
+  剩下的两处是 `feed-nav.tsx:88,168` 的 DOM 字面量，测试里的字符串就是 DOM 契约本身，抽 helper 消不掉。
+- 「滚动几何 7 处现场重算」——数学已单源：`list-scroll.ts`（183 行纯函数，有单测），三个调用点都走它；
+  剩余只是「接口收散装 number」的审美问题，等真实缺陷再议。
 
 ## 维护约定
 
