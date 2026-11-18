@@ -1,9 +1,40 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
-const src = readFileSync('scripts/mutation-test.mjs', 'utf8')
+import { readFileSync, readdirSync } from 'node:fs'
+
+/**
+ * 结构判据：入口 + scripts/mutation/ 下全部模块。
+ *
+ * 2026-11-18 拆分后这里不再读单文件——但**断言的内容不变**：它们守的是「别把资源闸 /
+ * 超时 / 漂移兜底 / worker 预算删掉」，这些失效形态都**不会让任何行为用例变红**，
+ * 只有结构判据挡得住（docs/pitfalls.md §1.10 / §2.13）。拆文件只改读取面，不改判据。
+ */
+const ENTRY = 'scripts/mutation-test.mjs'
+const DIR = 'scripts/mutation'
+const MODULES = readdirSync(DIR).filter((name) => name.endsWith('.mjs')).sort().map((name) => DIR + '/' + name)
+const sources = [ENTRY, ...MODULES].map((file) => ({ file, text: readFileSync(file, 'utf8') }))
+const src = sources.map((s) => s.text).join('\n\n')
+const sourceOf = (file) => {
+  const found = sources.find((s) => s.file === file)
+  assert.ok(found, '缺模块: ' + file)
+  return found.text
+}
+
 test('runner 已函数化且走 worker_threads', () => {
   for (const anchor of ["import { Worker } from 'node:worker_threads'", 'function parseArgs(', 'function runSuite(', 'function applyMutation(', 'function classify(', 'function collectResults(', 'function partitionMutations(', 'function buildWorkerScript(']) assert.ok(src.includes(anchor), '缺锚点: ' + anchor)
+})
+test('拆分后入口只留 CLI/装配：表与运行器都不许回流', () => {
+  const entry = sourceOf(ENTRY)
+  assert.ok(entry.includes('async function main()'), '入口必须仍是 CLI 入口')
+  assert.ok(!entry.includes('function runSuite('), 'runSuite 不许回流入口（应在 suite.mjs）')
+  assert.ok(!entry.includes('id: \'link-协议白名单失效\''), '1,956 行数据表不许回流入口（应在 table.mjs）')
+  assert.ok(sourceOf('scripts/mutation/table.mjs').includes('export const MUTATIONS'), 'table.mjs 必须导出 MUTATIONS')
+})
+test('缓存版本必须枚举模块目录，不许只哈希入口', () => {
+  const incremental = sourceOf('scripts/mutation/incremental.mjs')
+  assert.ok(incremental.includes('RUNNER_FILES'), '缺 RUNNER_FILES（脚本版本的文件清单）')
+  assert.ok(incremental.includes('readdirSync'), '缺目录枚举：新增模块必须自动进版本哈希')
+  assert.ok(incremental.includes("file.startsWith('scripts/mutation/')"), '--changed 必须把整个模块目录算作「全部」')
 })
 test('隔离副本只拷必要目录、不拷 node_modules/.git/.worktrees', () => {
   assert.ok(src.includes("mkdtempSync(") && src.includes(".worktrees"))
