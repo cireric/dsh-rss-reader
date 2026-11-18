@@ -348,8 +348,10 @@ const MUTATIONS = [
   { id: 'list-scroll-夹取保护', file: 'lib/list-scroll.js',
     judges: ['list-scroll.test.mjs'],
     judgeTests: ['滚动计算对非法输入免疫（NaN/0/负数不该把滚动条写坏）'],
-    from: 'const ceiling = Number.isFinite(maxTop) && maxTop > 0 ? maxTop : 0;',
-    to: 'const ceiling = maxTop;' },
+    // 2026-11-17 重锚：同一行夹取在 clampScrollTop / edgeTopFor / restoreTopFor 出现 3 次，
+    // 旧 from 只命中第一处（applyMutation 只 replace 一次）。带上函数签名后唯一。
+    from: "export function clampScrollTop(value, maxTop) {\n    if (!Number.isFinite(value))\n        return 0;\n    const ceiling = Number.isFinite(maxTop) && maxTop > 0 ? maxTop : 0;",
+    to: "export function clampScrollTop(value, maxTop) {\n    if (!Number.isFinite(value))\n        return 0;\n    const ceiling = maxTop;" },
   { id: 'item-id-guid 优先级', file: 'lib/feed/item-id.js',
     judges: ['parse.test.mjs'],
     judgeTests: ['条目 id 稳定派生：同一输入恒等，不同 guid 不同 id', '身份解析：没有重复时逐条结果与 deriveItemId 完全一致（不改变既有行为）'],
@@ -615,8 +617,10 @@ const MUTATIONS = [
     to: ';' },
   { id: 'client-perFeedUnread 不落 state', file: 'lib/client.js',
     judges: ['nav-selection.test.mjs', 'scroll-dom.test.mjs', 'unread-accounting.test.mjs'],
-    from: 'perFeedUnread: overview.perFeedUnread,',
-    to: 'perFeedUnread: {},' },
+    // 2026-11-17 重锚：perFeedUnread 的写入在 applyOverview 与搜索分支各一处；
+    // 旧 from 只命中第一处。带上 applyOverview 的整段 set 后唯一。
+    from: "\t\t\t\tset({\n\t\t\t\t\titems: overview.items,\n\t\t\t\t\tfeeds: overview.feeds,\n\t\t\t\t\tfolders: overview.folders,\n\t\t\t\t\ttags,\n\t\t\t\t\tunread: overview.unread,\n\t\t\t\t\tperFeedUnread: overview.perFeedUnread,",
+    to: "\t\t\t\tset({\n\t\t\t\t\titems: overview.items,\n\t\t\t\t\tfeeds: overview.feeds,\n\t\t\t\t\tfolders: overview.folders,\n\t\t\t\t\ttags,\n\t\t\t\t\tunread: overview.unread,\n\t\t\t\t\tperFeedUnread: {}," },
   // setFilter 的「源 x filter」语义（评审 Important 2）。既有 setFilter 用例全跑在 virtual 状态
   // 下、源条件恒真 ⇒ 这条路径零覆盖。退回「只按 filter 算第一条」后，已选中某源时切 filter
   // 会把 selectedId 送到源外条目 —— 判据是 tests/nav-selection.test.mjs 的第 6 条用例。
@@ -681,8 +685,9 @@ const MUTATIONS = [
     // （lib/client.js:1931，行首 6 个 tab），不是源码里的 `{state.navVisible && (<FeedNav`。
     // 该串是产物里唯一的 navVisible 条件：另两处是默认值 navVisible: true 与 !state.navVisible。
     // 改成恒真 ⇒ 折叠后左栏仍然渲染，`[data-rss-nav]` 还在 DOM 里 —— 折叠的判据就是「这个容器整个消失」。
-    from: 'state.navVisible && /* @__PURE__ */',
-    to: 'true && /* @__PURE__ */' },
+    // 2026-11-17 重锚：state.navVisible 还有 !state.navVisible 那一处；带上 children 前缀后唯一。
+    from: "children: [state.navVisible && /* @__PURE__ */",
+    to: "children: [true && /* @__PURE__ */" },
   // 滚动键只作用右栏（2026-10-10 两列布局任务 4）。左栏同样 `overflowY: auto`，
   // 所以「按键不会去滚左栏」不取决于它能不能滚，而取决于**它不带 data-rss-scroll** 这个标记判定：
   // 一旦左栏也被打上该属性，querySelector 取到的第一个匹配就是它（FeedNav 在文档序里靠前），
@@ -1722,7 +1727,9 @@ const MUTATIONS = [
     judges: ['scroll-dom.test.mjs'],
     judgeTests: ['文件夹浏览：空目录可见，进入后只显示成员条目，空目录有明确空状态', '当前浏览文件夹：改名迁移范围，删除回到跨源列表'],
     // 第一个 onSelectFolder 是「进入文件夹」按钮的点击处理器；改成折叠后点击文件夹名不会切范围。
-    from: 'onSelectFolder(row.folder);', to: 'onToggleFolder(row.folder);' },
+    // 2026-11-17 重锚：onSelectFolder(row.folder) 在 onClick 与 onKeyDown 各一处；
+    // 带上 onClick 前缀后唯一，保留「只坏鼠标路径」的原意。
+    from: "onClick: (event) => {\n\t\t\t\t\t\t\t\t\t\tevent.stopPropagation();\n\t\t\t\t\t\t\t\t\t\tonSelectFolder(row.folder);", to: "onClick: (event) => {\n\t\t\t\t\t\t\t\t\t\tevent.stopPropagation();\n\t\t\t\t\t\t\t\t\t\tonToggleFolder(row.folder);" },
   { id: 'folder-改名不迁移选中', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
     judgeTests: ['当前浏览文件夹：改名迁移范围，删除回到跨源列表'],
@@ -1765,8 +1772,9 @@ const MUTATIONS = [
   { id: 'tag-重名误报bad-request', file: 'lib/store-sqlite.js',
     judges: ['tag-storage.test.mjs', 'tag-endpoints.test.mjs'],
     judgeTests: ['标签端点：创建/改名/列表/删除与错误码', '标签 CRUD：空标签可见、改名保 id 与关联、删标签不影响文章与阅读状态'],
-    from: "throw new TagError('conflict', '标签已存在：' + safeName);",
-    to: "throw new TagError('bad-request', '标签已存在：' + safeName);" },
+    // 2026-11-17 重锚：同一句 conflict 在 create 与 rename 各一处；带上 INSERT_TAG 后唯一。
+    from: "sql(INSERT_TAG).run(tag.id, tag.name, tag.createdAt);\n            }\n            catch (error) {\n                if (isUniqueTagNameError(error))\n                    throw new TagError('conflict', '标签已存在：' + safeName);",
+    to: "sql(INSERT_TAG).run(tag.id, tag.name, tag.createdAt);\n            }\n            catch (error) {\n                if (isUniqueTagNameError(error))\n                    throw new TagError('bad-request', '标签已存在：' + safeName);" },
   { id: 'tag-空标签列表丢失', file: 'lib/store-sqlite.js',
     judges: ['tag-storage.test.mjs', 'tag-endpoints.test.mjs'],
     judgeTests: ['标签端点：创建/改名/列表/删除与错误码', '清理与退订生命周期：文章删除只清标签关联，标签本身保留', '标签 CRUD：空标签可见、改名保 id 与关联、删标签不影响文章与阅读状态'],
@@ -2052,11 +2060,15 @@ function seedWorkerCopy(workerRoot) {
 }
 
 // 应用一条变异（原 :953-963 的逐条子逻辑）。ok:false = 「未应用」——比幸存更隐蔽（pitfalls 二、2.7）。
+//
+// `from` 必须**恰好**命中一次：`String.replace` 只替换第一处，命中多处时变异会落到别的副本上，
+// 测试红不红都不再证明条目标的那条判定（2026-11-17 复核发现 5 条旧锚点命中 2–3 处）。
+// 这里把「唯一定位」变成硬前提，宁可报未应用，也不让一条模糊变异冒充证据。
 function applyMutation(root, m) {
   const target = path.join(root, m.file)
   const original = readFileSync(target, 'utf8')
+  if (original.split(m.from).length - 1 !== 1) return { ok: false, original }
   const mutated = original.replace(m.from, m.to)
-  if (mutated === original) return { ok: false, original }
   writeFileSync(target, mutated)
   return { ok: true, original }
 }
