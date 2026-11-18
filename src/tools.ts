@@ -20,12 +20,11 @@
  */
 import type { Context } from 'cordis'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
-import { createHash } from 'node:crypto'
 import { EXTRACTOR_REVISION } from './article.js'
 import { rebuildItem } from './domain.js'
 import type { ItemRecord } from './domain.js'
 import type { ReaderStore } from './store.js'
-import { decodeCursor } from './cursor.js'
+import { decodeFencedCursor, encodeFencedCursor, queryFenceKey } from './cursor-fence.js'
 import type { SearchPage, SearchQuery } from './shared.js'
 
 /** 搜索默认返回条数（PRD §8.2）。 */
@@ -129,13 +128,6 @@ function optionalBoolean(args: Record<string, unknown>, name: string): boolean |
   if (value === undefined) return undefined
   if (typeof value !== 'boolean') throw new Error(name + ' 必须是布尔值')
   return value
-}
-
-/** 续页游标的栅栏键：查询条件变了就必须换一个键，否则会拿旧页的边界去续新查询。 */
-function cursorKeyOf(text: string, unread: boolean, starred: boolean, since: string | undefined, feedIds: readonly string[]): string {
-  return createHash('sha256')
-    .update(JSON.stringify([text, unread, starred, since, [...feedIds].sort()]))
-    .digest('base64url') + ':'
 }
 
 /** 把结构化正文块摊成纯文本；`paragraphs` 是升级前老缓存的兼容读。 */
@@ -247,12 +239,11 @@ function searchTool(deps: ReadToolDeps): ToolDefinition {
         .filter(([id]) => feedId === undefined || id === feedId)
         .map(([id, feed]) => [id, feed.title ?? id])
 
-      const key = cursorKeyOf(text, unread, starred, since, feeds.map(([id]) => id))
+      // 与 searchItems 端点共用同一份查询栅栏（src/cursor-fence.ts）：换条件必须换键。
+      const key = queryFenceKey([text, unread, starred, since, feeds.map(([id]) => id).sort()])
       const supplied = rawCursor === '' ? undefined : rawCursor
-      const inner = supplied?.slice(key.length)
-      if (supplied !== undefined && (!supplied.startsWith(key) || inner === undefined || decodeCursor(inner) === undefined)) {
-        throw new Error('分页游标与当前搜索条件不匹配，请重新搜索')
-      }
+      const parsed = decodeFencedCursor(key, supplied)
+      if (parsed.status === 'mismatch') throw new Error('分页游标与当前搜索条件不匹配，请重新搜索')
 
       const page = await deps.searchItems({
         text,
@@ -260,14 +251,14 @@ function searchTool(deps: ReadToolDeps): ToolDefinition {
         ...(unread ? { read: 'unread' as const } : {}),
         ...(starred ? { starred: true } : {}),
         ...(since === undefined ? {} : { from: since }),
-        ...(inner === undefined ? {} : { cursor: inner }),
+        ...(parsed.inner === undefined ? {} : { cursor: parsed.inner }),
       }, feeds, limit, exec.signal)
 
       return {
         query: text,
         count: page.items.length,
         items: page.items.map(digestOf),
-        ...(page.nextCursor === undefined ? {} : { nextCursor: key + page.nextCursor }),
+        ...(page.nextCursor === undefined ? {} : { nextCursor: encodeFencedCursor(key, page.nextCursor) }),
       }
     },
   }

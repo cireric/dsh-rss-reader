@@ -9,7 +9,6 @@
  *
  * 名字表与 dispatch 的 case 必须是同一份（曾经是两处手写、靠人记得同步）；现在缺失即编译错误。
  */
-import { createHash } from 'node:crypto'
 import type { ZodType } from 'zod'
 import {
   addFeedPayload,
@@ -50,7 +49,8 @@ import type { ReaderStore, UnreadStore } from './store.js'
 import { clampReadingRatio, fail, ok, type DuplicateHintView, type Endpoint, type ItemView, type Overview, type RefreshRun, type RpcResult } from './shared.js'
 import type { UnreadAccount } from './unread.js'
 import { sanitizeViewPreferences } from './preferences.js'
-import { decodeCursor, recencyOf } from './cursor.js'
+import { recencyOf } from './cursor.js'
+import { decodeFencedCursor, encodeFencedCursor, queryFenceKey } from './cursor-fence.js'
 import type { Cursor } from './cursor.js'
 import { buildItemPage, decodePageCursor, type PageScope } from './item-page.js'
 
@@ -309,15 +309,14 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       const feeds: Array<[string, string]> = ctx.store.listFeeds()
         .filter(([id]) => (query.feedId === undefined || query.feedId === id) && (selected?.has(id) ?? true))
         .map(([id, feed]) => [id, feed.title ?? id])
-      const key = createHash('sha256').update(JSON.stringify([
+      // 查询条件栅栏与搜索工具共用一份实现（src/cursor-fence.ts）：条件变、旧游标必须响亮失败。
+      const key = queryFenceKey([
         query.text, query.read, query.starred === true, query.from, query.to, query.tagId, feeds.map(([id]) => id).sort(),
-      ])).digest('base64url') + ':'
-      const cursor = query.cursor?.slice(key.length)
-      if (query.cursor !== undefined && (!query.cursor.startsWith(key) || cursor === undefined || !decodeCursor(cursor))) {
-        return fail('bad-request', '分页游标与当前搜索不匹配，请重新搜索')
-      }
-      const page = await ctx.searchItems({ ...query, cursor, feedId: feeds.length === 1 ? feeds[0][0] : undefined }, feeds, 30, ctx.signal)
-      return ok({ ...page, nextCursor: page.nextCursor === undefined ? undefined : key + page.nextCursor })
+      ])
+      const parsed = decodeFencedCursor(key, query.cursor)
+      if (parsed.status === 'mismatch') return fail('bad-request', '分页游标与当前搜索不匹配，请重新搜索')
+      const page = await ctx.searchItems({ ...query, cursor: parsed.inner, feedId: feeds.length === 1 ? feeds[0][0] : undefined }, feeds, 30, ctx.signal)
+      return ok({ ...page, nextCursor: encodeFencedCursor(key, page.nextCursor) })
     },
   }),
   overview: defineEndpoint({

@@ -1879,11 +1879,12 @@ export const MUTATIONS = [
     from: 'const limit = Math.min(typeof rawLimit === \'number\' ? rawLimit : SEARCH_DEFAULT_ITEMS, SEARCH_MAX_ITEMS);',
     to: 'const limit = typeof rawLimit === \'number\' ? rawLimit : SEARCH_DEFAULT_ITEMS;' },
   // ② 游标栅栏：没有它，换一组筛选条件后拿旧页游标续页会**静默**从别处接着翻。
-  { id: 'tools-游标不校验条件', file: 'lib/tools.js',
-    judges: ['tools.test.mjs'],
-    judgeTests: ['rss_search：游标必须被查询条件栅栏住，换条件续页响亮失败'],
-    from: "if (supplied !== undefined && (!supplied.startsWith(key) || inner === undefined || decodeCursor(inner) === undefined)) {",
-    to: 'if (supplied !== undefined && inner === undefined) {' },
+  // 2026-11-18 阶段 9：搜索端点与 agent 工具共用 src/cursor-fence.ts，栅栏不再是 tools 的私有判定。
+  { id: 'fence-查询栅栏不校验条件', file: 'lib/cursor-fence.js',
+    judges: ['tools.test.mjs', 'search.test.mjs'],
+    judgeTests: ['rss_search：游标必须被查询条件栅栏住，换条件续页响亮失败', '本地搜索跨页稳定，按源、日期、星标和已读筛选，并只查当前缓存'],
+    from: "    if (!raw.startsWith(key))\n        return { status: 'mismatch' };",
+    to: "    if (false)\n        return { status: 'mismatch' };" },
   // ③ 片段截断：不截就是「一次搜索把整篇摘要灌进上下文」，PRD §8.2 的长度上限靠它兜。
   { id: 'tools-片段不截断', file: 'lib/tools.js',
     judges: ['tools.test.mjs'],
