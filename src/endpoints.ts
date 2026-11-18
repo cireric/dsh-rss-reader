@@ -36,7 +36,7 @@ import {
 import type { createSearch } from './search.js'
 import type { Config } from './config.js'
 import { EXTRACTOR_REVISION, contentVersionOf, fetchArticle, blocksToText } from './article.js'
-import { rebuildItem, type ItemRecord } from './domain.js'
+import { rebuildItem } from './domain.js'
 import { selectCleanup } from './retention.js'
 import { buildOpml, parseOpml } from './opml.js'
 import { FolderError } from './folders.js'
@@ -47,7 +47,8 @@ import type { ReaderStore, UnreadStore } from './store.js'
 // 未读判据（isUnread / countUnreadPerFeed）不再由本文件在 JS 侧实现：Task 5 把它交给了存储侧，
 // 自持实现里的 SQL `read_at IS NULL` 与 shared.ts 的 isUnread 是同一件事，两者的等价由
 // tests/store-sqlite.test.mjs 的「同一夹具上逐键对账」钉住。shared.ts 仍是那条规则的定义处。
-import { clampReadingRatio, decodeCursor, encodeCursor, fail, ok, recencyOf, sanitizeViewPreferences, type Cursor, type DuplicateHintView, type Endpoint, type ItemView, type Overview, type RefreshRun, type RpcResult, type UnreadAccount } from './shared.js'
+import { clampReadingRatio, decodeCursor, fail, ok, recencyOf, sanitizeViewPreferences, type Cursor, type DuplicateHintView, type Endpoint, type ItemView, type Overview, type RefreshRun, type RpcResult, type UnreadAccount } from './shared.js'
+import { buildItemPage, decodePageCursor, type PageScope } from './item-page.js'
 
 /** 端点需要的运行时依赖（显式传入，不靠闭包）。 */
 export interface EndpointDeps {
@@ -172,39 +173,22 @@ const accountOf = (target: UnreadStore): UnreadAccount => {
   return { unread: sumOf(perFeedUnread), perFeedUnread }
 }
 
-/**
- * 文件夹浏览的**范围键**：游标必须绑在「文件夹名 + 当前成员」上。
- *
- * 为什么成员也要进键：文件夹只是一个名字，成员可以在两页之间被移动。只绑名字时，
- * 旧游标会拿着「第一页的成员快照」去查「第二页的新成员」，结果既不连续也不可解释；
- * 绑上排序后的成员列表后，成员一变旧游标自然失配，客户端必须从第一页重来。
- */
-interface OverviewScope {
-  readonly folder?: string
-  readonly feedIds?: readonly string[]
-  readonly tagId?: string
-  readonly key: string
-}
-
-const folderScopeKey = (folder: string, feedIds: readonly string[]): string =>
-  'folder:' + createHash('sha256').update(JSON.stringify([folder, [...feedIds].sort()])).digest('base64url')
-
 /** 从 overview/refresh 的**已解析**入参里把范围落到库上（形状由 payload 声明判，这里只判存在性）。 */
 function overviewScopeOf(
   ctx: EndpointCtx,
   input: { readonly folder?: string | null; readonly tagId?: string | null },
-): { scope?: OverviewScope; failure?: RpcResult<never> } {
+): { scope?: PageScope; failure?: RpcResult<never> } {
   const { folder, tagId } = input
   if (tagId !== undefined && tagId !== null) {
     const found = ctx.store.listTags().find((tag) => tag.id === tagId)
     if (found === undefined) return { failure: fail('not-found', '标签不存在：' + tagId) }
     // 标签 id 是稳定主键：改名不会让当前浏览范围失效；删除才会（listTags 找不到）。
-    return { scope: { tagId: found.id, key: 'tag:' + found.id } }
+    return { scope: { kind: 'tag', id: found.id } }
   }
   if (folder === undefined || folder === null) return {}
   const found = ctx.store.listFolders().find((entry) => entry.name === folder)
   if (found === undefined) return { failure: fail('not-found', '文件夹不存在：' + folder) }
-  return { scope: { folder, feedIds: found.feedIds, key: folderScopeKey(folder, found.feedIds) } }
+  return { scope: { kind: 'folder', name: folder, feedIds: found.feedIds } }
 }
 
 /**
@@ -212,11 +196,11 @@ function overviewScopeOf(
  *
  * @param run       本轮刷新的明细（refresh 端点用；overview 缺省 ⇒ 回包不带 refresh 字段、
  *                  refreshed 恒 false）。X/Y、节流与并入在途的区别全在这一个值里（M4 02）。
- * @param cursor    续页边界（keyset）；缺省 = 第一页。游标由 overview 端点解码后传入，
+ * @param cursor    续页边界（keyset）；缺省 = 第一页。游标由 overview 端点围栏解码后传入，
  *                  这里**不再判形状** —— 认不出的游标在那一层就被响亮拒了（见 ENDPOINTS.overview）
- * @param scope     文件夹范围；缺省 = 普通跨源契约（逐字不变）。有它时列表在 SQL 侧先按成员过滤再限页。
+ * @param scope     浏览范围；缺省 = 普通跨源契约（逐字不变）。有它时取页在 SQL 侧先按成员/标签过滤再限页。
  */
-const buildOverview = (ctx: EndpointCtx, run?: RefreshRun, cursor?: Cursor, scope?: OverviewScope): Overview => {
+const buildOverview = (ctx: EndpointCtx, run?: RefreshRun, cursor?: Cursor, scope?: PageScope): Overview => {
   const refreshedAtMs = ctx.lastRefreshCompletedAt()
   // refreshed 是布尔概况（客户端历史上就靠它），refresh 说明细节 —— 两者由同一个 run 派生，
   // 不允许各自算一遍：否则「refreshed=true 而 outcome=throttled」这种自相矛盾迟早出现。
@@ -254,67 +238,39 @@ const buildOverview = (ctx: EndpointCtx, run?: RefreshRun, cursor?: Cursor, scop
   // 从回包里消失（左栏那一行角标变空白，界面上无从分辨）。
   const perFeedUnread = target.unreadPerFeed(feeds.map((feed) => feed.id))
 
-  // 列表取数同样交给存储侧：**只取一页**（SQL 里是 i2 索引上的 LIMIT + keyset 谓词），
-  // 而不是「把 10 万行建成 ItemView、排序、再 slice 掉 99700 条」。取数顺序与原先逐字相同
-  // （recency 降序 + id 升序），所以截断点上的结果没有区别 —— 只有成本不同。
-  //
-  // ⚠️ 窗口要**放大重取**：上面那句「只收所属源还在的条目」会把残留行（退订后没清干净 /
-  // 手工改库）挡掉，而挡掉的那些**已经占掉了窗口**。不重取的话列表会少几条，而用户看不出原因
-  // —— 原先的写法是先按 feeds 表滤完全部、再截断，所以这里必须保住同一条语义。
-  //
-  // ⚠️ 多取一行（window + 1）**只用于判断「后面还有没有」**：nextCursor 必须来自「存储侧确实
-  // 还有行」这个事实，不能拿「items 短于 maxItemsShown」反推 —— 孤儿行占窗口时取不满的那一页
-  // 未必是最后一页（上面那条放大的理由同此）。少给一页 = 用户翻不到底（本任务要修的缺陷又回来了）；
-  // 多给一页 = 白白多一次往返，且末页空页会让界面上的「加载更多」闪一下。
-  const pageSize = ctx.config.maxItemsShown
-  let window = pageSize
-  let rows: Array<[string, ItemRecord]> = []
-  let items: ItemView[] = []
-  // 最后一条**真正下发**的条目在 rows 里的下标（-1 = 这一页一条都没下）
-  let lastDelivered = -1
-  // 存储侧是否已给不出更多行（请求 window + 1 行却只拿到 ≤ window 行）
-  let exhausted = false
-  while (true) {
-    rows = target.listRecent(window + 1, cursor, scope?.feedIds, scope?.tagId)
-    items = []
-    lastDelivered = -1
-    for (let index = 0; index < rows.length; index += 1) {
-      const [itemId, item] = rows[index]
-      const feedTitle = titles.get(item.feedId)
-      if (feedTitle === undefined) continue
-      // 这一页取满就停：后面的行只用来判断「还有没有下一行」，不再建 ItemView
-      if (items.length >= pageSize) break
-      items.push({
-        id: itemId,
-        feedId: item.feedId,
-        feedTitle,
-        title: item.title,
-        link: item.link,
-        publishedAt: item.publishedAt,
-        fetchedAt: item.fetchedAt,
-        readAt: item.readAt,
-        starred: item.starred,
-        keptUnread: item.keptUnread,
-        summary: item.summary,
-      })
-      lastDelivered = index
-    }
-    exhausted = rows.length <= window
-    if (items.length >= pageSize || exhausted) break
-    window *= 2
+  // 一页条目交给 src/item-page.ts（ADR-0004）：窗口放大、多取一行判尾、游标围栏都在那里。
+  // 这里只做投影（行 → ItemView）与标签批量补 —— 两者是 wire 形状，不是分页协议。
+  const page = buildItemPage(target, {
+    ...(scope === undefined ? {} : { scope }),
+    ...(cursor === undefined ? {} : { cursor }),
+    pageSize: ctx.config.maxItemsShown,
+    knownFeedIds: new Set(titles.keys()),
+  })
+  // 模块已按同一份 titles 键域滤掉孤儿；走到这里还缺标题，说明两个判定已经分家（不是用户输入问题），
+  // 响亮抛错 —— 再回落一次 feedId 会把契约破坏伪装成「标题就是 id」的条目。
+  const feedTitleOf = (feedId: string): string => {
+    const title = titles.get(feedId)
+    if (title === undefined) throw new Error('一页条目下发了 feeds 键域之外的条目：' + feedId)
+    return title
   }
-
-  // 续页游标 = 下发批次的**最后一行**（recency + id 一对值）。判据是「它后面还有行」：
-  // 要么同一批里还有（lastDelivered 不是最后一个下标），要么存储侧还没给完（!exhausted）。
-  // 两者都不成立 ⇒ 到底，nextCursor 缺省 —— 客户端据此停止翻页（Overview 契约）。
   // 每页一次批量取标签 id（不能逐行 N+1）；ItemView 的 tagIds 是列表行标签与编辑器的数据源。
-  const tagIdsByItem = target.tagIdsForItems(items.map((item) => item.id))
-  items = items.map((item) => ({ ...item, tagIds: tagIdsByItem[item.id] ?? [] }))
+  const tagIdsByItem = target.tagIdsForItems(page.rows.map(([itemId]) => itemId))
+  const items: ItemView[] = page.rows.map(([itemId, item]) => ({
+    id: itemId,
+    feedId: item.feedId,
+    feedTitle: feedTitleOf(item.feedId),
+    title: item.title,
+    link: item.link,
+    publishedAt: item.publishedAt,
+    fetchedAt: item.fetchedAt,
+    readAt: item.readAt,
+    starred: item.starred,
+    keptUnread: item.keptUnread,
+    summary: item.summary,
+    tagIds: tagIdsByItem[itemId] ?? [],
+  }))
 
-  const nextCursor = lastDelivered >= 0 && (lastDelivered + 1 < rows.length || !exhausted)
-    ? (scope === undefined ? '' : scope.key + ':')
-      + encodeCursor({ recency: recencyOf(items[items.length - 1]), id: items[items.length - 1].id })
-    : undefined
+  const nextCursor = page.nextCursor
 
   return {
     feeds,
@@ -372,22 +328,12 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       const scope = resolved.scope
       const raw = input.cursor
       if (raw === undefined || raw === null) return ok(buildOverview(ctx, undefined, undefined, scope))
-      let cursor: Cursor | undefined
-      if (scope === undefined) {
-        cursor = decodeCursor(raw)
-      } else {
-        // 有范围游标 = "<scopeKey>:<recency>|<id>"。前缀不符意味着文件夹成员变了、或调用方
-        // 拿别的范围/无范围游标来续页 —— 两种都必须响亮失败，绝不能静默从头开始。
-        const prefix = scope.key + ':'
-        if (!raw.startsWith(prefix)) {
-          return fail('bad-request', '分页游标与当前范围不匹配，请重新加载')
-        }
-        cursor = decodeCursor(raw.slice(prefix.length))
-      }
-      if (cursor === undefined) {
-        return fail('bad-request', '未知的续页游标（格式应为 "<recency>|<id>"）：' + raw)
-      }
-      return ok(buildOverview(ctx, undefined, cursor, scope))
+      // 围栏（前缀 = 范围键）与形状都由一页条目模块判（ADR-0004）；两种失败各留一句文案：
+      // 「范围变了」要客户端重载当前范围，「格式认不出」是调用方传了垃圾 —— 处置不同，不能合并。
+      const parsed = decodePageCursor(scope, raw)
+      if (parsed.status === 'mismatch') return fail('bad-request', '分页游标与当前范围不匹配，请重新加载')
+      if (parsed.status === 'malformed') return fail('bad-request', '未知的续页游标（格式应为 "<recency>|<id>"）：' + raw)
+      return ok(buildOverview(ctx, undefined, parsed.cursor, scope))
     },
   }),
 

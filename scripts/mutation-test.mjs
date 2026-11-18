@@ -1307,13 +1307,18 @@ const MUTATIONS = [
   // 列表窗口的「放大重取」（Task 5 自审发现）：残留行（退订后没清干净 / 手工改库）会先被取回来、
   // 再因为「所属源已退订」被挡掉，而它们**已经占掉了窗口**。少了这一步，右栏会静默少几条。
   // 判据：tests/endpoints-perfeed-unread.test.mjs 的「已退订源的残留条目…不许把列表的截断窗口占掉」。
-  { id: 'overview-列表窗口不再放大重取', file: 'lib/endpoints.js',
-    judges: ['endpoints-perfeed-unread.test.mjs'],
-    judgeTests: ['已退订源的残留条目：既不进账目，也不许把列表的截断窗口占掉（退订后没清干净 / 手工改库）'],
+  { id: 'overview-列表窗口不再放大重取', file: 'lib/item-page.js',
+    judges: ['endpoints-perfeed-unread.test.mjs', 'item-page.test.mjs'],
+    judgeTests: [
+      '已退订源的残留条目：既不进账目，也不许把列表的截断窗口占掉（退订后没清干净 / 手工改库）',
+      '窗口放大：孤儿占掉的窗口必须被补回来，取回的条数始终是 window + 1',
+    ],
     // 首轮取回的 5 条里 4 条是残留行 ⇒ 列表只剩 1 条，而用户看不出少在哪（原实现是先滤后截，不会少）。
     // ⚠️ 2026-10-11 任务 6：取数循环重写（多取一行以判断「后面还有没有」），原锚串消失 ⇒ 本条
     // 改锚到新产物的同一处判定（window 不再放大 = 残留行会被当成「已到底」）。
-    from: 'exhausted = rows.length <= window;',
+    // ⚠️ 2026-11-18 阶段 6：循环搬进 src/item-page.ts（ADR-0004），批次变量从 rows 改名 fetched
+    // （rows 现在专指「要下发的行」）⇒ 随搬家重锚。
+    from: 'exhausted = fetched.length <= window;',
     to: 'exhausted = true;',
   },
   // ── 列表分页 keyset + 客户端契约（2026-10-11 大规模存储任务 6）────────────────────
@@ -1352,16 +1357,65 @@ const MUTATIONS = [
     // ⚠️ 2026-10-15 端点注册表重构后重锚：overview 的 handler 体缩进从 20 格变 16 格
     // （switch case → ENDPOINTS.overview.to），且 `buildOverview` 多了 ctx 首参 ⇒ 旧 from 串失配。
     // 2026-11-16 阶段 5 核过：defineEndpoint 只换了表项的 opener，handler 体缩进不变 ⇒ 无需重锚。
+    // ⚠️ 2026-11-18 阶段 6：围栏解码收进 item-page 的三态结果（ADR-0004）⇒ 锚点改成 malformed 那一臂。
     // 语义不变：认不出游标时**响亮拒绝**，而不是静默从第一页开始。
-    from: "            if (cursor === undefined) {\n                return fail('bad-request', '未知的续页游标（格式应为 \"<recency>|<id>\"）：' + raw);\n            }",
-    to: "            if (cursor === undefined) return ok(buildOverview(ctx, false));" },
-  { id: 'paging-到底也硬给续页游标', file: 'lib/endpoints.js',
-    judges: ['overview-paging.test.mjs', 'overview-scale.test.mjs'],
-    judgeTests: ['overview 分页：第 300 与第 301 条的边界不重不漏，末页没有 nextCursor'],
+    from: "            if (parsed.status === 'malformed')\n                return fail('bad-request', '未知的续页游标（格式应为 \"<recency>|<id>\"）：' + raw);",
+    to: "            if (parsed.status === 'malformed')\n                return ok(buildOverview(ctx, undefined, undefined, scope));" },
+  { id: 'paging-到底也硬给续页游标', file: 'lib/item-page.js',
+    judges: ['overview-paging.test.mjs', 'overview-scale.test.mjs', 'item-page.test.mjs'],
+    judgeTests: [
+      'overview 分页：第 300 与第 301 条的边界不重不漏，末页没有 nextCursor',
+      '判尾：到底时不硬给续页游标；恰好取满也不算「还有下一页」',
+    ],
     // 到底时还给游标 ⇒ 客户端一直显示「加载更多」，点下去得到空页（界面上的死按钮）。
     // 判据：tests/overview-paging.test.mjs 的「末页没有 nextCursor」。
-    from: 'const nextCursor = lastDelivered >= 0 && (lastDelivered + 1 < rows.length || !exhausted)',
+    // ⚠️ 2026-11-18 阶段 6：判尾搬进 src/item-page.ts；批次变量改名 fetched。
+    from: 'const nextCursor = lastDelivered >= 0 && (lastDelivered + 1 < fetched.length || !exhausted)',
     to: 'const nextCursor = lastDelivered >= 0' },
+  // ── 一页条目：分页协议自己的失效面（2026-11-18 阶段 6 / ADR-0004）──────────────
+  // 搬迁后这四条守的是**模块内部**的判定：围栏、孤儿过滤、判尾依据、JS 续页方向。
+  // 每条都有一条只属于它的判据；from 照 lib/item-page.js 的产物形状逐字抄，已核 OCCURRENCES=1。
+  { id: 'page-围栏不校验范围（跨范围游标被接受）', file: 'lib/item-page.js',
+    judges: ['item-page.test.mjs', 'folder-browse.test.mjs', 'tag-browse.test.mjs'],
+    judgeTests: [
+      '栅栏：同范围可解，成员变动 / 别的范围失配，垃圾体是 malformed（三态不许合并）',
+      '文件夹游标绑定范围与成员：无范围/别的文件夹/成员变动后的旧游标全部 bad-request',
+      '标签游标绑定 id：无范围或别的标签游标都 bad-request',
+    ],
+    // 栅栏键（folder:<hash> / tag:<id>）长度固定 ⇒ 去掉前缀校验后，**别的文件夹/标签的游标**会被
+    // 按当前前缀长度切片、恰好切出合法游标体 ⇒ 静默按错误的范围续页（成员变了、排序重排，用户看不出）。
+    // 判据：文件夹/标签浏览的 bad-request 用例 + 模块围栏三态用例。
+    from: "    if (!raw.startsWith(prefix))\n        return { status: 'mismatch' };",
+    to: "    if (false)\n        return { status: 'mismatch' };" },
+  { id: 'page-孤儿行照发（不按源集合过滤）', file: 'lib/item-page.js',
+    judges: ['endpoints-perfeed-unread.test.mjs', 'item-page.test.mjs'],
+    judgeTests: [
+      '已退订源的残留条目：既不进账目，也不许把列表的截断窗口占掉（退订后没清干净 / 手工改库）',
+      '窗口放大：孤儿占掉的窗口必须被补回来，取回的条数始终是 window + 1',
+    ],
+    // 退订残留 / 手工改库的行会直接出现在右栏，点开是一条「源已不存在」的条目 —— 访问期挡板失效。
+    from: "            if (!knownFeedIds.has(row[1].feedId))\n                continue;",
+    to: "            if (false)\n                continue;" },
+  { id: 'page-判尾用「取不满」反推', file: 'lib/item-page.js',
+    judges: ['item-page.test.mjs', 'overview-paging.test.mjs', 'folder-browse.test.mjs'],
+    judgeTests: [
+      '判尾：到底时不硬给续页游标；恰好取满也不算「还有下一页」',
+      'overview 分页：第 300 与第 301 条的边界不重不漏，末页没有 nextCursor',
+      '文件夹浏览先按成员筛选再限页：成员条目不会落到跨源首页之外',
+    ],
+    // 代码注释点名的那条错法：拿「这一页取满/取不满」反推还有没有下一页。恰好取满的末页会多给一个
+    // 游标 ⇒ 界面上是「加载更多」死按钮，点下去得到空页。
+    from: 'const nextCursor = lastDelivered >= 0 && (lastDelivered + 1 < fetched.length || !exhausted)',
+    to: 'const nextCursor = lastDelivered >= 0 && rows.length >= pageSize' },
+  { id: 'page-JS 续页谓词方向写反', file: 'lib/item-page.js',
+    judges: ['item-page.test.mjs', 'overview-paging.test.mjs'],
+    judgeTests: [
+      'afterCursor：recency 降序、同 recency 内 id 升序的「严格之后」',
+      '旧实现（createStore）：listRecent 的游标谓词与自持实现逐条同义',
+    ],
+    // JS 侧唯一一份续页谓词（两份适配器共用）：同 recency 内方向写反 ⇒ 打平点上重复 + 漏。
+    from: '    return row.recency < cursor.recency || (row.recency === cursor.recency && row.id > cursor.id);',
+    to: '    return row.recency < cursor.recency || (row.recency === cursor.recency && row.id < cursor.id);' },
   // ── 端点注册表（2026-10-15 H1 深化）─────────────────────────────────────────
   // 两条各守一个**横切**失效面：前者是「表与名字表分家」，后者是「守卫顺序被绕过」。
   // 判据都在 tests/endpoint-registry.test.mjs（新增文件，见该文件头注释）。
@@ -1709,15 +1763,20 @@ const MUTATIONS = [
     judgeTests: ['文件夹浏览先按成员筛选再限页：成员条目不会落到跨源首页之外'],
     from: 'const scoped = feedIds === undefined\n                ? undefined\n                : JSON.stringify([...new Set(feedIds)]);',
     to: 'const scoped = undefined;' },
-  { id: 'folder-空范围回落全表', file: 'lib/endpoints.js',
-    judges: ['folder-browse.test.mjs'],
-    judgeTests: ['空文件夹返回空列表与完整目录；不存在的文件夹明确 not-found'],
-    from: 'rows = target.listRecent(window + 1, cursor, scope?.feedIds, scope?.tagId);',
-    to: 'rows = target.listRecent(window + 1, cursor, scope?.feedIds.length ? scope.feedIds : undefined, scope?.tagId);' },
-  { id: 'folder-游标不校验范围', file: 'lib/endpoints.js',
-    judges: ['folder-browse.test.mjs'],
-    judgeTests: ['文件夹游标绑定范围与成员：无范围/别的文件夹/成员变动后的旧游标全部 bad-request'],
-    from: 'if (!raw.startsWith(prefix)) {', to: 'if (false) {' },
+  { id: 'folder-空范围回落全表', file: 'lib/item-page.js',
+    judges: ['folder-browse.test.mjs', 'item-page.test.mjs'],
+    judgeTests: [
+      '空文件夹返回空列表与完整目录；不存在的文件夹明确 not-found',
+      '范围映射：tag 范围只取带该标签的行并写入 tag 栅栏；空 folder 是空结果而不是全表',
+    ],
+    // ⚠️ 2026-11-18 阶段 6：取数调用搬进 src/item-page.ts（ADR-0004），锚点改成「范围 → listRecent
+    // 参数」的映射。空成员列表若被当成「没有范围」，空文件夹会查出全库 —— M2 03 的硬要求。
+    from: '            return { feedIds: scope.feedIds };',
+    to: '            return { feedIds: scope.feedIds.length > 0 ? scope.feedIds : undefined };' },
+  // （2026-11-18 阶段 6 退役）原 `folder-游标不校验范围`：围栏校验搬进 src/item-page.ts 后，
+  // 它与 `page-围栏不校验范围（跨范围游标被接受）` 是**同一个失效面**（后者同时覆盖标签范围与模块三态），
+  // 保留两条等于让一条变异替另一条作证。退役不是删除守卫：folder-browse 的 bad-request 用例仍在，
+  // 且由 `page-围栏不校验范围` 施加变异。
   { id: 'folder-左栏不显示空目录', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
     judgeTests: ['文件夹浏览：空目录可见，进入后只显示成员条目，空目录有明确空状态'],
@@ -1808,10 +1867,9 @@ const MUTATIONS = [
     judges: ['tag-browse.test.mjs'],
     judgeTests: ['搜索 + 标签 + 未读取交集，搜索结果也带 tagIds'],
     from: 'if (query.tagId !== undefined) {', to: 'if (false) {' },
-  { id: 'tag-浏览游标绑名称', file: 'lib/endpoints.js',
-    judges: ['tag-browse.test.mjs'],
-    judgeTests: ['标签浏览先按 id 筛选再限页：深页文章不漏，目录保留空标签'],
-    from: "key: 'tag:' + found.id", to: "key: 'tag:' + found.name" },
+  // （2026-11-18 阶段 6 退役）原 `tag-浏览游标绑名称`：PageScope 的 tag 分支只携带 `id`
+  // （判别联合，ADR-0004），「拿名字当栅栏键」在类型层面已不可表达 —— 没有东西可变异。
+  // 守住它的是 `page-围栏不校验范围` 那条模块用例（值 = id 的栅栏键一旦错，跨标签游标立刻失配）。
   { id: 'tag-左栏丢空标签', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
     judgeTests: ['标签浏览与编辑：左栏行、空标签、列表/正文共用标签栏，频繁切换不高亮成已读'],
