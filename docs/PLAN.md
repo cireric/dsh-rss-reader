@@ -1,6 +1,7 @@
 # PLAN —— 架构候选的分阶段执行计划
 
-> 来源：2026-11-14 的架构评审（8 个候选，报告是 /tmp 下的临时 HTML，**不作为长期依赖**）。本文件只列
+> 来源：2026-11-14 的架构评审（8 个候选；报告是仓库外的临时 HTML，**不作为长期依赖**，
+> 卡 #8 的事实摘在阶段 5 的「问题」段与 [ADR-0003](adr/0003-endpoint-payload-is-declared.md)）。本文件只列
 > **尚未动工**的候选，一个候选一个阶段。用词以 [GLOSSARY.md](../GLOSSARY.md) 为准；每条决定的理由写在
 > [docs/adr/](adr/)，这里不重复。完成定义见 [AGENTS.md](../AGENTS.md)（四道门槛），本文件不抄。
 
@@ -14,6 +15,7 @@
 | 阶段 2 · 「打开一条」五遍 | `store.activate` 成为唯一触发点；`nextExpandedOf` 收成一条规则 | `3aff807` |
 | 阶段 3 · ReaderStore 契约与替身 | 36 方法可执行契约 + 内存实现升格 + 窄接口 + 判据归一 + 五份局部桩退役 | `6fbdeb0` `03af3ed` `ba96196` `6a3f470` |
 | 阶段 4b · 48 项动作按域分家 | 标签 / 搜索 / 订阅 / 列表四域各自成文件，store 只留装配与视图记忆 | `2db1f31` `a1d98af` `0a1d45b` `62ef6ff` `855f26c` `608d50b` `25b179c` `b98bea6` `0b34671` `0b768ae` |
+| 阶段 5 · 端点的入参不在 interface 里 | 28 个端点一份 payload 声明；`defineEndpoint` 解析一次 | `310ab5b` `867eacf` `7414372` `1cb3b35` `793f706` |
 
 ## 怎么用这份文件
 
@@ -175,26 +177,33 @@ Blob / document / window.open / console；四份测试沙箱各复制一遍装�
 
 ## 阶段 5 —— 端点的入参不在 interface 里
 
-**状态**：未开始 · **规模**：中 · **来源**：评审卡 #8
+**状态**：已完成（2026-11-17）· **规模**：中 · **来源**：评审卡 #8
 
-**问题**：28 个端点里 27 个的 payload 形状只能从 handler 体内的 cast 反推（**23 处** `payload as`），
-`String(x ?? '')` 让「缺字段」与「空串」不可分；只有 `searchItems` 有 zod schema。
+**前置决定（已拍板 2026-11-16）**：重开 H1 终审的「刻意不引入 zod」裁决。zod 自 `ef50cba` 起就是运行时依赖，
+H1 当时（`c901727`）的 `package.json` 已含它 —— 裁决里「新增依赖 + 供应链审查成本」两条代价当时就不成立。
+限定：只用仓库已有的 zod，不新增依赖、不换库。理由与决定见 [ADR-0003](adr/0003-endpoint-payload-is-declared.md)。
 
-**证据**：`src/endpoints.ts:73`（EndpointSpec 只有 carriesAccount + to）、`:290`（唯一 schema）、`:917`（createDispatch）；
-23 处 cast：`:134` `:367` `:400` `:528` `:616` `:711` `:743` `:878`（其余同形）。
+**问题**：28 个端点里 **23 个接 payload**（5 个零入参：`opmlExport` / `cleanup` / `viewPreferences` /
+`listFolders` / `listTags`），23 处 `payload as`、7 处 `String(x ?? '')`、3 处 `map(String)`；
+只有 `searchItems` 有 zod schema。「缺字段」与「空串」在这一层不可分。两个具体缺陷：
+`saveViewPreferences` 缺 `preferences` 键会把默认视图写盘；`saveReadingProgress` 缺 `ratio` 会把阅读进度写回 0。
 
-**前置决定（必须先拍板）**：与 H1 终审的执行期 Ruling「刻意不引入 zod」冲突——当时是 6 处，现在是 23 处。
-建议重开并限定「只用仓库已有的 zod，不新增依赖」，同时补一条 ADR 记录这次重开。**没拍板不开工。**
+**证据**（改动前）：`src/endpoints.ts` 的 `EndpointSpec` 只有 `carriesAccount` + `to(payload: unknown)`；
+`createDispatch` 拿到的是未知形状；cast 分布在各 handler 体内（23 处，`payload as`）。
 
-**方案**：`EndpointSpec` 多一条入参声明；`createDispatch` 解析一次、按同一个 `bad-request` 信封拒绝；
-handler 只拿解析后的值。
+**方案**：`EndpointSpec` 多一条 `payload`（zod）与 `invalidMessage`；`defineEndpoint` 工厂解析一次、
+按同一个 `bad-request` 信封拒绝（`details.issues` 带字段路径）；handler 只拿解析后的值。
+声明住 `src/endpoint-payloads.ts`（共享片段 + 28 个端点的声明；20 个导出的 schema 常量），零入参写 `noPayload`。
+声明只判形状与类型；URL 合法性、存在性、比例夹取仍留在 handler。
 
 **验收**
-- [ ] 28 个端点都有入参声明（`Record<Endpoint, …>` 的穷尽性会替我们盯着）
-- [ ] 一种失败信封；至少 5 个端点有「坏入参」用例
-- [ ] 回归：`endpoint-registry` / `*-endpoints` / `http-route` 全绿
+- [x] 28 个端点都有入参声明（`Record<Endpoint, …>` 穷尽性 + `tests/endpoint-payloads.test.mjs` 的契约表）
+- [x] 一种失败信封；6 条端到端细节用例（5 个端点）+ 23 个端点各一条 dispatch 坏样本（契约表另有 64 条）
+- [x] `saveViewPreferences` 缺 `preferences`、`saveReadingProgress` 缺 `ratio` → `bad-request`
+- [x] 回归：`endpoint-payloads` / `endpoint-registry` / `*-endpoints` / `http-route` 全绿（全量 647/647；mutation 245/245、幸存 0）
 
-**风险**：错误文案会变。客户端若有按 message 判断的地方，先盘点再改。
+**风险**：错误文案按端点收敛成一条（三条金标准文案逐字保留）；客户端零文案依赖（已核对）。
+客户端 payload 类型化不在本阶段（触发条件：客户端发错字段的真实缺陷，或端点 ≥ 35）。
 
 ---
 
