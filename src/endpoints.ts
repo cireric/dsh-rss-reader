@@ -1,5 +1,5 @@
 /**
- * 浏览器半的读写通道：25 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
+ * 浏览器半的读写通道：28 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
  *
  * 原先这里是一个 switch：每臂各自手写 payload 解析、各自记得把未读账并进回包 ——
  * interface 的复杂度 ≈ implementation 的复杂度。现在「一个端点」是一个 module：
@@ -10,7 +10,29 @@
  * 名字表与 dispatch 的 case 必须是同一份（曾经是两处手写、靠人记得同步）；现在缺失即编译错误。
  */
 import { createHash } from 'node:crypto'
-import { z } from 'zod'
+import type { ZodType } from 'zod'
+import {
+  addFeedPayload,
+  discoverFeedsPayload,
+  duplicateHintsPayload,
+  idPayload,
+  itemIdPayload,
+  itemIdsPayload,
+  markReadPayload,
+  moveFeedToFolderPayload,
+  namePayload,
+  noPayload,
+  opmlImportPayload,
+  overviewPayload,
+  removeFeedPayload,
+  renameFolderPayload,
+  renameTagPayload,
+  saveReadingProgressPayload,
+  saveViewPreferencesPayload,
+  scopePayload,
+  searchQueryPayload,
+  setItemTagsPayload,
+} from './endpoint-payloads.js'
 import type { createSearch } from './search.js'
 import type { Config } from './config.js'
 import { EXTRACTOR_REVISION, contentVersionOf, fetchArticle, blocksToText } from './article.js'
@@ -69,10 +91,48 @@ export interface EndpointCtx {
  * 收进声明而不是让每个 handler 自己拼：这条横切不变量原先在 5 个 case 里各写一遍
  * （`...accountOf(target)`），任一处漏掉就是「幽灵未读」——客户端拿本地增量当真相，
  * 左栏各源之和 ≠ 顶栏总数（spec §4 不变量 1）。
+ *
+ * `payload`：入参形状的**唯一**声明（`src/endpoint-payloads.ts`）。`to` 收到的已经是解析后的值，
+ * 所以 handler 体内不再有 `payload as`。零入参端点写 `noPayload`（= `z.unknown()`）。
  */
 export interface EndpointSpec {
   readonly carriesAccount?: true
+  readonly payload: ZodType<unknown>
+  /** 解析失败时给调用方看的那一句话；零入参端点没有这条路径，可以省。 */
+  readonly invalidMessage?: string
   readonly to: (payload: unknown, ctx: EndpointCtx) => Promise<RpcResult<unknown>>
+}
+
+/**
+ * 端点声明的构造器：把「解析一次」收在这里，`ENDPOINTS` 的每一项都经它声明。
+ *
+ * 为什么不在 `createDispatch` 里解析：dispatch 拿到的 `spec.to` 是**擦除过类型**的
+ * `(payload: unknown) => …`。要在那里解析，handler 就得重新接回 `unknown` 再 cast 一遍 ——
+ * 正是阶段 5 要消灭的东西。工厂闭包保留 `P`，handler 拿到的是已解析的类型。
+ *
+ * 失败信封只有一种：`bad-request` + 端点自己的中文文案 + `details.issues`（字段路径与
+ * issue code，不含原始值 —— 日志与测试要能定位「哪个字段」，不该把用户输入抄进回包）。
+ */
+function defineEndpoint<P>(spec: {
+  readonly carriesAccount?: true
+  readonly payload: ZodType<P>
+  readonly invalidMessage?: string
+  readonly to: (input: P, ctx: EndpointCtx) => Promise<RpcResult<unknown>>
+}): EndpointSpec {
+  return {
+    ...(spec.carriesAccount === true ? { carriesAccount: true as const } : {}),
+    payload: spec.payload,
+    ...(spec.invalidMessage === undefined ? {} : { invalidMessage: spec.invalidMessage }),
+    to: async (raw, ctx) => {
+      const parsed = spec.payload.safeParse(raw)
+      if (!parsed.success) {
+        return fail('bad-request', spec.invalidMessage ?? '入参无效', {
+          issues: parsed.error.issues.map((issue) => ({ path: issue.path.map(String), code: issue.code })),
+        })
+      }
+      return spec.to(parsed.data, ctx)
+    },
+  }
 }
 
 /**
@@ -129,27 +189,19 @@ interface OverviewScope {
 const folderScopeKey = (folder: string, feedIds: readonly string[]): string =>
   'folder:' + createHash('sha256').update(JSON.stringify([folder, [...feedIds].sort()])).digest('base64url')
 
-/** 从 overview/refresh 的 payload 里解析文件夹或标签范围；失败时返回带 code 的信封。 */
-function overviewScopeOf(ctx: EndpointCtx, payload: unknown): { scope?: OverviewScope; failure?: RpcResult<never> } {
-  const body = payload as { folder?: unknown; tagId?: unknown } | null
-  const folder = body?.folder
-  const tagId = body?.tagId
-  if (folder !== undefined && folder !== null && tagId !== undefined && tagId !== null) {
-    return { failure: fail('bad-request', 'overview 不能同时按文件夹与标签筛选') }
-  }
+/** 从 overview/refresh 的**已解析**入参里把范围落到库上（形状由 payload 声明判，这里只判存在性）。 */
+function overviewScopeOf(
+  ctx: EndpointCtx,
+  input: { readonly folder?: string | null; readonly tagId?: string | null },
+): { scope?: OverviewScope; failure?: RpcResult<never> } {
+  const { folder, tagId } = input
   if (tagId !== undefined && tagId !== null) {
-    if (typeof tagId !== 'string' || tagId === '') {
-      return { failure: fail('bad-request', 'overview 的 tagId 必须是非空字符串') }
-    }
     const found = ctx.store.listTags().find((tag) => tag.id === tagId)
     if (found === undefined) return { failure: fail('not-found', '标签不存在：' + tagId) }
     // 标签 id 是稳定主键：改名不会让当前浏览范围失效；删除才会（listTags 找不到）。
     return { scope: { tagId: found.id, key: 'tag:' + found.id } }
   }
   if (folder === undefined || folder === null) return {}
-  if (typeof folder !== 'string' || folder === '') {
-    return { failure: fail('bad-request', 'overview 的 folder 必须是非空字符串') }
-  }
   const found = ctx.store.listFolders().find((entry) => entry.name === folder)
   if (found === undefined) return { failure: fail('not-found', '文件夹不存在：' + folder) }
   return { scope: { folder, feedIds: found.feedIds, key: folderScopeKey(folder, found.feedIds) } }
@@ -281,31 +333,18 @@ const buildOverview = (ctx: EndpointCtx, run?: RefreshRun, cursor?: Cursor, scop
   }
 }
 /**
- * 端点表：25 个端点一处声明。
+ * 端点表：28 个端点一处声明（每项的 `payload` 是入参形状的唯一声明）。
  *
  * 穷尽性由 `Record<Endpoint, EndpointSpec>` 保证 —— 名字表（shared.ts 的 ENDPOINT_NAMES）
  * 加了新端点而这里没跟上，编译就不过。这是本文件里唯一需要「加端点时改的地方」。
  */
-const searchDay = z.iso.date().optional()
-const searchQuerySchema = z.object({
-  text: z.string().trim().min(1).refine((text) => [...text].length <= 120),
-  feedId: z.string().optional(),
-  feedIds: z.array(z.string()).optional(),
-  tagId: z.string().min(1).optional(),
-  read: z.enum(['read', 'unread']).optional(),
-  starred: z.boolean().optional(),
-  from: searchDay,
-  to: searchDay,
-  cursor: z.string().max(2048).optional(),
-}).refine(({ from, to }) => !from || !to || from <= to)
-
 export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
-  searchItems: {
-    to: async (payload, ctx) => {
-      const parsed = searchQuerySchema.safeParse(payload)
-      if (!parsed.success) return fail('bad-request', '搜索词、日期范围或分页游标无效')
+  searchItems: defineEndpoint({
+    payload: searchQueryPayload,
+    invalidMessage: '搜索词、日期范围或分页游标无效',
+    to: async (input, ctx) => {
       if (!ctx.searchItems) return fail('not-ready', '搜索服务尚未就绪')
-      const query = parsed.data
+      const query = input
       const selected = query.feedIds === undefined ? undefined : new Set(query.feedIds)
       const feeds: Array<[string, string]> = ctx.store.listFeeds()
         .filter(([id]) => (query.feedId === undefined || query.feedId === id) && (selected?.has(id) ?? true))
@@ -320,18 +359,19 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       const page = await ctx.searchItems({ ...query, cursor, feedId: feeds.length === 1 ? feeds[0][0] : undefined }, feeds, 30, ctx.signal)
       return ok({ ...page, nextCursor: page.nextCursor === undefined ? undefined : key + page.nextCursor })
     },
-  },
-  overview: {
-    to: async (payload, ctx) => {
+  }),
+  overview: defineEndpoint({
+    payload: overviewPayload,
+    invalidMessage: 'overview 的 folder / tagId / cursor 无效',
+    to: async (input, ctx) => {
       // 续页游标**必须解码成功**才继续（Overview 的契约）。认不出时**响亮拒绝**：
       // 「解不出就从第一页开始」会让翻页永远翻不完 —— 每页都回同一批条目，界面无限追加重复行，
       // 而用户看到的是一份「永远滚不到底」的列表，不是一句报错。
-      const resolved = overviewScopeOf(ctx, payload)
+      const resolved = overviewScopeOf(ctx, input)
       if (resolved.failure !== undefined) return resolved.failure
       const scope = resolved.scope
-      const raw = (payload as { cursor?: unknown } | null)?.cursor
+      const raw = input.cursor
       if (raw === undefined || raw === null) return ok(buildOverview(ctx, undefined, undefined, scope))
-      if (typeof raw !== 'string') return fail('bad-request', 'overview 的 cursor 必须是字符串')
       let cursor: Cursor | undefined
       if (scope === undefined) {
         cursor = decodeCursor(raw)
@@ -349,31 +389,36 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       }
       return ok(buildOverview(ctx, undefined, cursor, scope))
     },
-  },
+  }),
 
-  refresh: {
-    to: async (payload, ctx) => {
+  refresh: defineEndpoint({
+    payload: scopePayload,
+    invalidMessage: 'refresh 的 folder / tagId 无效',
+    to: async (input, ctx) => {
       // 在文件夹里点刷新时必须留在同一范围：否则列表会突然跳回跨源首页（用户会以为选中的文件夹丢了）。
-      const resolved = overviewScopeOf(ctx, payload)
+      const resolved = overviewScopeOf(ctx, input)
       if (resolved.failure !== undefined) return resolved.failure
       const run = await ctx.refreshNow()
       return ok(buildOverview(ctx, run, undefined, resolved.scope))
     },
-  },
+  }),
 
-  markRead: {
+  markRead: defineEndpoint({
+    payload: markReadPayload,
+    invalidMessage: 'markRead 需要 itemIds 数组',
     carriesAccount: true,
-    to: async (payload, ctx) => {
-      const body = payload as { itemIds?: unknown; skipKept?: unknown; before?: unknown } | null
-      const itemIds = Array.isArray(body?.itemIds) ? (body as { itemIds: unknown[] }).itemIds.map(String) : []
-      if (itemIds.length === 0) return fail('bad-request', 'markRead 需要 itemIds 数组')
+    to: async (input, ctx) => {
+      const itemIds = input.itemIds
       // 「全部标为已读」（A 键）走这条时带 skipKept：**保持未读的条目要活下来**
       // —— 那正是规格 §3.3 里 kept-unread 的用处；而单条打开/显式标记不带它，
       // 那种情况下按规格「标为已读即移除 kept-unread」。
-      const skipKept = body?.skipKept === true
+      const skipKept = input.skipKept === true
       // 「只标**早于** X 的」（规格 §3.3 的 panic button，2009-08 加入）。客户端会先按范围过滤一遍，
       // 这里是**第二道闸**：客户端列表只是快照，宿主手上的 recency 才是权威。
-      const before = typeof body?.before === 'string' && body.before !== '' ? body.before : undefined
+      // 空串仍是「没有范围」：形状声明只判类型，这条归一留在这里。
+      const before = input.before === undefined || input.before === null || input.before === ''
+        ? undefined
+        : input.before
       const stamp = new Date().toISOString()
       let changed = 0
       for (const itemId of itemIds) {
@@ -391,16 +436,15 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       // 账目由分发核按 carriesAccount 统一合并 —— 这条不变量不再由本 handler 承担。
       return ok({ changed })
     },
-  },
+  }),
 
-  unmarkRead: {
+  unmarkRead: defineEndpoint({
+    payload: itemIdsPayload,
+    invalidMessage: 'unmarkRead 需要 itemIds 数组',
     carriesAccount: true,
-    to: async (payload, ctx) => {
+    to: async (input, ctx) => {
       // 只服务于「全部标记已读」的短时撤销
-      const itemIds = Array.isArray((payload as { itemIds?: unknown } | null)?.itemIds)
-        ? ((payload as { itemIds: unknown[] }).itemIds.map(String))
-        : []
-      if (itemIds.length === 0) return fail('bad-request', 'unmarkRead 需要 itemIds 数组')
+      const itemIds = input.itemIds
       let changed = 0
       for (const itemId of itemIds) {
         const existing = ctx.store.item(itemId)
@@ -413,14 +457,15 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       // 同上：撤销也要把每源账目一并下发，客户端才不必拿本地增量去猜（同一个不变量）。
       return ok({ changed })
     },
-  },
+  }),
 
-  article: {
-    to: async (payload, ctx) => {
+  article: defineEndpoint({
+    payload: itemIdPayload,
+    invalidMessage: 'article 需要 itemId',
+    to: async (input, ctx) => {
       // 按需正文（V 键）：先看缓存，再冷却，最后才抓原站。三步都留日志——这是唯一会
       // 出网的用户手势，出问题时必须能从日志里还原过程。
-      const itemId = String((payload as { itemId?: unknown } | null)?.itemId ?? '')
-      if (!itemId) return fail('bad-request', 'article 需要 itemId')
+      const itemId = input.itemId
       const existing = ctx.store.item(itemId)
       if (existing === undefined) return fail('not-found', '条目不存在：' + itemId)
       // 命中缓存的前提：**缓存的内容版本等于当前版本**。
@@ -484,14 +529,15 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         progress: ctx.store.readingProgress(itemId, contentVersion)?.ratio,
       })
     },
-  },
+  }),
 
-  duplicateHints: {
-    to: async (payload, ctx) => {
+  duplicateHints: defineEndpoint({
+    payload: duplicateHintsPayload,
+    invalidMessage: 'duplicateHints 的 itemIds 必须是字符串数组',
+    to: async (input, ctx) => {
       // 跨源重复提示（M5 03）：**一次批量查**，只针对客户端这一屏的条目。
       // 不做「每次渲染扫全库」：客户端一次 load 调一次，宿主按 link_key 走索引查候选。
-      const raw = (payload as { itemIds?: unknown } | null)?.itemIds
-      const ids = Array.isArray(raw) ? raw.map(String) : []
+      const ids = input.itemIds ?? []
       if (ids.length === 0) return ok({ hints: [] })
       // 一屏最多几百条；超出的直接截断而不是报错 —— 提示是锦上添花，不该让面板红一次
       const visible: DuplicateRow[] = []
@@ -520,39 +566,39 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       }))
       return ok({ hints: view })
     },
-  },
+  }),
 
-  saveReadingProgress: {
-    to: async (payload, ctx) => {
+  saveReadingProgress: defineEndpoint({
+    payload: saveReadingProgressPayload,
+    invalidMessage: 'saveReadingProgress 需要 itemId、contentVersion 与 ratio',
+    to: async (input, ctx) => {
       // 阅读进度（M5 02）。**只写本地库**：这条路径一次网络都不发（恢复进度也不该发）。
-      const body = payload as { itemId?: unknown; contentVersion?: unknown; ratio?: unknown } | null
-      const itemId = typeof body?.itemId === 'string' ? body.itemId : ''
-      const contentVersion = typeof body?.contentVersion === 'string' ? body.contentVersion : ''
-      if (itemId === '' || contentVersion === '') {
-        return fail('bad-request', 'saveReadingProgress 需要 itemId 与 contentVersion（字符串）')
-      }
+      const { itemId, contentVersion } = input
       if (ctx.store.item(itemId) === undefined) return fail('not-found', '条目不存在：' + itemId)
       // 夹取只在这里与存储侧发生（clampReadingRatio 是唯一实现）：快速滚动时会算出越界值，
       // 而库里躺着 1.5 这种比例只会让下一次恢复「越界」。
-      const ratio = clampReadingRatio(body?.ratio)
+      const ratio = clampReadingRatio(input.ratio)
       await ctx.store.saveReadingProgress(itemId, contentVersion, ratio)
       return ok({ ratio })
     },
-  },
+  }),
 
-  opmlExport: {
-    to: async (_payload, ctx) => {
+  opmlExport: defineEndpoint({
+    payload: noPayload,
+    to: async (_input, ctx) => {
       const feeds = ctx.store.listFeeds().map(([feedUrl, record]) => ({
         url: feedUrl, title: record.title, folder: record.folder,
       }))
       return ok({ opml: buildOpml(feeds), feedCount: feeds.length })
     },
-  },
+  }),
 
-  opmlImport: {
-    to: async (payload, ctx) => {
+  opmlImport: defineEndpoint({
+    payload: opmlImportPayload,
+    invalidMessage: 'opmlImport 需要 opml 文本',
+    to: async (input, ctx) => {
       // §3.1：导入时**逐源抓取校验**，坏源单独标注、不阻断其余。
-      const text = String((payload as { opml?: unknown } | null)?.opml ?? '')
+      const text = input.opml
       if (text.trim() === '') return fail('bad-request', 'opmlImport 需要 opml 文本')
       const parsed = parseOpml(text)
       if (parsed.subscriptions.length === 0) {
@@ -602,7 +648,7 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         ' 源，文件内跳过 ' + parsed.skipped.length + ' 项')
       return ok({ added, existed, failed, skipped: parsed.skipped, accepted })
     },
-  },
+  }),
 
   /**
    * **只发现、不订阅**（PRD §9）：回候选清单与逐条原因，一个字节都不写。
@@ -611,10 +657,11 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
    * 「可能只回候选」会让客户端无法区分「加了」和「只是看了看」——而这两件事的后果完全不同
    * （写盘 vs 零写入）。分开之后，取消 = 什么都不做，不需要任何回滚。
    */
-  discoverFeeds: {
-    to: async (payload, ctx) => {
-      const raw = String((payload as { url?: unknown } | null)?.url ?? '').trim()
-      if (raw === '') return fail('bad-request', 'discoverFeeds 需要 url')
+  discoverFeeds: defineEndpoint({
+    payload: discoverFeedsPayload,
+    invalidMessage: 'discoverFeeds 需要 url',
+    to: async (input, ctx) => {
+      const raw = input.url
       // 出网手势照 article 端点的先例留痕：发现不出现在刷新日志里，否则「点了没反应」无从排查。
       ctx.log('发现订阅候选：' + raw)
       const result = await discoverCandidates(raw, {
@@ -624,11 +671,13 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       ctx.log('发现结果：' + raw + ' → 已验证 ' + result.candidates.length + ' 个候选，' + result.warnings.length + ' 条警告')
       return ok(result)
     },
-  },
+  }),
 
-  addFeed: {
-    to: async (payload, ctx) => {
-      const raw = String((payload as { url?: unknown } | null)?.url ?? '')
+  addFeed: defineEndpoint({
+    payload: addFeedPayload,
+    invalidMessage: 'addFeed 需要 url',
+    to: async (input, ctx) => {
+      const raw = input.url
       const checked = await validateSubscriptions([raw], {
         limits: { timeoutMs: ctx.config.timeoutMs, maxBytes: ctx.config.maxBytes, trustedTarget: true },
         concurrency: 1,
@@ -654,12 +703,13 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         accepted: [{ url: result.url, title: result.title, folder: stored?.folder }],
       })
     },
-  },
+  }),
 
-  removeFeed: {
-    to: async (payload, ctx) => {
-      const feedId = String((payload as { url?: unknown } | null)?.url ?? '')
-      if (!feedId) return fail('bad-request', 'removeFeed 需要 url')
+  removeFeed: defineEndpoint({
+    payload: removeFeedPayload,
+    invalidMessage: 'removeFeed 需要 url',
+    to: async (input, ctx) => {
+      const feedId = input.url
       const known = ctx.store.feed(feedId)
       if (known === undefined) return fail('not-found', '订阅不存在：' + feedId)
       // 退订是**一次变更**，由 store 拥有（订阅项 + 条目 + 游标，见 ADR-0002）：
@@ -669,11 +719,12 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       ctx.log('退订 ' + feedId + '（连带删除 ' + items + ' 条条目）')
       return ok({ removed: 1, items })
     },
-  },
+  }),
 
-  cleanup: {
+  cleanup: defineEndpoint({
+    payload: noPayload,
     carriesAccount: true,
-    to: async (_payload, ctx) => {
+    to: async (_input, ctx) => {
       // 显式清理（用户点按钮触发，**不设定时器**——验收项之一就是不残留定时器）。
       // 判据刻意保守：已读 + 未星标 + 未保持未读 + 早于阈值，四个条件缺一不可（见 retention.ts 注释）。
       //
@@ -699,15 +750,16 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         freedChars + ' 字符）')
       return ok({ deleted: doomed.size, freedChars, cutoff })
     },
-  },
+  }),
 
-  toggleKeepUnread: {
+  toggleKeepUnread: defineEndpoint({
+    payload: itemIdPayload,
+    invalidMessage: 'toggleKeepUnread 需要 itemId',
     carriesAccount: true,
-    to: async (payload, ctx) => {
+    to: async (input, ctx) => {
       // 「保持未读」在 GR 里**没有快捷键**（规格 §3.4 的键位列是「—」），是条目下方的链接。
       // 所以这个端点服务于客户端的那个链接，不接键位。
-      const itemId = String((payload as { itemId?: unknown } | null)?.itemId ?? '')
-      if (!itemId) return fail('bad-request', 'toggleKeepUnread 需要 itemId')
+      const itemId = input.itemId
       const existing = ctx.store.item(itemId)
       if (existing === undefined) return fail('not-found', '条目不存在：' + itemId)
       const keptUnread = existing.keptUnread !== true
@@ -717,7 +769,7 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         : rebuildItem(existing, { omit: ['keptUnread'] }))
       return ok({ itemId, keptUnread })
     },
-  },
+  }),
 
   // 视图记忆（两列布局任务 7）：UI 偏好的读/写端点是两个，而不是挂在 overview 上。
   //
@@ -728,32 +780,37 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
   //  · 读取必须**早于** feeds 数据可用：客户端一挂载就恢复，不能等 overview 回来再改视图
   //    （那会让用户先看到默认态再跳一下）。
   //
-  // 复用既有 HTTP 通道（ROUTE_PATH + requestRejection 准入），与其余 13 个端点同一条路
+  // 复用既有 HTTP 通道（ROUTE_PATH + requestRejection 准入），与其余端点同一条路
   // —— 不新开机制、不加注入口。
-  viewPreferences: {
-    to: async (_payload, ctx) => ok({ preferences: ctx.store.viewPreferences() }),
-  },
+  viewPreferences: defineEndpoint({
+    payload: noPayload,
+    to: async (_input, ctx) => ok({ preferences: ctx.store.viewPreferences() }),
+  }),
 
-  saveViewPreferences: {
-    to: async (payload, ctx) => {
+  saveViewPreferences: defineEndpoint({
+    payload: saveViewPreferencesPayload,
+    invalidMessage: 'saveViewPreferences 需要 preferences',
+    to: async (input, ctx) => {
       // 传进来的值一律不可信（可能是别的版本写的、也可能根本不是一个对象）：
       // 交给 store 归一后再落库。认不出就回落默认，绝不抛错、绝不把垃圾写进域。
-      const saved = await ctx.store.saveViewPreferences((payload as { preferences?: unknown } | null)?.preferences)
+      const saved = await ctx.store.saveViewPreferences(input.preferences)
       return ok({ preferences: saved })
     },
-  },
+  }),
 
   // ── 文件夹目录与变更接口（M2 02）────────────────────────────────────────
   // 与订阅同住 config.json；每个变更都在**一次**读改写里完成（改名连带成员归属）。
   // 名称规则与错误码归 src/folders.ts；这里只做 payload 形状校验与错误信封转换。
-  listFolders: {
-    to: async (_payload, ctx) => ok({ folders: ctx.store.listFolders() }),
-  },
+  listFolders: defineEndpoint({
+    payload: noPayload,
+    to: async (_input, ctx) => ok({ folders: ctx.store.listFolders() }),
+  }),
 
-  createFolder: {
-    to: async (payload, ctx) => {
-      const name = (payload as { name?: unknown } | null)?.name
-      if (typeof name !== 'string') return fail('bad-request', 'createFolder 需要 name（字符串）')
+  createFolder: defineEndpoint({
+    payload: namePayload,
+    invalidMessage: 'createFolder 需要 name（字符串）',
+    to: async (input, ctx) => {
+      const name = input.name
       try {
         return ok({ folders: await ctx.store.createFolder(name) })
       } catch (error) {
@@ -762,28 +819,28 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         throw error
       }
     },
-  },
+  }),
 
-  renameFolder: {
-    to: async (payload, ctx) => {
-      const body = payload as { from?: unknown; to?: unknown } | null
-      if (typeof body?.from !== 'string' || typeof body?.to !== 'string') {
-        return fail('bad-request', 'renameFolder 需要 from 与 to（字符串）')
-      }
+  renameFolder: defineEndpoint({
+    payload: renameFolderPayload,
+    invalidMessage: 'renameFolder 需要 from 与 to（字符串）',
+    to: async (input, ctx) => {
+      const { from, to } = input
       try {
-        return ok({ folders: await ctx.store.renameFolder(body.from, body.to) })
+        return ok({ folders: await ctx.store.renameFolder(from, to) })
       } catch (error) {
         const failure = folderFailure(error)
         if (failure !== undefined) return failure
         throw error
       }
     },
-  },
+  }),
 
-  deleteFolder: {
-    to: async (payload, ctx) => {
-      const name = (payload as { name?: unknown } | null)?.name
-      if (typeof name !== 'string') return fail('bad-request', 'deleteFolder 需要 name（字符串）')
+  deleteFolder: defineEndpoint({
+    payload: namePayload,
+    invalidMessage: 'deleteFolder 需要 name（字符串）',
+    to: async (input, ctx) => {
+      const name = input.name
       try {
         // 独立入口：只解除分类，绝不走 removeFeed（那会连带删条目）。判据在 tests/folder-storage。
         return ok(await ctx.store.deleteFolder(name))
@@ -793,43 +850,38 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         throw error
       }
     },
-  },
+  }),
 
-  moveFeedToFolder: {
-    to: async (payload, ctx) => {
-      const body = payload as { feedId?: unknown; folder?: unknown } | null
-      if (typeof body?.feedId !== 'string' || body.feedId === '') {
-        return fail('bad-request', 'moveFeedToFolder 需要 feedId（非空字符串）')
-      }
-      // folder 键**必须显式给出**：缺键 ≠ 移到未分类。少了这道判断，一个坏 payload 会把用户
-      // 刚归好的源静默移出分组。
-      if (body === null || !Object.hasOwn(body, 'folder')) {
-        return fail('bad-request', 'moveFeedToFolder 需要 folder（字符串或 null，null = 未分类）')
-      }
-      if (body.folder !== null && typeof body.folder !== 'string') {
-        return fail('bad-request', 'moveFeedToFolder 的 folder 必须是字符串或 null')
-      }
+  moveFeedToFolder: defineEndpoint({
+    payload: moveFeedToFolderPayload,
+    invalidMessage: 'moveFeedToFolder 需要 feedId（非空字符串）与 folder（字符串或 null）',
+    to: async (input, ctx) => {
+      // folder 键**必须显式给出**：缺键 ≠ 移到未分类。这条由 payload 声明（键必需、可 null）钉住，
+      // 少了它一个坏 payload 会把用户刚归好的源静默移出分组。
+      const { feedId, folder } = input
       try {
-        return ok({ folders: await ctx.store.moveFeedToFolder(body.feedId, body.folder === null ? undefined : body.folder) })
+        return ok({ folders: await ctx.store.moveFeedToFolder(feedId, folder === null ? undefined : folder) })
       } catch (error) {
         const failure = folderFailure(error)
         if (failure !== undefined) return failure
         throw error
       }
     },
-  },
+  }),
 
   // ── 标签持久化与变更接口（M2 05）────────────────────────────────────
   // 标签只分类：这里没有「标读」语义，也不触碰 items.read_at。关联写入使用稳定 tag id，
   // 名称可改而 id 不变；空标签由 listTags 的 LEFT JOIN 保留。
-  listTags: {
-    to: async (_payload, ctx) => ok({ tags: ctx.store.listTags() }),
-  },
+  listTags: defineEndpoint({
+    payload: noPayload,
+    to: async (_input, ctx) => ok({ tags: ctx.store.listTags() }),
+  }),
 
-  createTag: {
-    to: async (payload, ctx) => {
-      const name = (payload as { name?: unknown } | null)?.name
-      if (typeof name !== 'string') return fail('bad-request', 'createTag 需要 name（字符串）')
+  createTag: defineEndpoint({
+    payload: namePayload,
+    invalidMessage: 'createTag 需要 name（字符串）',
+    to: async (input, ctx) => {
+      const name = input.name
       try {
         return ok({ tag: await ctx.store.createTag(name) })
       } catch (error) {
@@ -838,28 +890,28 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         throw error
       }
     },
-  },
+  }),
 
-  renameTag: {
-    to: async (payload, ctx) => {
-      const body = payload as { id?: unknown; name?: unknown } | null
-      if (typeof body?.id !== 'string' || typeof body?.name !== 'string') {
-        return fail('bad-request', 'renameTag 需要 id 与 name（字符串）')
-      }
+  renameTag: defineEndpoint({
+    payload: renameTagPayload,
+    invalidMessage: 'renameTag 需要 id 与 name（字符串）',
+    to: async (input, ctx) => {
+      const { id, name } = input
       try {
-        return ok({ tag: await ctx.store.renameTag(body.id, body.name) })
+        return ok({ tag: await ctx.store.renameTag(id, name) })
       } catch (error) {
         const failure = tagFailure(error)
         if (failure !== undefined) return failure
         throw error
       }
     },
-  },
+  }),
 
-  deleteTag: {
-    to: async (payload, ctx) => {
-      const id = (payload as { id?: unknown } | null)?.id
-      if (typeof id !== 'string') return fail('bad-request', 'deleteTag 需要 id（字符串）')
+  deleteTag: defineEndpoint({
+    payload: idPayload,
+    invalidMessage: 'deleteTag 需要 id（字符串）',
+    to: async (input, ctx) => {
+      const id = input.id
       try {
         await ctx.store.deleteTag(id)
         return ok({ deleted: true })
@@ -869,39 +921,38 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         throw error
       }
     },
-  },
+  }),
 
-  setItemTags: {
-    to: async (payload, ctx) => {
-      const body = payload as { itemId?: unknown; tagIds?: unknown } | null
-      if (typeof body?.itemId !== 'string' || body.itemId === '') {
-        return fail('bad-request', 'setItemTags 需要 itemId（非空字符串）')
-      }
+  setItemTags: defineEndpoint({
+    payload: setItemTagsPayload,
+    invalidMessage: 'setItemTags 需要 itemId（非空字符串）与 tagIds（字符串数组）',
+    to: async (input, ctx) => {
       try {
-        // tagIds 的形状由 normalizeTagIds 统一判（非数组 / 非字符串都回 bad-request）；
-        // 这里不把 unknown 强转成 any，也不让一个坏 payload 走到 SQL。
-        const tags = await ctx.store.setItemTags(body.itemId, body.tagIds as readonly string[])
-        return ok({ itemId: body.itemId, tags })
+        // tagIds 的形状由 payload 声明判；去重仍由 store 的 normalizeTagIds 判，
+        // 标签是否存在由存储侧的关联写入判（src/store-sqlite.ts 的 setItemTags）。
+        const tags = await ctx.store.setItemTags(input.itemId, input.tagIds)
+        return ok({ itemId: input.itemId, tags })
       } catch (error) {
         const failure = tagFailure(error)
         if (failure !== undefined) return failure
         throw error
       }
     },
-  },
+  }),
 
-  toggleStar: {
+  toggleStar: defineEndpoint({
+    payload: itemIdPayload,
+    invalidMessage: 'toggleStar 需要 itemId',
     carriesAccount: true,
-    to: async (payload, ctx) => {
-      const itemId = String((payload as { itemId?: unknown } | null)?.itemId ?? '')
-      if (!itemId) return fail('bad-request', 'toggleStar 需要 itemId')
+    to: async (input, ctx) => {
+      const itemId = input.itemId
       const existing = ctx.store.item(itemId)
       if (existing === undefined) return fail('not-found', '条目不存在：' + itemId)
       const starred = !existing.starred
       await ctx.store.saveItem(itemId, { ...existing, starred })
       return ok({ itemId, starred })
     },
-  },
+  }),
 }
 
 /**
