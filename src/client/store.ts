@@ -152,7 +152,7 @@ export interface ReaderState {
   /**
    * 续页游标（Overview.nextCursor，keyset）：**原样**回带给下一次 overview 调用。
    *
-   * 客户端不解释它的内容（格式 `"<recency>|<id>"` 由宿主定义，见 src/shared.ts 的 decodeCursor）——
+   * 客户端不解释它的内容（格式 `"<recency>|<id>"` 由宿主定义，见 src/cursor.ts 的 decodeCursor）——
    * 它只是一张「我读到哪儿了」的票据。缺省 = 已经到底，界面不再给「加载更多」的入口。
    */
   nextCursor: string | undefined

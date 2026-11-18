@@ -26,7 +26,7 @@ import { createSqliteStore } from '../lib/store-sqlite.js'
 import { createDispatch } from '../lib/endpoints.js'
 import { Config } from '../lib/config.js'
 import { createStore } from '../lib/store.js'
-import { decodeCursor, encodeCursor } from '../lib/shared.js'
+import { decodeCursor, encodeCursor } from '../lib/cursor.js'
 import { selectCleanup } from '../lib/retention.js'
 import { deps, freshRows, PAGING_FEED_ID } from './helpers/reader-store-memory.mjs'
 

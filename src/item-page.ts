@@ -2,7 +2,7 @@
  * 一页条目：`(范围, 游标, 页大小) → 行 + 下一游标`。
  *
  * 为什么单独成模块（ADR-0004）：分页协议是三件事的合成 —— **排序键**（recency 降序 + id 升序，
- * shared.ts 的 recencyOf）、**续页关系**（严格排在边界之后）、**栅栏**（游标绑在范围上）。
+ * cursor.ts 的 recencyOf）、**续页关系**（严格排在边界之后）、**栅栏**（游标绑在范围上）。
  * 这三件事原先分居三处：窗口循环与投影在 endpoints 的 buildOverview 闭包里、编码在 handler 里、
  * 解码在 200 行之外、谓词在三个 SQL 变体和两份 JS 适配器里各写一遍。改任何一处，另一处的用例
  * 都不会红；要测「一页怎么产生」还得起真库 + 真 dispatch。
@@ -15,7 +15,8 @@
  */
 import { createHash } from 'node:crypto'
 import type { ItemRecord } from './domain.js'
-import { decodeCursor, encodeCursor, recencyOf, type Cursor } from './shared.js'
+import { decodeCursor, encodeCursor, recencyOf } from './cursor.js'
+import type { Cursor } from './cursor.js'
 
 /**
  * 浏览范围：文件夹（成员参与栅栏键）或标签（id 参与）。
@@ -79,7 +80,7 @@ export function decodePageCursor(scope: PageScope | undefined, raw: string): Cur
 /**
  * 「这一行严格排在游标之后吗」—— JS 侧的唯一一份续页谓词（ADR-0004 决定 4）。
  *
- * 行与游标是**同一个形状**（`Cursor`：排序键 + id 的一对值，定义在 shared.ts），所以两边都收
+ * 行与游标是**同一个形状**（`Cursor`：排序键 + id 的一对值，定义在 src/cursor.ts），所以两边都收
  * `Cursor` 而不是把一对裸字符串拆成两个参数 —— 排序键的含义只在一处声明。
  *
  * 排序是 recency 降序、同 recency 内 id **升序**，所以同 recency 的续页方向是 `row.id > cursor.id`。

@@ -13,7 +13,9 @@ import { normalizeTagIds, normalizeTagName, requireTagId, TagError } from './tag
 import type { FolderView, TagView } from './shared.js'
 import { articleCharsOf, type ArticleEntry, type CleanupRow } from './retention.js'
 import { applyFeedIntent, type FeedIntent } from './feed-intent.js'
-import { clampReadingRatio, countUnreadPerFeed, recencyOf, sanitizeViewPreferences, type Cursor, type ViewPreferences } from './shared.js'
+import { clampReadingRatio, countUnreadPerFeed, sanitizeViewPreferences, type ViewPreferences } from './shared.js'
+import { recencyOf } from './cursor.js'
+import type { Cursor } from './cursor.js'
 import { afterCursor } from './item-page.js'
 import { linkKeyOf, type DuplicateRow } from './duplicates.js'
 
@@ -138,7 +140,7 @@ export interface ReaderStore {
    */
   unreadPerFeed(feedIds: readonly string[]): Record<string, number>
   /**
-   * 跨源最近的 limit 条（`recency` 降序 + id 升序 —— 与 allItems 同一套排序键，见 shared.ts 的
+   * 跨源最近的 limit 条（`recency` 降序 + id 升序 —— 与 allItems 同一套排序键，见 cursor.ts 的
    * recencyOf；缺发布时间的条目按抓取时间归位）。
    *
    * **为什么不是「取回全表再 slice」**：10 万行下「取 300 条」的代价是物化 10 万条。

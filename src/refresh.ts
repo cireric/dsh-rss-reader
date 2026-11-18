@@ -8,7 +8,7 @@
  *      前者必须远大于后者，否则老条目会借「滚出去重窗口」重新变成未读。
  */
 import { mapConcurrent } from './concurrency.js'
-import { recencyOf } from './shared.js'
+import { recencyOf } from './cursor.js'
 import { rebuildItem, type FeedRecord } from './domain.js'
 import { resolveItemIds, type KnownIdentities } from './feed/item-id.js'
 import { fetchFeed, type FetchLimits } from './feed/fetch.js'

@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite'
 import { parentPort, workerData } from 'node:worker_threads'
-import { decodeCursor, encodeCursor, recencyOf, type ItemView, type SearchPage, type SearchQuery } from './shared.js'
+import { type ItemView, type SearchPage, type SearchQuery } from './shared.js'
+import { decodeCursor, encodeCursor, recencyOf } from './cursor.js'
 
 const db = new DatabaseSync(workerData, { readOnly: true })
 const port = parentPort

@@ -19,10 +19,8 @@
  * 整体覆盖（applyAccount）。feeds / tags 只读，**唯一例外**是 overview 整份落地（applyOverview
  * 与 load 的搜索分支按宿主快照原样写回目录，已在边界表登记）。
  */
-import {
-  httpUrlOrEmpty, recencyOf, type ArticlePayload, type CleanupResult, type ItemView, type Overview,
-  type UnreadAccount,
-} from '../shared.js'
+import { httpUrlOrEmpty, type ArticlePayload, type CleanupResult, type ItemView, type Overview, type UnreadAccount } from '../shared.js'
+import { recencyOf } from '../cursor.js'
 import { createAccountMirror } from './account-mirror.js'
 import { selectionExists } from './nav-model.js'
 import { relativeTime } from './relative-time.js'

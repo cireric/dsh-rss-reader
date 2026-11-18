@@ -1328,7 +1328,7 @@ export const MUTATIONS = [
     // 锚点从「某个 SELECT 的 WHERE 尾巴」改成「这个常量本身」。
     from: "const AFTER_CURSOR = '(i.recency < ? OR (i.recency = ? AND i.id > ?))'",
     to: "const AFTER_CURSOR = '(i.recency < ? OR (i.recency = ? AND i.id < ?))'" },
-  { id: 'paging-游标不校验形状（垃圾当第一页）', file: 'lib/shared.js',
+  { id: 'paging-游标不校验形状（垃圾当第一页）', file: 'lib/cursor.js',
     judges: ['overview-paging.test.mjs'],
     judgeTests: ['游标编解码：格式 "<recency>|<id>"，认不出的必须返回 undefined（不许当成从头开始）', 'overview：游标认不出时响亮拒绝（bad-request），绝不静默从头开始'],
     // 认不出的游标若被解出一个值，调用方就不再失败 —— 客户端回带的垃圾游标会被当成正常续页。

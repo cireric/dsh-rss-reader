@@ -25,7 +25,7 @@ import { EXTRACTOR_REVISION } from './article.js'
 import { rebuildItem } from './domain.js'
 import type { ItemRecord } from './domain.js'
 import type { ReaderStore } from './store.js'
-import { decodeCursor } from './shared.js'
+import { decodeCursor } from './cursor.js'
 import type { SearchPage, SearchQuery } from './shared.js'
 
 /** 搜索默认返回条数（PRD §8.2）。 */
