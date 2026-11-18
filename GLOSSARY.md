@@ -44,3 +44,15 @@ SQL 侧只按索引/生成列缩小候选集合的谓词（如 `read_at IS NOT N
 
 读路径上的防御（overview 按 feeds 键域过滤、`unreadPerFeed` 按传入键、搜索与 agent 工具收窄）。
 它们让孤儿不可见，但**不是**清理，也不改变「孤儿不该存在」这条。
+
+## 一页条目（item page）
+
+`(范围, 游标, 页大小) → 行 + 下一游标` 的那一次产出。窗口补偿、孤儿过滤与游标围栏都属于它；
+端点只负责把行装配成 wire 回包（见 [ADR-0004](docs/adr/0004-item-page-is-the-paging-owner.md)）。
+_Avoid_: 分页函数、`buildOverview`
+
+## 游标围栏（cursor fence）
+
+把续页游标绑在一个**范围**上的前缀（`folder:<成员哈希>:` / `tag:<id>:`）。范围一变，旧游标必须
+响亮失配，绝不静默从头开始——否则翻页会永远翻不完，界面无限追加同一批条目。
+_Avoid_: 游标前缀、scope key
