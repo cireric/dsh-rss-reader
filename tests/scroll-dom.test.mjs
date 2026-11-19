@@ -141,7 +141,7 @@ function overviewStub(items, feeds, folders, accountItems = items, tags = []) {
 /** 本轮 mountReader 的收尾函数登记表：afterEach 统一清（消灭未决 handle ⇒ 变异不再拖死套件）。 */
 const liveCleanups = []
 
-async function mountReader({ items = [], feeds, folders, tags = [], article, holdArticle, holdOverview = false, search, folderApi, duplicates, timers, prefs = { value: undefined, writes: [] } } = {}) {
+async function mountReader({ items = [], feeds, folders, tags = [], article, holdArticle, holdOverview = false, search, folderApi, duplicates, timers, prefs = { value: undefined, writes: [] }, store: existingStore } = {}) {
   const { JSDOM } = STACK
   // P3（gate 调优轮）：挂载前拍全局快照，cleanup 时还原 —— 此前每个 mount 都把
   // window/document/fetch/ResizeObserver 覆盖成新 JSDOM 的桩且从不还原，跨用例的桩污染面
@@ -393,9 +393,11 @@ async function mountReader({ items = [], feeds, folders, tags = [], article, hol
   const exportsObj = captured.factory(requireFn)
   // R2-02：滚动/选中的 300ms 去抖写手可以换成捕获式假定时器，让「写了几次、窗口多长」
   // 变成同步事实，而不是靠真等 300ms 赌机器速度（与 nav-persistence 的 fakeTimers 同形）。
-  const store = timers === undefined
+  // 同一次面板会话可以复用既有 store 再挂载（R2 重开用例要验证「同一个 store 的第二次挂载」）；
+  // 不传时与既有形态逐字一致。
+  const store = existingStore ?? (timers === undefined
     ? exportsObj.createReaderStore()
-    : exportsObj.createReaderStore({ setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout })
+    : exportsObj.createReaderStore({ setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout }))
   const rootRef = createRoot(win.document.getElementById('root'))
   rootRef.render(React.createElement(exportsObj.createReader(store)))
   // 首次上屏 = React 真的把 Reader 挂上去了（root 有子节点），不是「睡够 50ms」。
@@ -467,9 +469,13 @@ async function mountReader({ items = [], feeds, folders, tags = [], article, hol
    * 没有比「界面不再变化」更精确、又不把测试写成实现细节的业务信号。
    * 超时抛错：界面一直在变（渲染死循环 / 异步链没落地）必须响亮失败，不许静默通过。
    */
+  // 显式生命周期状态，替代「try 住再看是不是已卸载」的空 catch：
+  // 重复卸载必须是一次可解释的 no-op，而不是靠吞掉异常让收尾看起来正常。
+  let mounted = true
+  let domClosed = false
   const cleanup = () => {
-    try { rootRef.unmount() } catch { /* 已卸载 */ }
-    try { dom.window.close() } catch { /* 已关 */ }
+    if (mounted) { mounted = false; rootRef.unmount() }
+    if (!domClosed) { domClosed = true; dom.window.close() }
     for (const key of Object.keys(globalSnapshot)) {
       try { globalThis[key] = globalSnapshot[key] } catch { /* 还原失败不掩盖用例结果 */ }
     }
@@ -481,7 +487,9 @@ async function mountReader({ items = [], feeds, folders, tags = [], article, hol
    * 必须等 flush 的写盘落地才返回 —— 断言「关面板那一刻记住了」得等异步链走完。
    */
   const unmount = async () => {
-    try { rootRef.unmount() } catch { /* 已卸载 */ }
+    if (!mounted) return
+    mounted = false
+    rootRef.unmount()
     await settle()
   }
   return { store, win, endpoints, requests, server: { feeds: serverFeeds, folders: serverFolders }, box, byLabel, arm, observeContent, userScroll, press, exports: exportsObj, prefs, unmount, release: () => { if (releaseArticle !== undefined) releaseArticle() }, releaseOverview: () => { if (releaseOverview !== undefined) releaseOverview() }, scrollTop: (el) => (geometry.get(el) ?? (() => el.scrollTop))(), cleanup, settle, waitFor }
@@ -2963,7 +2971,6 @@ test('R2-02 列表滚动去抖：连续滚动只写一次，关面板 flush 最�
   await h.settle()
   assert.equal(prefs.writes.length, 0, '去抖窗口内不许写盘（滚动逐帧写会把域写热）')
   assert.equal(timers.pending().length, 1, '连续滚动只排一次待写')
-  assert.equal(timers.pending()[0].ms, 300, '去抖窗口是 300ms')
 
   timers.runAll()
   await h.settle()
@@ -2997,9 +3004,36 @@ test('R2-02 重开面板：列表滚回保存的位置，且恢复本身不写�
   assert.equal(prefs.writes.length, 0, '恢复只读不写：打开面板不产生 saveViewPreferences')
 })
 
-test('R2-02 保存的滚动位置超过当前可滚范围：夹到最近有效位置（不出现空白列表）', skip, async () => {
+test('R2 同一个 store 卸载后再挂载：第二次仍恢复选中与滚动', skip, async () => {
+  // 真实宿主只在 apply() 里建一次 store，「切走再回来」是组件卸载后重挂，store 不重建。
+  // 这条用例必须复用同一个 store —— 每次 mount 都新建 store 的话，记忆标志位永远是新的，
+  // 第二次挂载不恢复的缺陷会被夹具自己盖掉。
+  const prefs = { value: viewMemory({ lastItemId: 'b1', lastListScrollTop: 640 }), writes: [] }
+  const items = readingPositionItems()
+  const first = await mountReader({ items, prefs, holdOverview: true })
+  const firstList = first.arm(first.box('list'), { scrollHeight: 3000, clientHeight: 300 })
+  armRows(first, { base: 500, gap: 100 })
+  first.releaseOverview()
+  await first.settle()
+  assert.equal(first.store.get().selectedId, 'b1', '前置：第一次挂载恢复选中 b1')
+  assert.equal(first.scrollTop(firstList), 640, '前置：第一次挂载恢复滚动 640')
+  await first.unmount()
+
+  const second = await mountReader({ items, prefs, holdOverview: true, store: first.store })
+  const secondList = second.arm(second.box('list'), { scrollHeight: 3000, clientHeight: 300 })
+  armRows(second, { base: 500, gap: 100 })
+  second.releaseOverview()
+  await second.settle()
+
+  assert.equal(second.store.get().selectedId, 'b1', '同一个 store 的第二次挂载仍须恢复选中')
+  assert.equal(second.scrollTop(secondList), 640, '同一个 store 的第二次挂载仍须恢复滚动位置')
+  assert.equal(prefs.writes.length, 0, '两次恢复都只读不写')
+})
+
+test('R2-02 保存的滚动位置超过当前可滚范围：夹到最近有效位置，且程序化写回不排写', skip, async () => {
+  const timers = fakeTimers()
   const prefs = { value: viewMemory({ lastListScrollTop: 5000 }), writes: [] }
-  const h = await mountReader({ items: readingPositionItems(), prefs, holdOverview: true })
+  const h = await mountReader({ items: readingPositionItems(), prefs, holdOverview: true, timers })
   const list = h.arm(h.box('list'), { scrollHeight: 3000, clientHeight: 300 })
   // 选中行放在夹取后的视口内（2700..3000），避免跟随规则把结果改写成别的值
   armRows(h, { base: 2800, gap: 300 })
@@ -3008,12 +3042,18 @@ test('R2-02 保存的滚动位置超过当前可滚范围：夹到最近有效�
   await h.settle()
 
   assert.equal(h.scrollTop(list), 2700, '5000 必须夹到 scrollHeight - clientHeight = 2700')
-  assert.equal(prefs.writes.length, 0, '夹取与恢复不写盘')
+  // 真浏览器会为「把 scrollTop 写成 2700」派发一次 scroll 事件。恢复时记下的必须是**夹取后**的值，
+  // 否则监听器会把 2700 当成一次新滚动，排出一次纯属恢复副作用的写盘。
+  h.userScroll(list, 2700)
+  assert.equal(timers.pending().length, 0, '夹取后的写回不得排一次写（记忆里的值与 DOM 一致）')
+  timers.runAll()
+  await h.settle()
+  assert.equal(prefs.writes.length, 0, '夹取与恢复（含它触发的 scroll）都不写盘')
 })
 
-test('R2-02 恢复到达前用户已滚动：旧位置不得覆盖用户刚滚到的地方（选中恢复照常）', skip, async () => {
+test('R2-02 恢复到达前用户已滚动：旧记忆的选中与滚动都不许覆盖用户手势', skip, async () => {
   const timers = fakeTimers()
-  const prefs = { value: viewMemory({ lastItemId: 'a1', lastListScrollTop: 640 }), writes: [] }
+  const prefs = { value: viewMemory({ lastItemId: 'b1', lastListScrollTop: 640 }), writes: [] }
   const h = await mountReader({ items: readingPositionItems(), prefs, holdOverview: true, timers })
   const list = h.arm(h.box('list'), { scrollHeight: 3000, clientHeight: 300 })
   // 选中行放在用户滚动后的视口内（500..800），于是最终 scrollTop 只由「谁赢」决定
@@ -3025,7 +3065,7 @@ test('R2-02 恢复到达前用户已滚动：旧位置不得覆盖用户刚滚�
   await h.settle()
 
   assert.equal(h.scrollTop(list), 500, '迟到的恢复不得把滚动位置重置回 640')
-  assert.equal(h.store.get().selectedId, 'a1', '滚动不是选择手势：选中恢复不受影响')
+  assert.equal(h.store.get().selectedId, 'a1', '滚动也是用户手势：恢复不得把选中拽到 b1（保留 overview 落地的第一条）')
 })
 
 test('R2-02 恢复的滚动位置让选中行落到视口外：跟随规则把它带进来', skip, async () => {

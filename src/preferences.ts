@@ -90,6 +90,21 @@ export const DEFAULT_VIEW_PREFERENCES: ViewPreferences = {
 const FILTERS: ReadonlyArray<ViewPreferences['filter']> = ['all', 'unread', 'starred']
 
 /**
+ * 列表滚动位置唯一判据（R2-02）：只接受有限且 ≥ 0 的数，认不出返回 undefined。
+ *
+ * 读侧（sanitizeViewPreferences）与写侧（客户端 rememberListScrollTop）共用这一份 ——
+ * 值从存储读回来、从 DOM scroll 事件交上来，都必须是同一条判据。ADR-0001：
+ * 一条判断只该有一个裁决者，否则一处放宽、一处收紧时，表现是「存得下却读不回」
+ * 或「读得回却写不出去」，而且两边看代码都各自正确。
+ *
+ * 0 是合法值（停在顶部），不能与「没有记忆」混为一谈；NaN / Infinity / 负数 / 字符串
+ * 一律当没有，不制造一个会让滚动条乱跳的坐标。
+ */
+export function validListScrollTop(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+/**
  * 把「存储里读到的东西」归一成一份可信的视图记忆（**读侧唯一的判定点**）。
  *
  * 为什么必须逐字段独立回落而不是整份二选一：一次坏值不该把另外两项的记忆一起抹掉 ——
@@ -168,12 +183,9 @@ export function sanitizeViewPreferences(
   const lastItemIdRaw = source['lastItemId']
   const lastItemId = typeof lastItemIdRaw === 'string' && lastItemIdRaw !== '' ? lastItemIdRaw : undefined
 
-  // 列表滚动位置（R2-02）：只接受有限且 ≥ 0 的数；0 是合法值（停在顶部），
-  // 负数 / NaN / Infinity / 字符串认不出就当「没有」。同样不把 undefined 写成键。
-  const lastListScrollTopRaw = source['lastListScrollTop']
-  const lastListScrollTop = typeof lastListScrollTopRaw === 'number' && Number.isFinite(lastListScrollTopRaw) && lastListScrollTopRaw >= 0
-    ? lastListScrollTopRaw
-    : undefined
+  // 列表滚动位置（R2-02）：判据见 validListScrollTop（读侧与写侧共用的唯一裁决者）。
+  // 同样不把 undefined 写成键 —— 「没有」不能用 undefined 占位。
+  const lastListScrollTop = validListScrollTop(source['lastListScrollTop'])
 
   // 只搬运点名的字段：认不出的键（历史版本留下的、或被别的写入者塞进来的）一律丢掉，
   // 否则它们会被原样写回存储，攒够几版就成了没人敢删的历史包袱。

@@ -828,10 +828,19 @@ export const MUTATIONS = [
     judgeTests: ['持久化值不可信时（未知 feedId / 非法 shape）回落默认值且不抛错'],
     from: 'FILTERS.includes(filterRaw) ? filterRaw : DEFAULT_VIEW_PREFERENCES.filter',
     to: 'filterRaw ?? DEFAULT_VIEW_PREFERENCES.filter' },
-  // ③ 恢复不许盖掉用户在异步窗口里做的手势（时序守卫）
+  // ③ 恢复不许盖掉用户在异步窗口里做的手势（时序守卫）。
+  // R2 起这条判据同时看守阅读位置：选中（j/k、点行、打开条目）与滚动都算「用户已动手」，
+  // 迟到的恢复必须整份让位。此前为 R2 单独加过一条同 from/to 的 client-恢复覆盖用户手势，
+  // 它是同一条判定的第二份条目（重复变异），判据已并入这里，不再各守一半。
   { id: 'persist-恢复盖掉用户手势', file: 'lib/client.js',
-    judges: ['nav-persistence.test.mjs'],
-    judgeTests: ['恢复是异步的：用户在它到达之前的手势不会被旧记忆盖掉（整份让位）'],
+    judges: ['nav-persistence.test.mjs', 'scroll-dom.test.mjs'],
+    judgeTests: [
+      '恢复是异步的：用户在它到达之前的手势不会被旧记忆盖掉（整份让位）',
+      '阅读位置：恢复到达前用户先选了另一行 ⇒ 恢复整份让位，不把选中拽回去',
+      'R2-01 恢复迟到：用户先选的行不被覆盖',
+      '列表滚动位置：恢复到达前用户已滚动 ⇒ 选中与滚动都不被旧记忆覆盖',
+      'R2-02 恢复到达前用户已滚动：旧记忆的选中与滚动都不许覆盖用户手势',
+    ],
     from: 'if (viewTouched) return;',
     to: ';' },
   // ④ 恢复必须真的落到 state —— 只读了记忆却不用它，等于功能没接上（最隐蔽的形态）
@@ -840,18 +849,6 @@ export const MUTATIONS = [
     judgeTests: ['分页接线：续页游标在时渲染「加载更多」，点它真的取下一页（并追加到当前列表）', '记住上次选中的导航项、filter 与左栏显隐，重开后恢复', '选中的标签会记住：重开后回到同一个标签，而不是静默掉回「全部」', '改字号只动排版：导航、过滤与左栏显隐一项都不许被覆盖（重开后排版也恢复）', '持久化值不可信时（未知 feedId / 非法 shape）回落默认值且不抛错'],
     // 2026-11-16 重锚：视图记忆改成 host 注入的 viewMemory（load 已搬进 list-actions.ts）。
     from: 'if (!viewMemory.restored()) viewMemory.apply(preferences);',
-    to: ';' },
-  // ⑪ R2-01 阅读位置：恢复不得覆盖用户在异步窗口里选中的行。
-  // 与既有的 persist-恢复盖掉用户手势 是同一条守卫，但这一条**额外**由新的选中手势判据与
-  // 真实 DOM 时序用例看守 —— 去掉守卫时，「按 j 选好的行不会自己弹回去」当场翻红。
-  { id: 'client-恢复覆盖用户手势', file: 'lib/client.js',
-    judges: ['nav-persistence.test.mjs', 'scroll-dom.test.mjs'],
-    judgeTests: [
-      '阅读位置：恢复到达前用户先选了另一行 ⇒ 恢复整份让位，不把选中拽回去',
-      'R2-01 恢复迟到：用户先选的行不被覆盖',
-      '恢复是异步的：用户在它到达之前的手势不会被旧记忆盖掉（整份让位）',
-    ],
-    from: 'if (viewTouched) return;',
     to: ';' },
   // ⑫ R2-01 阅读位置：恢复只读不写。恢复时调一次 persistView 会把「读」与「写」耦合成环
   // （读到的旧值覆盖用户刚做的动作），也让每次打开面板都白热一次存储。
@@ -868,23 +865,52 @@ export const MUTATIONS = [
   { id: 'client-滚动不去抖', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs', 'scroll-dom.test.mjs'],
     judgeTests: [
-      '列表滚动位置：滚动去抖 300ms 写一次，保存内容含 lastListScrollTop',
+      '列表滚动位置：滚动去抖写一次，保存内容含 lastListScrollTop',
       'R2-02 列表滚动去抖：连续滚动只写一次，关面板 flush 最后一处位置',
     ],
-    // from 照构建产物 lib/client.js 的实际形状写（三行一组，单独锚 scheduleViewWrite() 会在
+    // from 照构建产物 lib/client.js 的实际形状写（多行一组，单独锚 scheduleViewWrite() 会在
     // rememberSelection 里再命中一次）。改动为当场 persistView：滚动立刻写盘、且置「用户已动手」。
-    from: 'lastListScrollTop = top;\n\t\t\t\tlistScrollTouched = true;\n\t\t\t\tscheduleViewWrite();',
-    to: 'lastListScrollTop = top;\n\t\t\t\tlistScrollTouched = true;\n\t\t\t\tpersistView();' },
+    from: 'const value = validListScrollTop(top);\n\t\t\t\tif (value === void 0) return;\n\t\t\t\tif (value === lastListScrollTop) return;\n\t\t\t\tlastListScrollTop = value;\n\t\t\t\tlistScrollTouched = true;\n\t\t\t\tviewTouched = true;\n\t\t\t\tscheduleViewWrite();',
+    to: 'const value = validListScrollTop(top);\n\t\t\t\tif (value === void 0) return;\n\t\t\t\tif (value === lastListScrollTop) return;\n\t\t\t\tlastListScrollTop = value;\n\t\t\t\tlistScrollTouched = true;\n\t\t\t\tviewTouched = true;\n\t\t\t\tpersistView();' },
   // ⑫c R2-02 列表滚动位置：写入口是**整份覆盖写**，少带这一位就会被下一次导航抹掉
   // （用户切一下源/过滤，重开面板就回到顶部 —— 本项最容易踩的坑）。
   { id: 'persist-整份写丢滚动位置', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs', 'scroll-dom.test.mjs'],
     judgeTests: [
-      '列表滚动位置：滚动去抖 300ms 写一次，保存内容含 lastListScrollTop',
+      '列表滚动位置：滚动去抖写一次，保存内容含 lastListScrollTop',
       'R2-02 列表滚动去抖：连续滚动只写一次，关面板 flush 最后一处位置',
     ],
     from: 'if (lastListScrollTop !== void 0) preferences.lastListScrollTop = lastListScrollTop;',
     to: ';' },
+  // ⑫d R2-01 阅读位置：整份写漏掉 lastItemId ⇒ 一次普通导航（切源/过滤/左栏显隐）就把
+  // 「上次停在哪一行」抹掉。判据是选中变化写盘与普通导航整份写两条用例。
+  { id: 'persist-整份写丢选中位置', file: 'lib/client.js',
+    judges: ['nav-persistence.test.mjs'],
+    judgeTests: [
+      '阅读位置：选中变化去抖写一次，保存内容含 lastItemId',
+    ],
+    from: 'if (state.selectedId !== void 0) preferences.lastItemId = state.selectedId;',
+    to: ';' },
+  // ⑫e R2-01 阅读位置：面板卸载 = 会话结束。宿主只建一次 store，卸载时不复位恢复标志，
+  // 第二次挂载的 load 就永远不再读记忆 —— 切走再回来看着像「位置没记住」。
+  { id: 'persist-卸载不复位会话', file: 'lib/client.js',
+    judges: ['nav-persistence.test.mjs', 'scroll-dom.test.mjs'],
+    judgeTests: [
+      '阅读位置：同一个 store 卸载后再挂载（会话结束）会重新读记忆',
+      'R2 同一个 store 卸载后再挂载：第二次仍恢复选中与滚动',
+    ],
+    from: 'viewRestored = false;\n\t\t\t\tviewTouched = false;\n\t\t\t\tlistScrollTouched = false;\n\t\t\t\trestoredListScrollTop = void 0;',
+    to: ';' },
+  // ⑫f R2-02 列表滚动位置：恢复值必须在 store 里按当前可滚范围夹取，并把**夹取后的值**
+  // 记为上次位置；否则真浏览器为程序化写回派发的 scroll 会被当成用户滚动，排出一次写盘。
+  { id: 'persist-取恢复值不夹取', file: 'lib/client.js',
+    judges: ['nav-persistence.test.mjs', 'scroll-dom.test.mjs'],
+    judgeTests: [
+      '列表滚动位置：取恢复值时按当前可滚范围夹取，夹取后的写回不排写',
+      'R2-02 保存的滚动位置超过当前可滚范围：夹到最近有效位置，且程序化写回不排写',
+    ],
+    from: 'const clamped = clampScrollTop(saved, maxTop);\n\t\t\t\tlastListScrollTop = clamped;\n\t\t\t\treturn clamped;',
+    to: 'lastListScrollTop = saved;\n\t\t\t\treturn saved;' },
   // ⑤ 写盘串行化失效 ⇒ 后发的先到会让记忆回退成更早的状态
   { id: 'persist-写盘不串行化', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs'],

@@ -47,9 +47,11 @@ import { READER_KEY_HELP, READER_HELP_SCOPE_LABEL } from '../keys.js'
 // 只剩「跟随选中项滚动」那条 effect 用的两个（nextScrollTop / SCROLL_ATTR）；
 // 扫视与翻页那几个（scanTop / pageTop / halfPageTop / scanStepFor / scrollSelectorFor / lineStepFrom）
 // 已随 141 行键盘路由搬进 keyboard-routing.ts（2026-10-15）。
+// 夹取（clampScrollTop）已收进 store.takeListScrollTop：面板拿到的就是夹取后的值，
+// 这里不再保留第二份夹取（同一条判据只留一个裁决者）。
 // isElementNode 的**类型收窄**住在客户端（./element-node.ts）：host 工程没有 DOM lib，
 // 收窄留在共享文件里会让 host 编译不过（2026-11-13 实测 tsc 7.0.2 TS2304）。
-import { clampScrollTop, nextScrollTop, SCROLL_ATTR } from '../list-scroll.js'
+import { nextScrollTop, SCROLL_ATTR } from '../list-scroll.js'
 import { isElementNode } from './element-node.js'
 
 export const inject = ['slots']
@@ -317,14 +319,20 @@ export function createReader(store: ReaderStore): () => ReactNode {
     // 它还必须早于下面那条「跟随选中」的 useEffect，跟随规则才能基于恢复后的位置判断选中行是否可见
     // （在视口内就不动它；因视口变化落到视口外，才允许跟随规则把它带进来）。
     // 取不到（没有记忆 / 用户恢复前已滚过 / 已取过）就什么都不做。
+    // 夹取已在 store.takeListScrollTop 内完成，拿到的就是可写的最终值 —— 这里直接写 DOM。
+    //
+    // 依赖里必须有 state.loading：同一个 store 的第二次挂载时 items 可能已经在上一次会话里，
+    // 本次 overview 落到 state 的数组甚至可能与旧值同引用（缓存 / 夹具）—— 只盯 items 的话
+    // 恢复值到达时这个 effect 不会重跑，滚动就停在 0。loading 的 true→false 是「这一轮取数真的
+    // 走完了」的业务信号，恢复值恰在它之后交接，所以它必须参与触发。
     useLayoutEffect(() => {
       if (state.view !== 'list') return
       const box = listBox.current
       if (box === null) return
-      const saved = store.takeListScrollTop()
+      const saved = store.takeListScrollTop(box.scrollHeight - box.clientHeight)
       if (saved === undefined) return
-      box.scrollTop = clampScrollTop(saved, box.scrollHeight - box.clientHeight)
-    }, [store, state.view, state.items])
+      box.scrollTop = saved
+    }, [store, state.view, state.items, state.loading])
 
     // 跟随滚动：选中项超出可视区时才滚（j/k 走到边界后屏幕要跟着动——用户实测缺失）。
     // 位置计算在 src/list-scroll.ts 里，是纯函数且有单测；这里只负责量 DOM 并写入。

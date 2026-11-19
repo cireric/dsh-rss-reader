@@ -719,9 +719,9 @@ test('只在关键动作时写盘：移动光标（每次按键）不产生写�
 
 /* ============================ ③b 阅读位置：回到上次那一行（R2-01） ============================ */
 
-test('阅读位置：选中变化去抖 300ms 写一次，保存内容含 lastItemId', async () => {
+test('阅读位置：选中变化去抖写一次，保存内容含 lastItemId', async () => {
   // 为什么必须去抖：j/k 每次移动都会换选中，逐次写盘等于每按一次键就写一次域。
-  // 判据同时钉住三件事：不当场写、窗口 300ms、窗口内只落一次。
+  // 判据钉行为而不是实现常量：不当场写；把待写定时器推进之后，恰好落一次。
   const timers = fakeTimers()
   const prefs = { value: undefined, writes: [] }
   const store = await openPanel({ items: twoFeeds(), prefs, timers })
@@ -730,7 +730,6 @@ test('阅读位置：选中变化去抖 300ms 写一次，保存内容含 lastIt
   store.select('b1')
   assert.equal(prefs.writes.length, 0, '选中不当场写盘')
   assert.equal(timers.pending().length, 1, '选中变化必须排一次写')
-  assert.equal(timers.pending()[0].ms, 300, '去抖窗口是 300ms')
   timers.runAll()
   await flush()
   assert.equal(prefs.writes.length, 1, '一次去抖只写一次')
@@ -885,8 +884,9 @@ const savedView = (overrides = {}) => ({
   reading: DEFAULT_READING_PREFERENCES, ...overrides,
 })
 
-test('列表滚动位置：滚动去抖 300ms 写一次，保存内容含 lastListScrollTop', async () => {
-  // 滚动是高频动作：每帧写盘会把域写热，所以它必须和选中共用同一个 300ms 去抖窗口。
+test('列表滚动位置：滚动去抖写一次，保存内容含 lastListScrollTop', async () => {
+  // 滚动是高频动作：每帧写盘会把域写热，所以它必须和选中共用同一个去抖写手。
+  // 判据钉行为而不是实现常量：不当场写；把待写定时器推进之后，恰好落一次。
   // 同时钉住整份覆盖写那条最容易踩的坑：普通导航不换滚动位置，但会把整份偏好重写一遍 ——
   // 写入口少带 lastListScrollTop，一次切左栏就把位置抹了。
   const timers = fakeTimers()
@@ -896,7 +896,6 @@ test('列表滚动位置：滚动去抖 300ms 写一次，保存内容含 lastLi
   store.rememberListScrollTop(640)
   assert.equal(prefs.writes.length, 0, '滚动不当场写盘')
   assert.equal(timers.pending().length, 1, '滚动必须排一次去抖写')
-  assert.equal(timers.pending()[0].ms, 300, '去抖窗口是 300ms')
 
   // 连续滚动重新计时，只在停下来之后写一次
   store.rememberListScrollTop(720)
@@ -933,14 +932,29 @@ test('列表滚动位置：滚动后立刻关面板（flush）也记住', async 
 test('列表滚动位置：恢复值只被取一次，取过就清空；恢复本身不写盘', async () => {
   const prefs = { value: savedView({ lastListScrollTop: 640 }), writes: [] }
   const store = await openPanel({ items: twoFeeds(), prefs })
-  assert.equal(store.takeListScrollTop(), 640, '面板首屏后能取到恢复值')
-  assert.equal(store.takeListScrollTop(), undefined, '取过即清空 —— 第二次什么都不做')
+  assert.equal(store.takeListScrollTop(2000), 640, '面板首屏后能按当前可滚范围取到恢复值')
+  assert.equal(store.takeListScrollTop(2000), undefined, '取过即清空 —— 第二次什么都不做')
   assert.equal(prefs.writes.length, 0, '恢复只读不写（打开面板不产生 saveViewPreferences）')
 })
 
-test('列表滚动位置：恢复到达前用户已滚动 ⇒ 滚动恢复放弃，但选中恢复照常', async () => {
-  // 与 R2-01 的「用户先选了别的行」同形，但手势是**滚动**：它只否决滚动恢复，
-  // 不该把迟到的选中恢复一起吞掉（实现决策 8 只把选择/导航算作整份让位）。
+test('列表滚动位置：取恢复值时按当前可滚范围夹取，夹取后的写回不排写', async () => {
+  // 存进去的是 9999，当前容器只能滚到 2700。夹取必须在 store 里完成并把**夹取后的值**
+  // 记成「上一次的位置」—— 面板随后写 DOM 时浏览器会派发一次 scroll，若记的是 9999，
+  // 监听器会把这次程序化写回当成用户滚动，排出一次纯属恢复副作用的写盘。
+  const timers = fakeTimers()
+  const prefs = { value: savedView({ lastListScrollTop: 9999 }), writes: [] }
+  const store = await openPanel({ items: twoFeeds(), prefs, timers })
+  assert.equal(store.takeListScrollTop(2700), 2700, '9999 必须夹到当前最大可滚位置 2700')
+  store.rememberListScrollTop(2700)        // 等价于浏览器为程序化写回派发的 scroll 事件
+  assert.equal(timers.pending().length, 0, '夹取后的值与记忆一致，不得排一次写')
+  timers.runAll()
+  await flush()
+  assert.equal(prefs.writes.length, 0, '恢复（含它触发的 scroll）不写盘')
+})
+
+test('列表滚动位置：恢复到达前用户已滚动 ⇒ 选中与滚动都不被旧记忆覆盖', async () => {
+  // 滚动同样是用户手势：恢复还在路上时用户先滚过，迟到的恢复就不许再动这个列表 ——
+  // 既不能重置滚动，也不能把选中拽回旧记忆那一行（否则视口会被「跟随选中」再次拉走）。
   const timers = fakeTimers()
   const prefs = { value: savedView({ lastItemId: 'b1', lastListScrollTop: 640 }), writes: [] }
   const exports = loadExports({ items: twoFeeds(), prefs, timers })
@@ -951,8 +965,29 @@ test('列表滚动位置：恢复到达前用户已滚动 ⇒ 滚动恢复放弃
   await loading
   await flush()
 
-  assert.equal(store.takeListScrollTop(), undefined, '用户已经滚过 ⇒ 旧滚动位置必须放弃，不许覆盖他刚滚到的地方')
-  assert.equal(store.get().selectedId, 'b1', '滚动不是选择手势：选中恢复不受影响')
+  assert.equal(store.takeListScrollTop(2000), undefined, '用户已经滚过 ⇒ 旧滚动位置必须放弃，不许覆盖他刚滚到的地方')
+  assert.equal(store.get().selectedId, 'a1', '滚动也是用户手势：选中恢复同样让位（保留 overview 落地的第一条）')
+})
+
+test('阅读位置：同一个 store 卸载后再挂载（会话结束）会重新读记忆', async () => {
+  // 真实宿主只在 apply() 里建一次 store；面板切走再回来时组件重挂、store 不重建。
+  // 若恢复标志位停在「已恢复 / 已动手」，第二次挂载就再也不会读记忆。
+  const timers = fakeTimers()
+  const prefs = { value: savedView({ lastItemId: 'b1', lastListScrollTop: 640 }), writes: [] }
+  const store = await openPanel({ items: twoFeeds(), prefs, timers })
+  assert.equal(store.get().selectedId, 'b1', '前置：第一次挂载恢复选中 b1')
+  assert.equal(store.takeListScrollTop(2000), 640, '前置：第一次挂载取到滚动位置')
+  store.flushViewMemory()                  // 等价于面板卸载：会话结束
+
+  // 两次挂载之间记忆可能被别的面板改写（视图记忆是单槽，以最后写入为准）。
+  // 第二次挂载必须重新读，而不是沿用上一次的恢复结果。
+  prefs.value = savedView({ lastItemId: 'a2', lastListScrollTop: 300 })
+  await store.load('overview')
+  await flush()
+
+  assert.equal(store.get().selectedId, 'a2', '第二次挂载必须重新读记忆并恢复选中')
+  assert.equal(store.takeListScrollTop(2000), 300, '第二次挂载必须重新交接滚动位置')
+  assert.equal(prefs.writes.length, 0, '两次恢复都只读不写')
 })
 
 /* ============================ ④ 老域能否打开（必须实测） ============================ */

@@ -7,8 +7,9 @@
  */
 import { useEffect, useState } from 'react'
 import { ROUTE_PATH, type DiscoveryResult, type Endpoint, type FeedView, type FolderView, type ItemView, type OpmlImportResult, type RpcResult, type SearchQuery, type TagView, type DuplicateHintView } from '../shared.js'
-import { DEFAULT_READING_PREFERENCES, sanitizeViewPreferences } from '../preferences.js'
+import { DEFAULT_READING_PREFERENCES, sanitizeViewPreferences, validListScrollTop } from '../preferences.js'
 import type { ReadingPreferences, ViewPreferences } from '../preferences.js'
+import { clampScrollTop } from '../list-scroll.js'
 
 export type Filter = 'all' | 'unread' | 'starred'
 
@@ -263,7 +264,8 @@ const browserDeps: ReaderStoreDeps = {
  *
  * 列表滚动位置（R2-02）的 `lastListScrollTop` / `restoredListScrollTop` / `listScrollTouched` 是列表域的
  * **模块内**值：刻意不进 state、不触发渲染；`rememberListScrollTop` 与选中共享同一个 300ms 去抖写手，
- * `flushViewMemory` 一次把两者都落盘。`takeListScrollTop` 只交出恢复值一次（取过即清空）。
+ * `flushViewMemory` 一次把两者都落盘。`takeListScrollTop` 按当前可滚范围夹取后只交出恢复值一次
+ * （取过即清空）；`flushViewMemory` 同时是「面板卸载 = 会话结束」的复位入口。
  *
  * 共享的不止三样：`deps`（通道/时钟/opener）、`set`（唯一写入口）、`state`（只读快照），
  * 以及跨域入口 `listVersion`（列表与搜索共用，经 next/current 两个函数）、`reload`、`refreshDuplicateHints`。
@@ -324,8 +326,8 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
    *     判据用**刚下发的 feeds 表**，所以恢复发生在 applyOverview 之后（那时才看得见在订的源）。
    *  ② **恢复不写盘**：一挂载就把读到的值写回去，等于每次打开面板都写一次同一个值 —— 白热存储，
    *     还会把「读」和「写」两条路径耦合成环（读到的旧值刚好覆盖掉用户刚做的动作）。
-   *  ③ **用户的手势优先**：恢复是异步的，用户在它到达之前按了 u / 点了源，就不能再拿旧记忆盖掉
-   *     他的手势（touched 标志）。否则表现为「按了没反应，过一会儿自己弹回去」。
+   *  ③ **用户的手势优先**：恢复是异步的，用户在它到达之前按了 u / 点了源 / 选了行 / 滚了列表，
+   *     就不能再拿旧记忆盖掉他的手势（touched 标志）。否则表现为「按了没反应，过一会儿自己弹回去」。
    *  ④ **写盘是整份覆盖**：阅读位置（R2-01）必须由写入口从**当下** state 取 selectedId，
    *     调用方不许自己拼一份 —— 少带这一位，一次普通的切过滤/切左栏就会把记忆抹掉。
    */
@@ -346,8 +348,11 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
    */
   let restoredListScrollTop: number | undefined
   /**
-   * 恢复到达前用户是否已经滚过列表。**只否决滚动恢复**，不否决选中恢复 ——
-   * 滚动不是「选择/导航手势」，用户自己滚到的位置不该被旧记忆覆盖，但他没动过选中项。
+   * 本会话里用户是否已经滚过列表。取恢复值时据此放弃旧滚动位置。
+   *
+   * 注意它与「整份恢复让位」不是同一条判据：滚动同时也会置 `viewTouched`（见
+   * rememberListScrollTop），因为迟到的选中恢复会通过「跟随选中」再次把视口拉走。
+   * 本标志只负责「取恢复值」这一条路径，便于把两件事分别读懂。
    */
   let listScrollTouched = false
   /** 写盘串行化：记忆按用户动作的先后收敛，不能让两个在飞的请求乱序落库（后发的先到 ⇒ 记忆回退）。 */
@@ -468,9 +473,9 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   /**
    * 安排一次 300ms 去抖写（**只排程**，不置「用户已动手」）。
    *
-   * 为什么要和「用户已动手」拆开：选中与滚动共用同一个写手（只该有一个去抖窗口），
-   * 但两者对手势判据的意义不同 —— 选中意味着整份恢复让位；滚动只否决滚动恢复，
-   * 不该顺手吞掉还没到达的选中恢复（实现决策 8 只把「选择/导航」算作整份让位）。
+   * 置 `viewTouched` 的责任留给调用方：rememberSelection / rememberListScrollTop 都是
+   * 「用户真的动手了」的入口，各自先置标志再排程；本函数只保证选中与滚动共用同一个
+   * 去抖窗口（只该有一个写手），避免任一入口需要「排程但不让位」这种特例。
    */
   const scheduleViewWrite = (): void => {
     // 重新计时而不是叠加：连续 j/k / 连续滚动只在停下来 300ms 后写一次。
@@ -496,31 +501,40 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
    * 记录列表滚动位置（R2-02）：只改模块内的值并排一次去抖写。
    *
    * **不 set**：滚动若进 React state，每帧都会重渲染整个阅读器；界面没有任何一处读这个值。
-   * 认不出的值直接忽略（与 sanitizeViewPreferences 同一条归一化规则），不制造一次空写。
-   * 与上次记下的值相同也跳过 —— 恢复时程序化写 scrollTop 会触发一次 scroll 事件，
-   * 这一条让「读回来的值」不会在打开面板时被当成用户手势再写回去一遍。
+   * 认不出的值直接忽略（validListScrollTop 与 sanitizeViewPreferences 共用同一条判据），
+   * 不制造一次空写。与上次记下的值相同也跳过 —— 恢复时程序化写 scrollTop 会让浏览器派发
+   * 一次 scroll 事件；这一条让「读回来的值」不会被当成用户手势再写回去一遍。
+   *
+   * 值真的变化时置 viewTouched：滚动也是用户手势。否则恢复还在路上时用户先滚了列表，
+   * 迟到的选中恢复仍会把选中换到旧记忆那一行 —— 「跟随选中」随后又把视口拉走，用户的滚动
+   * 等于白做（实现决策 8 在 R2 修复轮按此收口：选择/导航/滚动都算「已动手」）。
    */
   const rememberListScrollTop = (top: number): void => {
-    if (!Number.isFinite(top) || top < 0) return
-    if (top === lastListScrollTop) return
-    lastListScrollTop = top
+    const value = validListScrollTop(top)
+    if (value === undefined) return
+    if (value === lastListScrollTop) return
+    lastListScrollTop = value
     listScrollTouched = true
+    viewTouched = true
     scheduleViewWrite()
   }
 
   /**
    * 取一次恢复的滚动位置（R2-02）：**取过即清空**，且用户已经自己滚过就放弃。
    *
-   * 面板在列表首屏渲染完成后调用一次，然后自己把 scrollTop 夹进当前可滚范围。
-   * 同时把值写进模块内的 lastListScrollTop：随后由这次写回触发的 scroll 事件不会排出一次
-   * 「恢复本身造成的写盘」（用户故事 12 / 存储注释 ②）。
+   * 面板在列表首屏渲染完成后调用一次，并把返回值**直接**写进容器 scrollTop。
+   * 夹取在这里完成而不是留给面板：`lastListScrollTop` 必须是夹取后的值 —— 真浏览器会为
+   * 「把 scrollTop 写成夹取后的值」派发一次 scroll，若模块里记的是未夹取的原值（如 9999 → 2700），
+   * 监听器会把这次程序化写回当成用户滚动，排出一次纯属恢复副作用的写盘（用户故事 12）。
+   * 面板因此不再自己夹 —— 两份夹取迟早会漂移。
    */
-  const takeListScrollTop = (): number | undefined => {
+  const takeListScrollTop = (maxTop: number): number | undefined => {
     const saved = restoredListScrollTop
     restoredListScrollTop = undefined
     if (saved === undefined || listScrollTouched) return undefined
-    lastListScrollTop = saved
-    return saved
+    const clamped = clampScrollTop(saved, maxTop)
+    lastListScrollTop = clamped
+    return clamped
   }
 
   /**
@@ -530,11 +544,22 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
    * 那一刻的位置也得记住。写手同时管选中项与列表滚动位置（R2-02），所以 flush 一次两样都带走。
    * 为什么「没有待写值不许写」：每次打开/关闭面板都写一次同样的值只会白热存储；恢复本身也不写盘，
    * 所以「没有手势 → 零写请求」这条既有承诺在卸载路径上同样成立。
+   *
+   * **卸载 = 会话结束**：写完待写值后必须把恢复状态整组复位。宿主只在 apply() 里建一次 store，
+   * 面板切走再回来是组件卸载后重挂、store 不重建 —— 若 viewRestored 停在 true，第二次挂载
+   * 的 load 就再也不会读记忆；viewTouched 停在 true 会让它即使读到也整份放弃；待恢复的滚动
+   * 位置与 listScrollTouched 也会让滚动恢复永远取不到值。复位放在 flush 里是因为它就是
+   * 「面板卸载」的唯一入口（真实面板与测试都走这里）。
    */
   const flushViewMemory = (): void => {
-    if (pendingViewWrite === undefined) return
-    cancelPendingViewWrite()
-    writeView()
+    if (pendingViewWrite !== undefined) {
+      cancelPendingViewWrite()
+      writeView()
+    }
+    viewRestored = false
+    viewTouched = false
+    listScrollTouched = false
+    restoredListScrollTop = undefined
   }
 
   /**
@@ -634,7 +659,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     flushViewMemory,
     /** 列表滚动位置（R2-02）：只改模块内的值 + 300ms 去抖写，不触发渲染。 */
     rememberListScrollTop,
-    /** 取一次恢复的滚动位置；取过即清空，用户已滚过则放弃（面板首屏后调用一次）。 */
+    /** 取一次恢复的滚动位置（按传入的最大可滚位置夹取）；取过即清空，用户已滚过则放弃。 */
     takeListScrollTop,
     ...navActions, ...opmlActions, ...feedActions,
     dismissNotice: (): void => { set({ notice: undefined }) },
