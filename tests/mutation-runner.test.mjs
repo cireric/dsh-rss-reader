@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { MUTATIONS } from '../scripts/mutation/table.mjs'
 
 /**
  * 结构判据：入口 + scripts/mutation/ 下全部模块。
@@ -119,4 +120,25 @@ test('P3：--timings 报表可算出 >=1s 占比与 ETA（观察优化空间的�
 test('内环无墙钟断言（timing 判据全部住在 tests/perf/）', () => {
   assert.ok(!readFileSync('tests/overview-scale.test.mjs', 'utf8').includes('OVERVIEW_BUDGET_MS'), '内环仍有墙钟判据（终审 I1：负载刀口）')
   assert.ok(readFileSync('tests/perf/overview-scale.test.mjs', 'utf8').includes('OVERVIEW_BUDGET_MS'), 'perf 侧未收编 timing 判据')
+})
+
+test('变异锚点：每条 from 在目标文件里恰好命中一次', () => {
+  // 为什么要有这条（两次实证）：2026-11-19 R4 把正文态收成 bodyState、2026-11-20 R2-01 让
+  // activate 先调 rememberSelection()，各打断一条变异锚点。全量 gate 报「未应用」并把它计成
+  // 幸存 —— 条目还在表里，门槛实际已经没守住，而只有跑到全量 gate 才看得见。
+  // 这条判据只看「能不能应用」，不看「应用后会不会被抓住」（后者只有 gate 能回答）。
+  const texts = new Map()
+  const textOf = (file) => {
+    if (!texts.has(file)) {
+      assert.ok(existsSync(file), '变异目标文件不存在: ' + file)
+      texts.set(file, readFileSync(file, 'utf8'))
+    }
+    return texts.get(file)
+  }
+  const problems = []
+  for (const mutation of MUTATIONS) {
+    const count = textOf(mutation.file).split(mutation.from).length - 1
+    if (count !== 1) problems.push(mutation.id + ' → 命中 ' + count + ' 次（' + mutation.file + '）')
+  }
+  assert.deepEqual(problems, [], '变异锚点失效（重构/改名后要重锚）:\n' + problems.join('\n'))
 })
