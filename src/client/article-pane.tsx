@@ -105,6 +105,17 @@ function ArticleBlockView({ block }: { block: Record<string, unknown> }): ReactN
   return <p style={{ margin: '0 0 1.05em' }}>{text}</p>
 }
 
+/**
+ * 纯文本段落 → p 块。
+ *
+ * 两处共用：老缓存的 `paragraphs`（正文）与回退段落（R4-B2）都只是字符串，都该走
+ * `ArticleBlockView` 的 p 分支。原先两处各写一份 `map((text) => ({ kind: 'p', text }))`，
+ * 一份改了（包一层块 / 去空白）另一份不会跟着改。
+ */
+function paragraphBlocks(paragraphs: readonly string[]): Array<Record<string, unknown>> {
+  return paragraphs.map((text) => ({ kind: 'p', text }))
+}
+
 export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress }: {
   article: ArticleState | undefined
   item: ItemView | undefined
@@ -132,7 +143,7 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
   // 这份 blocks **只用于估算阅读时长**，回退段落绝不进来（R4-B5）。
   const readingBlocks: Array<Record<string, unknown>> = article?.blocks !== undefined
     ? article.blocks
-    : (article?.paragraphs ?? []).map((text) => ({ kind: 'p', text }))
+    : paragraphBlocks(article?.paragraphs ?? [])
   /**
    * 回退内容（R4-B1）：正文区没有可渲染块时，用订阅源自带的摘要兜底。
    *
@@ -140,20 +151,39 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
    * 内容只在渲染期从 item.summary 现算，不写进 ArticleState —— 第二次打开同一条仍会请求原站，
    * 原站恢复后自然重抓。加载中 / 没有 article 时不回退：那两态没有「正文不可用」可谈。
    */
-  const summaryParagraphs = readingBlocks.length === 0 ? paragraphsOf(item?.summary) : []
-  const fallback = article !== undefined && article.loading !== true && readingBlocks.length === 0
-    && hasBodyText(summaryParagraphs)
-    ? { paragraphs: summaryParagraphs, failure: article.failure }
-    : undefined
-  const fallbackActive = fallback !== undefined
+  const hasRenderedBlocks = readingBlocks.length > 0
+  const fallbackParagraphs = hasRenderedBlocks ? [] : paragraphsOf(item?.summary)
+  const hasFallbackBody = !hasRenderedBlocks && hasBodyText(fallbackParagraphs)
+  /**
+   * 正文区此刻的形态 —— **唯一**的派生判别式。
+   *
+   * 改造前同一件事写了三遍：回退标签看 `fallback !== undefined`、错误块看
+   * `failure !== undefined && fallback === undefined`、回顶按钮又手工拼
+   * `failure === undefined || fallbackActive`。三份表达式必须永远一致，改一处漏一处就会出
+   * 「有回退内容却没有回顶按钮」这类错位。现在渲染、标签、回顶按钮都只读这一个值。
+   *
+   * 顺序即优先级，与改造前三个渲染分支逐字对应：没有 article 或加载中 → loading；
+   * 有回退内容 → fallback；端点给了失败原因 → failed；其余 → content
+   * （含「成功但 blocks 为空且摘要不够门槛」的空白正文，保持原样）。
+   */
+  const bodyState: 'loading' | 'failed' | 'fallback' | 'content' =
+    article === undefined || article.loading === true
+      ? 'loading'
+      : hasFallbackBody
+        ? 'fallback'
+        : article.failure !== undefined
+          ? 'failed'
+          : 'content'
+  /** 失败原因原文：回退态的原因行与错误块共用，照实显示、不改写（R4-B3 / R4-B7）。 */
+  const articleFailure = article?.failure
   /**
    * 实际画出来的 blocks：回退态是摘要段落（复用 ArticleBlockView 的 p 分支）。
    * 与 readingBlocks 分成两个变量的理由见 R4-B5 —— 回退内容没有 contentVersion，
    * 算进阅读时长就是给用户一个不属于这篇正文的分钟数。
    */
-  const displayBlocks: Array<Record<string, unknown>> = fallback === undefined
-    ? readingBlocks
-    : fallback.paragraphs.map((text) => ({ kind: 'p', text }))
+  const displayBlocks: Array<Record<string, unknown>> = bodyState === 'fallback'
+    ? paragraphBlocks(fallbackParagraphs)
+    : readingBlocks
   const title = article?.title || item?.title
   const publishedAt = item?.publishedAt
   // 历史行可能带脏 link（修复前落库的 javascript:）：渲染前过 shared.ts 的唯一白名单。
@@ -268,7 +298,7 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
     const box = boxRef.current
     if (box === null || article === undefined) return
     // 回退态没有 contentVersion，也就没有可恢复的阅读进度（R4-B5）：别拿旧比例去对一段摘要。
-    if (article.loading === true || article.failure !== undefined || fallbackActive) return
+    if (bodyState !== 'content') return
     const ratio = article.restoreRatio
     if (ratio === undefined || ratio <= 0) return
     const top = restoreTopFor(ratio, box.scrollHeight, box.clientHeight)
@@ -276,7 +306,7 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
     expectedTopRef.current = top
     // 图片还没进场时内容更矮：记住这个比例，长高时按它补正（用户一动就解除，见 handleScroll）
     restoreRatioRef.current = ratio
-  }, [article?.itemId, article?.loading, article?.failure, article?.restoreRatio, fallbackActive])
+  }, [article?.itemId, article?.loading, article?.failure, article?.restoreRatio, bodyState])
 
   /**
    * 离开这篇时把「读到哪儿」写回去（M5 02）。
@@ -289,13 +319,13 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
     const itemId = article?.itemId
     const contentVersion = article?.contentVersion
     // 回退态不写阅读进度：摘要不是原站正文，没有 contentVersion，也不该被记成「读到哪儿」（R4-B5）。
-    if (itemId === undefined || contentVersion === undefined || fallbackActive) return undefined
+    if (itemId === undefined || contentVersion === undefined || bodyState === 'fallback') return undefined
     return () => {
       const box = boxRef.current ?? lastBoxRef.current
       if (box === null) return
       onSaveProgress(itemId, contentVersion, readingRatioOf(box.scrollTop, box.scrollHeight, box.clientHeight))
     }
-  }, [article?.itemId, article?.contentVersion, fallbackActive, onSaveProgress])
+  }, [article?.itemId, article?.contentVersion, bodyState, onSaveProgress])
 
   /**
    * 内容长高时继续贴底。
@@ -409,7 +439,7 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
             * 用 role="note" 而不是 role="alert"：这不是错误态 —— 用户有内容可读，只是来源不是原站正文。
             * 原因行沿用 dsh-rss-meta 小字，文案按有无 failure 分两种；failure 原文照实显示（不吞、不改写）。
             */}
-          {fallback !== undefined && (
+          {bodyState === 'fallback' && (
             <div role="note" style={{
               marginBottom: 18, padding: '10px 12px', borderRadius: 6,
               border: '1px solid color-mix(in srgb, currentColor 18%, transparent)',
@@ -417,19 +447,19 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
             }}>
               <div style={{ fontWeight: 600 }}>以下为订阅源提供的内容，可能不是全文</div>
               <div className="dsh-rss-meta" style={{ marginTop: 4 }}>
-                {fallback.failure === undefined
+                {articleFailure === undefined
                   ? '原站没有可显示的正文'
-                  : '原站正文没能取到：' + fallback.failure}
+                  : '原站正文没能取到：' + articleFailure}
               </div>
               <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
                 style={{ marginTop: 8 }} onClick={onRetry}>重试抓取</button>
             </div>
           )}
-          {article === undefined || article.loading ? (
+          {bodyState === 'loading' ? (
             <p className="dsh-rss-meta" role="status">正在抓取原站正文…</p>
-          ) : article.failure !== undefined && fallback === undefined ? (
+          ) : bodyState === 'failed' ? (
             <div role="alert" style={{ color: 'var(--rss-error)' }}>
-              没能取到正文：{article.failure}
+              没能取到正文：{articleFailure}
               <div className="dsh-rss-meta" style={{ marginTop: 6 }}>
                 {link ? '可以返回列表，或打开原站阅读。' : '可以按 Esc 返回列表。'}
               </div>
@@ -446,7 +476,7 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
         * 只在正文真的画出来时显示：加载中、抓取失败且无回退内容时既没有正文可跳，
         * 按钮也只会挤在「正在抓取…」那行旁边造成误解。回退态有摘要段落可滚，照常显示（R4-B6）。
         */}
-      {article !== undefined && article.loading !== true && (article.failure === undefined || fallbackActive) && (
+      {(bodyState === 'content' || bodyState === 'fallback') && (
         <div style={{
           position: 'absolute', right: 16, bottom: 16,
           display: 'flex', flexDirection: 'column', gap: 6,

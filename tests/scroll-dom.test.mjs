@@ -2399,13 +2399,15 @@ test('正文失败回退：订阅源摘要够门槛时显示来源标注、原�
     '回退态照常显示回顶/到底按钮（有可滚内容）')
 
   const articleCalls = () => h.requests.filter((entry) => entry.endpoint === 'article')
+  const saves = () => h.requests.filter((entry) => entry.endpoint === 'saveReadingProgress')
   assert.equal(articleCalls().length, 1, '打开一次只发一次正文请求（回退是纯渲染）')
-  assert.equal(h.requests.filter((entry) => entry.endpoint === 'saveReadingProgress').length, 0,
-    '回退内容没有 contentVersion：不许写阅读进度')
+  assert.equal(saves().length, 0, '回退内容没有 contentVersion：不许写阅读进度')
 
   // 返回列表再打开同一条：仍要重新请求 —— 证明回退内容没有被当成缓存。
+  // 离开（组件卸载）也不能写进度：回退态没有 contentVersion，写进去就是把摘要当成原站正文（R4-B5）。
   h.press('Escape')
   await h.settle()
+  assert.equal(saves().length, 0, '离开回退页（Esc 回列表）后不得发 saveReadingProgress')
   h.press('V', true)
   await h.waitFor(() => articleCalls().length === 2, { timeout: 900, label: '第二次打开重新请求正文' })
   await h.settle()
@@ -2438,6 +2440,42 @@ test('正文失败回退：摘要不到门槛时保持原错误块，不显示�
   assert.equal(h.requests.filter((entry) => entry.endpoint === 'article').length, 1, '仍只发一次正文请求')
 })
 
+// 验收 3：summary 缺失 / 空串（验收 2 是「不到 40 字」的另一种输入）。
+// 这两条刻意分开挂载：夹具约定一条用例一个 mountReader，复盘时能直接看出是哪种输入红的。
+test('正文失败回退：summary 缺失时保持原错误块，不出现回退标签', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    article: { failure: '403' },
+  })
+  await h.store.load('overview')
+  await h.settle()
+  h.press('V', true)
+  await h.waitFor(() => h.store.get().view === 'article', { timeout: 900, label: '进入正文页' })
+  await h.settle()
+
+  const alert = h.win.document.querySelector('[role="alert"]')
+  assert.ok(alert !== null, 'summary 缺失时必须保持原错误块（不是回退态）')
+  assert.match(alert.textContent ?? '', /没能取到正文：403/, '错误块文案逐字不变')
+  assert.equal(h.win.document.querySelector('[role="note"]'), null, 'summary 缺失时不许出现回退标签')
+})
+
+test('正文失败回退：summary 为空串时保持原错误块，不出现回退标签', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a', summary: '' })],
+    article: { failure: '403' },
+  })
+  await h.store.load('overview')
+  await h.settle()
+  h.press('V', true)
+  await h.waitFor(() => h.store.get().view === 'article', { timeout: 900, label: '进入正文页' })
+  await h.settle()
+
+  const alert = h.win.document.querySelector('[role="alert"]')
+  assert.ok(alert !== null, 'summary 为空串时必须保持原错误块（不是回退态）')
+  assert.match(alert.textContent ?? '', /没能取到正文：403/, '错误块文案逐字不变')
+  assert.equal(h.win.document.querySelector('[role="note"]'), null, 'summary 为空串时不许出现回退标签')
+})
+
 test('正文失败回退：重试请求的是正文页那一篇（article.itemId），冷却期原文照实显示', skip, async () => {
   let attempt = 0
   const cooldown = '刚刚取过这篇正文，请 30 秒后再试'
@@ -2458,7 +2496,9 @@ test('正文失败回退：重试请求的是正文页那一篇（article.itemId
   await h.settle()
 
   const articleCalls = () => h.requests.filter((entry) => entry.endpoint === 'article')
+  const markReads = () => h.requests.filter((entry) => entry.endpoint === 'markRead')
   assert.equal(articleCalls().length, 1, '前置条件：首次打开只请求一次')
+  assert.equal(markReads().length, 1, '前置条件：打开条目标一次已读（loadArticle → activate）')
 
   // 制造「列表选中项 ≠ 正文页那一篇」：重试若读 selectedId 就会去抓 b。
   h.store.select('b')
@@ -2475,6 +2515,12 @@ test('正文失败回退：重试请求的是正文页那一篇（article.itemId
   const calls = articleCalls()
   assert.equal(calls[1].payload.itemId, 'a', '重试必须取 article.itemId，不是列表选中项 selectedId')
   assert.equal(h.store.get().article.itemId, 'a', '正文页仍然停在 a')
+  assert.equal(markReads().length, 1,
+    '重试不得重复标已读：条目已读时 activate → markRead 早退（R4-B8）')
+  // 已知且有意（不是本次回退新增的规则）：loadArticle 开头把 selectedId 钉回正文那一篇。
+  // 列表选中项会因此从 b 变回 a；把它钉成断言，避免日后误判成「重试改坏了列表选中」。
+  assert.equal(h.store.get().selectedId, 'a',
+    '重试后 selectedId 会被 loadArticle 带回正文那一篇（既有行为，已知且有意）')
   const reason = h.win.document.querySelector('[role="note"] .dsh-rss-meta')
   assert.ok(reason !== null, '重试失败后仍显示回退原因行')
   assert.equal(reason.textContent, '原站正文没能取到：' + cooldown, '冷却期失败原文必须照实显示，不吞不改写')
@@ -2500,4 +2546,49 @@ test('正文失败回退：成功但空 blocks 也显示回退，原因行写「
   const body = h.win.document.querySelector('article.dsh-rss-article-column')
   assert.deepEqual([...body.querySelectorAll('p')].map((element) => element.textContent), [paragraph],
     '回退段落仍然按 p 渲染')
+})
+
+test('正文失败回退：字号/栏宽/主题当场生效，空格可滚动正文容器', skip, async () => {
+  // 验收 5：回退态不是「死内容」——它继承正文容器，读起来必须和原站正文一样可调、可滚。
+  const paragraph = '回退态也要能调排版：这一段订阅源内容足够长，跨过四十个字符的门槛，用来验证字号、栏宽与主题。'
+  const h = await mountReader({
+    items: [item({ id: 'a', summary: '<p>' + paragraph + '</p>' })],
+    article: { failure: '403' },
+  })
+  await h.store.load('overview')
+  await h.settle()
+  h.press('V', true)
+  await h.waitFor(() => h.store.get().view === 'article', { timeout: 900, label: '进入正文页' })
+  await h.settle()
+
+  assert.ok(h.win.document.querySelector('[role="note"]') !== null, '前置条件：当前是回退态')
+  const body = () => h.win.document.querySelector('article.dsh-rss-article-column')
+  assert.equal(body().style.fontSize, '16px', '默认字号')
+  assert.equal(body().style.maxWidth, '760px', '默认栏宽')
+
+  // 字号：回退段落与标签都住在正文列里，必须当场跟着变
+  const sizeSelect = h.win.document.querySelector('select[aria-label="正文字号"]')
+  assert.ok(sizeSelect !== null, '正文页要有字号选择')
+  setControlValue(h.win, sizeSelect, '20')
+  await h.settle()
+  assert.equal(body().style.fontSize, '20px', '回退态改字号必须当场生效')
+
+  // 栏宽：同样落在正文列上
+  const widthSelect = h.win.document.querySelector('select[aria-label="正文栏宽"]')
+  assert.ok(widthSelect !== null, '正文页要有栏宽选择')
+  setControlValue(h.win, widthSelect, '900')
+  await h.settle()
+  assert.equal(body().style.maxWidth, '900px', '回退态改栏宽必须当场生效')
+
+  // 主题：标记打在滚动容器上（CSS 按它覆盖正文面）
+  const themeSelect = h.win.document.querySelector('select[aria-label="正文主题"]')
+  assert.ok(themeSelect !== null, '正文页要有主题选择')
+  setControlValue(h.win, themeSelect, 'dark')
+  await h.settle()
+  assert.equal(h.box('article').getAttribute('data-rss-reading-theme'), 'dark', '回退态改主题必须当场生效')
+
+  // 空格：按键路径按标记属性现取容器，回退态同样要能滚
+  const scroller = h.arm(h.box('article'))
+  assert.equal(h.press(' '), true, '回退态空格应被正文页接管')
+  assert.equal(h.scrollTop(scroller), 300, '回退态空格应当滚动正文容器一屏')
 })
