@@ -2290,3 +2290,61 @@ test('P0-1：条目链接是 javascript: 时，列表行与正文页都不渲染
   assert.equal(h.win.document.querySelector('a[href^="javascript:"]'), null,
     '正文页的「打开原站」同样不许出现 javascript:')
 })
+
+/** 在列表视图点开一条行，返回它的摘要区（点击 = 选中 + 标已读 + 展开摘录）。 */
+async function openSummaryRow(h, id) {
+  const row = h.win.document.querySelector('[data-rss-row="' + id + '"] .dsh-rss-row-main')
+  assert.ok(row !== null, '条目行必须渲染出来：' + id)
+  row.dispatchEvent(new h.win.MouseEvent('click', { bubbles: true, cancelable: true }))
+  await h.settle()
+  const summary = h.win.document.querySelector('[data-rss-row="' + id + '"] .dsh-rss-summary')
+  assert.ok(summary !== null, '展开后必须有摘要区：' + id)
+  return summary
+}
+
+// 列表行展开的三种呈现各有一条直接用例：这是「摘要判据归位」重构前用户可见行为的全部，
+// 现状零覆盖 —— 搬 paragraphsOf / hasBodyText 时任何分支或文案漂移都必须当场翻红。
+// 文案按逐字钉，不按正则片段：这两句兜底是用户分辨「源没给正文」与「源只给外链」的唯一线索。
+
+test('列表行展开①：够门槛时按段落逐块渲染（不许拼成一行）', skip, async () => {
+  const firstParagraph = '第一段：这是订阅源提供的正文，长度足够跨过四十个字符的门槛。'
+  const secondParagraph = '第二段：继续说明，两段拼起来肯定超过四十个字。'
+  const h = await mountReader({
+    items: [item({ id: 'body', summary: '<p>' + firstParagraph + '</p><p>' + secondParagraph + '</p>' })],
+  })
+  await h.store.load('overview')
+  await h.settle()
+
+  const summary = await openSummaryRow(h, 'body')
+  const paragraphBlocks = [...summary.children].filter((element) => element.tagName === 'SPAN')
+  assert.deepEqual(
+    paragraphBlocks.map((element) => element.textContent),
+    [firstParagraph, secondParagraph],
+    '正文必须按段落逐块渲染（两段 = 两个块）',
+  )
+  assert.ok(!summary.textContent.includes('（此源'), '有正文时不许出现任何兜底文案')
+})
+
+test('列表行展开②：段落非空但不到门槛 →「此源只提供标题与外链，正文在原站」', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'link-only', summary: '<p><a href="https://news.ycombinator.com/item?id=1">Comments</a></p>' })],
+  })
+  await h.store.load('overview')
+  await h.settle()
+
+  const summary = await openSummaryRow(h, 'link-only')
+  const block = summary.querySelector('span')
+  assert.ok(block !== null, '兜底文案必须是摘要区的块')
+  assert.equal(block.textContent, '（此源只提供标题与外链，正文在原站）', '文案逐字不变')
+})
+
+test('列表行展开③：一个段落都没有 →「此源未提供正文，点下面到原站阅读」', skip, async () => {
+  const h = await mountReader({ items: [item({ id: 'no-summary' })] })
+  await h.store.load('overview')
+  await h.settle()
+
+  const summary = await openSummaryRow(h, 'no-summary')
+  const block = summary.querySelector('span')
+  assert.ok(block !== null, '兜底文案必须是摘要区的块')
+  assert.equal(block.textContent, '（此源未提供正文，点下面到原站阅读）', '文案逐字不变')
+})

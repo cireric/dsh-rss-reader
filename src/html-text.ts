@@ -56,6 +56,19 @@ export function htmlToText(fragment: string): string {
 }
 
 /**
+ * HTML 片段 → 段落数组：`htmlToText` 按块级标签切出来的行。
+ *
+ * 为什么住在这里：列表行展开与正文面的回退内容是**同一条**「这段摘要算不算正文」规则的两步 ——
+ * 第一步在 HTML 层切段（本函数），第二步在段落层判长度（`shared.ts` 的 `hasBodyText`）。
+ * 切行规则留在客户端就是第二份实现，而两份实现注定会越走越远（2026-10-07 就漂过一次：
+ * 客户端那份漏了解码实体）。undefined 与空串同义地返回 []，列表行据此区分两条兜底文案。
+ */
+export function paragraphsOf(html: string | undefined): string[] {
+  if (html === undefined || html === '') return []
+  return htmlToText(html).split('\n')
+}
+
+/**
  * `<pre>` 内容专用转换：**保留每行原样缩进**。
  *
  * 不能复用 htmlToText —— 它会逐行 trim，把代码的缩进吃掉（实测：单测当场抓到

@@ -39,9 +39,9 @@ import { FeedsView } from './feeds-view.js'
 import { FeedNav } from './feed-nav.js'
 import { TagEditor } from './tag-editor.js'
 import { ArticleView } from './article-pane.js'
-import { httpUrlOrEmpty, MIN_CONTENT_CHARS, ROUTE_PATH, type ArticlePayload, type CleanupResult, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult } from '../shared.js'
+import { hasBodyText, httpUrlOrEmpty, ROUTE_PATH, type ArticlePayload, type CleanupResult, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult } from '../shared.js'
 import { recencyOf } from '../cursor.js'
-import { htmlToText } from '../html-text.js'
+import { paragraphsOf } from '../html-text.js'
 // resolveReaderKey 也搬去了（keyboard-routing.ts 第 1 层）；这里只留帮助浮窗要用的两张表。
 import { READER_KEY_HELP, READER_HELP_SCOPE_LABEL } from '../keys.js'
 // 只剩「跟随选中项滚动」那条 effect 用的两个（nextScrollTop / SCROLL_ATTR）；
@@ -191,14 +191,6 @@ function RefreshIcon({ spinning }: { spinning?: boolean }): ReactNode {
       <path d="M13.6 2.2v3.2h-3.2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   )
-}
-
-
-function toParagraphs(html: string | undefined): string[] {
-  // 直接用抽取层那套共享实现（html-text.ts）。原先这里自己抄了一份：标签处理规则逐字相同，
-  // 但少了解码实体那一步，闭合标签清单也少了 pre —— 两份实现注定会越走越远。
-  if (html === undefined || html === '') return []
-  return htmlToText(html).split('\n')
 }
 
 
@@ -696,11 +688,11 @@ export function createReader(store: ReaderStore): () => ReactNode {
                     {isOpen && (
                       <span className="dsh-rss-summary">
                         {(() => {
-                          const paragraphs = toParagraphs(item.summary)
-                          const bodyText = paragraphs.join(' ').trim()
+                          const paragraphs = paragraphsOf(item.summary)
                           // 「勉强算有正文」不该冒充正文：像 HN 那样 feed 里只有一串 Comments 链接时，
                           // 剥完标签只剩几个字符——与其显示一行孤零零的 "Comments"，不如如实说明。
-                          if (bodyText.length < MIN_CONTENT_CHARS) {
+                          // 门槛与判据都住在 shared.ts（hasBodyText），与正文面的回退内容共用一份。
+                          if (!hasBodyText(paragraphs)) {
                             return (
                               <span style={{ display: 'block', opacity: 0.7 }}>
                                 {paragraphs.length === 0

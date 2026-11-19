@@ -321,6 +321,18 @@ export function clampReadingRatio(value: unknown): number {
 export const MIN_CONTENT_CHARS = 40
 
 /**
+ * 「这段摘要算不算正文」：段落拼成一行后达到 `MIN_CONTENT_CHARS`。
+ *
+ * 与门槛值同住是刻意的 —— 值改而判据没改（或反过来）是最难发现的一类漂移。判据本身与
+ * 列表行历史实现逐字等价：`paragraphs.join(' ').trim().length >= MIN_CONTENT_CHARS`，
+ * **只拼接一次**。分隔的那个空格也数进长度，调用方不要再自己 join 一遍来判。
+ * 两处使用面（列表行摘录、正文面的回退内容）必须都走这里，不许各留一份。
+ */
+export function hasBodyText(paragraphs: readonly string[]): boolean {
+  return paragraphs.join(' ').trim().length >= MIN_CONTENT_CHARS
+}
+
+/**
  * 只放行 http/https 的绝对 URL；其余（`javascript:` / `data:` / `file:` / `mailto:` …）一律空串。
  *
  * 为什么必须有它（M5 安全评审，2026-11-15）：feed 的条目 `<link>` 由**发布者控制**，而它会

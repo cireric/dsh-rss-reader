@@ -12,7 +12,9 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { EXTRACTOR_REVISION, extractArticle, fetchArticle, isDecorativeImage, isFrameable, pickImageUrl, attrOf, blocksToText } from '../lib/article.js'
 // decodeEntities / htmlToText 已搬到 html-text.ts（2026-10-07），断言一条没动
-import { decodeEntities, htmlToText } from '../lib/html-text.js'
+import { decodeEntities, htmlToText, paragraphsOf } from '../lib/html-text.js'
+// 「这段摘要算不算正文」的判据与 40 字门槛同住 shared.ts：两处（列表行 / 正文面）共用一份
+import { hasBodyText } from '../lib/shared.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const fixture = readFileSync(join(here, 'fixtures', 'article.html'), 'utf8')
@@ -34,6 +36,27 @@ test('HTML 转文本：块级标签转换行，空白收敛，标签不留痕', 
   assert.equal(htmlToText('甲<br>乙'), '甲\n乙')
   assert.equal(htmlToText('<div>  多余   空白  </div>'), '多余 空白')
   assert.ok(!htmlToText('<p>正文</p><script>x</script>').includes('script'))
+})
+
+test('paragraphsOf：HTML 按段落切块（空值认作没有段落，实体先解码再切）', () => {
+  // 列表行要靠「有没有段落」区分两条兜底文案，所以 undefined 与空串必须同义地返回 []。
+  assert.deepEqual(paragraphsOf(undefined), [], 'undefined = 源没给正文')
+  assert.deepEqual(paragraphsOf(''), [], '空串 = 没有段落')
+  assert.deepEqual(paragraphsOf('<p>一段</p>'), ['一段'])
+  assert.deepEqual(paragraphsOf('<p>一段</p><p>二段</p><br>三段'), ['一段', '二段', '三段'])
+  assert.deepEqual(paragraphsOf('<p>&amp; &lt; &#x2014;</p>'), ['& < —'], '实体必须解码后再切段')
+})
+
+test('hasBodyText：40 字门槛（拼接用单个空格，分隔符也数进长度）', () => {
+  // 门槛与判据必须同住：这里钉的是**旧列表行判据的语义**（join(' ') 一次、trim 一次），
+  // 列表行与正文面的回退内容都靠它，任何一边单独改门槛都会先让这条红。
+  assert.equal(hasBodyText([]), false, '没有段落 = 没有正文')
+  assert.equal(hasBodyText(['']), false, '空段不算正文')
+  assert.equal(hasBodyText(['   ']), false, '纯空白不算正文')
+  assert.equal(hasBodyText(['a'.repeat(39)]), false, '39 字低于门槛')
+  assert.equal(hasBodyText(['a'.repeat(40)]), true, '恰好 40 字算正文（边界与旧判据同一边）')
+  assert.equal(hasBodyText(['a'.repeat(20), 'b'.repeat(19)]), true, '两段拼接 20 + 1 空格 + 19 = 40 字')
+  assert.equal(hasBodyText(['a'.repeat(20), 'b'.repeat(18)]), false, '拼接后 39 字：分隔符数进长度，不是各段分别判')
 })
 
 test('抽取：正文保留为段落块，导航/页脚/脚本/短栏目被丢弃', () => {
