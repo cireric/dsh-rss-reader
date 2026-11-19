@@ -1268,8 +1268,11 @@ export const MUTATIONS = [
     judgeTests: ['C4-b 迁入：o 展开并触发 markRead 端点（副作用不能漏）', '行内 Enter / Space 与 o 同义：再按一次收起（GR 规范 o / enter = open/close）'],
     // activate 少了标已读 ⇒ 「打开即已读」整条规则消失，而界面上看不出任何异常（角标只是不减）。
     // 判据：scroll-dom 的「点击即标已读 —— store.activate 是唯一触发点」。
-    from: '\t\t\t\tset({ selectedId: itemId });\n\t\t\t\tmarkRead(itemId);',
-    to: '\t\t\t\tset({ selectedId: itemId });' },
+    // ⚠️ 2026-11-20 重锚：R2-01 让 activate 先 rememberSelection() 记阅读位置；旧锚
+    //    （set + markRead 两行）已不存在。锚点改成「rememberSelection + markRead」两行，
+    //    仍只命中一次，且判定语义不变（去掉的仍是 markRead）。
+    from: '\t\t\t\trememberSelection();\n\t\t\t\tmarkRead(itemId);',
+    to: '\t\t\t\trememberSelection();' },
   { id: 'store-viewPreferences 不校验标签', file: 'lib/store-sqlite.js',
     judges: ['store-sqlite.test.mjs'],
     judgeTests: ['viewPreferences：标签被删之后回落虚拟视图（读侧校验，与已退订的源同一条）'],
