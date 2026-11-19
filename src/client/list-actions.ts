@@ -128,6 +128,23 @@ export function createListActions(host: ListActionHost) {
   }
 
   /**
+   * 切作用域必须退出正文 —— `selectNav` / `setFilter` 共用的唯一入口。
+   *
+   * **病象**：正在看正文时点另一个源 / 文件夹 / 标签，或切「未读 / 星标」过滤，右栏仍停在上一篇——
+   * 它已经不属于当前作用域，读者看到的是「作用域变了、内容却没变」的自相矛盾。
+   *
+   * **根因**：这两个动作只改作用域状态，没人收回跨域呈现状态 `view` / `article`。两样必须一起清：
+   * 正文面的唯一真相是 `article.itemId`，只把 `view` 改回列表会留下旧 `article`，而在途的正文回包
+   * 仍会命中 `loadArticle` 的 `get().article?.itemId` 守卫，把一篇已经离开作用域的文章重新画回来。
+   *
+   * **边界**：只接这两个入口。视图恢复、Esc 关闭（`closeArticle`）与搜索提交各有自己的语义，
+   * 不要顺手接上来 —— 关闭正文后保留 `article` 是阅读进度落盘要用的。
+   */
+  const leaveArticleForScope = (): void => {
+    if (get().view === 'article') set({ view: 'list', article: undefined })
+  }
+
+  /**
    * 切换全局过滤（顶栏那组按钮 / 左栏虚拟视图三行 / 键盘打开虚拟视图行都走它）。
    *
    * 光标同步（2026-10-10 任务 6 返工）：换 filter 就是「当前项换了一行」，光标跟着落到那一行，
@@ -135,6 +152,8 @@ export function createListActions(host: ListActionHost) {
    * 而「哪一行此刻生效」由 selected 标记独立表达（选着源时它仍亮在源那一行 —— 规格 §2.1 的叠加）。
    */
   const setFilter = (filter: Filter): void => {
+    // 换过滤也是换作用域：正文里切「未读 / 星标」必须回列表，旧文章不属于新过滤。
+    leaveArticleForScope()
     set({ filter, navCursor: { kind: 'filter', filter } })
     relocateSelection()
     persistView()
@@ -735,5 +754,7 @@ export function createListActions(host: ListActionHost) {
     },
     /** 跨域入口：选中重落。nav-actions 与视图恢复共用，刻意不上 ReaderStore 的公开面。 */
     relocateSelection,
+    /** 跨域入口：切作用域前退出正文。setFilter 在同文件直调，nav-actions 的 selectNav 经 host 注入。 */
+    leaveArticleForScope,
   }
 }

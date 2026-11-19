@@ -253,13 +253,13 @@ const browserDeps: ReaderStoreDeps = {
  *
  * | 域 | 拥有的 state | 动作 | 允许改别人的什么 |
  * |---|---|---|---|
- * | 列表 | `items` / `selectedId` / `nextCursor` / `loadingMore` / `filter` / `layout` / `markAllRange` / `undo`（账目 `unread` / `perFeedUnread` 由 account-mirror 的回包整体覆盖） | load / loadMore / visible / setFilter / setLayout / activate / selectRelative / markRead / toggleStar / toggleKeepUnread / toggleRead / markAllRead / undoMarkAll / cleanup / stepArticle / openArticle / retryArticle | 只**读** feeds / tags；改账目一律经 account-mirror（回包整体覆盖）。**跨域写入逐条登记在此**：① setFilter 同步 `navCursor`（光标跟着过滤走，2026-10-10 的既有规则）；② overview 整份落地（applyOverview 与 load 的搜索分支）把 feeds / folders / tags 按宿主快照原样写回；③ 选中项失效时 applyOverview / load 把 navSelection + navCursor 回落虚拟视图（与「源被退订」同一条规则）；④ 正文动作（openArticle / retryArticle / stepArticle）写 `view` / `article` —— 这两份是跨域呈现状态，不归任何一块私有 |
+ * | 列表 | `items` / `selectedId` / `nextCursor` / `loadingMore` / `filter` / `layout` / `markAllRange` / `undo`（账目 `unread` / `perFeedUnread` 由 account-mirror 的回包整体覆盖） | load / loadMore / visible / setFilter / setLayout / activate / selectRelative / markRead / toggleStar / toggleKeepUnread / toggleRead / markAllRead / undoMarkAll / cleanup / stepArticle / openArticle / retryArticle | 只**读** feeds / tags；改账目一律经 account-mirror（回包整体覆盖）。**跨域写入逐条登记在此**：① setFilter 同步 `navCursor`（光标跟着过滤走，2026-10-10 的既有规则）；② overview 整份落地（applyOverview 与 load 的搜索分支）把 feeds / folders / tags 按宿主快照原样写回；③ 选中项失效时 applyOverview / load 把 navSelection + navCursor 回落虚拟视图（与「源被退订」同一条规则）；④ 正文动作（openArticle / retryArticle / stepArticle）写 `view` / `article` —— 这两份是跨域呈现状态，不归任何一块私有；⑤ setFilter 经 leaveArticleForScope 写 `view` / `article`（切过滤退出正文） |
  * | 搜索 | `search` / `searchRevision` / `searchRequest` / `searchPages` | submitSearch / loadSearch / resetSearchPage | 借列表的 items / selectedId / nextCursor / loading 展示；**不许**改 filter |
- * | 订阅 | `feeds` / `folders` / `discovery` / `feedsBusy` / `importReport` / `navSelection` / `navCursor` / `navVisible` / `foldedFolders` / `viewPreferences`（**deleteFolder 例外**：删掉当前所在文件夹时会把 `filter` 回落成 `all`，这条跨域写入登记在此） | addFeed / removeFeed / importOpml / exportOpml / discover / createFolder / renameFolder / deleteFolder / moveFeedToFolder / selectNav / moveNavCursor / openNavCursor / toggleNav / toggleFolder | 改 navSelection 后必须走 persistView；退订只能经 `deleteSubscription` |
+ * | 订阅 | `feeds` / `folders` / `discovery` / `feedsBusy` / `importReport` / `navSelection` / `navCursor` / `navVisible` / `foldedFolders` / `viewPreferences`（**deleteFolder 例外**：删掉当前所在文件夹时会把 `filter` 回落成 `all`，这条跨域写入登记在此） | addFeed / removeFeed / importOpml / exportOpml / discover / createFolder / renameFolder / deleteFolder / moveFeedToFolder / selectNav / moveNavCursor / openNavCursor / toggleNav / toggleFolder | 改 navSelection 后必须走 persistView；退订只能经 `deleteSubscription`；selectNav 经列表域的 leaveArticleForScope 写 `view` / `article`（切作用域退出正文） |
  * | 标签 | `tags` / 条目的 `tagIds` | createTag / renameTag / deleteTag / toggleItemTag | 乐观改 tagIds，失败回取当前页拉回真相（tagWrite 串行化 + tagEpoch 身份） |
  *
- * `view` / `article` 是跨域呈现状态：列表的 openArticle / retryArticle / closeArticle、搜索的 submitSearch、
- * 导航的 toggleFeeds 都会写 `view` —— 它不属于任何一块的私有 state。
+ * `view` / `article` 是跨域呈现状态：列表的 openArticle / retryArticle / closeArticle 与 setFilter、
+ * 搜索的 submitSearch、导航的 selectNav（经列表域入口）与 toggleFeeds 都会写 —— 它不属于任何一块的私有 state。
  *
  * 共享的不止三样：`deps`（通道/时钟/opener）、`set`（唯一写入口）、`state`（只读快照），
  * 以及跨域入口 `listVersion`（列表与搜索共用，经 next/current 两个函数）、`reload`、`refreshDuplicateHints`。
@@ -447,7 +447,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
 
   // 列表域工厂：setFilter 要清搜索结果（reset 只能经搜索域的入口），所以建在搜索域之后；
   // 导航域又反过来借它的 setFilter / relocateSelection —— 工厂之间只传闭包，不含执行期副作用。
-  const { actions: listActions, relocateSelection } = createListActions({
+  const { actions: listActions, relocateSelection, leaveArticleForScope } = createListActions({
     get, set, persistView, rpc: deps.rpc, log: deps.log,
     now: deps.now, setTimeout: deps.setTimeout, clearTimeout: deps.clearTimeout, open: deps.open,
     search: searchActions,
@@ -471,6 +471,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   const navActions = createNavActions({
     get, set, reload: () => listActions.load('overview'), persistView, relocateSelection, searchActions,
     setFilter: listActions.setFilter,
+    leaveArticleForScope,
   })
 
   const feedActions = createFeedActions({ set, rpc: deps.rpc, reload: () => listActions.load('overview') })
