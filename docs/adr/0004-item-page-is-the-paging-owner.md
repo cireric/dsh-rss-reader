@@ -41,3 +41,9 @@
   走同一条取页路径。
 - 新模块是 host 侧纯模块（`node:crypto` + 类型），不依赖 store 实现；`store.ts` /
   `memory-store.ts` 反向 import 它的 `afterCursor`，所以 `PageSource` 用结构化声明，避免模块环。
+
+## 2026-11-19 修订（R1 显示窗）
+
+决定 4 的「签名不动」按**范围维度**放宽：`listRecent` 允许增加一个可选的时间窗参数，与 `feedIds` / `tagId` 正交。
+`PageScope` 仍是 folder / tag 两态，时间窗**不进** `PageScope`；但它必须进栅栏键（`fenceKeyOf(scope, window)`），
+否则切窗后旧游标会静默续页。续页谓词仍只有「每种语言一处」——加窗不产生第二处。
