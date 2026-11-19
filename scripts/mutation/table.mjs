@@ -630,6 +630,19 @@ export const MUTATIONS = [
     judgeTests: ['虚拟视图与既有 setFilter 等价，不留两套状态'],
     from: 'navSelection: { kind: "virtual" },\n\t\t\t\t\tfilter: "all"',
     to: 'navSelection: { kind: "virtual" }' },
+  // 切作用域必须退出正文（R2 票 03，2026-11-19）：selectNav（源/文件夹/标签，含「再选同一个 = 取消」）
+  // 与 setFilter（未读/星标/全部）共用这一个入口。去掉它，正文里切作用域会继续显示作用域外的旧文章。
+  // 判据是 scroll-dom 的四条「正文视图下…」用例；搜索提交自己回列表，不由本条承担（也不重复实现）。
+  { id: 'client-切源不回列表', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: [
+      '正文视图下点另一个源：回到列表、旧文章不再显示，且不额外标读/取数',
+      '正文视图下再点同一个源（取消选中）：同样回到列表',
+      '正文视图下点文件夹 / 标签：同样回到列表、清空旧文章',
+      '正文视图下切「未读 / 星标」过滤：回到列表',
+    ],
+    from: '\t\t\tconst leaveArticleForScope = () => {\n\t\t\t\tif (get().view === "article") set({\n\t\t\t\t\tview: "list",\n\t\t\t\t\tarticle: void 0\n\t\t\t\t});\n\t\t\t};',
+    to: '\t\t\tconst leaveArticleForScope = () => {};' },
   // 每源未读数的**键域**（2026-10-10）。左栏角标按 feeds 表逐行渲染，键域必须严格 = feeds 表：
   // 删掉「以 feeds 表铺 0」后，0 未读的源会丢键，那一行变成「角标空白」而不是「角标 0」——
   // 界面上无从分辨，是最贵的那类沉默失败。非等价变异：丢键后取值变 undefined，两条测试会红。

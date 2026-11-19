@@ -1010,6 +1010,177 @@ test('点击某个源：右栏列表只剩该源条目', skip, async () => {
   assert.deepEqual(listTitles(), ['a', 'b', 'c'], '取消后应当回到聚合视图')
 })
 
+/* ── 切作用域必须退出正文（R2 票 03）────────────────────────────────────────────
+ * 右栏正文面的唯一真相是 article.itemId：作用域已经换了、正文却还是上一篇，
+ * 读者看到的是一篇不属于当前源/文件夹/标签/过滤的文章。四条用例守着两个入口：
+ * 左栏（selectNav：源/文件夹/标签，含「再选同一个 = 取消」分支）与过滤三连（setFilter）。
+ * 搜索提交自己回列表，不在这一组里重复实现。 */
+test('正文视图下点另一个源：回到列表、旧文章不再显示，且不额外标读/取数', skip, async () => {
+  const h = await mountReader({
+    items: [
+      item({ id: 'a', feedId: 'f1', feedTitle: '源一' }),
+      item({ id: 'b', feedId: 'f2', feedTitle: '源二' }),
+    ],
+    feeds: [{ id: 'f1', title: '源一' }, { id: 'f2', title: '源二' }],
+  })
+  await h.store.load('overview')
+  await h.settle()
+
+  const navRow = (key) => h.win.document.querySelector('[data-rss-nav-row="' + key + '"]')
+  const clickNav = (key) => navRow(key).dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
+  const rows = () => [...h.win.document.querySelectorAll('[data-rss-row]')].map((el) => el.getAttribute('data-rss-row'))
+
+  clickNav('feed:f1')
+  await h.settle()
+  assert.deepEqual(rows(), ['a'], '前置条件：源一的列表只有 a')
+
+  h.press('V', true)
+  await h.waitFor(() => h.store.get().view === 'article', { timeout: 900, label: '进入正文页' })
+  await h.waitFor(() => h.box('article') !== null, { timeout: 900, label: '正文容器出现' })
+  assert.equal(h.store.get().article?.itemId, 'a', '前置条件：正在看 a 的正文')
+
+  const marksBefore = h.requests.filter((entry) => entry.endpoint === 'markRead').length
+  const articlesBefore = h.requests.filter((entry) => entry.endpoint === 'article').length
+
+  clickNav('feed:f2')
+  await h.settle()
+
+  assert.equal(h.store.get().view, 'list', '切到另一个源后必须回到列表，而不是继续停在旧正文')
+  assert.equal(h.store.get().article, undefined, '旧正文必须清空 —— 它已经不属于当前作用域')
+  assert.equal(h.box('article'), null, '正文容器必须从 DOM 消失，不能把上一源的旧文章留在屏幕上')
+  assert.equal(h.box('list')?.style.display, 'block', '列表容器必须重新可见')
+  assert.deepEqual(rows(), ['b'], '右栏只显示新源 f2 的条目')
+  assert.deepEqual({ ...h.store.get().navSelection }, { kind: 'feed', feedId: 'f2' }, '作用域已切到源二')
+  assert.equal(h.store.get().selectedId, 'b', '选中语义不变：落到新作用域的第一条')
+  assert.equal(h.requests.filter((entry) => entry.endpoint === 'markRead').length, marksBefore,
+    '切源不是打开条目，不许额外标读')
+  assert.equal(h.requests.filter((entry) => entry.endpoint === 'article').length, articlesBefore,
+    '切源不是打开正文，不许额外取数')
+})
+
+test('正文视图下再点同一个源（取消选中）：同样回到列表', skip, async () => {
+  const h = await mountReader({
+    items: [
+      item({ id: 'a', feedId: 'f1', feedTitle: '源一' }),
+      item({ id: 'b', feedId: 'f2', feedTitle: '源二' }),
+    ],
+    feeds: [{ id: 'f1', title: '源一' }, { id: 'f2', title: '源二' }],
+  })
+  await h.store.load('overview')
+  await h.settle()
+
+  const clickFeed1 = () => h.win.document.querySelector('[data-rss-nav-row="feed:f1"]')
+    .dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
+
+  clickFeed1()
+  await h.settle()
+  h.press('V', true)
+  await h.waitFor(() => h.store.get().view === 'article', { timeout: 900, label: '进入正文页' })
+  assert.equal(h.store.get().article?.itemId, 'a', '前置条件：正在看源一的 a')
+
+  // 同一个源再点一次 = 取消选中（既有裁决）；这条分支同样属于「切作用域」，也必须退出正文。
+  clickFeed1()
+  await h.settle()
+
+  assert.deepEqual({ ...h.store.get().navSelection }, { kind: 'virtual' }, '再选同源应当取消选中')
+  assert.equal(h.store.get().view, 'list', '取消选中也必须回到列表，不能停在旧正文')
+  assert.equal(h.store.get().article, undefined, '取消选中同样要清空旧正文')
+  assert.equal(h.box('article'), null, '正文容器必须消失')
+  assert.deepEqual(
+    [...h.win.document.querySelectorAll('[data-rss-row]')].map((el) => el.getAttribute('data-rss-row')),
+    ['a', 'b'],
+    '取消后回到聚合列表',
+  )
+})
+
+test('正文视图下点文件夹 / 标签：同样回到列表、清空旧文章', skip, async () => {
+  const h = await mountReader({
+    items: [
+      item({ id: 'a', feedId: 'f1', feedTitle: '源一', tagIds: ['t1'] }),
+      item({ id: 'b', feedId: 'f2', feedTitle: '源二' }),
+    ],
+    feeds: [{ id: 'f1', title: '源一', folder: '技术' }, { id: 'f2', title: '源二' }],
+    tags: [{ id: 't1', name: '标签一' }],
+  })
+  await h.store.load('overview')
+  await h.settle()
+
+  const navRow = (key) => h.win.document.querySelector('[data-rss-nav-row="' + key + '"]')
+  assert.ok(navRow('folder:技术') !== null, '前置条件：文件夹行在左栏')
+  assert.ok(navRow('tag:t1') !== null, '前置条件：标签行在左栏')
+  // 文件夹行本身是展开/折叠；「进入文件夹」是旁边那个独立的打开按钮（两个动作在 DOM 层分开）。
+  const openFolder = () => h.win.document.querySelector('[data-rss-folder-open="技术"]')
+    .dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
+
+  h.press('V', true)
+  await h.waitFor(() => h.store.get().view === 'article', { timeout: 900, label: '进入正文页' })
+  await h.waitFor(() => h.box('article') !== null, { timeout: 900, label: '正文容器出现' })
+
+  openFolder()
+  await h.settle()
+  assert.deepEqual({ ...h.store.get().navSelection }, { kind: 'folder', folder: '技术' }, '作用域已切到文件夹')
+  assert.equal(h.store.get().view, 'list', '切文件夹后必须回到列表')
+  assert.equal(h.store.get().article, undefined, '切文件夹同样要清空旧正文')
+  assert.equal(h.box('article'), null, '正文容器必须消失')
+
+  // 文件夹内的第一条已被 relocate 选中；再开一次正文，再从正文切到标签。
+  h.press('V', true)
+  await h.waitFor(() => h.store.get().view === 'article', { timeout: 900, label: '再次进入正文页' })
+  await h.waitFor(() => h.box('article') !== null, { timeout: 900, label: '正文容器再次出现' })
+
+  navRow('tag:t1').dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
+  await h.settle()
+  assert.deepEqual({ ...h.store.get().navSelection }, { kind: 'tag', tagId: 't1' }, '作用域已切到标签')
+  assert.equal(h.store.get().view, 'list', '切标签后必须回到列表')
+  assert.equal(h.store.get().article, undefined, '切标签同样要清空旧正文')
+  assert.equal(h.box('article'), null, '正文容器必须消失')
+})
+
+test('正文视图下切「未读 / 星标」过滤：回到列表', skip, async () => {
+  const h = await mountReader({
+    items: [
+      item({ id: 'a', feedId: 'f1', feedTitle: '源一' }),
+      item({ id: 'b', feedId: 'f1', feedTitle: '源一', starred: true, readAt: '2026-10-01T00:00:00.000Z' }),
+      item({ id: 'c', feedId: 'f1', feedTitle: '源一' }),
+    ],
+    feeds: [{ id: 'f1', title: '源一' }],
+  })
+  await h.store.load('overview')
+  await h.settle()
+
+  const navRow = (key) => h.win.document.querySelector('[data-rss-nav-row="' + key + '"]')
+  const clickFilter = (key) => navRow('filter:' + key).dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
+
+  h.press('V', true)
+  await h.waitFor(() => h.store.get().view === 'article', { timeout: 900, label: '进入正文页' })
+  await h.waitFor(() => h.box('article') !== null, { timeout: 900, label: '正文容器出现' })
+
+  clickFilter('unread')
+  await h.settle()
+  assert.equal(h.store.get().filter, 'unread', '前置条件：过滤已切到未读')
+  assert.equal(h.store.get().view, 'list', '切未读过滤后必须回到列表')
+  assert.equal(h.store.get().article, undefined, '切过滤同样要清空旧正文')
+  assert.equal(h.box('article'), null, '正文容器必须消失')
+
+  // a 打开即已读，未读范围里剩下 c；再开 c 的正文，然后切「星标」。
+  h.press('V', true)
+  await h.waitFor(() => h.store.get().view === 'article', { timeout: 900, label: '再次进入正文页' })
+  await h.waitFor(() => h.box('article') !== null, { timeout: 900, label: '正文容器再次出现' })
+  assert.equal(h.store.get().article?.itemId, 'c', '前置条件：正在看未读的 c')
+
+  clickFilter('starred')
+  await h.settle()
+  assert.equal(h.store.get().filter, 'starred', '前置条件：过滤已切到星标')
+  assert.equal(h.store.get().view, 'list', '切星标过滤后必须回到列表')
+  assert.equal(h.store.get().article, undefined, '切过滤同样要清空旧正文')
+  assert.equal(h.box('article'), null, '正文容器必须消失')
+  assert.deepEqual(
+    [...h.win.document.querySelectorAll('[data-rss-row]')].map((el) => el.getAttribute('data-rss-row')),
+    ['b'],
+    '星标过滤下只剩 b',
+  )
+})
+
 test('选了「未读」再选源：源与过滤两条轴各自生效，未读行仍亮着（用户实测反馈）', skip, async () => {
   // 用户报的现象：「先选未读，再选源，未读的选择状态丢了」。
   // 实测定性：filter **没有**被清掉（右栏确实只剩该源的未读），丢的是**左栏那一行的点亮** ——
