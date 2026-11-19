@@ -255,7 +255,7 @@ const browserDeps: ReaderStoreDeps = {
  * |---|---|---|---|
  * | 列表 | `items` / `selectedId` / `nextCursor` / `loadingMore` / `filter` / `layout` / `markAllRange` / `undo`（账目 `unread` / `perFeedUnread` 由 account-mirror 的回包整体覆盖） | load / loadMore / visible / setFilter / setLayout / activate / selectRelative / markRead / toggleStar / toggleKeepUnread / toggleRead / markAllRead / undoMarkAll / cleanup / stepArticle / openArticle / retryArticle | 只**读** feeds / tags；改账目一律经 account-mirror（回包整体覆盖）。**跨域写入逐条登记在此**：① setFilter 同步 `navCursor`（光标跟着过滤走，2026-10-10 的既有规则）；② overview 整份落地（applyOverview 与 load 的搜索分支）把 feeds / folders / tags 按宿主快照原样写回；③ 选中项失效时 applyOverview / load 把 navSelection + navCursor 回落虚拟视图（与「源被退订」同一条规则）；④ 正文动作（openArticle / retryArticle / stepArticle）写 `view` / `article` —— 这两份是跨域呈现状态，不归任何一块私有 |
  * | 搜索 | `search` / `searchRevision` / `searchRequest` / `searchPages` | submitSearch / loadSearch / resetSearchPage | 借列表的 items / selectedId / nextCursor / loading 展示；**不许**改 filter |
- * | 订阅 | `feeds` / `folders` / `discovery` / `feedsBusy` / `importReport` / `navSelection` / `navCursor` / `navVisible` / `foldedFolders` / `viewPreferences`（**deleteFolder 例外**：删掉当前所在文件夹时会把 `filter` 回落成 `all`，这条跨域写入登记在此） | addFeed / removeFeed / importOpml / exportOpml / discover / createFolder / renameFolder / deleteFolder / moveFeedToFolder / selectNav / moveNavCursor / openNavCursor / toggleNav / toggleFolder | 改 navSelection 后必须走 persistView；退订只能经 `deleteSubscription` |
+ * | 订阅 | `feeds` / `folders` / `discovery` / `feedsBusy` / `importReport` / `navSelection` / `navCursor` / `navVisible` / `foldedFolders` / `viewPreferences`（**deleteFolder 例外**：删掉当前所在文件夹时会把 `filter` 回落成 `all`，这条跨域写入登记在此） | addFeed / removeFeed / importOpml / exportOpml / discover / createFolder / renameFolder / deleteFolder / moveFeedToFolder / selectNav / moveNavCursor / openNavCursor / toggleNav / toggleFolder / flushViewMemory | 改 navSelection 后必须走 persistView；**整份覆盖写必须带上当下的 selectedId**（否则一次普通导航就抹掉阅读位置）；选中 / j/k / 打开条目经 300ms 去抖写手记 lastItemId，面板卸载时 flush；退订只能经 `deleteSubscription` |
  * | 标签 | `tags` / 条目的 `tagIds` | createTag / renameTag / deleteTag / toggleItemTag | 乐观改 tagIds，失败回取当前页拉回真相（tagWrite 串行化 + tagEpoch 身份） |
  *
  * `view` / `article` 是跨域呈现状态：列表的 openArticle / retryArticle / closeArticle、搜索的 submitSearch、
@@ -322,11 +322,60 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
    *     还会把「读」和「写」两条路径耦合成环（读到的旧值刚好覆盖掉用户刚做的动作）。
    *  ③ **用户的手势优先**：恢复是异步的，用户在它到达之前按了 u / 点了源，就不能再拿旧记忆盖掉
    *     他的手势（touched 标志）。否则表现为「按了没反应，过一会儿自己弹回去」。
+   *  ④ **写盘是整份覆盖**：阅读位置（R2-01）必须由写入口从**当下** state 取 selectedId，
+   *     调用方不许自己拼一份 —— 少带这一位，一次普通的切过滤/切左栏就会把记忆抹掉。
    */
   let viewRestored = false
   let viewTouched = false
   /** 写盘串行化：记忆按用户动作的先后收敛，不能让两个在飞的请求乱序落库（后发的先到 ⇒ 记忆回退）。 */
   let viewWriteChain: Promise<void> = Promise.resolve()
+
+  /**
+   * 阅读位置的去抖窗口（R2-01）。
+   *
+   * 为什么选中要防抖、而导航不用：j/k 一秒钟能按十几次，逐次写盘只会把域写热；
+   * 导航动作是离散的（点一次源/过滤/按一次 u），本来就不存在「每按一次键都写」的量。
+   * 窗口与撤销窗口共用 deps.setTimeout/clearTimeout 这条既有接缝 —— 测试要能看见「窗口多长、
+   * 写了几次」，而不是靠真等 350ms 赌机器速度。
+   */
+  const VIEW_WRITE_DEBOUNCE_MS = 300
+  /** 待写定时器的句柄。undefined = 没有待写值（flushViewMemory 据此判断「不制造空写」）。 */
+  let pendingViewWrite: unknown
+
+  const cancelPendingViewWrite = (): void => {
+    if (pendingViewWrite === undefined) return
+    deps.clearTimeout(pendingViewWrite)
+    pendingViewWrite = undefined
+  }
+
+  /**
+   * 拼一份可落盘的视图快照。
+   *
+   * **整份覆盖写**：lastItemId 直接取当下 selectedId，不接受调用方传值 —— 写入口只有这一处，
+   * 才能保证「任何一个 navigation 动作都不会把阅读位置落下」。没有选中项时不写这个键（不是写空串）。
+   */
+  const viewPreferencesNow = (): ViewPreferences => {
+    const preferences: ViewPreferences = {
+      navSelection: memorableSelectionOf(state.navSelection),
+      filter: state.filter,
+      navVisible: state.navVisible,
+      reading: state.reading,
+    }
+    if (state.selectedId !== undefined) preferences.lastItemId = state.selectedId
+    return preferences
+  }
+
+  /** 真正发一次整份写（调用方负责已经取消待写定时器）。 */
+  const writeView = (): void => {
+    const preferences = viewPreferencesNow()
+    viewWriteChain = viewWriteChain
+      .then(() => deps.rpc('saveViewPreferences', { preferences }))
+      // 写盘失败要有可见后果（AGENTS.md 禁空 catch）：进 error 让面板说出来。
+      // 界面状态不回滚 —— 它与「能不能记住」是两件事，把左栏再翻回去只会让用户更困惑。
+      .then(() => {}, (failure: unknown) => {
+        set({ error: failure instanceof Error ? failure.message : String(failure) })
+      })
+  }
 
   /**
    * 就地把恢复值落到 state。
@@ -361,31 +410,61 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
             : { kind: 'filter', filter: prefs.filter },
     })
     relocateSelection()
+    // 阅读位置（R2-01）：先按既有规则落到当前作用域第一条，再尝试改选上次那一行。
+    // **直接 set，不走 select()**：select 会置「用户已动手」并排一次写盘，而恢复既不是手势、
+    // 也不该产生写请求（读一次面板不写盘是既有承诺）。
+    // 不在当前页就不选中，也**不额外取数**：条目已被清理时面板照常打开，不翻页去找一条不存在的记忆。
+    if (prefs.lastItemId !== undefined) {
+      const remembered = state.items.some((item) => item.id === prefs.lastItemId)
+        ? prefs.lastItemId
+        : undefined
+      set({ selectedId: remembered })
+    }
   }
 
   /**
    * 落盘当前视图偏好（**只在关键动作时调**，见三个动作方法）。
    *
-   * 为什么不做防抖定时器：被记的是「选中的导航项 / filter / 左栏显隐」，它们只在**离散的用户动作**
+   * 为什么导航不防抖：被记的是「选中的导航项 / filter / 左栏显隐」，它们只在**离散的用户动作**
    * 里变（点源、点 filter、按 u），一次动作一次写，本来就不存在「每按一次键都写」的量。
    * 而移动光标（shift+n/p）是唯一高频的那个，它**刻意不记**（见 NavCursor 注释：那是焦点，不是「看到哪儿」）。
-   * 加一个定时器反而要给面板引入常驻资源（验收要求卸载不留残余），收益为零。
+   * 阅读位置（选中项）是另一类：j/k 会成串发生，所以它走 scheduleViewWrite 的 300ms 去抖，
+   * 由本函数在关键动作里先取消待写、再整份写一次（避免同一次动作写两遍）。
    */
   const persistView = (): void => {
     viewTouched = true
-    const preferences: ViewPreferences = {
-      navSelection: memorableSelectionOf(state.navSelection),
-      filter: state.filter,
-      navVisible: state.navVisible,
-      reading: state.reading,
-    }
-    viewWriteChain = viewWriteChain
-      .then(() => deps.rpc('saveViewPreferences', { preferences }))
-      // 写盘失败要有可见后果（AGENTS.md 禁空 catch）：进 error 让面板说出来。
-      // 界面状态不回滚 —— 它与「能不能记住」是两件事，把左栏再翻回去只会让用户更困惑。
-      .then(() => {}, (failure: unknown) => {
-        set({ error: failure instanceof Error ? failure.message : String(failure) })
-      })
+    // 这一次马上要落的整份写已经包含当下的选中项，定时器再补一枪就是重复写。
+    cancelPendingViewWrite()
+    writeView()
+  }
+
+  /**
+   * 选中变化（纯选中 / j/k / 打开条目）走这里：置「用户已动手」并安排一次 300ms 去抖写。
+   *
+   * 为什么选中也要置 touched：恢复是异步的，若用户已经按 j 换了行而恢复仍无条件覆盖，
+   * 表现就是「按了 j，过一会儿选中自己弹回上次那一行」。这条手势判据与 u / 点源共用同一个标志。
+   */
+  const scheduleViewWrite = (): void => {
+    viewTouched = true
+    // 重新计时而不是叠加：连续 j/k 只在停下来 300ms 后写一次。
+    cancelPendingViewWrite()
+    pendingViewWrite = deps.setTimeout(() => {
+      pendingViewWrite = undefined
+      writeView()
+    }, VIEW_WRITE_DEBOUNCE_MS)
+  }
+
+  /**
+   * 面板卸载时调用：有待写值就立刻落一次，没有就什么都不做。
+   *
+   * 为什么必须存在：去抖窗口 300ms，读者完全可能选完一行立刻关面板 —— 那一刻的位置也得记住。
+   * 为什么「没有待写值不许写」：每次打开/关闭面板都写一次同样的值只会白热存储；恢复本身也不写盘，
+   * 所以「没有手势 → 零写请求」这条既有承诺在卸载路径上同样成立。
+   */
+  const flushViewMemory = (): void => {
+    if (pendingViewWrite === undefined) return
+    cancelPendingViewWrite()
+    writeView()
   }
 
   /**
@@ -450,6 +529,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   const { actions: listActions, relocateSelection } = createListActions({
     get, set, persistView, rpc: deps.rpc, log: deps.log,
     now: deps.now, setTimeout: deps.setTimeout, clearTimeout: deps.clearTimeout, open: deps.open,
+    rememberSelection: scheduleViewWrite,
     search: searchActions,
     nextListVersion: () => ++listVersion,
     currentListVersion: () => listVersion,
@@ -479,6 +559,8 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
     get, submitSearch: (query?: SearchQuery) => searchActions.submit(query),
     refreshCount, setReading,
+    /** 面板卸载时落一次待写的阅读位置（没有待写值时不写）。 */
+    flushViewMemory,
     ...navActions, ...opmlActions, ...feedActions,
     dismissNotice: (): void => { set({ notice: undefined }) },
     ...listActions,

@@ -828,6 +828,29 @@ export const MUTATIONS = [
     // 2026-11-16 重锚：视图记忆改成 host 注入的 viewMemory（load 已搬进 list-actions.ts）。
     from: 'if (!viewMemory.restored()) viewMemory.apply(preferences);',
     to: ';' },
+  // ⑪ R2-01 阅读位置：恢复不得覆盖用户在异步窗口里选中的行。
+  // 与既有的 persist-恢复盖掉用户手势 是同一条守卫，但这一条**额外**由新的选中手势判据与
+  // 真实 DOM 时序用例看守 —— 去掉守卫时，「按 j 选好的行不会自己弹回去」当场翻红。
+  { id: 'client-恢复覆盖用户手势', file: 'lib/client.js',
+    judges: ['nav-persistence.test.mjs', 'scroll-dom.test.mjs'],
+    judgeTests: [
+      '阅读位置：恢复到达前用户先选了另一行 ⇒ 恢复整份让位，不把选中拽回去',
+      'R2-01 恢复迟到：用户先选的行不被覆盖',
+      '恢复是异步的：用户在它到达之前的手势不会被旧记忆盖掉（整份让位）',
+    ],
+    from: 'if (viewTouched) return;',
+    to: ';' },
+  // ⑫ R2-01 阅读位置：恢复只读不写。恢复时调一次 persistView 会把「读」与「写」耦合成环
+  // （读到的旧值覆盖用户刚做的动作），也让每次打开面板都白热一次存储。
+  { id: 'client-恢复写盘', file: 'lib/client.js',
+    judges: ['nav-persistence.test.mjs'],
+    judgeTests: [
+      '阅读位置：重开面板选中上次那一行，且恢复本身不写盘',
+      '阅读位置：上次那一条不在当前页 ⇒ 不选中，也不额外取数',
+    ],
+    // from 照构建产物 lib/client.js 的实际形状写（tsdown 把 if 块压成了一行）。
+    from: 'if (prefs.lastItemId !== void 0) set({ selectedId: state.items.some((item) => item.id === prefs.lastItemId) ? prefs.lastItemId : void 0 });',
+    to: 'if (prefs.lastItemId !== void 0) set({ selectedId: state.items.some((item) => item.id === prefs.lastItemId) ? prefs.lastItemId : void 0 });\n\t\t\t\tpersistView();' },
   // ⑤ 写盘串行化失效 ⇒ 后发的先到会让记忆回退成更早的状态
   { id: 'persist-写盘不串行化', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs'],

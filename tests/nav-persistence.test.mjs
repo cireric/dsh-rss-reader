@@ -39,6 +39,31 @@ const BUNDLE_NAME = 'client.js'
 /** 等一轮宏任务：客户端写盘是 fire-and-forget 的异步链，断言前必须先让它落定。 */
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
 
+/**
+ * 捕获式假定时器（R2-01）：阅读位置的写手用 store 注入的 setTimeout 去抖。
+ *
+ * 为什么不用真等 350ms：去抖窗口本身是**行为**（300ms 内多次选中只写一次），
+ * 真等只能断言「最终写了」，断不到「写了几次」与「窗口多长」；假定时器把这两件事都变成同步事实。
+ */
+function fakeTimers() {
+  const scheduled = new Map()
+  let seq = 0
+  return {
+    setTimeout(handler, ms) {
+      seq += 1
+      scheduled.set(seq, { handler, ms })
+      return seq
+    },
+    clearTimeout(handle) { scheduled.delete(handle) },
+    pending() { return [...scheduled.values()] },
+    runAll() {
+      const jobs = [...scheduled.values()]
+      scheduled.clear()
+      for (const job of jobs) job.handler()
+    },
+  }
+}
+
 /* ============================ ① 纯函数层：形状归一化 ============================ */
 
 test('sanitizeViewPreferences：形状合法时原样通过，且只留协议里的四个字段', () => {
@@ -51,6 +76,29 @@ test('sanitizeViewPreferences：形状合法时原样通过，且只留协议里
   assert.deepEqual(Object.keys(extra).sort(), ['filter', 'navSelection', 'navVisible', 'reading'])
   // 默认常量本身必须是合法形状（它同时是域里的 initial）
   assert.deepEqual(sanitizeViewPreferences(DEFAULT_VIEW_PREFERENCES), DEFAULT_VIEW_PREFERENCES)
+})
+
+test('sanitizeViewPreferences：lastItemId 只认非空字符串，认不出就当没有', () => {
+  // 阅读位置（R2-01）：记住「上次选中的那一行」。它与其他字段同一条归一化规则 ——
+  // 一次坏值只抹掉它自己，不许把导航/过滤/排版一起带走。
+  const base = { navSelection: { kind: 'virtual' }, filter: 'unread', navVisible: false }
+  const kept = sanitizeViewPreferences({ ...base, lastItemId: 'a2' })
+  assert.equal(kept.lastItemId, 'a2', '非空字符串必须原样保留')
+  assert.equal(kept.filter, 'unread', 'lastItemId 合法时其他字段一项不丢')
+
+  for (const raw of ['', 0, null, true, {}, []]) {
+    const value = sanitizeViewPreferences({ ...base, lastItemId: raw })
+    assert.equal('lastItemId' in value, false, '认不出的 lastItemId 必须当作没有：' + JSON.stringify(raw))
+    assert.equal(value.navSelection.kind, 'virtual', '坏 lastItemId 不许带走 navSelection：' + JSON.stringify(raw))
+    assert.equal(value.filter, 'unread', '坏 lastItemId 不许带走 filter：' + JSON.stringify(raw))
+    assert.equal(value.navVisible, false, '坏 lastItemId 不许带走 navVisible：' + JSON.stringify(raw))
+  }
+
+  // 旧配置根本没有这个键：读入正常，且返回对象里不凭空多一个 undefined 键
+  const legacy = sanitizeViewPreferences(base)
+  assert.equal('lastItemId' in legacy, false, '旧配置缺字段时必须保持「没有」，不是 undefined 占位')
+  // 默认偏好不必带这个键（首次安装的 initial 与「没有记忆」是同一件事）
+  assert.equal('lastItemId' in DEFAULT_VIEW_PREFERENCES, false)
 })
 
 test('sanitizeViewPreferences：认不出的形状一律回落默认，绝不编造', () => {
@@ -238,6 +286,38 @@ test('真实 createSqliteStore：读侧校验坏值、写侧归一后才落库�
 
 /* ============================ ② 宿主端点层 ============================ */
 
+test('真实 createSqliteStore：lastItemId 原样落进 config.json，旧配置缺这个键仍能读', async () => {
+  // R2-01 的存储承诺：阅读位置只是视图记忆的又一位，走同一条「整份覆盖写 + 读侧归一」的路径。
+  // 用生产路径（createSqliteStore）而不是内存桩：config.json 才是用户重开面板时真正读的那份文件。
+  const dir = mkdtempSync(join(tmpdir(), 'rss-nav-position-'))
+  const configPath = join(dir, 'config.json')
+  const db = openDatabase(':memory:')
+  try {
+    migrateSchema(db)
+    const store = createSqliteStore(db, configPath)
+    const saved = await store.saveViewPreferences({
+      navSelection: { kind: 'virtual' }, filter: 'all', navVisible: true,
+      reading: DEFAULT_READING_PREFERENCES, lastItemId: 'a2',
+    })
+    assert.equal(saved.lastItemId, 'a2', '写侧归一必须保留 lastItemId')
+    assert.equal(JSON.parse(readFileSync(configPath, 'utf8')).viewPreferences.lastItemId, 'a2',
+      '落盘文件里必须真的有这一位（否则重开后无从恢复）')
+    assert.equal(store.viewPreferences().lastItemId, 'a2', '读回来一致')
+
+    // 旧版本留下的配置没有这个键：读入正常、其他偏好一项不丢，也不凭空写一个 undefined 进去
+    const onDisk = JSON.parse(readFileSync(configPath, 'utf8'))
+    delete onDisk.viewPreferences.lastItemId
+    writeFileSync(configPath, JSON.stringify(onDisk))
+    const legacy = store.viewPreferences()
+    assert.equal('lastItemId' in legacy, false, '旧配置缺字段 ⇒ 当作没有，而不是 undefined 占位')
+    assert.equal(legacy.filter, 'all', '缺 lastItemId 不许带走 filter')
+    assert.deepEqual(legacy.reading, DEFAULT_READING_PREFERENCES, '缺 lastItemId 不许带走排版')
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 const memoryStore = () => createMemoryStore()
 
 /** EndpointDeps 的桩（形状照 src/endpoints.ts 的 EndpointDeps，不增减字段）。 */
@@ -311,7 +391,7 @@ const overviewOf = (items, tags = []) => overviewStub({ items, tags })
  * 加载真实 bundle / 驱动真实 store。prefs 是「宿主那一侧的域 global」：跨两次 store 实例共享，
  * 这样「重开面板」在测试里就是「再建一个 store、读同一份 prefs」。
  */
-function loadExports({ items, tags = [], prefs, failSave = false, writeDelayMs = [] }) {
+function loadExports({ items, tags = [], prefs, failSave = false, writeDelayMs = [], timers }) {
   // 2026-11-15 阶段 4 票据 02：沙箱与假通道收进共享 helper（本文件不再自己写 fetch 分支）。
   const { exports } = loadClientModule()
   const channel = createFakeChannel({
@@ -337,7 +417,15 @@ function loadExports({ items, tags = [], prefs, failSave = false, writeDelayMs =
   })
   // 调用点保持 exports.createReaderStore()：这里把通道注入进去。
   const create = exports.createReaderStore
-  exports.createReaderStore = (overrides = {}) => create({ rpc: channel.rpc, ...overrides })
+  exports.createReaderStore = (overrides = {}) => create({
+    rpc: channel.rpc,
+    ...(timers === undefined ? {} : { setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout }),
+    ...overrides,
+  })
+  // 阅读位置的用例要断言「不额外取数」：通道按游标记下的调用序列是唯一可信来源。
+  exports.__pageCalls = () => channel.pageCalls
+  // 恢复不许碰读态/阅读进度：一次调用序列就能证明「恢复不是打开」。
+  exports.__calls = () => channel.calls
   return exports
 }
 
@@ -370,19 +458,19 @@ test('记住上次选中的导航项、filter 与左栏显隐，重开后恢复'
   // 那么任何单个动作漏写都会被后一个动作的整份写入盖过去 —— 那条守卫就永远没人看。
   first.setFilter('unread')
   await flush()
-  assert.deepEqual(prefs.value, { navSelection: { kind: 'virtual' }, filter: 'unread', navVisible: true, reading: DEFAULT_READING_PREFERENCES },
-    'setFilter 自己就要写一次盘')
+  assert.deepEqual(prefs.value, { navSelection: { kind: 'virtual' }, filter: 'unread', navVisible: true, reading: DEFAULT_READING_PREFERENCES, lastItemId: 'a1' },
+    'setFilter 自己就要写一次盘（整份写带上当前选中项 a1）')
 
   first.selectNav({ kind: 'feed', feedId: 'B' })
   await flush()
-  assert.deepEqual(prefs.value, { navSelection: { kind: 'feed', feedId: 'B' }, filter: 'unread', navVisible: true, reading: DEFAULT_READING_PREFERENCES },
-    'selectNav 自己就要写一次盘')
+  assert.deepEqual(prefs.value, { navSelection: { kind: 'feed', feedId: 'B' }, filter: 'unread', navVisible: true, reading: DEFAULT_READING_PREFERENCES, lastItemId: 'b1' },
+    'selectNav 自己就要写一次盘（切源后选中项落到 b1）')
 
   first.toggleNav()
   await flush()
   assert.equal(prefs.writes.length, 3, '三个关键动作各写一次，不多不少')
-  assert.deepEqual(prefs.value, { navSelection: { kind: 'feed', feedId: 'B' }, filter: 'unread', navVisible: false, reading: DEFAULT_READING_PREFERENCES },
-    '四个状态都必须落盘，且只落协议里的四个字段')
+  assert.deepEqual(prefs.value, { navSelection: { kind: 'feed', feedId: 'B' }, filter: 'unread', navVisible: false, reading: DEFAULT_READING_PREFERENCES, lastItemId: 'b1' },
+    '四个导航/排版状态都必须落盘；lastItemId 只在有选中项时出现')
 
   // 重开面板：新 store 实例 + 同一份宿主 prefs
   const second = await openPanel({ items: twoFeeds(), prefs })
@@ -390,6 +478,7 @@ test('记住上次选中的导航项、filter 与左栏显隐，重开后恢复'
   assert.equal(second.get().navSelection.kind, 'feed', '选中的源必须恢复')
   assert.equal(second.get().navSelection.feedId, 'B')
   assert.equal(second.get().navVisible, false, '左栏显隐必须恢复')
+  assert.equal(second.get().selectedId, 'b1', '阅读位置也必须恢复：重开就停在 b1')
   assert.deepEqual(ids(second.visible()), ['b1'], '恢复后的右栏内容就是「源 B × 未读」')
   // 光标刻意**不**持久化：恢复时按既有规则落到「生效的那一行」（见 src/client/store.ts 的注释）
   assert.deepEqual({ ...second.get().navCursor }, { kind: 'feed', feedId: 'B' },
@@ -436,7 +525,7 @@ test('改字号只动排版：导航、过滤与左栏显隐一项都不许被�
   await flush()
   assert.deepEqual(prefs.value, {
     navSelection: { kind: 'feed', feedId: 'B' }, filter: 'unread', navVisible: false,
-    reading: { fontSize: 20, lineWidth: 760, theme: 'auto' },
+    reading: { fontSize: 20, lineWidth: 760, theme: 'auto' }, lastItemId: 'b1',
   }, '写盘落的必须是整份 state：只发 reading 会让另外三项回落默认')
 
   first.setReading({ theme: 'dark' })
@@ -551,14 +640,20 @@ test('写盘串行化：前一次慢、后一次快时，最终的记忆是「�
   await new Promise((resolve) => setTimeout(resolve, 120))
 
   assert.equal(prefs.writes.length, 2, '两次动作各写一次')
-  assert.deepEqual(prefs.value, { navSelection: { kind: 'feed', feedId: 'B' }, filter: 'unread', navVisible: true, reading: DEFAULT_READING_PREFERENCES },
+  assert.deepEqual(prefs.value, { navSelection: { kind: 'feed', feedId: 'B' }, filter: 'unread', navVisible: true, reading: DEFAULT_READING_PREFERENCES, lastItemId: 'b1' },
     '最终记忆必须是最新动作那一份，而不是最后落地的那个请求')
-  assert.deepEqual(prefs.writes[0], { navSelection: { kind: 'virtual' }, filter: 'unread', navVisible: true, reading: DEFAULT_READING_PREFERENCES },
-    '串行化：第一次写的是动作发生时的状态（当时还没选源）')
-  assert.deepEqual(prefs.writes[1], { navSelection: { kind: 'feed', feedId: 'B' }, filter: 'unread', navVisible: true, reading: DEFAULT_READING_PREFERENCES })
+  assert.deepEqual(prefs.writes[0], { navSelection: { kind: 'virtual' }, filter: 'unread', navVisible: true, reading: DEFAULT_READING_PREFERENCES, lastItemId: 'a1' },
+    '串行化：第一次写的是动作发生时的状态（当时还没选源，选中项是 a1）')
+  assert.deepEqual(prefs.writes[1], { navSelection: { kind: 'feed', feedId: 'B' }, filter: 'unread', navVisible: true, reading: DEFAULT_READING_PREFERENCES, lastItemId: 'b1' })
   // 顺序即「按动作先后」，与 setFilter 里那句注释同一条判据
-  assert.deepEqual((() => { const s = store.get(); return { navSelection: s.navSelection.kind === 'feed' ? { kind: 'feed', feedId: s.navSelection.feedId } : { kind: 'virtual' }, filter: s.filter, navVisible: s.navVisible, reading: { ...s.reading } } })(), prefs.value,
-    '界面状态与存储里的记忆必须一致')
+  assert.deepEqual((() => {
+    const s = store.get()
+    return {
+      navSelection: s.navSelection.kind === 'feed' ? { kind: 'feed', feedId: s.navSelection.feedId } : { kind: 'virtual' },
+      filter: s.filter, navVisible: s.navVisible, reading: { ...s.reading },
+      ...(s.selectedId === undefined ? {} : { lastItemId: s.selectedId }),
+    }
+  })(), prefs.value, '界面状态与存储里的记忆必须一致')
 })
 
 test('只在关键动作时写盘：移动光标（每次按键）不产生写入', async () => {
@@ -576,6 +671,166 @@ test('只在关键动作时写盘：移动光标（每次按键）不产生写�
   store.toggleNav()
   await flush()
   assert.equal(prefs.writes.length, 1, '真正被记忆的动作才写一次')
+})
+
+/* ============================ ③b 阅读位置：回到上次那一行（R2-01） ============================ */
+
+test('阅读位置：选中变化去抖 300ms 写一次，保存内容含 lastItemId', async () => {
+  // 为什么必须去抖：j/k 每次移动都会换选中，逐次写盘等于每按一次键就写一次域。
+  // 判据同时钉住三件事：不当场写、窗口 300ms、窗口内只落一次。
+  const timers = fakeTimers()
+  const prefs = { value: undefined, writes: [] }
+  const store = await openPanel({ items: twoFeeds(), prefs, timers })
+  assert.equal(store.get().selectedId, 'a1', '前置：没有记忆时与今天一致（落在作用域第一条）')
+
+  store.select('b1')
+  assert.equal(prefs.writes.length, 0, '选中不当场写盘')
+  assert.equal(timers.pending().length, 1, '选中变化必须排一次写')
+  assert.equal(timers.pending()[0].ms, 300, '去抖窗口是 300ms')
+  timers.runAll()
+  await flush()
+  assert.equal(prefs.writes.length, 1, '一次去抖只写一次')
+  assert.equal(prefs.value.lastItemId, 'b1', '保存内容必须含 lastItemId')
+
+  // **整份覆盖写**：普通导航（切左栏显隐）不换选中，但会重写整份偏好 ——
+  // 若写入口没带上当下的选中项，这一下就把阅读位置抹了（本项最容易踩的坑）。
+  store.toggleNav()
+  await flush()
+  assert.equal(prefs.writes.length, 2, 'toggleNav 自己写一次')
+  assert.equal(prefs.value.lastItemId, 'b1', '普通导航的整份写必须携带当下的选中项')
+})
+
+test('阅读位置：重开面板选中上次那一行，且恢复本身不写盘', async () => {
+  const timers = fakeTimers()
+  const prefs = { value: undefined, writes: [] }
+  const first = await openPanel({ items: twoFeeds(), prefs, timers })
+  first.select('b1')
+  first.flushViewMemory()               // 等价于关面板：把待写值立刻落盘
+  await flush()
+  assert.equal(prefs.value.lastItemId, 'b1', '前置：记忆里已经是 b1')
+
+  const second = await openPanel({ items: twoFeeds(), prefs, timers: fakeTimers() })
+  assert.equal(second.get().selectedId, 'b1', '重开面板必须选中上次停留的那一行')
+  assert.equal(prefs.writes.length, 1, '恢复只读不写：重开面板不产生 saveViewPreferences')
+
+  // 恢复不是打开：读态不变，也不触发阅读进度写回（用户故事 11/12）
+  const third = loadExports({ items: twoFeeds(), prefs, timers: fakeTimers() })
+  const restored = third.createReaderStore()
+  await restored.load('overview')
+  await flush()
+  assert.equal(restored.get().items.every((entry) => entry.readAt === undefined), true,
+    '恢复前后任何条目的读态都不许变（恢复不是打开）')
+  assert.equal(third.__calls().some(([endpoint]) => endpoint === 'markRead' || endpoint === 'unmarkRead'), false,
+    '恢复不得调用标读端点')
+  assert.equal(third.__calls().some(([endpoint]) => endpoint === 'saveReadingProgress'), false,
+    '恢复不得产生阅读进度写回')
+})
+
+test('阅读位置：上次那一条不在当前页 ⇒ 不选中，也不额外取数', async () => {
+  const prefs = {
+    value: {
+      navSelection: { kind: 'virtual' }, filter: 'all', navVisible: true,
+      reading: DEFAULT_READING_PREFERENCES, lastItemId: 'gone',
+    },
+    writes: [],
+  }
+  const exports = loadExports({ items: twoFeeds(), prefs })
+  const store = exports.createReaderStore()
+  await store.load('overview')
+  await flush()
+
+  assert.equal(store.get().selectedId, undefined, '条目已被清理 ⇒ 面板正常打开、没有选中行')
+  assert.deepEqual(ids(store.visible()), ['a1', 'a2', 'b1'], '列表照常可见（不是空面板）')
+  assert.equal(exports.__pageCalls().length, 1, '不在当前页就不额外取数：只发生了挂载那一次 overview')
+  assert.equal(prefs.writes.length, 0, '恢复不写盘')
+})
+
+test('阅读位置：上次的源已退订 ⇒ 回落「全部」，其他视图偏好照常恢复', async () => {
+  const prefs = {
+    value: {
+      navSelection: { kind: 'feed', feedId: 'gone' }, filter: 'all', navVisible: true,
+      reading: DEFAULT_READING_PREFERENCES, lastItemId: 'a2',
+    },
+    writes: [],
+  }
+  const store = await openPanel({ items: twoFeeds(), prefs })
+  assert.equal(store.get().navSelection.kind, 'virtual', '已退订的源回落虚拟视图 —— 面板打得开比记得住更重要')
+  assert.deepEqual(ids(store.visible()), ['a1', 'a2', 'b1'], '回落之后右栏是「全部」而不是空范围')
+  assert.equal(store.get().selectedId, 'a2', 'lastItemId 是另一项视图偏好，不随源失效一起丢')
+  assert.equal(store.get().navVisible, true, '其他偏好不丢')
+})
+
+test('阅读位置：旧配置没有 lastItemId 时正常读入，其他偏好一项不丢', async () => {
+  const prefs = {
+    value: {
+      navSelection: { kind: 'feed', feedId: 'B' }, filter: 'unread', navVisible: false,
+      reading: { fontSize: 20, lineWidth: 900, theme: 'dark' },
+    },
+    writes: [],
+  }
+  const store = await openPanel({ items: twoFeeds(), prefs })
+  assert.equal(store.get().navSelection.kind, 'feed', '旧配置的源选中必须保住')
+  assert.equal(store.get().filter, 'unread')
+  assert.equal(store.get().navVisible, false)
+  assert.deepEqual({ ...store.get().reading }, { fontSize: 20, lineWidth: 900, theme: 'dark' })
+  assert.equal(store.get().selectedId, 'b1', '没有阅读位置时按既有规则落在作用域第一条')
+  assert.equal(prefs.writes.length, 0, '旧配置被读一次也不产生写')
+})
+
+test('阅读位置：flushViewMemory 只写待写值，没有待写值不制造空写', async () => {
+  const timers = fakeTimers()
+  const prefs = { value: undefined, writes: [] }
+  const store = await openPanel({ items: twoFeeds(), prefs, timers })
+
+  store.flushViewMemory()
+  await flush()
+  assert.equal(prefs.writes.length, 0, '没有待写值时 flush 不写 —— 否则每次打开/关闭面板都白热一次存储')
+
+  store.select('b1')
+  assert.equal(timers.pending().length, 1, '前置：有一次待写')
+  store.flushViewMemory()
+  assert.equal(timers.pending().length, 0, 'flush 必须先取消待写定时器（否则随后还会再写一次）')
+  store.flushViewMemory()
+  await flush()
+  assert.equal(prefs.writes.length, 1, '一次待写只落一次')
+  assert.equal(prefs.value.lastItemId, 'b1', '落的是当下选中项')
+})
+
+test('阅读位置：打开条目（activate）也排一次写 —— 正文里关面板能记住那一篇', async () => {
+  const timers = fakeTimers()
+  const prefs = { value: undefined, writes: [] }
+  const store = await openPanel({ items: twoFeeds(), prefs, timers })
+  store.activate('a2')
+  await flush()
+  assert.equal(timers.pending().length, 1, '打开条目也要进入写手（否则正文里关面板会丢掉那一篇）')
+  store.flushViewMemory()
+  await flush()
+  assert.equal(prefs.value.lastItemId, 'a2')
+})
+
+test('阅读位置：恢复到达前用户先选了另一行 ⇒ 恢复整份让位，不把选中拽回去', async () => {
+  // 时机与「按 u」那条既有用例同形：面板一挂载就 load，恢复要等一次读端点往返。
+  // 这次用户的手势是**选中条目**（纯选中也是「已动手」，见实现决策 8）。
+  const timers = fakeTimers()
+  const prefs = {
+    value: {
+      navSelection: { kind: 'virtual' }, filter: 'all', navVisible: true,
+      reading: DEFAULT_READING_PREFERENCES, lastItemId: 'a1',
+    },
+    writes: [],
+  }
+  const exports = loadExports({ items: twoFeeds(), prefs, timers })
+  const store = exports.createReaderStore()
+  const loading = store.load('overview')   // 刻意不 await：模拟恢复还在路上
+  store.select('b1')
+  assert.equal(store.get().selectedId, 'b1', '前置：用户手势已经生效')
+  await loading
+  await flush()
+
+  assert.equal(store.get().selectedId, 'b1', '迟到的恢复不得把选中拽回 a1')
+  timers.runAll()
+  await flush()
+  assert.equal(prefs.value.lastItemId, 'b1', '手势那一刻的选中项成为新记忆')
 })
 
 /* ============================ ④ 老域能否打开（必须实测） ============================ */

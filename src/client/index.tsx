@@ -295,6 +295,9 @@ export function createReader(store: ReaderStore): () => ReactNode {
     useEffect(() => {
       void store.load('refresh')
     }, [])
+    // 关面板时把待写的阅读位置落一次（R2-01）：写手是 300ms 去抖的，读者完全可能选完一行立刻离开。
+    // 没有待写值时 flushViewMemory 什么都不做 —— 「打开面板看一眼再关」不产生写请求。
+    useEffect(() => () => { store.flushViewMemory() }, [store])
     useEffect(() => {
       root?.focus()
     }, [root])

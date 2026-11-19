@@ -20,6 +20,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
 import { READER_KEY_HELP } from '../lib/keys.js'
+import { DEFAULT_READING_PREFERENCES } from '../lib/preferences.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const BUNDLE = join(ROOT, 'lib', 'client.js')
@@ -140,7 +141,7 @@ function overviewStub(items, feeds, folders, accountItems = items, tags = []) {
 /** 本轮 mountReader 的收尾函数登记表：afterEach 统一清（消灭未决 handle ⇒ 变异不再拖死套件）。 */
 const liveCleanups = []
 
-async function mountReader({ items = [], feeds, folders, tags = [], article, holdArticle, search, folderApi, duplicates } = {}) {
+async function mountReader({ items = [], feeds, folders, tags = [], article, holdArticle, holdOverview = false, search, folderApi, duplicates, prefs = { value: undefined, writes: [] } } = {}) {
   const { JSDOM } = STACK
   // P3（gate 调优轮）：挂载前拍全局快照，cleanup 时还原 —— 此前每个 mount 都把
   // window/document/fetch/ResizeObserver 覆盖成新 JSDOM 的桩且从不还原，跨用例的桩污染面
@@ -223,15 +224,28 @@ async function mountReader({ items = [], feeds, folders, tags = [], article, hol
   }
   let releaseArticle
   const gate = holdArticle === true ? new Promise((resolve) => { releaseArticle = resolve }) : undefined
+  // R2-01：把 overview 扣住，用来表达「恢复还在路上，用户已经动手」这个真实窗口。
+  // 恢复读的是同一条宿主通道，所以挂起它等价于宿主慢了一拍。
+  let releaseOverview
+  const overviewGate = holdOverview === true ? new Promise((resolve) => { releaseOverview = resolve }) : undefined
   const requests = []
   const fetchStub = async (_url, init) => {
     const body = JSON.parse(init.body)
     endpoints.push(body.endpoint)
     requests.push({ endpoint: body.endpoint, payload: body.payload })
+    // 视图记忆（R2-01）：重开面板 = 新 store 读同一份宿主 prefs。写盘落进同一个对象，
+    // 于是「关面板 → 再开」在这层是可表达的，不必碰实现内部。
+    if (body.endpoint === 'viewPreferences') return ok({ preferences: prefs.value })
+    if (body.endpoint === 'saveViewPreferences') {
+      prefs.value = body.payload?.preferences
+      prefs.writes.push(body.payload?.preferences)
+      return ok({ preferences: prefs.value })
+    }
     // refresh 与 overview 都回完整 Overview（src/endpoints.ts:112-118）—— 桩件此前把 refresh
     // 回成 {changed,unread}，而面板挂载时走的就是 refresh（index.tsx:184），于是 overview 字段
     // 全是 undefined。这是夹具没守住契约，不是代码该容忍的形状。
     if (body.endpoint === 'overview' || body.endpoint === 'refresh') {
+      if (overviewGate !== undefined) await overviewGate
       const folder = body.payload?.folder
       const tagId = body.payload?.tagId
       let visibleItems = folder === undefined
@@ -383,7 +397,8 @@ async function mountReader({ items = [], feeds, folders, tags = [], article, hol
   // 首次上屏 = React 真的把 Reader 挂上去了（root 有子节点），不是「睡够 50ms」。
   await waitFor(() => win.document.getElementById('root').childNodes.length > 0, { timeout: 2000, label: 'Reader 首次上屏' })
   // 挂载后组件自己会走一次 refresh（index.tsx:184）—— 等它落地再交给用例。
-  await settle()
+  // holdOverview 是**被测形态**（恢复在途），不能等它回来。
+  await settle({ allowPending: holdOverview === true })
 
   /** 按标记属性现取容器 —— 与按键处理器读的是同一个属性，所以它顺带钉住了标记。 */
   const box = (kind) => win.document.querySelector('[data-rss-scroll="' + kind + '"]')
@@ -457,7 +472,15 @@ async function mountReader({ items = [], feeds, folders, tags = [], article, hol
   }
   // 登记到模块级收尾表：afterEach 统一调用（用例无需逐一改）
   liveCleanups.push(cleanup)
-  return { store, win, endpoints, requests, server: { feeds: serverFeeds, folders: serverFolders }, box, byLabel, arm, observeContent, userScroll, press, exports: exportsObj, release: () => { if (releaseArticle !== undefined) releaseArticle() }, scrollTop: (el) => (geometry.get(el) ?? (() => el.scrollTop))(), cleanup, settle, waitFor }
+  /**
+   * 关面板：只卸 Reader 本身，保留 store 与 JSDOM（重开用例随后会再挂一个）。
+   * 必须等 flush 的写盘落地才返回 —— 断言「关面板那一刻记住了」得等异步链走完。
+   */
+  const unmount = async () => {
+    try { rootRef.unmount() } catch { /* 已卸载 */ }
+    await settle()
+  }
+  return { store, win, endpoints, requests, server: { feeds: serverFeeds, folders: serverFolders }, box, byLabel, arm, observeContent, userScroll, press, exports: exportsObj, prefs, unmount, release: () => { if (releaseArticle !== undefined) releaseArticle() }, releaseOverview: () => { if (releaseOverview !== undefined) releaseOverview() }, scrollTop: (el) => (geometry.get(el) ?? (() => el.scrollTop))(), cleanup, settle, waitFor }
 }
 
 /** 一条最小可用条目。 */
@@ -2591,4 +2614,119 @@ test('正文失败回退：字号/栏宽/主题当场生效，空格可滚动正
   const scroller = h.arm(h.box('article'))
   assert.equal(h.press(' '), true, '回退态空格应被正文页接管')
   assert.equal(h.scrollTop(scroller), 300, '回退态空格应当滚动正文容器一屏')
+})
+
+/* ==================== R2-01 阅读位置：回到上次那一行（真 React + jsdom） ==================== */
+
+/** 三个条目、两个源：足够验证「选中哪一行」与「行在视口外」两种形态。 */
+function readingPositionItems() {
+  return [
+    item({ id: 'a1' }),
+    item({ id: 'a2' }),
+    item({ id: 'b1', feedId: 'B', feedTitle: '源 B' }),
+  ]
+}
+
+/** 一份合法的视图记忆（没有阅读位置时就是旧配置的形状）。 */
+function viewMemory(overrides = {}) {
+  return {
+    navSelection: { kind: 'virtual' }, filter: 'all', navVisible: true,
+    reading: DEFAULT_READING_PREFERENCES, ...overrides,
+  }
+}
+
+test('R2-01 重开面板：上次停留的那一行被选中', skip, async () => {
+  const prefs = { value: undefined, writes: [] }
+  const items = readingPositionItems()
+  const first = await mountReader({ items, prefs })
+  await first.settle()
+  assert.equal(first.store.get().selectedId, 'a1', '前置：没有记忆时落在作用域第一条')
+
+  // 用 j 移动两行（j/k 与纯选中都算「用户已动手」）
+  first.press('j'); await first.settle()
+  first.press('j'); await first.settle()
+  assert.equal(first.store.get().selectedId, 'b1', '前置：用户停在 b1')
+
+  // 关面板 = 卸载 Reader；写手必须立刻 flush（不能等 300ms 去抖 —— 面板已经没了）
+  await first.unmount()
+  assert.equal(prefs.value.lastItemId, 'b1', '关面板那一刻必须把当下选中项写进记忆')
+
+  // 重开面板 = 新 store 读同一份宿主 prefs
+  const second = await mountReader({ items, prefs })
+  await second.settle()
+  assert.equal(second.store.get().selectedId, 'b1', '重开面板必须选中上次停留的那一行')
+  const row = second.win.document.querySelector('[data-rss-row="b1"]')
+  assert.ok(row !== null, 'b1 必须渲染出来')
+  assert.equal(row.hasAttribute('data-rss-selected'), true, '选中态必须真的画在那一行上，而不是只改了 state')
+})
+
+test('R2-01 正文里关面板：重开后选中那一篇', skip, async () => {
+  const prefs = { value: undefined, writes: [] }
+  const items = readingPositionItems()
+  const first = await mountReader({ items, prefs })
+  await first.settle()
+  first.press('j'); await first.settle()
+  first.press('j'); await first.settle()
+  assert.equal(first.store.get().selectedId, 'b1', '前置：停在 b1')
+
+  assert.equal(first.press('V', true), true, 'V 应当被接管')
+  await first.waitFor(() => first.store.get().view === 'article', { timeout: 900, label: '进入正文页' })
+  await first.settle()
+  assert.equal(first.store.get().article?.itemId, 'b1', '前置：正文页打开的就是 b1')
+
+  // 在正文里关面板：flush 取的是**当下**的选中项（loadArticle 会 activate 它）
+  await first.unmount()
+  assert.equal(prefs.value.lastItemId, 'b1', '正文里关面板也要记住那一篇')
+
+  const second = await mountReader({ items, prefs })
+  await second.settle()
+  assert.equal(second.store.get().selectedId, 'b1', '重开后那一行已被选中，按一次 Enter 就回到原文')
+  assert.equal(second.store.get().view, 'list', '重开一律回列表（不自动打开正文）')
+})
+
+test('R2-01 恢复迟到：用户先选的行不被覆盖', skip, async () => {
+  // 恢复要等 overview 往返；这段窗口里用户可能已经按 j / 点了另一行。
+  // 把 overview 扣住就得到这个真实时序：先有手势，后有恢复。
+  const prefs = { value: viewMemory({ lastItemId: 'a1' }), writes: [] }
+  const items = readingPositionItems()
+  const h = await mountReader({ items, prefs, holdOverview: true })
+  assert.equal(h.store.get().items.length, 0, '前置：overview 被扣住，列表还没有数据')
+  assert.equal(h.store.get().selectedId, undefined, '前置：恢复也还没到')
+
+  h.store.select('b1')                     // 行点击 / j/k 走的同一个动作（纯选中）
+  assert.equal(h.store.get().selectedId, 'b1', '前置：用户手势已经生效')
+  h.releaseOverview()
+  await h.settle()
+
+  assert.equal(h.store.get().items.length, items.length, '前置：overview 已放行')
+  assert.equal(h.store.get().selectedId, 'b1', '迟到的恢复不得把选中拽回 a1')
+  assert.equal(h.win.document.querySelector('[data-rss-row="b1"]').hasAttribute('data-rss-selected'), true,
+    '界面上选中的仍是用户选的那一行')
+})
+
+test('R2-01 恢复的选中行在视口外：列表把它带进视口', skip, async () => {
+  // jsdom 没有布局引擎，offsetTop/offsetHeight 恒为 0 —— 给行装上可测几何，
+  // 与既有「跟随选中项滚动」用例同一手法（量的是真 DOM 节点，只是尺寸由测试给）。
+  const prefs = { value: viewMemory({ lastItemId: 'b1' }), writes: [] }
+  const items = readingPositionItems()
+  const h = await mountReader({ items, prefs, holdOverview: true })
+  const list = h.arm(h.box('list'), { scrollHeight: 3000, clientHeight: 300 })
+  Object.defineProperty(h.win.HTMLElement.prototype, 'offsetHeight', {
+    configurable: true,
+    get() { return this.getAttribute?.('data-rss-row') === null ? 0 : 48 },
+  })
+  Object.defineProperty(h.win.HTMLElement.prototype, 'offsetTop', {
+    configurable: true,
+    get() {
+      if (this.getAttribute?.('data-rss-row') === null) return 0
+      const parent = this.parentElement
+      return parent === null ? 0 : Array.from(parent.children).indexOf(this) * 1000
+    },
+  })
+
+  h.releaseOverview()
+  await h.settle()
+
+  assert.equal(h.store.get().selectedId, 'b1', '前置：恢复选中了视口外的 b1（第 3 行，offsetTop 2000）')
+  assert.equal(h.scrollTop(list), 1748, '恢复的选中行必须被带进视口（2000 + 48 - 300）')
 })

@@ -40,6 +40,13 @@ export interface ListActionHost {
   set: (patch: Partial<ReaderState>) => void
   /** 切过滤是「关键动作」：要写视图记忆（persistView 的归属仍按票据 05 的裁定留在 store）。 */
   persistView: () => void
+  /**
+   * 阅读位置（R2-01）：纯选中 / j/k / 打开条目都算「用户已动手」，并安排一次 300ms 去抖写。
+   *
+   * 为什么不是一个纯标志：这些动作和「恢复」共用 touched 判据（恢复不得覆盖用户刚选的行），
+   * 而写入又要防抖 —— 两件事必须在同一处发生，否则迟早出现「置了标志却没记住位置」。
+   */
+  rememberSelection: () => void
   /** 搜索域：setFilter 的 reset 与 load / loadMore 的搜索分支共用同一组入口。 */
   search: {
     reset: () => void
@@ -72,7 +79,7 @@ export interface ListActionHost {
 
 export function createListActions(host: ListActionHost) {
   const {
-    get, set, rpc, persistView, search, nextListVersion, currentListVersion, viewMemory,
+    get, set, rpc, persistView, rememberSelection, search, nextListVersion, currentListVersion, viewMemory,
     refreshDuplicateHints, log, now, setTimeout, clearTimeout, open,
   } = host
 
@@ -151,7 +158,11 @@ export function createListActions(host: ListActionHost) {
   const setShowUnread = (showUnread: boolean): void => { set({ showUnread }) }
 
   /** 纯选中：只挪光标，**不**标已读、不展开（要副作用请走 activate —— 「打开一条」的唯一触发点）。 */
-  const select = (itemId: string): void => { set({ selectedId: itemId }) }
+  const select = (itemId: string): void => {
+    set({ selectedId: itemId })
+    // 阅读位置（R2-01）：纯选中也是「用户已动手」——迟到的恢复不许覆盖它，且这次选择要被记住。
+    rememberSelection()
+  }
 
   /**
    * j/k：**只移动选中，不标已读**（用户 2026-10-06 明确要求）。
@@ -170,6 +181,7 @@ export function createListActions(host: ListActionHost) {
     const target = list[nextIndex]
     if (target === undefined) return
     set({ selectedId: target.id })
+    rememberSelection()
   }
 
   // ── 账目管线与撤销窗口（票据 06b）─────────────────────────────────────────────
@@ -290,6 +302,9 @@ export function createListActions(host: ListActionHost) {
    */
   const activate = (itemId: string): void => {
     set({ selectedId: itemId })
+    // 打开条目也是「用户已动手」：它既可能发生在恢复到达之前（选中必须让给用户），
+    // 也要被记进阅读位置 —— 正文里关面板时，flush 靠的就是这一次选中。
+    rememberSelection()
     void markRead(itemId)
   }
 

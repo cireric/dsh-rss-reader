@@ -8,10 +8,10 @@
  */
 
 /**
- * 视图记忆：面板重开后要恢复起来的那几项（两列布局任务 7）。
+ * 视图记忆：面板重开后要恢复起来的那几项（两列布局任务 7 + R2-01）。
  *
- * 四份状态刻意**只列被记忆的**：navSelection（虚拟视图 / 某个源）、filter、navVisible，
- * 以及 M5 01 的正文排版 reading。
+ * 这几份状态刻意**只列被记忆的**：navSelection（虚拟视图 / 某个源）、filter、navVisible、
+ * 正文排版 reading，以及 R2-01 的阅读位置 lastItemId（上次选中的那一行）。
  * 特别**不含 navCursor**（键盘光标）—— 理由见客户端 store 的恢复注释：光标是「焦点在哪」，
  * 是瞬时的指向，而这里记的是「上次看到哪儿」；恢复时按既有规则把它落到生效的那一行即可。
  */
@@ -31,6 +31,14 @@ export interface ViewPreferences {
   navVisible: boolean
   /** 正文排版（M5 01）。旧配置没有这个键 ⇒ 归一化时补默认值，不许因为缺字段就回落整份记忆。 */
   reading: ReadingPreferences
+  /**
+   * 上次选中的条目 id（R2-01 阅读位置）。
+   *
+   * **可选**：旧配置没有这个键，首次安装的默认偏好也不必带它 —— 「没有」就是没有，
+   * 不要用一个空串或 undefined 占位（那会让「从没记过」与「记了一个空值」不可区分）。
+   * 它只描述「上次停在哪儿」，不携带读态、也不是打开动作；条目已被清理时由客户端按当前页校验后丢弃。
+   */
+  lastItemId?: string
 }
 
 /**
@@ -145,8 +153,22 @@ export function sanitizeViewPreferences(
       : DEFAULT_READING_PREFERENCES.theme,
   }
 
-  // 只搬运点名的四个字段：认不出的键（历史版本留下的、或被别的写入者塞进来的）一律丢掉，
+  // 阅读位置（R2-01）：只接受非空字符串；认不出就当「没有」，返回对象里不出现这个键。
+  // 与上面四项同一条规则 —— 一次坏值只该抹掉它自己，不许把导航/过滤/排版一起带走。
+  // 「条目是否还在当前页」不在这里判：那是恢复阶段的目录判据，需要刚下发的 items（见 applyRestoredView）。
+  const lastItemIdRaw = source['lastItemId']
+  const lastItemId = typeof lastItemIdRaw === 'string' && lastItemIdRaw !== '' ? lastItemIdRaw : undefined
+
+  // 只搬运点名的字段：认不出的键（历史版本留下的、或被别的写入者塞进来的）一律丢掉，
   // 否则它们会被原样写回存储，攒够几版就成了没人敢删的历史包袱。
-  return { navSelection, filter, navVisible, reading }
+  // lastItemId 只在真的记过时才出现 —— 「没有」不能用 undefined 占一个键，否则「从没记过」
+  // 与「记过一个空值」在存储里又不可区分了（旧配置的判据就是键在不在）。
+  return {
+    navSelection,
+    filter,
+    navVisible,
+    reading,
+    ...(lastItemId === undefined ? {} : { lastItemId }),
+  }
 }
 
