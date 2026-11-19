@@ -14,6 +14,7 @@
 | 阶段 1 · tag 选中被记忆静默降级 | 四种 kind 与 NavSelection 一一对应；投影收成一个穷尽函数 | `1c26275` |
 | 阶段 2 · 「打开一条」五遍 | `store.activate` 成为唯一触发点；`nextExpandedOf` 收成一条规则 | `3aff807` |
 | 阶段 3 · ReaderStore 契约与替身 | 36 方法可执行契约 + 内存实现升格 + 窄接口 + 判据归一 + 五份局部桩退役 | `6fbdeb0` `03af3ed` `ba96196` `6a3f470` |
+| 阶段 4 · 客户端 store 依赖暗处 | ReaderStoreDeps 接缝 + 共享假通道 + overview 桩工厂；48 项动作拆到 4b | `5de290d` `29aa58f` `f994336` `986c955` `bc119a8` `16c0bb0` `ba219ff` `764f83f` |
 | 阶段 4b · 48 项动作按域分家 | 标签 / 搜索 / 订阅 / 列表四域各自成文件，store 只留装配与视图记忆 | `2db1f31` `a1d98af` `0a1d45b` `62ef6ff` `855f26c` `608d50b` `25b179c` `b98bea6` `0b34671` `0b768ae` |
 | 阶段 5 · 端点的入参不在 interface 里 | 28 个端点一份 payload 声明；`defineEndpoint` 解析一次 | `310ab5b` `867eacf` `7414372` `1cb3b35` `793f706` |
 | 阶段 6 · 「一页条目」没有家 | 分页协议收进 `src/item-page.ts`；store 续页谓词每种语言一处 | `33a6663` `557fcdc` `7fb9306` `252696a` |

@@ -1,6 +1,6 @@
 # 功能状态
 
-> 版本 **0.1.0** · 更新 2026-11-14 · **未发布**（无 tag、无 npm publish、无远端推送）
+> 版本 **0.1.0** · 更新 2026-11-18 · **已推送 main**（阶段 9 收尾 `9ce1a9e`）· 未打 tag、无 npm publish
 >
 > 状态词只有五个，按「证据离真机有多远」排：
 > **已落地**（代码在 `src/`、门槛绿）→ **隔离 smoke**（测试或合成夹具通过）→ **真机确认**（活体宿主装载过）→
@@ -36,11 +36,11 @@
 - **浏览器观感**：主题对比度、窄窗口折行、长文 + 懒加载图片时的进度恢复跳动 —— 只有结构保证，没有真人验收。
 - **大库**：10 万条量级的搜索、分页、`VACUUM INTO`、`link_key IN (…)` 时延，本机只有 ≤ 600 条的真实数据和合成夹具。
 
-## 发布前要做的事（清单，未执行）
+## 发布前要做的事（2026-11-18 状态）
 
-1. `bash scripts/gate.sh`（L1：build → build:client → typecheck → test）全绿；
-2. `npm run mutation -- --workers 1` 按批跑完（本机内存 < 6 GB，见 `docs/pitfalls.md` §1.3）；
-3. 真机三步：`dev_reload_package`（前后 `[active]`）→ 当天日志无「装载失败」→ 路由回 401；
-4. 备份演练：按 `docs/ops/backup-restore.md` §3/§4 取一份快照并校验（**升级前必做**）；
-5. 版本号与 `CHANGELOG.md` 一致（当前 `0.1.0`）；
-6. **发布动作（打 tag / npm publish / 推远端）另行授权** —— 本文件不代表已经发布。
+- [x] 1. `bash scripts/gate.sh`（L1：build → build:client → typecheck → test）全绿（2026-11-18 实测：4/4，664/664）；
+- [x] 2. `npm run mutation -- --workers 1` 全量跑完（2026-11-18 实测：246/246、0 幸存）；
+- [x] 3. 真机三步：`dev_reload_package` 前后 `[active]` → 当天日志 0 条「装载失败」→ 路由 401（2026-11-18 实测）；
+- [ ] 4. 备份演练：按 `docs/ops/backup-restore.md` §3/§4 取一份快照并校验（**升级前必做**；P1，未执行）；
+- [x] 5. 版本号与 `CHANGELOG.md` 一致（当前 `0.1.0`）；
+- [ ] 6. **发布动作（打 tag / npm publish）另行授权** —— 已推送 `main`（阶段 9 收尾 `9ce1a9e`），未打 tag、无 npm publish。
