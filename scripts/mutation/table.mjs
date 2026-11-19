@@ -1973,14 +1973,17 @@ export const MUTATIONS = [
     judgeTests: ['正文失败回退：订阅源摘要够门槛时显示来源标注、原因行与全部段落，不显示阅读时长'],
     // 把回退判定短路成永不成立：正文区没有 blocks 时退回旧行为（只画 role="alert"）。
     // 判据：scroll-dom 的回退用例断言 role="note" 必须出现 —— 这条一改就翻红。
-    from: 'const fallback = article !== void 0 && article.loading !== true && readingBlocks.length === 0 && hasBodyText(summaryParagraphs) ? {',
-    to: 'const fallback = void 0 && hasBodyText(summaryParagraphs) ? {' },
+    // ⚠️ 2026-11-19 重锚：正文态收成 bodyState 之后，旧锚 `const fallback = …` 已不存在；
+    //    锚点改到 `hasFallbackBody` 这一行（它是回退分支的唯一输入）。
+    from: 'const hasFallbackBody = !hasRenderedBlocks && hasBodyText(fallbackParagraphs);',
+    to: 'const hasFallbackBody = false && hasBodyText(fallbackParagraphs);' },
   { id: 'client-回退门槛失效', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
     judgeTests: ['正文失败回退：摘要不到门槛时保持原错误块，不显示回退标签与重试'],
     // 去掉 hasBodyText 门槛：摘要只有 "Comments" 时也会渲染回退标签与段落。
     // 判据：scroll-dom 的「门槛不过」用例断言 role="note" 为 null —— 改后它会出现。
-    from: 'hasBodyText(summaryParagraphs)',
+    // ⚠️ 2026-11-19 重锚：变量随正文态重构改名（summaryParagraphs → fallbackParagraphs）。
+    from: 'hasBodyText(fallbackParagraphs)',
     to: 'true' },
   { id: 'html-段落不按换行切', file: 'lib/html-text.js',
     judges: ['article.test.mjs'],
