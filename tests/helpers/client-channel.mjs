@@ -19,7 +19,7 @@ export const BUNDLE_NAME = 'client.js'
 export function reactStub() {
   return {
     jsx: () => null, jsxs: () => null, Fragment: Symbol('Fragment'),
-    useEffect: () => {}, useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}],
+    useEffect: () => {}, useLayoutEffect: () => {}, useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}],
     useCallback: (fn) => fn, useRef: (initial) => ({ current: initial }), default: {},
   }
 }

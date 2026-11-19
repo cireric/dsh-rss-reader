@@ -11,7 +11,8 @@
  * 视图记忆：面板重开后要恢复起来的那几项（两列布局任务 7 + R2-01）。
  *
  * 这几份状态刻意**只列被记忆的**：navSelection（虚拟视图 / 某个源）、filter、navVisible、
- * 正文排版 reading，以及 R2-01 的阅读位置 lastItemId（上次选中的那一行）。
+ * 正文排版 reading，以及 R2-01 的阅读位置 lastItemId（上次选中的那一行）与 R2-02 的
+ * lastListScrollTop（列表滚到哪儿）。
  * 特别**不含 navCursor**（键盘光标）—— 理由见客户端 store 的恢复注释：光标是「焦点在哪」，
  * 是瞬时的指向，而这里记的是「上次看到哪儿」；恢复时按既有规则把它落到生效的那一行即可。
  */
@@ -39,6 +40,14 @@ export interface ViewPreferences {
    * 它只描述「上次停在哪儿」，不携带读态、也不是打开动作；条目已被清理时由客户端按当前页校验后丢弃。
    */
   lastItemId?: string
+  /**
+   * 列表滚动容器上次的 scrollTop（R2-02 阅读位置）。
+   *
+   * 与 lastItemId 一样**可选**：没有就是没有，不用 undefined 占位。只接受有限且 ≥ 0 的数
+   * —— 0 是「停在顶部」的真实位置，必须与「没记过」区分开；负值 / NaN / 字符串一律丢弃。
+   * 像素坐标会随列表长度变化，恢复时由客户端用 clampScrollTop 夹进当前可滚范围。
+   */
+  lastListScrollTop?: number
 }
 
 /**
@@ -159,16 +168,24 @@ export function sanitizeViewPreferences(
   const lastItemIdRaw = source['lastItemId']
   const lastItemId = typeof lastItemIdRaw === 'string' && lastItemIdRaw !== '' ? lastItemIdRaw : undefined
 
+  // 列表滚动位置（R2-02）：只接受有限且 ≥ 0 的数；0 是合法值（停在顶部），
+  // 负数 / NaN / Infinity / 字符串认不出就当「没有」。同样不把 undefined 写成键。
+  const lastListScrollTopRaw = source['lastListScrollTop']
+  const lastListScrollTop = typeof lastListScrollTopRaw === 'number' && Number.isFinite(lastListScrollTopRaw) && lastListScrollTopRaw >= 0
+    ? lastListScrollTopRaw
+    : undefined
+
   // 只搬运点名的字段：认不出的键（历史版本留下的、或被别的写入者塞进来的）一律丢掉，
   // 否则它们会被原样写回存储，攒够几版就成了没人敢删的历史包袱。
-  // lastItemId 只在真的记过时才出现 —— 「没有」不能用 undefined 占一个键，否则「从没记过」
-  // 与「记过一个空值」在存储里又不可区分了（旧配置的判据就是键在不在）。
+  // lastItemId / lastListScrollTop 只在真的记过时才出现 —— 「没有」不能用 undefined 占一个键，
+  // 否则「从没记过」与「记了一个空值」在存储里又不可区分了（旧配置的判据就是键在不在）。
   return {
     navSelection,
     filter,
     navVisible,
     reading,
     ...(lastItemId === undefined ? {} : { lastItemId }),
+    ...(lastListScrollTop === undefined ? {} : { lastListScrollTop }),
   }
 }
 

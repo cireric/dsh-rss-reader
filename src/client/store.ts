@@ -248,12 +248,12 @@ const browserDeps: ReaderStoreDeps = {
  *
  * ## 四块的分界（阶段 4 票据 03 的第一份成文边界）
  *
- * 下面 49 个成员按**谁写谁的 state** 分四块。这不是目录结构，是写入权限表 —— 拆文件之前先把
+ * 下面这些成员按**谁写谁的 state** 分四块。这不是目录结构，是写入权限表 —— 拆文件之前先把
  * 这条边界写清楚，否则拆出来的只是四个共享同一个 state 的碎片。
  *
  * | 域 | 拥有的 state | 动作 | 允许改别人的什么 |
  * |---|---|---|---|
- * | 列表 | `items` / `selectedId` / `nextCursor` / `loadingMore` / `filter` / `layout` / `markAllRange` / `undo`（账目 `unread` / `perFeedUnread` 由 account-mirror 的回包整体覆盖） | load / loadMore / visible / setFilter / setLayout / activate / selectRelative / markRead / toggleStar / toggleKeepUnread / toggleRead / markAllRead / undoMarkAll / cleanup / stepArticle / openArticle / retryArticle | 只**读** feeds / tags；改账目一律经 account-mirror（回包整体覆盖）。**跨域写入逐条登记在此**：① setFilter 同步 `navCursor`（光标跟着过滤走，2026-10-10 的既有规则）；② overview 整份落地（applyOverview 与 load 的搜索分支）把 feeds / folders / tags 按宿主快照原样写回；③ 选中项失效时 applyOverview / load 把 navSelection + navCursor 回落虚拟视图（与「源被退订」同一条规则）；④ 正文动作（openArticle / retryArticle / stepArticle）写 `view` / `article` —— 这两份是跨域呈现状态，不归任何一块私有；⑤ setFilter 经 leaveArticleForScope 写 `view` / `article`（切过滤退出正文） |
+ * | 列表 | `items` / `selectedId` / `nextCursor` / `loadingMore` / `filter` / `layout` / `markAllRange` / `undo`（账目 `unread` / `perFeedUnread` 由 account-mirror 的回包整体覆盖） | load / loadMore / visible / setFilter / setLayout / activate / selectRelative / markRead / toggleStar / toggleKeepUnread / toggleRead / markAllRead / undoMarkAll / cleanup / stepArticle / openArticle / retryArticle / rememberListScrollTop / takeListScrollTop | 只**读** feeds / tags；改账目一律经 account-mirror（回包整体覆盖）。**跨域写入逐条登记在此**：① setFilter 同步 `navCursor`（光标跟着过滤走，2026-10-10 的既有规则）；② overview 整份落地（applyOverview 与 load 的搜索分支）把 feeds / folders / tags 按宿主快照原样写回；③ 选中项失效时 applyOverview / load 把 navSelection + navCursor 回落虚拟视图（与「源被退订」同一条规则）；④ 正文动作（openArticle / retryArticle / stepArticle）写 `view` / `article` —— 这两份是跨域呈现状态，不归任何一块私有；⑤ setFilter 经 leaveArticleForScope 写 `view` / `article`（切过滤退出正文） |
  * | 搜索 | `search` / `searchRevision` / `searchRequest` / `searchPages` | submitSearch / loadSearch / resetSearchPage | 借列表的 items / selectedId / nextCursor / loading 展示；**不许**改 filter |
  * | 订阅 | `feeds` / `folders` / `discovery` / `feedsBusy` / `importReport` / `navSelection` / `navCursor` / `navVisible` / `foldedFolders` / `viewPreferences`（**deleteFolder 例外**：删掉当前所在文件夹时会把 `filter` 回落成 `all`，这条跨域写入登记在此） | addFeed / removeFeed / importOpml / exportOpml / discover / createFolder / renameFolder / deleteFolder / moveFeedToFolder / selectNav / moveNavCursor / openNavCursor / toggleNav / toggleFolder / flushViewMemory | 改 navSelection 后必须走 persistView；**整份覆盖写必须带上当下的 selectedId**（否则一次普通导航就抹掉阅读位置）；选中 / j/k / 打开条目经 300ms 去抖写手记 lastItemId，面板卸载时 flush；退订只能经 `deleteSubscription`；selectNav 经列表域的 leaveArticleForScope 写 `view` / `article`（切作用域退出正文） |
  * | 标签 | `tags` / 条目的 `tagIds` | createTag / renameTag / deleteTag / toggleItemTag | 乐观改 tagIds，失败回取当前页拉回真相（tagWrite 串行化 + tagEpoch 身份） |
@@ -261,9 +261,13 @@ const browserDeps: ReaderStoreDeps = {
  * `view` / `article` 是跨域呈现状态：列表的 openArticle / retryArticle / closeArticle 与 setFilter、
  * 搜索的 submitSearch、导航的 selectNav（经列表域入口）与 toggleFeeds 都会写 —— 它不属于任何一块的私有 state。
  *
+ * 列表滚动位置（R2-02）的 `lastListScrollTop` / `restoredListScrollTop` / `listScrollTouched` 是列表域的
+ * **模块内**值：刻意不进 state、不触发渲染；`rememberListScrollTop` 与选中共享同一个 300ms 去抖写手，
+ * `flushViewMemory` 一次把两者都落盘。`takeListScrollTop` 只交出恢复值一次（取过即清空）。
+ *
  * 共享的不止三样：`deps`（通道/时钟/opener）、`set`（唯一写入口）、`state`（只读快照），
  * 以及跨域入口 `listVersion`（列表与搜索共用，经 next/current 两个函数）、`reload`、`refreshDuplicateHints`。
- * 拆文件时的安全绳 = 现有 642 条测试；它们钉的是行为，不是文件位置。
+ * 拆文件时的安全绳 = 现有测试套件；它们钉的是行为，不是文件位置。
  */
 export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   const deps: ReaderStoreDeps = { ...browserDeps, ...overrides }
@@ -327,6 +331,25 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
    */
   let viewRestored = false
   let viewTouched = false
+  /**
+   * 列表滚动位置（R2-02）：**刻意停在模块内**，不进 React state。
+   *
+   * 滚动事件一秒几十次；进 state 就会每次重渲染整个阅读器，而且没有任何界面需要读它。
+   * 它只作为整份视图偏好的一位被写盘（见 viewPreferencesNow），所以状态越少越好。
+   */
+  let lastListScrollTop: number | undefined
+  /**
+   * 待恢复的滚动位置：applyRestoredView 交接、面板首屏后 take 一次即清空。
+   *
+   * 为什么不在 applyRestoredView 里直接写 DOM：恢复那一刻列表可能还没画出来（items 刚落地、
+   * React 尚未提交），容器量不到几何；滚动必须在首屏渲染完成后由面板执行。
+   */
+  let restoredListScrollTop: number | undefined
+  /**
+   * 恢复到达前用户是否已经滚过列表。**只否决滚动恢复**，不否决选中恢复 ——
+   * 滚动不是「选择/导航手势」，用户自己滚到的位置不该被旧记忆覆盖，但他没动过选中项。
+   */
+  let listScrollTouched = false
   /** 写盘串行化：记忆按用户动作的先后收敛，不能让两个在飞的请求乱序落库（后发的先到 ⇒ 记忆回退）。 */
   let viewWriteChain: Promise<void> = Promise.resolve()
 
@@ -362,6 +385,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
       reading: state.reading,
     }
     if (state.selectedId !== undefined) preferences.lastItemId = state.selectedId
+    if (lastListScrollTop !== undefined) preferences.lastListScrollTop = lastListScrollTop
     return preferences
   }
 
@@ -420,6 +444,9 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
         : undefined
       set({ selectedId: remembered })
     }
+    // 列表滚动位置（R2-02）：只交接给「取一次就清空」的入口 —— 写回 DOM 必须等首屏列表渲染完成，
+    // 那一刻容器才有真实几何（见 takeListScrollTop 与面板里的 useLayoutEffect）。
+    if (prefs.lastListScrollTop !== undefined) restoredListScrollTop = prefs.lastListScrollTop
   }
 
   /**
@@ -439,14 +466,14 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   }
 
   /**
-   * 选中变化（纯选中 / j/k / 打开条目）走这里：置「用户已动手」并安排一次 300ms 去抖写。
+   * 安排一次 300ms 去抖写（**只排程**，不置「用户已动手」）。
    *
-   * 为什么选中也要置 touched：恢复是异步的，若用户已经按 j 换了行而恢复仍无条件覆盖，
-   * 表现就是「按了 j，过一会儿选中自己弹回上次那一行」。这条手势判据与 u / 点源共用同一个标志。
+   * 为什么要和「用户已动手」拆开：选中与滚动共用同一个写手（只该有一个去抖窗口），
+   * 但两者对手势判据的意义不同 —— 选中意味着整份恢复让位；滚动只否决滚动恢复，
+   * 不该顺手吞掉还没到达的选中恢复（实现决策 8 只把「选择/导航」算作整份让位）。
    */
   const scheduleViewWrite = (): void => {
-    viewTouched = true
-    // 重新计时而不是叠加：连续 j/k 只在停下来 300ms 后写一次。
+    // 重新计时而不是叠加：连续 j/k / 连续滚动只在停下来 300ms 后写一次。
     cancelPendingViewWrite()
     pendingViewWrite = deps.setTimeout(() => {
       pendingViewWrite = undefined
@@ -455,9 +482,52 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   }
 
   /**
+   * 选中变化（纯选中 / j/k / 打开条目）走这里：置「用户已动手」并安排一次 300ms 去抖写。
+   *
+   * 为什么选中也要置 touched：恢复是异步的，若用户已经按 j 换了行而恢复仍无条件覆盖，
+   * 表现就是「按了 j，过一会儿选中自己弹回上次那一行」。这条手势判据与 u / 点源共用同一个标志。
+   */
+  const rememberSelection = (): void => {
+    viewTouched = true
+    scheduleViewWrite()
+  }
+
+  /**
+   * 记录列表滚动位置（R2-02）：只改模块内的值并排一次去抖写。
+   *
+   * **不 set**：滚动若进 React state，每帧都会重渲染整个阅读器；界面没有任何一处读这个值。
+   * 认不出的值直接忽略（与 sanitizeViewPreferences 同一条归一化规则），不制造一次空写。
+   * 与上次记下的值相同也跳过 —— 恢复时程序化写 scrollTop 会触发一次 scroll 事件，
+   * 这一条让「读回来的值」不会在打开面板时被当成用户手势再写回去一遍。
+   */
+  const rememberListScrollTop = (top: number): void => {
+    if (!Number.isFinite(top) || top < 0) return
+    if (top === lastListScrollTop) return
+    lastListScrollTop = top
+    listScrollTouched = true
+    scheduleViewWrite()
+  }
+
+  /**
+   * 取一次恢复的滚动位置（R2-02）：**取过即清空**，且用户已经自己滚过就放弃。
+   *
+   * 面板在列表首屏渲染完成后调用一次，然后自己把 scrollTop 夹进当前可滚范围。
+   * 同时把值写进模块内的 lastListScrollTop：随后由这次写回触发的 scroll 事件不会排出一次
+   * 「恢复本身造成的写盘」（用户故事 12 / 存储注释 ②）。
+   */
+  const takeListScrollTop = (): number | undefined => {
+    const saved = restoredListScrollTop
+    restoredListScrollTop = undefined
+    if (saved === undefined || listScrollTouched) return undefined
+    lastListScrollTop = saved
+    return saved
+  }
+
+  /**
    * 面板卸载时调用：有待写值就立刻落一次，没有就什么都不做。
    *
-   * 为什么必须存在：去抖窗口 300ms，读者完全可能选完一行立刻关面板 —— 那一刻的位置也得记住。
+   * 为什么必须存在：去抖窗口 300ms，读者完全可能选完一行、或滚到一个位置后立刻关面板 ——
+   * 那一刻的位置也得记住。写手同时管选中项与列表滚动位置（R2-02），所以 flush 一次两样都带走。
    * 为什么「没有待写值不许写」：每次打开/关闭面板都写一次同样的值只会白热存储；恢复本身也不写盘，
    * 所以「没有手势 → 零写请求」这条既有承诺在卸载路径上同样成立。
    */
@@ -529,7 +599,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   const { actions: listActions, relocateSelection, leaveArticleForScope } = createListActions({
     get, set, persistView, rpc: deps.rpc, log: deps.log,
     now: deps.now, setTimeout: deps.setTimeout, clearTimeout: deps.clearTimeout, open: deps.open,
-    rememberSelection: scheduleViewWrite,
+    rememberSelection,
     search: searchActions,
     nextListVersion: () => ++listVersion,
     currentListVersion: () => listVersion,
@@ -560,8 +630,12 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
     get, submitSearch: (query?: SearchQuery) => searchActions.submit(query),
     refreshCount, setReading,
-    /** 面板卸载时落一次待写的阅读位置（没有待写值时不写）。 */
+    /** 面板卸载时落一次待写的阅读位置与列表滚动位置（没有待写值时不写）。 */
     flushViewMemory,
+    /** 列表滚动位置（R2-02）：只改模块内的值 + 300ms 去抖写，不触发渲染。 */
+    rememberListScrollTop,
+    /** 取一次恢复的滚动位置；取过即清空，用户已滚过则放弃（面板首屏后调用一次）。 */
+    takeListScrollTop,
     ...navActions, ...opmlActions, ...feedActions,
     dismissNotice: (): void => { set({ notice: undefined }) },
     ...listActions,

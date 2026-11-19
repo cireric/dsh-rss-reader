@@ -141,7 +141,7 @@ function overviewStub(items, feeds, folders, accountItems = items, tags = []) {
 /** 本轮 mountReader 的收尾函数登记表：afterEach 统一清（消灭未决 handle ⇒ 变异不再拖死套件）。 */
 const liveCleanups = []
 
-async function mountReader({ items = [], feeds, folders, tags = [], article, holdArticle, holdOverview = false, search, folderApi, duplicates, prefs = { value: undefined, writes: [] } } = {}) {
+async function mountReader({ items = [], feeds, folders, tags = [], article, holdArticle, holdOverview = false, search, folderApi, duplicates, timers, prefs = { value: undefined, writes: [] } } = {}) {
   const { JSDOM } = STACK
   // P3（gate 调优轮）：挂载前拍全局快照，cleanup 时还原 —— 此前每个 mount 都把
   // window/document/fetch/ResizeObserver 覆盖成新 JSDOM 的桩且从不还原，跨用例的桩污染面
@@ -391,7 +391,11 @@ async function mountReader({ items = [], feeds, folders, tags = [], article, hol
     throw new Error('未预期的外部依赖：' + specifier)
   }
   const exportsObj = captured.factory(requireFn)
-  const store = exportsObj.createReaderStore()
+  // R2-02：滚动/选中的 300ms 去抖写手可以换成捕获式假定时器，让「写了几次、窗口多长」
+  // 变成同步事实，而不是靠真等 300ms 赌机器速度（与 nav-persistence 的 fakeTimers 同形）。
+  const store = timers === undefined
+    ? exportsObj.createReaderStore()
+    : exportsObj.createReaderStore({ setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout })
   const rootRef = createRoot(win.document.getElementById('root'))
   rootRef.render(React.createElement(exportsObj.createReader(store)))
   // 首次上屏 = React 真的把 Reader 挂上去了（root 有子节点），不是「睡够 50ms」。
@@ -2900,4 +2904,141 @@ test('R2-01 恢复的选中行在视口外：列表把它带进视口', skip, as
 
   assert.equal(h.store.get().selectedId, 'b1', '前置：恢复选中了视口外的 b1（第 3 行，offsetTop 2000）')
   assert.equal(h.scrollTop(list), 1748, '恢复的选中行必须被带进视口（2000 + 48 - 300）')
+})
+
+/* ==================== R2-02 列表滚回原处（真 React + jsdom） ==================== */
+
+/**
+ * 捕获式假定时器（与 nav-persistence 的那份同形）。
+ *
+ * 为什么 DOM 层也要它：去抖窗口 300ms 是**行为**（窗口内只写一次、窗口长度 300ms），
+ * 真等 300ms 只能断言「最终写了」，断不到「写了几次」；且会把这组用例拖慢。
+ */
+function fakeTimers() {
+  const scheduled = new Map()
+  let seq = 0
+  return {
+    setTimeout(handler, ms) {
+      seq += 1
+      scheduled.set(seq, { handler, ms })
+      return seq
+    },
+    clearTimeout(handle) { scheduled.delete(handle) },
+    pending() { return [...scheduled.values()] },
+    runAll() {
+      const jobs = [...scheduled.values()]
+      scheduled.clear()
+      for (const job of jobs) job.handler()
+    },
+  }
+}
+
+/** 给列表行装上可测几何（jsdom 没有布局引擎，offsetTop/offsetHeight 恒为 0）。 */
+function armRows(h, { base = 0, gap = 300, rowHeight = 48 } = {}) {
+  Object.defineProperty(h.win.HTMLElement.prototype, 'offsetHeight', {
+    configurable: true,
+    get() { return this.getAttribute?.('data-rss-row') === null ? 0 : rowHeight },
+  })
+  Object.defineProperty(h.win.HTMLElement.prototype, 'offsetTop', {
+    configurable: true,
+    get() {
+      if (this.getAttribute?.('data-rss-row') === null) return 0
+      const parent = this.parentElement
+      return parent === null ? 0 : base + Array.from(parent.children).indexOf(this) * gap
+    },
+  })
+}
+
+test('R2-02 列表滚动去抖：连续滚动只写一次，关面板 flush 最后一处位置', skip, async () => {
+  const timers = fakeTimers()
+  const prefs = { value: undefined, writes: [] }
+  const h = await mountReader({ items: readingPositionItems(), prefs, timers })
+  await h.settle()
+  const list = h.arm(h.box('list'), { scrollHeight: 3000, clientHeight: 300 })
+  // 首屏后选中项落在 a1；给它可测几何，避免跟随规则在滚动断言前自己动滚动条。
+  armRows(h, { base: 900, gap: 300 })
+
+  h.userScroll(list, 400)
+  h.userScroll(list, 900)
+  await h.settle()
+  assert.equal(prefs.writes.length, 0, '去抖窗口内不许写盘（滚动逐帧写会把域写热）')
+  assert.equal(timers.pending().length, 1, '连续滚动只排一次待写')
+  assert.equal(timers.pending()[0].ms, 300, '去抖窗口是 300ms')
+
+  timers.runAll()
+  await h.settle()
+  const saves = () => h.requests.filter((entry) => entry.endpoint === 'saveViewPreferences')
+  assert.equal(saves().length, 1, '一次滚动序列只产生一次 saveViewPreferences')
+  assert.equal(prefs.value.lastListScrollTop, 900, '落盘内容必须含最后的滚动位置')
+  assert.equal(prefs.value.lastItemId, 'a1', '整份写同时带上当下的选中项')
+
+  // 滚动后立刻关面板：定时器还没到点，卸载 flush 必须把最后位置带走
+  h.userScroll(list, 1200)
+  await h.unmount()
+  assert.equal(saves().length, 2, '卸载 flush 落一次')
+  assert.equal(prefs.value.lastListScrollTop, 1200, '关面板那一刻的位置必须记住')
+})
+
+test('R2-02 重开面板：列表滚回保存的位置，且恢复本身不写盘', skip, async () => {
+  // 保存值是像素坐标：首屏渲染完成后写回 scrollTop。选中 a1 的行在恢复后的视口内，
+  // 因此既有的「跟随选中」规则不应再动它（票面验收：选中行仍在视口内）。
+  const prefs = { value: viewMemory({ lastListScrollTop: 640 }), writes: [] }
+  const h = await mountReader({ items: readingPositionItems(), prefs, holdOverview: true })
+  const list = h.arm(h.box('list'), { scrollHeight: 3000, clientHeight: 300 })
+  armRows(h, { base: 700, gap: 300 })
+
+  h.releaseOverview()
+  await h.settle()
+
+  assert.equal(h.store.get().selectedId, 'a1', '前置：恢复落在第一条')
+  assert.equal(h.scrollTop(list), 640, '列表必须滚回保存的位置')
+  assert.equal(h.win.document.querySelector('[data-rss-row="a1"]').hasAttribute('data-rss-selected'), true,
+    '选中态画在那一行上')
+  assert.equal(prefs.writes.length, 0, '恢复只读不写：打开面板不产生 saveViewPreferences')
+})
+
+test('R2-02 保存的滚动位置超过当前可滚范围：夹到最近有效位置（不出现空白列表）', skip, async () => {
+  const prefs = { value: viewMemory({ lastListScrollTop: 5000 }), writes: [] }
+  const h = await mountReader({ items: readingPositionItems(), prefs, holdOverview: true })
+  const list = h.arm(h.box('list'), { scrollHeight: 3000, clientHeight: 300 })
+  // 选中行放在夹取后的视口内（2700..3000），避免跟随规则把结果改写成别的值
+  armRows(h, { base: 2800, gap: 300 })
+
+  h.releaseOverview()
+  await h.settle()
+
+  assert.equal(h.scrollTop(list), 2700, '5000 必须夹到 scrollHeight - clientHeight = 2700')
+  assert.equal(prefs.writes.length, 0, '夹取与恢复不写盘')
+})
+
+test('R2-02 恢复到达前用户已滚动：旧位置不得覆盖用户刚滚到的地方（选中恢复照常）', skip, async () => {
+  const timers = fakeTimers()
+  const prefs = { value: viewMemory({ lastItemId: 'a1', lastListScrollTop: 640 }), writes: [] }
+  const h = await mountReader({ items: readingPositionItems(), prefs, holdOverview: true, timers })
+  const list = h.arm(h.box('list'), { scrollHeight: 3000, clientHeight: 300 })
+  // 选中行放在用户滚动后的视口内（500..800），于是最终 scrollTop 只由「谁赢」决定
+  armRows(h, { base: 600, gap: 300 })
+
+  h.userScroll(list, 500)                  // 恢复还在路上，用户自己滚到了 500
+  assert.equal(timers.pending().length, 1, '前置：用户的滚动已经排了一次去抖写')
+  h.releaseOverview()
+  await h.settle()
+
+  assert.equal(h.scrollTop(list), 500, '迟到的恢复不得把滚动位置重置回 640')
+  assert.equal(h.store.get().selectedId, 'a1', '滚动不是选择手势：选中恢复不受影响')
+})
+
+test('R2-02 恢复的滚动位置让选中行落到视口外：跟随规则把它带进来', skip, async () => {
+  // 与 R2-01 的「选中行在视口外」同形，但这次保存的滚动位置是 0 —— 证明恢复滚动
+  // 与跟随选中是两条接力：先写回 0，再由既有规则把视口外的选中行带进视口。
+  const prefs = { value: viewMemory({ lastItemId: 'b1', lastListScrollTop: 0 }), writes: [] }
+  const h = await mountReader({ items: readingPositionItems(), prefs, holdOverview: true })
+  const list = h.arm(h.box('list'), { scrollHeight: 3000, clientHeight: 300 })
+  armRows(h, { base: 0, gap: 1000 })
+
+  h.releaseOverview()
+  await h.settle()
+
+  assert.equal(h.store.get().selectedId, 'b1', '前置：恢复选中了视口外的 b1（第 3 行，offsetTop 2000）')
+  assert.equal(h.scrollTop(list), 1748, '先恢复 0，再按跟随规则把 b1 带进视口（2000 + 48 - 300）')
 })

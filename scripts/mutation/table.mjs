@@ -864,6 +864,27 @@ export const MUTATIONS = [
     // from 照构建产物 lib/client.js 的实际形状写（tsdown 把 if 块压成了一行）。
     from: 'if (prefs.lastItemId !== void 0) set({ selectedId: state.items.some((item) => item.id === prefs.lastItemId) ? prefs.lastItemId : void 0 });',
     to: 'if (prefs.lastItemId !== void 0) set({ selectedId: state.items.some((item) => item.id === prefs.lastItemId) ? prefs.lastItemId : void 0 });\n\t\t\t\tpersistView();' },
+  // ⑫b R2-02 列表滚动位置：滚动必须走去抖写手，不能每帧直接写盘。
+  { id: 'client-滚动不去抖', file: 'lib/client.js',
+    judges: ['nav-persistence.test.mjs', 'scroll-dom.test.mjs'],
+    judgeTests: [
+      '列表滚动位置：滚动去抖 300ms 写一次，保存内容含 lastListScrollTop',
+      'R2-02 列表滚动去抖：连续滚动只写一次，关面板 flush 最后一处位置',
+    ],
+    // from 照构建产物 lib/client.js 的实际形状写（三行一组，单独锚 scheduleViewWrite() 会在
+    // rememberSelection 里再命中一次）。改动为当场 persistView：滚动立刻写盘、且置「用户已动手」。
+    from: 'lastListScrollTop = top;\n\t\t\t\tlistScrollTouched = true;\n\t\t\t\tscheduleViewWrite();',
+    to: 'lastListScrollTop = top;\n\t\t\t\tlistScrollTouched = true;\n\t\t\t\tpersistView();' },
+  // ⑫c R2-02 列表滚动位置：写入口是**整份覆盖写**，少带这一位就会被下一次导航抹掉
+  // （用户切一下源/过滤，重开面板就回到顶部 —— 本项最容易踩的坑）。
+  { id: 'persist-整份写丢滚动位置', file: 'lib/client.js',
+    judges: ['nav-persistence.test.mjs', 'scroll-dom.test.mjs'],
+    judgeTests: [
+      '列表滚动位置：滚动去抖 300ms 写一次，保存内容含 lastListScrollTop',
+      'R2-02 列表滚动去抖：连续滚动只写一次，关面板 flush 最后一处位置',
+    ],
+    from: 'if (lastListScrollTop !== void 0) preferences.lastListScrollTop = lastListScrollTop;',
+    to: ';' },
   // ⑤ 写盘串行化失效 ⇒ 后发的先到会让记忆回退成更早的状态
   { id: 'persist-写盘不串行化', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs'],

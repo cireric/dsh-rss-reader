@@ -66,7 +66,7 @@ function fakeTimers() {
 
 /* ============================ ① 纯函数层：形状归一化 ============================ */
 
-test('sanitizeViewPreferences：形状合法时原样通过，且只留协议里的四个字段', () => {
+test('sanitizeViewPreferences：形状合法时原样通过，且只留协议里的六个字段（两个位置字段可缺省）', () => {
   const value = sanitizeViewPreferences({ navSelection: { kind: 'feed', feedId: 'A' }, filter: 'unread', navVisible: false })
   assert.deepEqual(value, { navSelection: { kind: 'feed', feedId: 'A' }, filter: 'unread', navVisible: false, reading: DEFAULT_READING_PREFERENCES })
   // M5 之前的配置里没有 reading 键：必须补默认值，而不是把它当成「整份记忆不可信」
@@ -74,6 +74,12 @@ test('sanitizeViewPreferences：形状合法时原样通过，且只留协议里
   // 未知键必须被丢掉：它会被原样写回存储，攒够一版就成历史包袱
   const extra = sanitizeViewPreferences({ navSelection: { kind: 'virtual' }, filter: 'all', navVisible: true, legacyJunk: 1 })
   assert.deepEqual(Object.keys(extra).sort(), ['filter', 'navSelection', 'navVisible', 'reading'])
+  // R2：阅读位置是「可选的两项」—— 有就原样通过，整份协议的键域不能多也不能少
+  const positioned = sanitizeViewPreferences({
+    navSelection: { kind: 'virtual' }, filter: 'all', navVisible: true,
+    lastItemId: 'a2', lastListScrollTop: 640,
+  })
+  assert.deepEqual(Object.keys(positioned).sort(), ['filter', 'lastItemId', 'lastListScrollTop', 'navSelection', 'navVisible', 'reading'])
   // 默认常量本身必须是合法形状（它同时是域里的 initial）
   assert.deepEqual(sanitizeViewPreferences(DEFAULT_VIEW_PREFERENCES), DEFAULT_VIEW_PREFERENCES)
 })
@@ -99,6 +105,37 @@ test('sanitizeViewPreferences：lastItemId 只认非空字符串，认不出就�
   assert.equal('lastItemId' in legacy, false, '旧配置缺字段时必须保持「没有」，不是 undefined 占位')
   // 默认偏好不必带这个键（首次安装的 initial 与「没有记忆」是同一件事）
   assert.equal('lastItemId' in DEFAULT_VIEW_PREFERENCES, false)
+})
+
+test('sanitizeViewPreferences：lastListScrollTop 只认有限且 ≥ 0 的数，认不出就当没有', () => {
+  // 阅读位置（R2-02）：列表滚动位置是像素坐标，0 是合法值（停在顶部），负值与 NaN 只会让滚动条乱跳。
+  // 与 lastItemId 同一条归一化规则：一次坏值只抹掉它自己，不许带走导航/过滤/排版。
+  const base = { navSelection: { kind: 'virtual' }, filter: 'unread', navVisible: false }
+  const keptZero = sanitizeViewPreferences({ ...base, lastListScrollTop: 0 })
+  assert.equal(keptZero.lastListScrollTop, 0, '0 必须保留 —— 「停在顶部」不是「没有记忆」')
+  assert.equal(keptZero.filter, 'unread', 'lastListScrollTop 合法时其他字段一项不丢')
+
+  const kept = sanitizeViewPreferences({ ...base, lastListScrollTop: 1234.5 })
+  assert.equal(kept.lastListScrollTop, 1234.5, '有限正数必须原样保留')
+
+  for (const raw of [-1, -0.5, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, '100', null, true, {}, []]) {
+    const value = sanitizeViewPreferences({ ...base, lastListScrollTop: raw })
+    assert.equal('lastListScrollTop' in value, false, '认不出的滚动位置必须当作没有：' + String(raw))
+    assert.equal(value.navSelection.kind, 'virtual', '坏滚动位置不许带走 navSelection：' + String(raw))
+    assert.equal(value.filter, 'unread', '坏滚动位置不许带走 filter：' + String(raw))
+    assert.equal(value.navVisible, false, '坏滚动位置不许带走 navVisible：' + String(raw))
+  }
+
+  // 反方向同样独立：别的字段坏掉不许把合法的滚动位置一起带走
+  const independent = sanitizeViewPreferences({ ...base, filter: 'bogus', reading: { fontSize: 999 }, lastListScrollTop: 640 })
+  assert.equal(independent.lastListScrollTop, 640, 'filter / reading 坏掉不该抹掉滚动位置')
+  assert.equal(independent.filter, 'all', '坏 filter 只回落它自己')
+  assert.deepEqual(independent.reading, DEFAULT_READING_PREFERENCES, '坏排版只回落它自己')
+
+  // 旧配置根本没有这个键：读入正常，且返回对象里不凭空多一个 undefined 键
+  const legacy = sanitizeViewPreferences(base)
+  assert.equal('lastListScrollTop' in legacy, false, '旧配置缺字段时必须保持「没有」，不是 undefined 占位')
+  assert.equal('lastListScrollTop' in DEFAULT_VIEW_PREFERENCES, false)
 })
 
 test('sanitizeViewPreferences：认不出的形状一律回落默认，绝不编造', () => {
@@ -286,8 +323,8 @@ test('真实 createSqliteStore：读侧校验坏值、写侧归一后才落库�
 
 /* ============================ ② 宿主端点层 ============================ */
 
-test('真实 createSqliteStore：lastItemId 原样落进 config.json，旧配置缺这个键仍能读', async () => {
-  // R2-01 的存储承诺：阅读位置只是视图记忆的又一位，走同一条「整份覆盖写 + 读侧归一」的路径。
+test('真实 createSqliteStore：两个阅读位置字段原样落进 config.json，旧配置缺这两个键仍能读', async () => {
+  // R2-01 / R2-02 的存储承诺：阅读位置只是视图记忆的又两位，走同一条「整份覆盖写 + 读侧归一」的路径。
   // 用生产路径（createSqliteStore）而不是内存桩：config.json 才是用户重开面板时真正读的那份文件。
   const dir = mkdtempSync(join(tmpdir(), 'rss-nav-position-'))
   const configPath = join(dir, 'config.json')
@@ -297,21 +334,28 @@ test('真实 createSqliteStore：lastItemId 原样落进 config.json，旧配置
     const store = createSqliteStore(db, configPath)
     const saved = await store.saveViewPreferences({
       navSelection: { kind: 'virtual' }, filter: 'all', navVisible: true,
-      reading: DEFAULT_READING_PREFERENCES, lastItemId: 'a2',
+      reading: DEFAULT_READING_PREFERENCES, lastItemId: 'a2', lastListScrollTop: 640,
     })
     assert.equal(saved.lastItemId, 'a2', '写侧归一必须保留 lastItemId')
-    assert.equal(JSON.parse(readFileSync(configPath, 'utf8')).viewPreferences.lastItemId, 'a2',
+    assert.equal(saved.lastListScrollTop, 640, '写侧归一必须保留 lastListScrollTop')
+    const onDiskSaved = JSON.parse(readFileSync(configPath, 'utf8')).viewPreferences
+    assert.equal(onDiskSaved.lastItemId, 'a2',
       '落盘文件里必须真的有这一位（否则重开后无从恢复）')
+    assert.equal(onDiskSaved.lastListScrollTop, 640,
+      '滚动位置也必须真的落盘（否则重开面板只会回到顶部）')
     assert.equal(store.viewPreferences().lastItemId, 'a2', '读回来一致')
+    assert.equal(store.viewPreferences().lastListScrollTop, 640, '滚动位置读回来一致')
 
-    // 旧版本留下的配置没有这个键：读入正常、其他偏好一项不丢，也不凭空写一个 undefined 进去
+    // 旧版本留下的配置没有这两个键：读入正常、其他偏好一项不丢，也不凭空写一个 undefined 进去
     const onDisk = JSON.parse(readFileSync(configPath, 'utf8'))
     delete onDisk.viewPreferences.lastItemId
+    delete onDisk.viewPreferences.lastListScrollTop
     writeFileSync(configPath, JSON.stringify(onDisk))
     const legacy = store.viewPreferences()
     assert.equal('lastItemId' in legacy, false, '旧配置缺字段 ⇒ 当作没有，而不是 undefined 占位')
-    assert.equal(legacy.filter, 'all', '缺 lastItemId 不许带走 filter')
-    assert.deepEqual(legacy.reading, DEFAULT_READING_PREFERENCES, '缺 lastItemId 不许带走排版')
+    assert.equal('lastListScrollTop' in legacy, false, '旧配置缺滚动位置 ⇒ 当作没有')
+    assert.equal(legacy.filter, 'all', '缺位置字段不许带走 filter')
+    assert.deepEqual(legacy.reading, DEFAULT_READING_PREFERENCES, '缺位置字段不许带走排版')
   } finally {
     db.close()
     rmSync(dir, { recursive: true, force: true })
@@ -831,6 +875,84 @@ test('阅读位置：恢复到达前用户先选了另一行 ⇒ 恢复整份让
   timers.runAll()
   await flush()
   assert.equal(prefs.value.lastItemId, 'b1', '手势那一刻的选中项成为新记忆')
+})
+
+/* ============================ ③c 列表滚动位置：滚回原处（R2-02） ============================ */
+
+/** 一份合法的视图记忆（旧配置形状 = 没有两个位置字段）。 */
+const savedView = (overrides = {}) => ({
+  navSelection: { kind: 'virtual' }, filter: 'all', navVisible: true,
+  reading: DEFAULT_READING_PREFERENCES, ...overrides,
+})
+
+test('列表滚动位置：滚动去抖 300ms 写一次，保存内容含 lastListScrollTop', async () => {
+  // 滚动是高频动作：每帧写盘会把域写热，所以它必须和选中共用同一个 300ms 去抖窗口。
+  // 同时钉住整份覆盖写那条最容易踩的坑：普通导航不换滚动位置，但会把整份偏好重写一遍 ——
+  // 写入口少带 lastListScrollTop，一次切左栏就把位置抹了。
+  const timers = fakeTimers()
+  const prefs = { value: undefined, writes: [] }
+  const store = await openPanel({ items: twoFeeds(), prefs, timers })
+
+  store.rememberListScrollTop(640)
+  assert.equal(prefs.writes.length, 0, '滚动不当场写盘')
+  assert.equal(timers.pending().length, 1, '滚动必须排一次去抖写')
+  assert.equal(timers.pending()[0].ms, 300, '去抖窗口是 300ms')
+
+  // 连续滚动重新计时，只在停下来之后写一次
+  store.rememberListScrollTop(720)
+  store.rememberListScrollTop(800)
+  assert.equal(timers.pending().length, 1, '连续滚动不许叠加出多个待写')
+  timers.runAll()
+  await flush()
+  assert.equal(prefs.writes.length, 1, '一次滚动序列只写一次')
+  assert.equal(prefs.value.lastListScrollTop, 800, '保存内容必须含 lastListScrollTop')
+  assert.equal(prefs.value.lastItemId, 'a1', '整份写必须同时带上当下的选中项')
+
+  store.toggleNav()
+  await flush()
+  assert.equal(prefs.writes.length, 2, 'toggleNav 自己写一次')
+  assert.equal(prefs.value.lastListScrollTop, 800, '普通导航的整份写必须携带滚动位置（否则一次导航就抹掉）')
+})
+
+test('列表滚动位置：滚动后立刻关面板（flush）也记住', async () => {
+  // 去抖窗口 300ms：读者滚完立刻关面板，定时器会被清掉 —— 若卸载不 flush，最后那个位置就丢了。
+  const timers = fakeTimers()
+  const prefs = { value: undefined, writes: [] }
+  const store = await openPanel({ items: twoFeeds(), prefs, timers })
+
+  store.rememberListScrollTop(900)
+  assert.equal(timers.pending().length, 1, '前置：有一次待写')
+  store.flushViewMemory()
+  assert.equal(timers.pending().length, 0, 'flush 必须先取消待写定时器（否则随后还会再写一次）')
+  await flush()
+  assert.equal(prefs.writes.length, 1, '一次待写只落一次')
+  assert.equal(prefs.value.lastListScrollTop, 900, 'flush 必须带上滚动位置')
+  assert.equal(prefs.value.lastItemId, 'a1', 'flush 同时也带当下选中项')
+})
+
+test('列表滚动位置：恢复值只被取一次，取过就清空；恢复本身不写盘', async () => {
+  const prefs = { value: savedView({ lastListScrollTop: 640 }), writes: [] }
+  const store = await openPanel({ items: twoFeeds(), prefs })
+  assert.equal(store.takeListScrollTop(), 640, '面板首屏后能取到恢复值')
+  assert.equal(store.takeListScrollTop(), undefined, '取过即清空 —— 第二次什么都不做')
+  assert.equal(prefs.writes.length, 0, '恢复只读不写（打开面板不产生 saveViewPreferences）')
+})
+
+test('列表滚动位置：恢复到达前用户已滚动 ⇒ 滚动恢复放弃，但选中恢复照常', async () => {
+  // 与 R2-01 的「用户先选了别的行」同形，但手势是**滚动**：它只否决滚动恢复，
+  // 不该把迟到的选中恢复一起吞掉（实现决策 8 只把选择/导航算作整份让位）。
+  const timers = fakeTimers()
+  const prefs = { value: savedView({ lastItemId: 'b1', lastListScrollTop: 640 }), writes: [] }
+  const exports = loadExports({ items: twoFeeds(), prefs, timers })
+  const store = exports.createReaderStore()
+  const loading = store.load('overview')   // 刻意不 await：模拟恢复还在路上
+  store.rememberListScrollTop(120)
+  assert.equal(timers.pending().length, 1, '前置：用户的滚动已经排了一次写')
+  await loading
+  await flush()
+
+  assert.equal(store.takeListScrollTop(), undefined, '用户已经滚过 ⇒ 旧滚动位置必须放弃，不许覆盖他刚滚到的地方')
+  assert.equal(store.get().selectedId, 'b1', '滚动不是选择手势：选中恢复不受影响')
 })
 
 /* ============================ ④ 老域能否打开（必须实测） ============================ */

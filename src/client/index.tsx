@@ -13,7 +13,7 @@
  *
  * 数据只经同源 HTTP 通道走主进程（见 shared.ts），浏览器半不直连存储。
  */
-import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import type { Context as ClientContext } from 'cordis'
 // 只为触发模块增强（与官方客户端插件同一写法）：ctx.slots 由 ui-renderer/client 声明
 // （它 declare module '@deepseek-ai/cordis' 把 slots 挂到 Context 上），运行时由宿主提供，
@@ -49,7 +49,7 @@ import { READER_KEY_HELP, READER_HELP_SCOPE_LABEL } from '../keys.js'
 // 已随 141 行键盘路由搬进 keyboard-routing.ts（2026-10-15）。
 // isElementNode 的**类型收窄**住在客户端（./element-node.ts）：host 工程没有 DOM lib，
 // 收窄留在共享文件里会让 host 编译不过（2026-11-13 实测 tsc 7.0.2 TS2304）。
-import { nextScrollTop, SCROLL_ATTR } from '../list-scroll.js'
+import { clampScrollTop, nextScrollTop, SCROLL_ATTR } from '../list-scroll.js'
 import { isElementNode } from './element-node.js'
 
 export const inject = ['slots']
@@ -301,6 +301,30 @@ export function createReader(store: ReaderStore): () => ReactNode {
     useEffect(() => {
       root?.focus()
     }, [root])
+
+    // 记录列表滚动位置（R2-02）：passive 监听，滚动手势只更新 store 的模块内值并排 300ms 去抖写。
+    // 刻意不 setState：滚动不该触发 React 渲染。卸载时随上面那条 flushViewMemory 一起落一次。
+    useEffect(() => {
+      const box = listBox.current
+      if (box === null) return
+      const onScroll = (): void => { store.rememberListScrollTop(box.scrollTop) }
+      box.addEventListener('scroll', onScroll, { passive: true })
+      return () => { box.removeEventListener('scroll', onScroll) }
+    }, [store])
+
+    // 恢复列表滚动位置（R2-02）：列表首屏渲染完成后**取一次**保存值并写回。
+    // 用 useLayoutEffect 是刻意的：必须在浏览器绘制前写 scrollTop，否则会先闪一下顶部再跳回原处；
+    // 它还必须早于下面那条「跟随选中」的 useEffect，跟随规则才能基于恢复后的位置判断选中行是否可见
+    // （在视口内就不动它；因视口变化落到视口外，才允许跟随规则把它带进来）。
+    // 取不到（没有记忆 / 用户恢复前已滚过 / 已取过）就什么都不做。
+    useLayoutEffect(() => {
+      if (state.view !== 'list') return
+      const box = listBox.current
+      if (box === null) return
+      const saved = store.takeListScrollTop()
+      if (saved === undefined) return
+      box.scrollTop = clampScrollTop(saved, box.scrollHeight - box.clientHeight)
+    }, [store, state.view, state.items])
 
     // 跟随滚动：选中项超出可视区时才滚（j/k 走到边界后屏幕要跟着动——用户实测缺失）。
     // 位置计算在 src/list-scroll.ts 里，是纯函数且有单测；这里只负责量 DOM 并写入。

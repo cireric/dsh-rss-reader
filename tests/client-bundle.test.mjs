@@ -113,6 +113,9 @@ function loadClientBundle() {
         useCallback: (fn) => fn,
         useRef: (initial) => ({ current: initial }),
         useEffect: (fn) => { hookCalls.push('useEffect'); fn() },
+        // R2-02：面板用 useLayoutEffect 在首屏后写回列表 scrollTop。本文件只直接调工厂函数
+        // 取树，node 是假件、没有真实布局 —— 这个桩只需「被调到不炸」，语义判据在 scroll-dom 真 DOM 层。
+        useLayoutEffect: (fn) => { hookCalls.push('useLayoutEffect'); fn() },
         useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}],
         default: {},
       }
