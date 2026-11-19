@@ -2348,3 +2348,156 @@ test('列表行展开③：一个段落都没有 →「此源未提供正文，�
   assert.ok(block !== null, '兜底文案必须是摘要区的块')
   assert.equal(block.textContent, '（此源未提供正文，点下面到原站阅读）', '文案逐字不变')
 })
+
+// ── R4：正文抓取失败时回退到订阅源内容 ─────────────────────────────────────────
+// 回退是**纯渲染**：判据与列表行共用 paragraphsOf + hasBodyText，内容不进 ArticleState、
+// 不写缓存、不参与阅读时长。下面三条钉住票上的关键判定，第四条钉「无 failure 的空 blocks」文案。
+
+test('正文失败回退：订阅源摘要够门槛时显示来源标注、原因行与全部段落，不显示阅读时长', skip, async () => {
+  const firstParagraph = '第一段：这是订阅源提供的正文，长度足够跨过四十个字符的门槛。'
+  const secondParagraph = '第二段：继续说明，两段拼起来肯定超过四十个字。'
+  const h = await mountReader({
+    items: [
+      item({ id: 'a', summary: '<p>' + firstParagraph + '</p><p>' + secondParagraph + '</p>' }),
+      item({ id: 'b' }),
+    ],
+    article: { failure: '403' },
+  })
+  await h.store.load('overview')
+  await h.settle()
+  h.press('V', true)
+  await h.waitFor(() => h.store.get().view === 'article', { timeout: 900, label: '进入正文页' })
+  await h.settle()
+
+  // 回退不改变读态：打开的 a 标已读，b 保持未读（loadArticle / activate 的既有行为一字未动）。
+  assert.ok(h.store.get().items.find((entry) => entry.id === 'a').readAt !== undefined, '打开条目仍标已读')
+  assert.equal(h.store.get().items.find((entry) => entry.id === 'b').readAt, undefined, '其他条目的读态不受回退影响')
+
+  const note = h.win.document.querySelector('[role="note"]')
+  assert.ok(note !== null, '回退必须渲染 role="note" 的来源标注（不是错误态 alert）')
+  assert.match(note.textContent ?? '', /以下为订阅源提供的内容，可能不是全文/, '标签文案逐字不变')
+  const reason = note.querySelector('.dsh-rss-meta')
+  assert.ok(reason !== null, '原因行要沿用 dsh-rss-meta 小字样式')
+  assert.equal(reason.textContent, '原站正文没能取到：403', '原因行必须带上端点返回的失败原文')
+
+  const body = h.win.document.querySelector('article.dsh-rss-article-column')
+  assert.ok(body !== null, '正文列必须存在')
+  assert.ok(body.contains(note), '回退标签与段落必须同属正文列（字号/栏宽/主题由它继承）')
+  assert.deepEqual(
+    [...body.querySelectorAll('p')].map((element) => element.textContent),
+    [firstParagraph, secondParagraph],
+    '摘要必须按段落逐块渲染（复用正文的 p 块，不许拼成一行）',
+  )
+  assert.equal(h.win.document.querySelector('[data-rss-reading-minutes]'), null,
+    '回退段落不许参与阅读时长估算：该位置不该出现任何分钟数')
+  assert.ok([...h.win.document.querySelectorAll('a')].some((element) => (element.textContent ?? '').includes('打开原站')),
+    '「打开原站」照常保留')
+  const retry = [...h.win.document.querySelectorAll('button')]
+    .find((element) => (element.textContent ?? '').trim() === '重试抓取')
+  assert.ok(retry !== undefined, '回退态必须有「重试抓取」按钮')
+  assert.equal(h.byLabel('回到文章顶部', '前往文章底部').length, 2,
+    '回退态照常显示回顶/到底按钮（有可滚内容）')
+
+  const articleCalls = () => h.requests.filter((entry) => entry.endpoint === 'article')
+  assert.equal(articleCalls().length, 1, '打开一次只发一次正文请求（回退是纯渲染）')
+  assert.equal(h.requests.filter((entry) => entry.endpoint === 'saveReadingProgress').length, 0,
+    '回退内容没有 contentVersion：不许写阅读进度')
+
+  // 返回列表再打开同一条：仍要重新请求 —— 证明回退内容没有被当成缓存。
+  h.press('Escape')
+  await h.settle()
+  h.press('V', true)
+  await h.waitFor(() => articleCalls().length === 2, { timeout: 900, label: '第二次打开重新请求正文' })
+  await h.settle()
+  assert.equal(articleCalls().length, 2, '返回列表再打开同一条必须重新抓取')
+})
+
+test('正文失败回退：摘要不到门槛时保持原错误块，不显示回退标签与重试', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a', summary: '<p><a href="https://news.ycombinator.com/item?id=1">Comments</a></p>' })],
+    article: { failure: '403' },
+  })
+  await h.store.load('overview')
+  await h.settle()
+  h.press('V', true)
+  await h.waitFor(() => h.store.get().view === 'article', { timeout: 900, label: '进入正文页' })
+  await h.settle()
+
+  const alert = h.win.document.querySelector('[role="alert"]')
+  assert.ok(alert !== null, '门槛不过时必须保持原错误块')
+  assert.match(alert.textContent ?? '', /没能取到正文：403/, '错误块文案逐字不变')
+  assert.match(alert.textContent ?? '', /可以返回列表，或打开原站阅读。/, '兜底提示逐字不变')
+  assert.equal(h.win.document.querySelector('[role="note"]'), null, '门槛不过时不许出现回退标签')
+  assert.equal(
+    [...h.win.document.querySelectorAll('button')].some((element) => (element.textContent ?? '').trim() === '重试抓取'),
+    false,
+    '保持现状：门槛不过时没有新增重试按钮',
+  )
+  assert.equal(h.byLabel('回到文章顶部', '前往文章底部').length, 0,
+    '失败且无正文可读时不出回顶/到底按钮（与改动前一致）')
+  assert.equal(h.requests.filter((entry) => entry.endpoint === 'article').length, 1, '仍只发一次正文请求')
+})
+
+test('正文失败回退：重试请求的是正文页那一篇（article.itemId），冷却期原文照实显示', skip, async () => {
+  let attempt = 0
+  const cooldown = '刚刚取过这篇正文，请 30 秒后再试'
+  const h = await mountReader({
+    items: [
+      item({ id: 'a', summary: '<p>这一篇的订阅源摘要足够长，超过四十个字符的门槛，用于回退展示，第二句再多补一些字。</p>' }),
+      item({ id: 'b', summary: '<p>另一篇也足够长，但重试绝不该去抓它——正文页的唯一真相是 article.itemId。</p>' }),
+    ],
+    article: () => {
+      attempt += 1
+      return attempt === 1 ? { failure: '403' } : { failure: cooldown }
+    },
+  })
+  await h.store.load('overview')
+  await h.settle()
+  h.press('V', true)
+  await h.waitFor(() => h.store.get().view === 'article', { timeout: 900, label: '进入正文页' })
+  await h.settle()
+
+  const articleCalls = () => h.requests.filter((entry) => entry.endpoint === 'article')
+  assert.equal(articleCalls().length, 1, '前置条件：首次打开只请求一次')
+
+  // 制造「列表选中项 ≠ 正文页那一篇」：重试若读 selectedId 就会去抓 b。
+  h.store.select('b')
+  await h.settle()
+  assert.equal(h.store.get().selectedId, 'b', '前置条件：列表选中项已切到 b')
+
+  const retry = [...h.win.document.querySelectorAll('button')]
+    .find((element) => (element.textContent ?? '').trim() === '重试抓取')
+  assert.ok(retry !== undefined, '回退态必须能重试')
+  retry.dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
+  await h.waitFor(() => articleCalls().length === 2, { timeout: 900, label: '重试发出第二次正文请求' })
+  await h.settle()
+
+  const calls = articleCalls()
+  assert.equal(calls[1].payload.itemId, 'a', '重试必须取 article.itemId，不是列表选中项 selectedId')
+  assert.equal(h.store.get().article.itemId, 'a', '正文页仍然停在 a')
+  const reason = h.win.document.querySelector('[role="note"] .dsh-rss-meta')
+  assert.ok(reason !== null, '重试失败后仍显示回退原因行')
+  assert.equal(reason.textContent, '原站正文没能取到：' + cooldown, '冷却期失败原文必须照实显示，不吞不改写')
+})
+
+test('正文失败回退：成功但空 blocks 也显示回退，原因行写「原站没有可显示的正文」', skip, async () => {
+  const paragraph = '订阅源提供了这一段正文，虽然没有 failure，但原站正文块是空的；这句补充说明让它超过四十个字符的门槛。'
+  const h = await mountReader({
+    items: [item({ id: 'a', summary: '<p>' + paragraph + '</p>' })],
+    article: { itemId: 'a', title: 'ART', blocks: [], paragraphs: [] },
+  })
+  await h.store.load('overview')
+  await h.settle()
+  h.press('V', true)
+  await h.waitFor(() => h.store.get().view === 'article', { timeout: 900, label: '进入正文页' })
+  await h.settle()
+
+  const note = h.win.document.querySelector('[role="note"]')
+  assert.ok(note !== null, '没有可渲染 blocks 时也要回退')
+  const reason = note.querySelector('.dsh-rss-meta')
+  assert.ok(reason !== null, '原因行必须存在')
+  assert.equal(reason.textContent, '原站没有可显示的正文', '无 failure 时原因行是这句（不是「没能取到」）')
+  const body = h.win.document.querySelector('article.dsh-rss-article-column')
+  assert.deepEqual([...body.querySelectorAll('p')].map((element) => element.textContent), [paragraph],
+    '回退段落仍然按 p 渲染')
+})

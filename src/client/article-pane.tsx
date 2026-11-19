@@ -17,7 +17,8 @@ import { edgeTopFor, readingRatioOf, restoreTopFor } from '../list-scroll.js'
  * 缩成可辨认尺寸，需要看细节时点「打开原站」。
  */
 const ARTICLE_IMAGE_MAX_HEIGHT = 640
-import { httpUrlOrEmpty, estimateReadingMinutes, type ItemView } from '../shared.js'
+import { estimateReadingMinutes, hasBodyText, httpUrlOrEmpty, type ItemView } from '../shared.js'
+import { paragraphsOf } from '../html-text.js'
 import { READING_FONT_SIZES, READING_LINE_WIDTHS } from '../preferences.js'
 import type { ReadingPreferences } from '../preferences.js'
 import type { ArticleState } from './store.js'
@@ -104,10 +105,16 @@ function ArticleBlockView({ block }: { block: Record<string, unknown> }): ReactN
   return <p style={{ margin: '0 0 1.05em' }}>{text}</p>
 }
 
-export function ArticleView({ article, item, onBack, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress }: {
+export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress }: {
   article: ArticleState | undefined
   item: ItemView | undefined
   onBack: () => void
+  /**
+   * 重试抓取当前正文页这一篇（R4-B4）。
+   * 请求哪个条目由 store 按 `article.itemId` 决定，本组件只负责把用户意图交回去 ——
+   * 组件不碰 selectedId：正文页的唯一真相是 article.itemId（见 list-actions.ts 的 loadArticle）。
+   */
+  onRetry: () => void
   /** 记一次阅读进度（M5 02）：只在切换 / 关闭 / 卸载时调，滚动本身不写盘 */
   onSaveProgress: (itemId: string, contentVersion: string, ratio: number) => void
   /** 正文排版偏好（M5 01）：值归 store 所有，本组件只负责照着画、把用户的改动交回去 */
@@ -121,19 +128,41 @@ export function ArticleView({ article, item, onBack, scrollAttr, canPrev, canNex
   onPrev: () => void
   onNext: () => void
 }): ReactNode {
-  // 新缓存是结构化块；老缓存只有纯文本段落——把后者包成 p 块，走同一条渲染路径
-  const blocks: Array<Record<string, unknown>> = article?.blocks !== undefined
+  // 新缓存是结构化块；老缓存只有纯文本段落——把后者包成 p 块，走同一条渲染路径。
+  // 这份 blocks **只用于估算阅读时长**，回退段落绝不进来（R4-B5）。
+  const readingBlocks: Array<Record<string, unknown>> = article?.blocks !== undefined
     ? article.blocks
     : (article?.paragraphs ?? []).map((text) => ({ kind: 'p', text }))
+  /**
+   * 回退内容（R4-B1）：正文区没有可渲染块时，用订阅源自带的摘要兜底。
+   *
+   * 判据与列表行**完全一致**：paragraphsOf 切段 + hasBodyText 过 40 字门槛（两处共用一份实现）。
+   * 内容只在渲染期从 item.summary 现算，不写进 ArticleState —— 第二次打开同一条仍会请求原站，
+   * 原站恢复后自然重抓。加载中 / 没有 article 时不回退：那两态没有「正文不可用」可谈。
+   */
+  const summaryParagraphs = readingBlocks.length === 0 ? paragraphsOf(item?.summary) : []
+  const fallback = article !== undefined && article.loading !== true && readingBlocks.length === 0
+    && hasBodyText(summaryParagraphs)
+    ? { paragraphs: summaryParagraphs, failure: article.failure }
+    : undefined
+  const fallbackActive = fallback !== undefined
+  /**
+   * 实际画出来的 blocks：回退态是摘要段落（复用 ArticleBlockView 的 p 分支）。
+   * 与 readingBlocks 分成两个变量的理由见 R4-B5 —— 回退内容没有 contentVersion，
+   * 算进阅读时长就是给用户一个不属于这篇正文的分钟数。
+   */
+  const displayBlocks: Array<Record<string, unknown>> = fallback === undefined
+    ? readingBlocks
+    : fallback.paragraphs.map((text) => ({ kind: 'p', text }))
   const title = article?.title || item?.title
   const publishedAt = item?.publishedAt
   // 历史行可能带脏 link（修复前落库的 javascript:）：渲染前过 shared.ts 的唯一白名单。
   // 认不出就当作「无链接」——与 item.link === '' 的既有语义一致（不渲染「打开原站」）。
   const rawLink = item?.link
   const link = rawLink === undefined ? undefined : httpUrlOrEmpty(rawLink)
-  // 只按**已缓存的正文**估：加载中 / 抓取失败时 blocks 为空 ⇒ 0 ⇒ 界面不出现任何数字。
-  // 刻意不拿 summary 或源里的 excerpt 去凑 —— 那不是用户即将读的那段文本。
-  const readMinutes = estimateReadingMinutes(blocks)
+  // 只按**已缓存的正文**估：加载中 / 抓取失败时 readingBlocks 为空 ⇒ 0 ⇒ 界面不出现任何数字。
+  // 刻意不拿 summary 或源里的 excerpt 去凑 —— 回退内容不是原站正文，不给它编一个时长（R4-B5）。
+  const readMinutes = estimateReadingMinutes(readingBlocks)
 
   /**
    * 本组件自己拿到滚动容器 —— 右下角那两个按钮要作用在它上面。
@@ -238,7 +267,8 @@ export function ArticleView({ article, item, onBack, scrollAttr, canPrev, canNex
   useEffect(() => {
     const box = boxRef.current
     if (box === null || article === undefined) return
-    if (article.loading === true || article.failure !== undefined) return
+    // 回退态没有 contentVersion，也就没有可恢复的阅读进度（R4-B5）：别拿旧比例去对一段摘要。
+    if (article.loading === true || article.failure !== undefined || fallbackActive) return
     const ratio = article.restoreRatio
     if (ratio === undefined || ratio <= 0) return
     const top = restoreTopFor(ratio, box.scrollHeight, box.clientHeight)
@@ -246,7 +276,7 @@ export function ArticleView({ article, item, onBack, scrollAttr, canPrev, canNex
     expectedTopRef.current = top
     // 图片还没进场时内容更矮：记住这个比例，长高时按它补正（用户一动就解除，见 handleScroll）
     restoreRatioRef.current = ratio
-  }, [article?.itemId, article?.loading, article?.failure, article?.restoreRatio])
+  }, [article?.itemId, article?.loading, article?.failure, article?.restoreRatio, fallbackActive])
 
   /**
    * 离开这篇时把「读到哪儿」写回去（M5 02）。
@@ -258,13 +288,14 @@ export function ArticleView({ article, item, onBack, scrollAttr, canPrev, canNex
   useEffect(() => {
     const itemId = article?.itemId
     const contentVersion = article?.contentVersion
-    if (itemId === undefined || contentVersion === undefined) return undefined
+    // 回退态不写阅读进度：摘要不是原站正文，没有 contentVersion，也不该被记成「读到哪儿」（R4-B5）。
+    if (itemId === undefined || contentVersion === undefined || fallbackActive) return undefined
     return () => {
       const box = boxRef.current ?? lastBoxRef.current
       if (box === null) return
       onSaveProgress(itemId, contentVersion, readingRatioOf(box.scrollTop, box.scrollHeight, box.clientHeight))
     }
-  }, [article?.itemId, article?.contentVersion, onSaveProgress])
+  }, [article?.itemId, article?.contentVersion, fallbackActive, onSaveProgress])
 
   /**
    * 内容长高时继续贴底。
@@ -373,16 +404,37 @@ export function ArticleView({ article, item, onBack, scrollAttr, canPrev, canNex
               )}
             </header>
           )}
+          {/*
+            * 回退标签（R4-B3）：正文列标题 header 之后、正文块之前。
+            * 用 role="note" 而不是 role="alert"：这不是错误态 —— 用户有内容可读，只是来源不是原站正文。
+            * 原因行沿用 dsh-rss-meta 小字，文案按有无 failure 分两种；failure 原文照实显示（不吞、不改写）。
+            */}
+          {fallback !== undefined && (
+            <div role="note" style={{
+              marginBottom: 18, padding: '10px 12px', borderRadius: 6,
+              border: '1px solid color-mix(in srgb, currentColor 18%, transparent)',
+              background: 'color-mix(in srgb, currentColor 4%, transparent)',
+            }}>
+              <div style={{ fontWeight: 600 }}>以下为订阅源提供的内容，可能不是全文</div>
+              <div className="dsh-rss-meta" style={{ marginTop: 4 }}>
+                {fallback.failure === undefined
+                  ? '原站没有可显示的正文'
+                  : '原站正文没能取到：' + fallback.failure}
+              </div>
+              <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
+                style={{ marginTop: 8 }} onClick={onRetry}>重试抓取</button>
+            </div>
+          )}
           {article === undefined || article.loading ? (
             <p className="dsh-rss-meta" role="status">正在抓取原站正文…</p>
-          ) : article.failure !== undefined ? (
+          ) : article.failure !== undefined && fallback === undefined ? (
             <div role="alert" style={{ color: 'var(--rss-error)' }}>
               没能取到正文：{article.failure}
               <div className="dsh-rss-meta" style={{ marginTop: 6 }}>
                 {link ? '可以返回列表，或打开原站阅读。' : '可以按 Esc 返回列表。'}
               </div>
             </div>
-          ) : blocks.map((block, index) => <ArticleBlockView key={index} block={block} />)}
+          ) : displayBlocks.map((block, index) => <ArticleBlockView key={index} block={block} />)}
         </article>
       </div>
 
@@ -391,10 +443,10 @@ export function ArticleView({ article, item, onBack, scrollAttr, canPrev, canNex
         * 不把节点存进 state 让回调捕获，这与键盘那条路径是同一条约束。
         * 按钮放在滚动容器**之后**且同属相对定位层：不进滚动流，长文里也不会被滚走。
         *
-        * 只在正文真的画出来时显示：加载中/抓取失败时既没有正文可跳，按钮也只会挤在
-        * 「正在抓取…」那行旁边造成误解（与下面判断正文状态的那三支条件保持同一口径）。
+        * 只在正文真的画出来时显示：加载中、抓取失败且无回退内容时既没有正文可跳，
+        * 按钮也只会挤在「正在抓取…」那行旁边造成误解。回退态有摘要段落可滚，照常显示（R4-B6）。
         */}
-      {article !== undefined && article.loading !== true && article.failure === undefined && (
+      {article !== undefined && article.loading !== true && (article.failure === undefined || fallbackActive) && (
         <div style={{
           position: 'absolute', right: 16, bottom: 16,
           display: 'flex', flexDirection: 'column', gap: 6,

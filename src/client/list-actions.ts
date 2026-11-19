@@ -6,8 +6,8 @@
  * 06b 搬进来六个走 account-mirror 的动作（markRead / toggleStar / toggleKeepUnread / toggleRead /
  * markAllRead / undoMarkAll）与它们共用的 5000ms 撤销窗口（身份 CAS 在 undoMarkAll 的回滚里），
  * 外加两个直接下游 activate / openSelected（「打开即已读」与 v 键）。
- * 06c 搬进来取数与分页（load / loadMore / cleanup）和正文动作（openArticle / stepArticle /
- * canStepArticle / closeArticle / saveArticleProgress，以及它们内部的 loadArticle）——
+ * 06c 搬进来取数与分页（load / loadMore / cleanup）和正文动作（openArticle / retryArticle /
+ * stepArticle / canStepArticle / closeArticle / saveArticleProgress，以及它们内部的 loadArticle）——
  * 这一块是所有域的汇合点，所以最后搬。
  *
  * 为什么按这个顺序切：06a 是纯读 + 小状态；06b 的六个动作共用一条「乐观 → RPC → 覆盖 / 回滚」
@@ -638,6 +638,19 @@ export function createListActions(host: ListActionHost) {
   }
 
   /**
+   * 重试抓取当前正文页的那一篇（R4-B4）。
+   *
+   * 取 `article.itemId` 而不是 `selectedId`：正文页的唯一真相是 article.itemId —— 列表选中项
+   * 可能已经被别的入口（点击 / j/k / 搜索刷新）换到另一条，那就是「重试抓了别的文章」的错位。
+   * 请求仍走 loadArticle：冷却期等失败由宿主回包的 failure 原样显示，不在这里吞掉或改写。
+   */
+  const retryArticle = (): void => {
+    const itemId = get().article?.itemId
+    if (itemId === undefined) return
+    void loadArticle(itemId)
+  }
+
+  /**
    * 记一次阅读进度（M5 02）。
    *
    * 只在「切换文章 / 关闭正文 / 组件卸载」时调 —— **滚动本身不写盘**：逐帧写会把库写热，
@@ -718,7 +731,7 @@ export function createListActions(host: ListActionHost) {
     actions: {
       visible, setFilter, setLayout, setMarkAllRange, setShowUnread, select, selectRelative,
       markRead, activate, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllRead, undoMarkAll,
-      load, loadMore, cleanup, openArticle, closeArticle, stepArticle, canStepArticle, saveArticleProgress,
+      load, loadMore, cleanup, openArticle, retryArticle, closeArticle, stepArticle, canStepArticle, saveArticleProgress,
     },
     /** 跨域入口：选中重落。nav-actions 与视图恢复共用，刻意不上 ReaderStore 的公开面。 */
     relocateSelection,

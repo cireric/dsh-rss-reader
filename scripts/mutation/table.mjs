@@ -1964,4 +1964,29 @@ export const MUTATIONS = [
     judgeTests: ['写工具的逐次审批：pre-execute 只对本工具 ask，其它工具必须放行（waterfall 不许漏 next）'],
     from: "        if (exec.name !== 'rss_update_item')",
     to: '        if (true)' },
+  // ── R4：正文抓取失败时回退到订阅源内容（2026-11-19）────────────────────────
+  // 回退是纯渲染判定，两条失效都很安静：① 永远不画回退 ⇒ 用户重新只剩一句错误；
+  // ② 门槛失效 ⇒ 连 HN 的 "Comments" 都会被当成正文画出来。③ 段落切分退回整块则列表行与
+  // 正文回退同时退化成一整段。判据都是用户可见文案 / 段落数，不钉实现形状。
+  { id: 'client-回退内容永不渲染', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['正文失败回退：订阅源摘要够门槛时显示来源标注、原因行与全部段落，不显示阅读时长'],
+    // 把回退判定短路成永不成立：正文区没有 blocks 时退回旧行为（只画 role="alert"）。
+    // 判据：scroll-dom 的回退用例断言 role="note" 必须出现 —— 这条一改就翻红。
+    from: 'const fallback = article !== void 0 && article.loading !== true && readingBlocks.length === 0 && hasBodyText(summaryParagraphs) ? {',
+    to: 'const fallback = void 0 && hasBodyText(summaryParagraphs) ? {' },
+  { id: 'client-回退门槛失效', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['正文失败回退：摘要不到门槛时保持原错误块，不显示回退标签与重试'],
+    // 去掉 hasBodyText 门槛：摘要只有 "Comments" 时也会渲染回退标签与段落。
+    // 判据：scroll-dom 的「门槛不过」用例断言 role="note" 为 null —— 改后它会出现。
+    from: 'hasBodyText(summaryParagraphs)',
+    to: 'true' },
+  { id: 'html-段落不按换行切', file: 'lib/html-text.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['paragraphsOf：HTML 按段落切块（空值认作没有段落，实体先解码再切）'],
+    // paragraphsOf 只回一整段：列表行展开与正文回退都会把多段拼成一块（用户可见的多段信息丢失）。
+    // 判据：tests/article.test.mjs 的 paragraphsOf 用例逐段 deepEqual 三段。
+    from: "return htmlToText(html).split('\\n');",
+    to: 'return [htmlToText(html)];' },
 ]

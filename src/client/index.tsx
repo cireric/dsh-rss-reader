@@ -595,6 +595,8 @@ export function createReader(store: ReaderStore): () => ReactNode {
             article={state.article}
             item={activeArticle}
             onBack={() => store.closeArticle()}
+            // 重试抓取当前正文页那一篇：store 按 article.itemId 取数，不用 selectedId（R4-B4）。
+            onRetry={store.retryArticle}
             // 不再传 setBox：阅读容器的滚动生命周期（换文章归零 / 内容长高贴底）已归 article-pane
             // 自己（2026-10-15 C2）；键盘那条路径按键时刻按 scrollAttr 现取容器，不需要跨组件 ref 桥接。
             scrollAttr={SCROLL_ATTR}
