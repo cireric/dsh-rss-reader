@@ -20,33 +20,40 @@ import type { UnreadSplit } from '../unread.js'
  * 窗口载荷的 wire 形状：`from` / `to` 只在窗口档位出现（全部档位不带窗口，旧请求形状不变），
  * 而 `todayFrom` **每个档位都带** —— 「全部」档位也要靠它拿未读三联拆分。
  *
- * 刻意不用 `{ from?: string; to?: string }`：那允许「只有一半」这种宿主已经判为坏入参的形状。
- * `Record<string, string>` 让各档位的合法形态都能被展开进任意动作载荷。
+ * 刻意写成显式的三个字段而不是 `Record<string, string>`：后者把「只有一半的窗口」
+ * （只带 `from` 或只带 `to`）也当成合法载荷，而宿主已经把那种形状判成坏入参 ——
+ * 类型不该比它守的契约更宽。
  */
-export type DisplayWindowPayload = Readonly<Record<string, string>>
+export type DisplayWindowPayload = Readonly<{ todayFrom: string; from?: string; to?: string }>
 
 export interface DisplayWindowOption {
   readonly value: DisplayWindowRange
   /** 下拉里显示的名字：全部档位带「时间」后缀，三档是自然日名。 */
   readonly label: string
+  /** 顶栏计数、空态与下拉之外的界面文案用的短名（「全部」在顶栏仍写作既有「全局」）。 */
+  readonly shortLabel: string
+}
+
+/**
+ * 档位表的**唯一一份**：`value` 顺序 = 下拉顺序。名字（长 / 短）与档位在这里一起定义，
+ * 不在 `displayWindowNameOf` 里再维护一条 switch —— 两份映射迟早会在加档位时只说一半。
+ *
+ * 用 `Record<DisplayWindowRange, …>` 而不是数组：少写一个档位是编译错误，而不是运行时空白项。
+ * 对象的字符串键按插入序枚举，所以 `Object.values` 出来的顺序就是下拉顺序。
+ */
+const DISPLAY_WINDOW_TABLE: Record<DisplayWindowRange, DisplayWindowOption> = {
+  all: { value: 'all', label: '全部时间', shortLabel: '全部' },
+  today: { value: 'today', label: '今天', shortLabel: '今天' },
+  '3d': { value: '3d', label: '近 3 天', shortLabel: '近 3 天' },
+  '7d': { value: '7d', label: '近 7 天', shortLabel: '近 7 天' },
 }
 
 /** 下拉的四个档位与顺序：原生 select 的 options 直接映射这里，别在 JSX 里再抄一份。 */
-export const DISPLAY_WINDOW_OPTIONS: readonly DisplayWindowOption[] = [
-  { value: 'all', label: '全部时间' },
-  { value: 'today', label: '今天' },
-  { value: '3d', label: '近 3 天' },
-  { value: '7d', label: '近 7 天' },
-]
+export const DISPLAY_WINDOW_OPTIONS: readonly DisplayWindowOption[] = Object.values(DISPLAY_WINDOW_TABLE)
 
 /** 档位的短名：顶栏计数与空态共用（全部档位的顶栏文案仍沿用既有的「全局」）。 */
 export function displayWindowNameOf(range: DisplayWindowRange): string {
-  switch (range) {
-    case 'today': return '今天'
-    case '3d': return '近 3 天'
-    case '7d': return '近 7 天'
-    default: return '全部'
-  }
+  return DISPLAY_WINDOW_TABLE[range].shortLabel
 }
 
 /**
@@ -62,6 +69,23 @@ export function displayWindowPayloadOf(range: DisplayWindowRange, now: Date): Di
   return bounds === undefined
     ? { todayFrom }
     : { from: bounds.from, to: bounds.to, todayFrom }
+}
+
+/**
+ * 发请求那一刻的档位与它对应的 wire 字段，**成对取出**。
+ *
+ * 为什么不能只拿 payload：账目回包落地时要判断「这份账属于哪个档位」（R1 评审 P1）。
+ * 若调用方先取 payload、等回包到了再读 `state.displayWindow`，中途切过档就会把旧档的账
+ * 挂到新档名下；反过来先记档位、发请求时再算 payload 也会漏掉「两端之间切过一次」。
+ * 一次取出、原样传下去，取数与标记才是同一个时刻。
+ */
+export interface DisplayWindowRequest {
+  readonly window: DisplayWindowRange
+  readonly payload: DisplayWindowPayload
+}
+
+export function displayWindowRequestOf(range: DisplayWindowRange, now: Date): DisplayWindowRequest {
+  return { window: range, payload: displayWindowPayloadOf(range, now) }
 }
 
 /** 顶栏计数前缀：全部档位保持既有的「全局」，其余档位用档位名（今天 / 近 3 天 / 近 7 天）。 */

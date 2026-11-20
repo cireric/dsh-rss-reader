@@ -285,8 +285,10 @@ const unreadPerFeedSql = (window: DisplayWindowBounds | undefined): string =>
  * 于是 `today + earlier + noDate` 恒等于 `read_at IS NULL` 的总数（spec 决策 16）。
  * 无日期的行绝不参与前两桶（`IS NOT NULL` 两道守卫，`noDate` 单独接住）。
  *
- * 键域与 `unreadPerFeed` 共用 `IN_FEEDS`：账目总数来自 feeds 表键域求和，拆分若数进残留的
- * 已退订源条目，顶栏「共 X 条未读 · 今天 N …」的守恒式就会差出来。
+ * 键域必须与 `unreadPerFeed` 是**同一组源**，但两条 SQL 的施加位置不同：`unreadPerFeedSql`
+ * 只按 `feed_id` 分组，键域由调用方在 JS 侧按 feeds 表裁（见下面 unreadPerFeed 的「只认传进来的键」）；
+ * 拆分是无键的标量聚合，没有可以回 JS 裁剪的行，只能在 SQL 里用 `IN_FEEDS` 先限定。
+ * 否则残留的已退订源条目会被数进某一只桶，顶栏「共 X 条未读 · 今天 N …」的守恒式就会差出来。
  */
 const unreadSplitSql =
   'SELECT'

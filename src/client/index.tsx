@@ -58,6 +58,14 @@ import { isElementNode } from './element-node.js'
 
 export const inject = ['slots']
 
+/**
+ * 「账目与档位尚未对齐」时传给左栏的**空**每源账目（R1 评审 P1）。
+ *
+ * 空 map 的含义是「还不知道」，不是「每个源都是 0」：feed-nav 见到空 map 会一个角标都不渲染。
+ * 用模块级常量而不是字面量 `{}`，是为了让 FeedNav 的 props 引用在 pending 期间保持稳定。
+ */
+const NO_UNREAD: Record<string, number> = {}
+
 /** panellist 图标的 id 必须与 main 座位的 key 相同。 */
 const PANEL_ID = 'dsh-rss-reader'
 /** 阅读器根节点的标记：快捷键用它判断焦点是否在本面板内。 */
@@ -403,6 +411,12 @@ export function createReader(store: ReaderStore): () => ReactNode {
     }, [root, store, expanded, helpOpen])
 
     const items = store.visible()
+    /**
+     * 账目与当前档位是否对齐（R1 评审 P1）：切档后 displayWindow 立刻变了，而账目（以及它的
+     * accountWindow 标记）要等新档第一页回包才换。不对齐期间界面上的任何数字都可能属于
+     * **另一个窗口** —— 顶栏、左栏每源/文件夹角标、侧栏徽标必须一起闭嘴，而不是各显示各的。
+     */
+    const accountAligned = state.accountWindow === state.displayWindow
     const failing = state.feeds.filter((feed) => feed.lastFailure)
     // 顶栏那组 filter 按钮与键盘导航的行序共用同一份定义（见 VIRTUAL_VIEWS 的注释）
     const filters = VIRTUAL_VIEWS
@@ -443,7 +457,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
             feeds={state.feeds}
             folders={state.folders}
             tags={state.tags}
-            perFeedUnread={state.perFeedUnread}
+            perFeedUnread={accountAligned ? state.perFeedUnread : NO_UNREAD}
             filter={state.filter}
             navSelection={state.navSelection}
             navCursor={state.navCursor}
@@ -483,10 +497,16 @@ export function createReader(store: ReaderStore): () => ReactNode {
                 {state.search !== undefined && (
                   <span className="dsh-rss-window-hint" data-rss-window-reason="">搜索进行中不可用：搜索有自己的日期筛选</span>
                 )}
-                {state.showUnread && (
-                  // 数字与三分全部来自宿主回包（state.unread / state.unreadSplit），客户端不数条目。
-                  <span data-rss-unread-count="">{unreadCountTextOf(state.displayWindow, state)}</span>
-                )}
+                {state.showUnread && (accountAligned
+                  ? (
+                    // 数字与三分全部来自宿主回包（state.unread / state.unreadSplit），客户端不数条目。
+                    <span data-rss-unread-count="">{unreadCountTextOf(state.displayWindow, state)}</span>
+                  )
+                  : (
+                    // 账目还没换到当前档位（R1 评审 P1）：宁可说「正在统计…」，也不能把别的窗口的数字
+                    // 挂在当前档位名下。data-rss-unread-pending 就是这段静默期的可断言标记。
+                    <span data-rss-unread-pending="" title="正在按当前时间范围重新统计未读">正在统计…</span>
+                  ))}
                 <span>已加载 {state.items.length} 条</span>
               </div>
             )}
@@ -803,9 +823,9 @@ export function createReader(store: ReaderStore): () => ReactNode {
               在途时禁用（loadingMore）：连点会堆出多个请求，每次都要过一次 SQL 与一次 feeds 文件读。 */}
           {state.nextCursor !== undefined && (
             <div style={{ padding: '10px 20px', textAlign: 'center' }}>
-              {/* 整份重取在途时也禁用：旧游标还在 state 里（refresh 不改写当前页），此时发续页
-                  会与新第一页并发落地，两边都往「当前列表」拼。 */}
-              <button type="button" className="dsh-rss-btn" disabled={state.loadingMore || state.loading}
+              {/* 只由续页自身在途（loadingMore）禁用：刷新期间启用「加载更多」是既有行为，
+                  在途续页由列表版本号作废；切档时 nextCursor 已被 setWindow 清空，这一行根本不渲染。 */}
+              <button type="button" className="dsh-rss-btn" disabled={state.loadingMore}
                 onClick={() => { void store.loadMore() }}>
                 {state.loadingMore ? '加载中…' : '加载更多'}
               </button>
@@ -832,7 +852,8 @@ export function createReader(store: ReaderStore): () => ReactNode {
 export function Badge({ store }: { store: ReaderStore }): ReactNode {
   const state = useReaderStore(store)
   // 计数被隐藏时徽标也必须消失 —— 否则「隐藏」只做了一半
-  if (!state.showUnread || state.unread === 0) return null
+  // 账目还没换到当前档位时（R1 评审 P1）同样不显示：这个数是上一个窗口的，挂在这里就是撒谎。
+  if (!state.showUnread || state.accountWindow !== state.displayWindow || state.unread === 0) return null
   return <span title={state.unread + ' 条未读'} style={{ fontSize: 10 }}>{state.unread > 99 ? '99+' : state.unread}</span>
 }
 

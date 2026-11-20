@@ -129,6 +129,17 @@ export interface ReaderState {
    * 与过滤三连都不读写它，它也不读写 markAllRange。
    */
   displayWindow: DisplayWindowRange
+  /**
+   * 当前账目（`unread` / `perFeedUnread` / `unreadSplit`）**属于哪个档位**（R1 评审 P1）。
+   *
+   * 账目是宿主按某个窗口算出来的一份快照，不是「永远对应当前视野」的事实：切档后
+   * `displayWindow` 立刻变了，新档第一页却还在路上。两者不一致期间，界面上的任何数字都可能是
+   * 另一个窗口的数（「今天 <全部未读> 条」就是这么来的），所以顶栏 / 左栏角标 / 侧栏徽标
+   * 一律不显示，等回包把这份标记推到新档位（见 index.tsx 的 pending 文案）。
+   *
+   * 初值 `all` 不是猜测：store 的第一笔账来自挂载时的 refresh（默认档位就是「全部」）。
+   */
+  accountWindow: DisplayWindowRange
   /** 是否显示未读计数（规格 §5 不变量 8：**未读计数可隐藏**）。默认显示 = 既有行为。 */
   showUnread: boolean
   /** 最近一次导入的报告（坏源要逐条列出，不能只报总数） */
@@ -271,7 +282,7 @@ const browserDeps: ReaderStoreDeps = {
  *
  * | 域 | 拥有的 state | 动作 | 允许改别人的什么 |
  * |---|---|---|---|
- * | 列表 | `items` / `selectedId` / `nextCursor` / `loadingMore` / `filter` / `layout` / `markAllRange` / `displayWindow` / `undo`（账目 `unread` / `perFeedUnread` 由 account-mirror 的回包整体覆盖） | load / loadMore / visible / setFilter / setWindow / setLayout / activate / selectRelative / markRead / toggleStar / toggleKeepUnread / toggleRead / markAllRead / undoMarkAll / cleanup / stepArticle / openArticle / retryArticle / rememberListScrollTop / takeListScrollTop | 只**读** feeds / tags；改账目一律经 account-mirror（回包整体覆盖）。**跨域写入逐条登记在此**：① setFilter 同步 `navCursor`（光标跟着过滤走，2026-10-10 的既有规则）；② overview 整份落地（applyOverview 与 load 的搜索分支）把 feeds / folders / tags 按宿主快照原样写回；③ 选中项失效时 applyOverview / load 把 navSelection + navCursor 回落虚拟视图（与「源被退订」同一条规则）；④ 正文动作（openArticle / retryArticle / stepArticle）写 `view` / `article` —— 这两份是跨域呈现状态，不归任何一块私有；⑤ setFilter / setWindow 经 leaveArticleForScope 写 `view` / `article`（切过滤 / 切档退出正文） |
+ * | 列表 | `items` / `selectedId` / `nextCursor` / `loadingMore` / `filter` / `layout` / `markAllRange` / `displayWindow` / `accountWindow` / `undo`（账目 `unread` / `perFeedUnread` 由 account-mirror 的回包整体覆盖；`accountWindow` 标记这份账属于哪个档位） | load / loadMore / visible / setFilter / setWindow / setLayout / activate / selectRelative / markRead / toggleStar / toggleKeepUnread / toggleRead / markAllRead / undoMarkAll / cleanup / stepArticle / openArticle / retryArticle / rememberListScrollTop / takeListScrollTop | 只**读** feeds / tags；改账目一律经 account-mirror（回包整体覆盖）。**跨域写入逐条登记在此**：① setFilter 同步 `navCursor`（光标跟着过滤走，2026-10-10 的既有规则）；② overview 整份落地（applyOverview 与 load 的搜索分支）把 feeds / folders / tags 按宿主快照原样写回；③ 选中项失效时 applyOverview / load 把 navSelection + navCursor 回落虚拟视图（与「源被退订」同一条规则）；④ 正文动作（openArticle / retryArticle / stepArticle）写 `view` / `article` —— 这两份是跨域呈现状态，不归任何一块私有；⑤ setFilter / setWindow 经 leaveArticleForScope 写 `view` / `article`（切过滤 / 切档退出正文） |
  * | 搜索 | `search` / `searchRevision` / `searchRequest` / `searchPages` | submitSearch / loadSearch / resetSearchPage | 借列表的 items / selectedId / nextCursor / loading 展示；**不许**改 filter |
  * | 订阅 | `feeds` / `folders` / `discovery` / `feedsBusy` / `importReport` / `navSelection` / `navCursor` / `navVisible` / `foldedFolders` / `viewPreferences`（**deleteFolder 例外**：删掉当前所在文件夹时会把 `filter` 回落成 `all`，这条跨域写入登记在此） | addFeed / removeFeed / moveFeedOrder / importOpml / exportOpml / discover / createFolder / renameFolder / deleteFolder / moveFeedToFolder / selectNav / moveNavCursor / openNavCursor / toggleNav / toggleFolder / flushViewMemory | 改 navSelection 后必须走 persistView；**整份覆盖写必须带上当下的 selectedId**（否则一次普通导航就抹掉阅读位置）；选中 / j/k / 打开条目经 300ms 去抖写手记 lastItemId，面板卸载时 flush；退订只能经 `deleteSubscription`；selectNav 经列表域的 leaveArticleForScope 写 `view` / `article`（切作用域退出正文） |
  * | 标签 | `tags` / 条目的 `tagIds` | createTag / renameTag / deleteTag / toggleItemTag | 乐观改 tagIds，失败回取当前页拉回真相（tagWrite 串行化 + tagEpoch 身份） |
@@ -293,7 +304,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   let state: ReaderState = {
     items: [], feeds: [], folders: [], tags: [], unread: 0, unreadSplit: undefined, filter: 'all',
     selectedId: undefined, loading: true, error: undefined, undo: undefined,
-    view: 'list', layout: 'list', markAllRange: 'all', displayWindow: 'all', showUnread: true, article: undefined, notice: undefined,
+    view: 'list', layout: 'list', markAllRange: 'all', displayWindow: 'all', accountWindow: 'all', showUnread: true, article: undefined, notice: undefined,
     importReport: undefined, discovery: undefined, feedsBusy: false,
     navSelection: { kind: 'virtual' }, perFeedUnread: {}, navVisible: true,
     reading: DEFAULT_READING_PREFERENCES, duplicates: {},
