@@ -16,7 +16,7 @@ import { readConfigFile, writeConfigFile } from '../lib/storage/config-file.js'
 import { createSqliteStore } from '../lib/store-sqlite.js'
 import { createDispatch } from '../lib/endpoints.js'
 import { Config } from '../lib/config.js'
-import { deriveFeedOrder } from '../lib/feed-order.js'
+import { deriveFeedOrder, withoutFeedOrder } from '../lib/feed-order.js'
 
 const A = 'https://a.example/feed.xml'
 const B = 'https://b.example/feed.xml'
@@ -352,4 +352,85 @@ test('排序前后：条目流时间序、每条读态与每源未读数逐项�
     assert.deepEqual(after.value.perFeedUnread, before.value.perFeedUnread, '每源未读数逐项不变')
     assert.equal(after.value.unread, before.value.unread, '未读总数不变')
   } finally { h.cleanup() }
+})
+
+// ── R3 04：退订与回滚不弄坏顺序 ──────────────────────────────────────────
+
+test('withoutFeedOrder：删掉该 id 的全部出现，其余元素一格不动', () => {
+  assert.deepEqual(withoutFeedOrder([D, A, B, C], B), [D, A, C], '只删该 id，其余相对顺序不变')
+  assert.deepEqual(withoutFeedOrder([B, A, B, C], B), [A, C], '手改出的重复项一并清掉：文件里不再含该 id')
+  assert.deepEqual(withoutFeedOrder([A, B], 'missing'), [A, B], '不在数组里的 id 是 no-op')
+  assert.deepEqual(withoutFeedOrder([], A), [], '空数组原样')
+})
+
+test('退订：落盘的 feedOrder 里不再有该 id，其它源的相对先后一格不动；重开保持', async () => {
+  const ctx = fresh('unsubscribe-order', undefined, feedsOf(A, B, C, D))
+  try {
+    await ctx.store.reorderFeeds([D, B, A, C])
+    await ctx.store.saveItem('b-1', itemOf(B, 'b-1', '2026-11-20T00:00:00.000Z'))
+    await ctx.store.saveCursor(B, { seen: ['b-1'] })
+    assert.deepEqual(idsOf(ctx.store.listFeeds()), [D, B, A, C], '前提：用户排过的顺序与键序不同')
+
+    const removed = await ctx.store.deleteSubscription(B)
+    assert.deepEqual(removed, { items: 1 }, '既有行为不变：该源的条目跟着退订一起删')
+
+    const disk = readConfigFile(ctx.configPath)
+    assert.deepEqual(disk.feedOrder, [D, A, C], '文件里的顺序不再含该 id，其余相对顺序原样')
+    assert.deepEqual(Object.keys(disk.feeds), [A, C, D], 'feeds 只少了那个键，其余键序不被重排')
+    assert.equal(JSON.stringify(disk).includes(B), false, '整份文件里不该再出现该 id')
+    assert.equal(ctx.store.cursor(B), undefined, '既有行为不变：游标一并删除')
+    assert.equal(ctx.store.item('b-1'), undefined, '既有行为不变：条目一并删除')
+    assert.deepEqual(idsOf(ctx.store.listFeeds()), [D, A, C])
+
+    const reopened = reopen(ctx)
+    assert.deepEqual(idsOf(reopened.listFeeds()), [D, A, C], '关掉重开（同一份 config.json）后顺序保持')
+    assert.deepEqual(readConfigFile(ctx.configPath).feedOrder, [D, A, C], '重开也不得把该 id 带回来')
+  } finally { dispose(ctx) }
+})
+
+test('从未排过顺序时退订：不凭空创建 feedOrder 键，其余订阅一个不少', async () => {
+  const ctx = fresh('unsubscribe-legacy', undefined, feedsOf(A, B, C))
+  try {
+    assert.equal(Object.hasOwn(JSON.parse(readFileSync(ctx.configPath, 'utf8')), 'feedOrder'), false,
+      '前提：夹具是「从没排过」的旧配置')
+
+    await ctx.store.deleteSubscription(B)
+
+    const parsed = JSON.parse(readFileSync(ctx.configPath, 'utf8'))
+    assert.equal(Object.hasOwn(parsed, 'feedOrder'), false, '退订不得把「没排过」物化成「排过」')
+    assert.deepEqual(Object.keys(parsed.feeds), [A, C], '其余订阅一个不少，键序也不动')
+    assert.deepEqual(idsOf(ctx.store.listFeeds()), [A, C], '顺序仍是键序')
+  } finally { dispose(ctx) }
+})
+
+test('退订的库事务失败：顺序回滚到与退订前逐字一致（含被删掉的那一项与它的原位置）', async () => {
+  const ctx = fresh('unsubscribe-rollback', undefined, feedsOf(A, B, C, D))
+  try {
+    await ctx.store.reorderFeeds([D, B, A, C])
+    await ctx.store.saveItem('b-1', itemOf(B, 'b-1', '2026-11-20T00:00:00.000Z'))
+    await ctx.store.saveCursor(B, { seen: ['b-1'] })
+    // 「逐字一致」的基准是退订**前一刻**的字节，不是「看起来差不多」的语义等价。
+    const beforeBytes = readFileSync(ctx.configPath, 'utf8')
+
+    // 让库变成只读：config 是文件、照写不误；事务里的 DELETE 一定抛错 —— 正是
+    // 「config 写成功、库失败」那一半，也是回滚补偿唯一会跑的路径（照 store-sqlite 的既有造法）。
+    ctx.db.exec('PRAGMA query_only = ON')
+    try {
+      await assert.rejects(() => ctx.store.deleteSubscription(B), '库事务失败时必须抛错，不许静默当成退订成功')
+    } finally {
+      ctx.db.exec('PRAGMA query_only = OFF')
+    }
+
+    assert.equal(readFileSync(ctx.configPath, 'utf8'), beforeBytes, '回滚后整份文件必须与退订前逐字一致')
+    assert.deepEqual(readConfigFile(ctx.configPath).feedOrder, [D, B, A, C],
+      '被删掉的那一项必须回到原位置，不是被过滤掉或挪到末尾')
+    assert.deepEqual(idsOf(ctx.store.listFeeds()), [D, B, A, C], '失败就是什么都没发生：显示顺序同前')
+    assert.notEqual(ctx.store.feed(B), undefined, '订阅必须还在')
+    assert.notEqual(ctx.store.item('b-1'), undefined, '条目一条都不许删')
+    assert.notEqual(ctx.store.cursor(B), undefined, '游标也不许动')
+
+    // 故障撤掉之后重试：同一个 id 这一次真的消失，其余相对顺序仍然不动
+    assert.deepEqual(await ctx.store.deleteSubscription(B), { items: 1 })
+    assert.deepEqual(readConfigFile(ctx.configPath).feedOrder, [D, A, C])
+  } finally { dispose(ctx) }
 })

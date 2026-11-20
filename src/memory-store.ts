@@ -15,7 +15,7 @@ import type { CursorRecord, FeedRecord, ItemRecord, TagRecord } from './domain.j
 import type { ReaderConfigFile } from './storage/config-file.js'
 import { applyFeedIntent } from './feed-intent.js'
 import { addFolder, deleteFolder, folderViews, moveFeedToFolder, renameFolder } from './folders.js'
-import { deriveFeedOrder, orderedFeedEntries, reorderFeedOrder } from './feed-order.js'
+import { deriveFeedOrder, orderedFeedEntries, reorderFeedOrder, withoutFeedOrder } from './feed-order.js'
 import { normalizeTagIds, normalizeTagName, requireTagId, TagError } from './tags.js'
 import { type TagView } from './shared.js'
 import { DEFAULT_VIEW_PREFERENCES, sanitizeViewPreferences } from './preferences.js'
@@ -126,6 +126,9 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): MemoryStore
       }
       cursors.delete(feedId)
       feeds.delete(feedId)
+      // 顺序跟着这次退订一起变（R3 04），与两个生产实现同一语义：
+      // 留着已删 id 会让「重新订阅」把它带回旧位置，而不是按新源追加到末尾。
+      if (feedOrder !== undefined) feedOrder = withoutFeedOrder(feedOrder, feedId)
       return { items: removed }
     },
 

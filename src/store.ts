@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto'
 import { readerDomain, feedRecordSchema, tagRecordSchema, type CursorRecord, type FeedRecord, type ItemRecord, type TagRecord } from './domain.js'
 import type { ReaderConfigFile } from './storage/config-file.js'
 import { addFolder, deleteFolder, folderViews, moveFeedToFolder, renameFolder } from './folders.js'
-import { deriveFeedOrder, orderedFeedEntries, reorderFeedOrder } from './feed-order.js'
+import { deriveFeedOrder, orderedFeedEntries, reorderFeedOrder, withoutFeedOrder } from './feed-order.js'
 import { normalizeTagIds, normalizeTagName, requireTagId, TagError } from './tags.js'
 import type { FolderView, TagView } from './shared.js'
 import { articleCharsOf, type ArticleEntry, type CleanupRow } from './retention.js'
@@ -343,6 +343,9 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
       }
       await cursors.delete(feedId)
       await feeds.delete(feedId)
+      // 顺序也是这次退订的一部分（R3 04）：只删源、把 id 留在顺序里，读侧派生会把它藏起来，
+      // 但同一个 id 重新订阅时就会带着旧位置复活 —— 退订必须真的把它从顺序里删掉。
+      if (feedOrder !== undefined) feedOrder = withoutFeedOrder(feedOrder, feedId)
       return { items: removed }
     },
     item: (itemId) => items.get(itemId),

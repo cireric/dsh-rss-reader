@@ -89,6 +89,49 @@ export const contractCases = [
     },
   },
   {
+    // R3 04：退订是一次变更，顺序是这次变更的一部分 —— 被退掉的 id 不许留在顺序里，
+    // 也不许因为「过滤了一个元素」把别人的相对先后挪动。
+    name: 'deleteSubscription：顺序里不再有该 id，其余源的相对先后一格不动',
+    async run({ store }) {
+      for (const id of ['f1', 'f2', 'f3', 'f4']) {
+        await store.saveFeed(id, { url: 'https://' + id + '.example/feed.xml' })
+      }
+      assert.deepEqual(await store.reorderFeeds(['f3', 'f4', 'f1']), ['f3', 'f4', 'f1', 'f2'],
+        '前提：一份用户排过的、与键序不同的顺序')
+
+      await store.deleteSubscription('f4')
+      assert.deepEqual(store.listFeeds().map(([id]) => id), ['f3', 'f1', 'f2'],
+        '退掉的 id 从顺序里消失；其余相对先后（f3 在 f1 前、f1 在 f2 前）一格不动')
+
+      // 同一个 id 重新订阅：它已经是「没排过」的新源，只能追加末尾。
+      // 若退订只在顺序里留着那个 id（读侧派生会丢弃它、所以看不出来），这里会暴露：
+      // 它会带着旧位置复活，插回 f3 与 f1 之间。
+      await store.saveFeed('f4', { url: 'https://f4.example/feed.xml' })
+      assert.deepEqual(store.listFeeds().map(([id]) => id), ['f3', 'f1', 'f2', 'f4'],
+        '退订必须把它从顺序里真的删掉，不能只让派生把它藏起来')
+
+      assert.deepEqual(await store.reorderFeeds(['f2', 'f3', 'f1']), ['f2', 'f3', 'f1', 'f4'],
+        '退订之后写入口仍以当前有效顺序为基准工作')
+      assert.deepEqual(store.listFeeds().map(([id]) => id), ['f2', 'f3', 'f1', 'f4'])
+    },
+  },
+  {
+    // R3 04：从未排过顺序时退订不得物化出顺序键。契约面看不到文件，用「listFeeds 序 + 再排序的
+    // 落盘结果」表达同一件事：退订后仍是键序，之后的显式排序以这份序为基础。
+    name: 'deleteSubscription：未配置过顺序时不制造顺序（listFeeds 与后续 reorder 的结果）',
+    async run({ store }) {
+      for (const id of ['f3', 'f1', 'f2']) {
+        await store.saveFeed(id, { url: 'https://' + id + '.example/feed.xml' })
+      }
+      await store.deleteSubscription('f1')
+      assert.deepEqual(store.listFeeds().map(([id]) => id), ['f3', 'f2'], '没排过 ⇒ 仍是键序，退订不得扰动')
+      assert.deepEqual(await store.reorderFeeds(['f2']), ['f2', 'f3'], '后续排序以当前有效顺序补齐其余')
+      await store.saveFeed('f1', { url: 'https://f1.example/feed.xml' })
+      assert.deepEqual(store.listFeeds().map(([id]) => id), ['f2', 'f3', 'f1'],
+        '已排过的段落不动，新订阅（未列出）追加末尾')
+    },
+  },
+  {
     name: 'createFolder / listFolders：新建后出现在目录里；重名是可预期的 conflict 而不是崩溃',
     async run({ store }) {
       assert.deepEqual(store.listFolders(), [], '空目录起步')
