@@ -27,6 +27,21 @@ export const feedIdOf = (index) => 'https://feed' + index + '.example.com/atom.x
 export const OVERVIEW_BUDGET_MS = 100
 
 /**
+ * 覆盖基准数据的显示窗（半开区间）：基准条目的 `published_at` 是灌数据那一刻的「一小时前」，
+ * 所以 `[now−2h, now+1h)` 收入全部有发布时间的行、把测试后加的旧条目挡在窗外。
+ *
+ * 窗口在这里只生成一次：内环的结构性判据与 perf 的预算判据必须量同一个世界（同一条夹具、
+ * 同一个窗），两处各写一份 `-2h / +1h` 只会在某人调窗口时留下一条测空集的假绿。
+ */
+export function recentWindow() {
+  const now = Date.now()
+  return {
+    from: new Date(now - 2 * 60 * 60 * 1000).toISOString(),
+    to: new Date(now + 60 * 60 * 1000).toISOString(),
+  }
+}
+
+/**
  * 造一个 10 万行的真实库（单事务直灌 —— 量的是读路径，不是 saveItem 的写入成本）。
  *
  * 行形状刻意与 scripts/scale-bench.mjs 同形：1/3 没有发布时间（考排序键的 COALESCE 与
