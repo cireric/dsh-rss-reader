@@ -442,9 +442,10 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
       return rows
     },
     /**
-     * 顺序与生产同一条派生（src/feed-order.ts）：这个适配器没有 config.json，`folderFile()`
-     * 现造的 config 形状里没有 `feedOrder`，于是派生结果就是 `feeds` 的键序 —— 与改造前逐字相同。
-     * 规则只此一处：适配器若自己写一遍顺序，替身就会和生产各说各话。
+     * 顺序与生产同一条派生（src/feed-order.ts）：这个适配器没有 config.json，但 `folderFile()`
+     * 现造的 config 形状里带着它自己维护的 `feedOrder` —— 排过就按它，从没排过才回落成
+     * `feeds` 的键序（与改造前逐字相同）。规则只此一处：适配器若自己写一遍顺序，
+     * 替身就会和生产各说各话。
      */
     listFeeds: () => {
       const file = folderFile()
