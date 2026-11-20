@@ -142,7 +142,7 @@ function overviewStub(items, feeds, folders, accountItems = items, tags = []) {
 /** 本轮 mountReader 的收尾函数登记表：afterEach 统一清（消灭未决 handle ⇒ 变异不再拖死套件）。 */
 const liveCleanups = []
 
-async function mountReader({ items = [], feeds, folders, tags = [], article, holdArticle, holdOverview = false, search, folderApi, overviewApi, duplicates, timers, now, badge = false, prefs = { value: undefined, writes: [] }, store: existingStore } = {}) {
+async function mountReader({ items = [], feeds, folders, tags = [], article, holdArticle, holdOverview = false, search, folderApi, overviewApi, markReadGate, duplicates, timers, now, badge = false, prefs = { value: undefined, writes: [] }, store: existingStore } = {}) {
   const { JSDOM } = STACK
   // P3（gate 调优轮）：挂载前拍全局快照，cleanup 时还原 —— 此前每个 mount 都把
   // window/document/fetch/ResizeObserver 覆盖成新 JSDOM 的桩且从不还原，跨用例的桩污染面
@@ -401,6 +401,9 @@ async function mountReader({ items = [], feeds, folders, tags = [], article, hol
       return ok(payload ?? { itemId: body.payload.itemId, title: 'ART', blocks: [{ kind: 'p', text: '正文' }], paragraphs: ['正文'] })
     }
     if (body.endpoint === 'markRead' || body.endpoint === 'unmarkRead') {
+      // 账目回包竞争（R1 评审 P1）：用例需要表达「旧档发出的动作回包晚到」——扣住一次回包，
+      // 让切档 / 新档第一页先落地，再放行。桩件的账目仍按请求体里的窗口算（守宿主契约）。
+      if (markReadGate !== undefined) await markReadGate
       const ids = Array.isArray(body.payload?.itemIds) ? body.payload.itemIds : []
       return ok(markReply(body.endpoint, ids, body.payload))
     }
@@ -3638,6 +3641,116 @@ test('R1-03 在途续页：切档后旧回包不得把旧档条目追加进来�
   assert.deepEqual([...h.store.get().items].map((entry) => entry.id), ['today-1', 'today-2', 'today-read'],
     '旧档续页的回包必须整包丢弃，最终 items 全部属于新档')
   assert.equal(h.store.get().loadingMore, false, '切档必须清掉在途续页的 loadingMore 标记')
+})
+
+/* ──────────────── R1 评审 P1：账目必须跟着窗口走（不许把别的窗口的数字挂在当前档位名下） ──────────────── */
+
+test('R1 评审 P1：切档时账目未对齐 —— 顶栏「正在统计…」、左栏角标与徽标消失，回包落地后才恢复', skip, async () => {
+  let releaseWindow
+  const windowGate = new Promise((resolve) => { releaseWindow = resolve })
+  const h = await windowMount({
+    badge: true,
+    overviewApi: async (body) => {
+      // 只扣住带窗的 overview：首屏 refresh（全部）必须正常落地，否则没有旧账可撒谎。
+      if (body.payload?.from !== undefined) await windowGate
+      return undefined
+    },
+  })
+  await h.settle()
+  const doc = h.win.document
+  assert.equal(h.badgeText(), '5', '前置：全部档位的账目已落地')
+  assert.match(doc.querySelector('.dsh-rss-counts').textContent, /共 5 条未读/)
+
+  setControlValue(h.win, doc.querySelector('[data-rss-window]'), 'today')
+  await h.waitFor(() => doc.querySelector('[data-rss-unread-pending]') !== null,
+    { label: '切档后出现「账目未对齐」标记' })
+  const counts = doc.querySelector('.dsh-rss-counts')
+  assert.match(counts.textContent, /正在统计/, '未对齐期间只给中性文案')
+  assert.equal(doc.querySelector('[data-rss-unread-count]'), null, '未对齐期间不许渲染任何未读数字')
+  assert.doesNotMatch(counts.textContent, /今天 5 条未读/, '绝不许把「全部」的 5 条挂在「今天」名下')
+  assert.doesNotMatch(counts.textContent, /共 5 条未读/, '连「全部」档位的文案也不许留在「今天」档位下')
+  assert.equal(doc.querySelectorAll('[data-rss-nav-badge]').length, 0,
+    '未对齐期间左栏每源 / 文件夹角标必须一起消失')
+  assert.equal(h.badgeText(), '', '未对齐期间侧栏徽标必须一起消失')
+
+  releaseWindow()
+  await h.settle()
+  assert.equal(doc.querySelector('[data-rss-unread-pending]'), null, '窗内账落地后 pending 必须消失')
+  assert.match(doc.querySelector('.dsh-rss-counts').textContent, /今天 2 条未读/, '顶栏改说窗内数')
+  assert.equal(doc.querySelector('[data-rss-nav-row="feed:f1"]').getAttribute('data-rss-nav-badge'), '2',
+    'f1 的角标恢复成窗内数')
+  assert.equal(doc.querySelector('[data-rss-nav-row="feed:f2"]').getAttribute('data-rss-nav-badge'), '0',
+    '0 未读的源照旧有键（不是空白）')
+  const folderBadge = [...doc.querySelectorAll('[data-rss-nav-badge]')]
+    .find((element) => element.textContent.includes('技术'))
+  assert.equal(folderBadge?.getAttribute('data-rss-nav-badge'), '2', '文件夹角标 = 成员源角标之和')
+  assert.equal(h.badgeText(), '2', '侧栏徽标恢复成同一个窗内数')
+})
+
+test('R1 评审 P1：切档 overview 失败 —— 错误可见、顶栏停在「正在统计…」，切回原档位立刻恢复', skip, async () => {
+  let holdAll = false
+  let releaseAll
+  const allGate = new Promise((resolve) => { releaseAll = resolve })
+  const h = await windowMount({
+    badge: true,
+    overviewApi: async (body) => {
+      if (body.payload?.from !== undefined) throw new Error('injected-window-failure')
+      if (holdAll) await allGate
+      return undefined
+    },
+  })
+  await h.settle()
+  const doc = h.win.document
+  setControlValue(h.win, doc.querySelector('[data-rss-window]'), 'today')
+  await h.waitFor(() => doc.querySelector('[role="alert"]')?.textContent?.includes('injected-window-failure') === true,
+    { label: '带窗 overview 失败并显示错误' })
+
+  assert.ok(doc.querySelector('[data-rss-unread-pending]'), '失败后账目仍未对齐：顶栏必须停在 pending')
+  assert.match(doc.querySelector('.dsh-rss-counts').textContent, /正在统计/)
+  assert.doesNotMatch(doc.querySelector('.dsh-rss-counts').textContent, /今天 \d+ 条未读/,
+    '失败时不许出现「窗口名 + 数字」（那个数其实属于另一个窗口）')
+  assert.equal(h.badgeText(), '', '失败期间侧栏徽标也必须是空的')
+  assert.equal(doc.querySelectorAll('[data-rss-nav-badge]').length, 0, '失败期间左栏角标必须是空的')
+
+  // 切回「全部」：账目标记仍是「全部」⇒ 数字立即恢复，不必等这次 overview 回包（扣住它）。
+  holdAll = true
+  setControlValue(h.win, doc.querySelector('[data-rss-window]'), 'all')
+  await h.waitFor(() => doc.querySelector('[data-rss-unread-pending]') === null,
+    { label: '切回全部后数字恢复' })
+  assert.equal(h.store.get().loading, true, '回包还在路上：恢复不是等出来的')
+  assert.match(doc.querySelector('.dsh-rss-counts').textContent, /共 5 条未读/)
+  assert.equal(h.badgeText(), '5')
+
+  releaseAll()
+  await h.settle()
+})
+
+test('R1 评审 P1：切档前发出的 markRead 回包晚到 —— 不得把「全部」的账盖回「今天」', skip, async () => {
+  let releaseMarkRead
+  const markReadGate = new Promise((resolve) => { releaseMarkRead = resolve })
+  const h = await windowMount({ badge: true, markReadGate })
+  await h.settle()
+  const doc = h.win.document
+  assert.equal(h.badgeText(), '5', '前置：全部档位的账目已落地')
+
+  // 「全部」档位发出一次标读（ten-days 在「今天」窗外，今天窗的账不受它影响），回包被扣住。
+  const markDone = h.store.markRead('ten-days')
+  await h.waitFor(() => h.store.get().unread === 4, { label: '乐观账目生效' })
+
+  setControlValue(h.win, doc.querySelector('[data-rss-window]'), 'today')
+  await h.waitFor(() => doc.querySelector('.dsh-rss-counts')?.textContent.includes('今天 2 条未读') === true,
+    { label: '新档第一页落地、顶栏按窗报数' })
+  assert.equal(h.badgeText(), '2')
+
+  // 旧档（全部）的回包现在才到：整份丢弃，不许把账目改回「全部」的 4 条 / f2 的 2 条。
+  releaseMarkRead()
+  await markDone
+  await h.settle()
+  assert.equal(h.store.get().unread, 2, '旧窗口回包必须整份丢弃（「全部」是 4 条，今天窗是 2 条）')
+  assert.deepEqual(h.store.get().perFeedUnread, { f1: 2, f2: 0 }, '每源角标也不得被旧窗口的账覆盖')
+  assert.equal(doc.querySelector('[data-rss-unread-pending]'), null, '迟到的旧账不得把对齐状态打回 pending')
+  assert.match(doc.querySelector('.dsh-rss-counts').textContent, /今天 2 条未读/)
+  assert.equal(h.badgeText(), '2')
 })
 
 test('R1-03 重开面板：档位不持久化，回到「全部」', skip, async () => {

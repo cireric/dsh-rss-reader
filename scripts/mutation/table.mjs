@@ -666,7 +666,8 @@ export const MUTATIONS = [
     //   会让那对花括号被解析成**块语句** ⇒ 产物**加载期**就语法错、整个 client 组一起红。
     //   **那正是这个分类器要堵的假通过**：崩了被当成「抓到」，而没有任何断言真的看见「角标无视
     //   showUnread」。补回 `...` 后红条数才代表这条变异的本义（实测 3 条翻红）。
-    from: '...showUnread ? { "data-rss-nav-badge": String(unread) } : {},',
+    // 2026-11-20 重锚（R1 评审 P1）：角标条件加上了「账目已知」（unreadKnown）。
+    from: '...showUnread && unreadKnown ? { "data-rss-nav-badge": String(unread) } : {},',
     to: '...{ "data-rss-nav-badge": String(unread) },' },
   { id: 'client-左栏角标改用派生', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
@@ -1404,7 +1405,8 @@ export const MUTATIONS = [
     // 改锚到新产物的同一处判定（window 不再放大 = 残留行会被当成「已到底」）。
     // ⚠️ 2026-11-18 阶段 6：循环搬进 src/item-page.ts（ADR-0004），批次变量从 rows 改名 fetched
     // （rows 现在专指「要下发的行」）⇒ 随搬家重锚。
-    from: 'exhausted = fetched.length <= windowSize;',
+    // 2026-11-20 重锚（R1 评审 P2）：局部变量 windowSize 改名 fetchSize（时间窗参数也叫 window，两个名字易混）。
+    from: 'exhausted = fetched.length <= fetchSize;',
     to: 'exhausted = true;',
   },
   // ── 列表分页 keyset + 客户端契约（2026-10-11 大规模存储任务 6）────────────────────
@@ -1585,7 +1587,8 @@ export const MUTATIONS = [
     judgeTests: ['分页：每一页都以宿主回包为准整体覆盖账目，绝不在第二页开始派生'],
     // 缺陷本体在翻页处的复现：第二页开始又拿截断视图当真相 ⇒ 左栏各源之和 ≠ 顶栏总未读。
     // 判据：tests/nav-selection.test.mjs 的「每一页都以宿主回包为准整体覆盖账目」。
-    from: 'applyAccount(overview);',
+    // 2026-11-20 重锚（R1 评审 P1）：账目落地现在要带上发请求时的档位。
+    from: 'applyAccount(overview, request.window);',
     to: 'set({ unread: overview.items.filter((i) => i.readAt === void 0).length, perFeedUnread: state.perFeedUnread });' },
   { id: 'paging-首屏游标不落 state', file: 'lib/client.js',
     judges: ['client-bundle.test.mjs', 'nav-selection.test.mjs'],
@@ -1601,8 +1604,8 @@ export const MUTATIONS = [
     // 判据：tests/nav-selection.test.mjs 的「续页是追加…」里的 pageCalls 断言。
     // 2026-11-15 重锚：同上（deps.rpc）。
     // 2026-11-16 重锚：同上一族（deps.rpc → rpc、state.navSelection → 本地 nav 快照）。
-    // 2026-11-20 重锚（R1-03）：续页载荷加上了唯一窗口构造器的展开 ...windowPayload()。
-    from: 'const overview = await rpc("overview", {\n\t\t\t\t\t\tcursor,\n\t\t\t\t\t\t...nav.kind === "folder" ? { folder: nav.folder } : {},\n\t\t\t\t\t\t...nav.kind === "tag" ? { tagId: nav.tagId } : {},\n\t\t\t\t\t\t...windowPayload()\n\t\t\t\t\t});',
+    // 2026-11-20 重锚（R1-03 / 评审 P1）：续页载荷改为从「档位 + 载荷」成对取出的 request 展开。
+    from: 'const overview = await rpc("overview", {\n\t\t\t\t\t\tcursor,\n\t\t\t\t\t\t...nav.kind === "folder" ? { folder: nav.folder } : {},\n\t\t\t\t\t\t...nav.kind === "tag" ? { tagId: nav.tagId } : {},\n\t\t\t\t\t\t...request.payload\n\t\t\t\t\t});',
     // 2026-11-16 评审修复：callRpc 在产物里不存在（只有 rpc / deps.callRpc）—— 改成真的打第一页。
     to: 'const overview = await rpc("overview", {});' },
   { id: 'paging-在途不挡重复请求', file: 'lib/client.js',
@@ -1732,8 +1735,8 @@ export const MUTATIONS = [
   { id: 'client-回包账目必须落地', file: 'lib/client.js',
     judges: ['client-bundle.test.mjs'],
     judgeTests: ['C3：toggleStar 成功后账目以宿主回包为准落地（旧实现把回包整个丢掉）'],
-    // 2026-11-20 重锚（R1-03）：窗口字段由镜像在发请求前并入后，实参名从 action.payload 变成局部 payload。
-    from: 'deps.applyAccount(await deps.callRpc(action.endpoint, payload));',
+    // 2026-11-20 重锚（R1-03 / 评审 P1）：账目落地现在连发请求时的档位一起传（applyAccount(account, window)）。
+    from: 'deps.applyAccount(await deps.callRpc(action.endpoint, payload), request.window);',
     to: 'void (await deps.callRpc(action.endpoint, payload));' },
   { id: 'client-撤销失败必须恢复撤销条', file: 'lib/client.js',
     judges: ['client-bundle.test.mjs'],
@@ -2183,8 +2186,17 @@ export const MUTATIONS = [
     judgeTests: ['R1-03：列表取数 / 续页 / 四个镜像动作 / cleanup 带同一份窗口字段'],
     // 账目镜像不装饰动作载荷：视图停在「今天」时标一次读，回包的账被打回全量，窗内未读数
     // 立刻跳回全局数（spec 验收 12 的客户端半边）。判据是请求体断言 —— 它直接看 from/to。
-    from: '...deps.windowPayload()',
-    to: '...{}' },
+    // 2026-11-20 重锚（R1 评审 P1）：镜像改为从 windowRequest() 一次取档位 + 载荷，并展开 request.payload。
+    from: 'const payload = {\n\t\t\t\t\t...action.payload ?? {},\n\t\t\t\t\t...request.payload\n\t\t\t\t};',
+    to: 'const payload = {\n\t\t\t\t\t...action.payload ?? {}\n\t\t\t\t};' },
+  // R1 评审 P1：账目回包必须按「发请求时的档位」判断是否落地 —— 删掉这道闸，切档前发出的
+  // 标读 / 星标回包晚到时会把旧窗口的账盖到新窗口名下（顶栏说「今天 4 条」，窗内其实只有 2 条）。
+  // 判据直接断言回包落地后的 unread / perFeedUnread 仍是窗内值。
+  { id: '显示窗-账目不按窗口丢弃过期回包', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['R1 评审 P1：切档前发出的 markRead 回包晚到 —— 不得把「全部」的账盖回「今天」'],
+    from: 'if (window !== get().displayWindow) return;',
+    to: ';' },
   { id: '显示窗-切档不失效在途续页', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
     judgeTests: ['R1-03 在途续页：切档后旧回包不得把旧档条目追加进来（hold 控制回包顺序）'],

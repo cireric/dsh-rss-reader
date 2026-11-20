@@ -63,6 +63,12 @@ export function FeedNav({ feeds, folders, tags, perFeedUnread, filter, navSelect
     if (!feed.folder) continue
     unreadByFolder.set(feed.folder, (unreadByFolder.get(feed.folder) ?? 0) + (perFeedUnread[feed.id] ?? 0))
   }
+  /**
+   * 账目是否「知道」（R1 评审 P1）：空 map 是调用方在「账目还没换到当前档位」时的明确信号。
+   * 空 map ≠ 每个源都 0 —— 渲染一排 0 与渲染旧窗口的数一样是撒谎，所以整块角标都不渲染。
+   * 非空时维持既有契约：键域 = feeds 表（0 未读的源有键，显示 0），空文件夹仍显示 0。
+   */
+  const unreadKnown = Object.keys(perFeedUnread).length > 0
 
   return (
     <nav aria-label="订阅导航" {...{ 'data-rss-nav': '' }} style={{
@@ -114,7 +120,7 @@ export function FeedNav({ feeds, folders, tags, perFeedUnread, filter, navSelect
               <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" aria-expanded={expanded}
                 aria-label={(expanded ? '折叠文件夹 ' : '展开文件夹 ') + row.folder}
                 {...{ 'data-rss-nav-row': navCursorKey(row) }}
-                {...(showUnread ? { 'data-rss-nav-badge': String(total) } : {})}
+                {...(showUnread && unreadKnown ? { 'data-rss-nav-badge': String(total) } : {})}
                 {...(folderSelected ? { 'data-rss-nav-selected': '' } : {})}
                 {...(navCursor.kind === 'folder' && navCursor.folder === row.folder ? { 'data-rss-nav-cursor': '' } : {})}
                 onClick={() => onToggleFolder(row.folder)}
@@ -124,7 +130,7 @@ export function FeedNav({ feeds, folders, tags, perFeedUnread, filter, navSelect
                 style={{ ...ROW_STYLE, flex: 1, minWidth: 0, textAlign: 'start' }}>
                 <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
                 <span title={row.folder} style={LABEL_STYLE}>{row.folder}</span>
-                {showUnread && <span style={BADGE_STYLE}>{total > 99 ? '99+' : total}</span>}
+                {showUnread && unreadKnown && <span style={BADGE_STYLE}>{total > 99 ? '99+' : total}</span>}
               </button>
               <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
                 data-rss-folder-open={row.folder}
@@ -166,8 +172,9 @@ export function FeedNav({ feeds, folders, tags, perFeedUnread, filter, navSelect
         return (
           <div key={feed.id} role="button" tabIndex={0}
             {...{ 'data-rss-nav-row': 'feed:' + feed.id }}
-            // 隐藏计数时不渲染角标：与顶栏、侧栏徽标三者同消（规格不变量 8）
-            {...(showUnread ? { 'data-rss-nav-badge': String(unread) } : {})}
+            // 隐藏计数时不渲染角标：与顶栏、侧栏徽标三者同消（规格不变量 8）。
+            // 账目未对齐（空 map）时同理 —— 缺键是「不知道」，不能退化成 undefined/0 的角标。
+            {...(showUnread && unreadKnown ? { 'data-rss-nav-badge': String(unread) } : {})}
             {...(selectedFeedId === feed.id ? { 'data-rss-nav-selected': '' } : {})}
             {...(cursorFeedId === feed.id ? { 'data-rss-nav-cursor': '' } : {})}
             onClick={() => onSelectFeed(feed.id)}
@@ -176,7 +183,7 @@ export function FeedNav({ feeds, folders, tags, perFeedUnread, filter, navSelect
             }}
             style={feed.folder ? { ...ROW_STYLE, paddingInlineStart: 24 } : ROW_STYLE}>
             <span title={feed.title ?? feed.id} style={LABEL_STYLE}>{feed.title ?? feed.id}</span>
-            {showUnread && (
+            {showUnread && unreadKnown && (
               <span style={BADGE_STYLE}>
                 {unread > 99 ? '99+' : unread}
               </span>

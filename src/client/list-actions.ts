@@ -15,8 +15,9 @@
  * 放最后才不会「同时移动地基和墙」。
  *
  * 写入边界（见 store.ts 顶部的四块边界表）：拥有 items / selectedId / nextCursor / loadingMore /
- * filter / layout / markAllRange / undo；账目 unread / perFeedUnread 只由 account-mirror 的回包
- * 整体覆盖（applyAccount）。feeds / tags 只读，**唯一例外**是 overview 整份落地（applyOverview
+ * filter / layout / markAllRange / undo；账目 unread / perFeedUnread / unreadSplit 与它们的档位标记
+ * accountWindow 只由账目回包整份覆盖（applyAccount / applyOverview），其中 applyAccount 会丢弃
+ * 与当前档位不一致的过期回包。feeds / tags 只读，**唯一例外**是 overview 整份落地（applyOverview
  * 与 load 的搜索分支按宿主快照原样写回目录，已在边界表登记）。
  */
 import { httpUrlOrEmpty, type ArticlePayload, type CleanupResult, type ItemView, type Overview } from '../shared.js'
@@ -26,7 +27,7 @@ import type { DisplayWindowRange } from '../display-window.js'
 import { createAccountMirror } from './account-mirror.js'
 import { selectionExists } from './nav-model.js'
 import { relativeTime } from './relative-time.js'
-import { displayWindowPayloadOf, type DisplayWindowPayload } from './window-control.js'
+import { displayWindowRequestOf, type DisplayWindowRequest } from './window-control.js'
 import type { Filter, MarkAllRange, ReaderState, ReaderStoreDeps } from './store.js'
 
 /** 「全部标记已读」的撤销窗口（跟着 undo 状态走，所以在列表域这一侧）。 */
@@ -249,10 +250,19 @@ export function createListActions(host: ListActionHost) {
    * 这与任务 1 拒绝「客户端从 items 派生 perFeedUnread」是同一条理由 —— 口径只能由宿主给。
    * 乐观更新仍由调用方先做（手感），回包到达时以宿主为准纠正。
    */
-  const applyAccount = (account: UnreadAccount): void => {
+  const applyAccount = (account: UnreadAccount, window: DisplayWindowRange): void => {
+    // 账目跟着窗口走（R1 评审 P1）：`window` 是**发请求那一刻**的档位。回包在途时用户可能已经
+    // 切到别的档位，这份账就只描述旧窗口 —— 整份丢弃，不能拿它填新窗口的顶栏和角标。
+    // 顶栏 / 左栏 / 侧栏在「未对齐」期间由 index.tsx 统一显示 pending（见 ReaderState.accountWindow）。
+    if (window !== get().displayWindow) return
     // unreadSplit 也整份覆盖（R1 04）：回包缺席 ⇒ state 里也缺席（不沿用上一份）。
     // 客户端绝不本地推导三分、也不按动作做增量 —— 那是「拿截断视图当真相」的同一类错误。
-    set({ unread: account.unread, perFeedUnread: account.perFeedUnread, unreadSplit: account.unreadSplit })
+    set({
+      unread: account.unread,
+      perFeedUnread: account.perFeedUnread,
+      unreadSplit: account.unreadSplit,
+      accountWindow: window,
+    })
   }
 
   /**
@@ -274,14 +284,17 @@ export function createListActions(host: ListActionHost) {
   }
 
   /**
-   * 当前显示窗的 wire 字段 —— 客户端**唯一**的窗口载荷构造器（R1-03，spec 决策 15 / 28）。
+   * 发请求那一刻的档位 + wire 字段 —— 客户端**唯一**的窗口载荷构造器入口（R1-03，spec 决策 15 / 28）。
    *
    * 列表取数（overview / refresh）、续页与账目动作三处都只经它取 `from` / `to`；账目镜像在发请求前
    * 把同一份字段并进动作载荷。边界算术仍归 src/display-window.ts，本函数只做「档位 + 现在 → 载荷」。
    *
+   * 为什么连档位一起返回（R1 评审 P1）：回包落地时要用**发请求时**的档位判断这份账属于谁，
+   * 所以档位和载荷必须同一次取出（见 window-control.ts 的 DisplayWindowRequest）。
    * 每次请求现取 `now`：跨零点后下一次取数用新的「今天」，面板不为它设定时器（spec 决策 7）。
    */
-  const windowPayload = (): DisplayWindowPayload => displayWindowPayloadOf(get().displayWindow, new Date(now()))
+  const windowRequest = (): DisplayWindowRequest =>
+    displayWindowRequestOf(get().displayWindow, new Date(now()))
 
   /**
    * 六个动作共用「乐观 → RPC → 覆盖 / 回滚」管线（失败统一回滚，2026-10-16 拍板）。
@@ -289,7 +302,7 @@ export function createListActions(host: ListActionHost) {
    */
   const mirror = createAccountMirror({
     callRpc: rpc,
-    windowPayload,
+    windowRequest,
     applyAccount,
     fail: (failure) => { set({ error: failure instanceof Error ? failure.message : String(failure) }) },
   })
@@ -503,8 +516,11 @@ export function createListActions(host: ListActionHost) {
    *
    * 跨域写入登记（见 store.ts 的边界表）：这里会整份写 feeds / folders / tags —— 那是**宿主快照原样
    * 落地**，不是客户端编的；除此之外列表域对它们只读。
+   *
+   * `window` = 发这次请求那一刻的档位（不是回包后的 state.displayWindow）：账目与列表都属于这个
+   * 窗口，落地时把 `accountWindow` 一起推过去，顶栏才知道现在的数字是哪个档位的（R1 评审 P1）。
    */
-  const applyOverview = (overview: Overview): void => {
+  const applyOverview = (overview: Overview, window: DisplayWindowRange): void => {
     const state = get()
     const selected = state.selectedId
     const stillThere = selected !== undefined && overview.items.some((item) => item.id === selected)
@@ -518,6 +534,7 @@ export function createListActions(host: ListActionHost) {
       tags,
       unread: overview.unread,
       perFeedUnread: overview.perFeedUnread,
+      accountWindow: window,
       // 拆分同样整份覆盖：宿主没给（不带 todayFrom 的旧形状）就清成缺席，不许留着上一份。
       unreadSplit: overview.unreadSplit,
       // 第一页的游标由宿主给（缺省 = 这一页就是全部）。整份重取时它必须**跟着换掉**：
@@ -577,8 +594,12 @@ export function createListActions(host: ListActionHost) {
           ? { tagId: scopeSelection.tagId }
           : undefined
       // 窗口与范围正交（ADR-0004 的 2026-11-19 修订）：refresh 也带窗口，否则按一次刷新就把
-      // 视图从「今天」悄悄放回「全部」。载荷只由 windowPayload 产出，这里不写 from / to。
-      const overview = await rpc<Overview>(endpoint, { ...(scopePayload ?? {}), ...windowPayload() })
+      // 视图从「今天」悄悄放回「全部」。载荷只由唯一构造器产出，这里不写 from / to。
+      //
+      // 档位与载荷在**发 rpc 前一起取**（R1 评审 P1）：回包落地时用这份档位标记账目，绝不能
+      // 在回包后再读 displayWindow —— 中间切过档就会把旧档的账记到新档名下。
+      const request = windowRequest()
+      const overview = await rpc<Overview>(endpoint, { ...(scopePayload ?? {}), ...request.payload })
       if (version !== overviewVersion) return
       const searching = get().search
       if (searching) {
@@ -588,11 +609,14 @@ export function createListActions(host: ListActionHost) {
         set({
           feeds: overview.feeds, folders: overview.folders, tags,
           unread: overview.unread, perFeedUnread: overview.perFeedUnread, unreadSplit: overview.unreadSplit,
+          // 搜索分支同样整份落地账目：标记必须与这份账的请求档位一致（搜索期间控件禁用，
+          // 但 refresh / 挂载仍可能走这里，不能用回包后的 state 去猜）。
+          accountWindow: request.window,
           ...(missing ? { navSelection: { kind: 'virtual' }, filter: 'all', navCursor: { kind: 'filter', filter: 'all' } } : {}),
         })
         if (missing) persistView()
       } else {
-        applyOverview(overview)
+        applyOverview(overview, request.window)
       }
       if (!viewMemory.restored()) viewMemory.apply(preferences)
       // 用新游标重查已加载的页数，刷新插入的新条目不会挤掉整个阅读窗口。
@@ -649,11 +673,13 @@ export function createListActions(host: ListActionHost) {
     try {
       const nav = get().navSelection
       // 续页与第一页必须带**同一份**窗口字段；只给第一页带窗会让第 2 页从错误边界续起。
+      // 档位同样在发请求前取：这一页的账属于它，回包晚到 applyAccount 会按它判断是否落地。
+      const request = windowRequest()
       const overview = await rpc<Overview>('overview', {
         cursor,
         ...(nav.kind === 'folder' ? { folder: nav.folder } : {}),
         ...(nav.kind === 'tag' ? { tagId: nav.tagId } : {}),
-        ...windowPayload(),
+        ...request.payload,
       })
       // 版本不符 = 期间发生了一次整份重取（切档 / 切源 / 刷新）：这一页属于旧列表，整包丢弃。
       // 不清 loadingMore 是安全的 —— 触发版本变化的那次 load 已经在开头把它清掉了。
@@ -661,7 +687,7 @@ export function createListActions(host: ListActionHost) {
       // 追加拼在**当前** state 上（不是闭包里那份快照）：请求在途时用户可能已经标读/加星，
       // 用发请求前的 items 覆盖会把那些本地动作抹掉。
       set({ items: [...get().items, ...overview.items], nextCursor: overview.nextCursor })
-      applyAccount(overview)
+      applyAccount(overview, request.window)
       set({ loadingMore: false, error: undefined })
     } catch (failure) {
       if (version !== currentListVersion()) return
@@ -787,7 +813,7 @@ export function createListActions(host: ListActionHost) {
     try {
       // cleanup 不走账目镜像（它回包里的账不落地，随后整份重载 overview），但窗口必须从同一个
       // 构造器来 —— 否则清理之后的左栏角标会被这次写端点打回全量（spec 决策 15）。
-      const result = await rpc<CleanupResult>('cleanup', windowPayload())
+      const result = await rpc<CleanupResult>('cleanup', windowRequest().payload)
       set({
         notice: result.deleted === 0
           ? '没有可清理的条目（只清「已读且未星标」且早于阈值的旧条目）'
@@ -808,6 +834,10 @@ export function createListActions(host: ListActionHost) {
    *  2. 立即清空 items / 游标 / 选中并清 loadingMore：新档第一页落地前不能继续展示旧档条目，
    *     也不能让「加载更多」拿旧游标发请求；
    *  3. load('overview') 在开头递增列表版本号，在途续页因此整包丢弃（切源时的那处既有缺口一并修好）。
+   *
+   * **账目不清、accountWindow 也不动**（R1 评审 P1）：旧账留着，但它仍标着旧档位 —— 顶栏 / 左栏 /
+   * 侧栏据此显示「正在统计…」而不是把旧窗口的数字挂在新的档位名下。新档第一页落地时
+   * applyOverview 才把账目连同 accountWindow 一起换成新窗口的那份。
    *
    * 搜索进行中一律 no-op：搜索有自己的日期筛选（UTC 日界，ADR-0005 明确并存），窗口在搜索里
    * 没有对应物。UI 已把控件禁用并说明原因；动作层再挡一次，避免「切窗顺手退出搜索」把两条语义

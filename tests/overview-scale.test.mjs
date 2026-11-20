@@ -242,6 +242,9 @@ test('10 万行：窗口版取页与按窗账目的真实 SQL 在 EXPLAIN 下走
     const pagePlan = planOf(pageSql, [from, to, DEFAULTS.maxItemsShown + 1])
     const accountPlan = planOf(accountSql, [from, to])
 
+    // 这一条是**结构性验收**，不是实现细节洁癖：ADR-0005 / spec 决策 13 要求「窗口取页走 i2
+    // 范围扫描」有测试证据，而不是一句「性能没问题」。换索引（例如日后升到 i4）必须同时改
+    // 这里的断言与 05 票的 EXPLAIN 证据 —— 只改一边就会让证据与产物各说各话。
     assert.ok(pagePlan.some((detail) => detail.includes('SEARCH i USING INDEX i2')),
       '窗口取页必须走 i2 范围扫描，实际计划：' + pagePlan.join(' | '))
     assert.equal(pagePlan.some((detail) => detail.startsWith('SCAN')), false,

@@ -204,7 +204,7 @@ export interface ItemPage {
  * 直到凑满一页或存储侧给不出更多行 —— 不放大就会静默少几条，而用户看不出原因
  * （原实现是先按 feeds 表滤完全部再截断；这条语义必须保住）。
  *
- * 多取一行（window + 1）**只用于判断「后面还有没有」**：`nextCursor` 必须来自「存储侧确实还有行」
+ * 多取一行（fetchSize + 1）**只用于判断「后面还有没有」**：`nextCursor` 必须来自「存储侧确实还有行」
  * 这个事实，不能拿「取回的条数短于 pageSize」反推 —— 孤儿占窗时取不满的那一页未必是最后一页。
  * 少给一页 = 用户翻不到底；多给一页 = 多一次往返，且末页空页会让「加载更多」闪一下。
  */
@@ -213,7 +213,7 @@ export function buildItemPage(source: PageSource, request: PageRequest): ItemPag
   // 范围落到 listRecent 的两个可选参数上（映射本身是一个穷尽 switch，见 listRecentArgsOf）。
   const { feedIds, tagId } = listRecentArgsOf(scope)
 
-  let windowSize = pageSize
+  let fetchSize = pageSize
   let fetched: Array<[string, ItemRecord]> = []
   let rows: Array<[string, ItemRecord]> = []
   // 最后一条**真正下发**的行在本批 fetched 里的下标（-1 = 这一页一条都没下）
@@ -221,7 +221,7 @@ export function buildItemPage(source: PageSource, request: PageRequest): ItemPag
   // 存储侧是否已给不出更多行（请求 window + 1 行却只拿到 ≤ window 行）
   let exhausted = false
   while (true) {
-    fetched = source.listRecent(windowSize + 1, cursor, feedIds, tagId, window)
+    fetched = source.listRecent(fetchSize + 1, cursor, feedIds, tagId, window)
     rows = []
     lastDelivered = -1
     for (let index = 0; index < fetched.length; index += 1) {
@@ -232,9 +232,9 @@ export function buildItemPage(source: PageSource, request: PageRequest): ItemPag
       rows.push(row)
       lastDelivered = index
     }
-    exhausted = fetched.length <= windowSize
+    exhausted = fetched.length <= fetchSize
     if (rows.length >= pageSize || exhausted) break
-    windowSize *= 2
+    fetchSize *= 2
   }
 
   // 续页游标 = 下发批次的**最后一行**（recency + id 一对值）。判据是「它后面还有行」：

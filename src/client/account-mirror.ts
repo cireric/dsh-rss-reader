@@ -45,14 +45,15 @@
  */
 import type { Endpoint } from '../shared.js'
 import type { UnreadAccount } from '../unread.js'
-import type { DisplayWindowPayload } from './window-control.js'
+import type { DisplayWindowRange } from '../display-window.js'
+import type { DisplayWindowRequest } from './window-control.js'
 
 /** 管线的一格动作：守卫与载荷组装完之后，交给 run 的三步。 */
 export interface MirrorAction {
   /** 打到哪个端点（shared.ts 的 Endpoint：拼错名字是编译错误） */
   endpoint: Endpoint
   /**
-   * 动作自己的业务载荷。显示窗字段**不在这里手写**：由 deps.windowPayload() 在发请求前并入
+   * 动作自己的业务载荷。显示窗字段**不在这里手写**：由 deps.windowRequest() 在发请求前并入
    * （R1-03 的「窗随账走」唯一接缝，见下面 run 的注释）。
    */
   payload?: Record<string, unknown>
@@ -65,15 +66,21 @@ export interface MirrorAction {
 export interface AccountMirrorDeps {
   callRpc: <T>(endpoint: Endpoint, payload?: unknown) => Promise<T>
   /**
-   * 当前显示窗的 wire 字段（**唯一构造器**在 src/client/window-control.ts，由列表域注入）。
+   * 发请求那一刻的档位 + wire 字段（**唯一构造器**在 src/client/window-control.ts，由列表域注入）。
    *
    * 为什么由镜像统一装饰而不是各动作自己拼：四个带账动作（markRead / unmarkRead / toggleStar /
    * toggleKeepUnread，以及 A 的 markAllRead / undo 这两个同端点变体）如果各写一遍，总有一个会
    * 漏带窗口，表现是「标一次读，左栏角标被打回全量」。窗口在发请求那一刻取，与乐观更新同一时刻。
+   *
+   * 为什么连档位一起取（R1 评审 P1）：回包要按「发请求时的档位」落账。回包晚到时界面可能已经
+   * 切到别的档位，此时这份账属于旧窗口，不能拿来填新窗口的顶栏与角标。
    */
-  windowPayload: () => DisplayWindowPayload
-  /** 回包整体覆盖账目 —— list-actions.ts 的 applyAccount 原样传入，不变量注释仍在它头上。 */
-  applyAccount: (account: UnreadAccount) => void
+  windowRequest: () => DisplayWindowRequest
+  /**
+   * 回包整体覆盖账目 —— list-actions.ts 的 applyAccount 原样传入，不变量注释仍在它头上。
+   * `window` = 发请求那一刻的档位；与当前档位不一致时 applyAccount 会整份丢弃。
+   */
+  applyAccount: (account: UnreadAccount, window: DisplayWindowRange) => void
   /** 错误可见（AGENTS.md 禁空 catch）：store 侧 `set({ error })`，由面板说出来。 */
   fail: (failure: unknown) => void
 }
@@ -82,13 +89,17 @@ export function createAccountMirror(deps: AccountMirrorDeps): { run(action: Mirr
   return {
     async run(action: MirrorAction): Promise<void> {
       action.optimistic()
-      // 窗随账走（R1-03）：五个带账端点共用同一份窗口字段。全部档位时 windowPayload 只有
+      // 窗随账走（R1-03）：五个带账端点共用同一份窗口字段。全部档位时载荷只有
       // `todayFrom`（R1 04 起，用于回包的未读三联拆分）—— 旧宿主忽略这个未知字段，旧行为不变
       // 由构造器一处保证，而不是靠调用方各判一次档位。
-      const payload = { ...(action.payload ?? {}), ...deps.windowPayload() }
+      //
+      // 档位在**发请求前**取（R1 评审 P1）：回包成功时把它交给 applyAccount，由后者判断这份账
+      // 是否仍属于当前窗口。不能在回包到达后再读 state.displayWindow —— 那会把旧窗口的账挂到新窗口。
+      const request = deps.windowRequest()
+      const payload = { ...(action.payload ?? {}), ...request.payload }
       try {
         // 成功 = 以宿主回包为准整体覆盖账目（不变量 ①）；动作结果字段不落地（不变量 ④）。
-        deps.applyAccount(await deps.callRpc<UnreadAccount>(action.endpoint, payload))
+        deps.applyAccount(await deps.callRpc<UnreadAccount>(action.endpoint, payload), request.window)
       } catch (failure) {
         // 失败 = 动作没发生（2026-10-16 拍板）：先回滚，错误再进 error 条 ——
         // 顺序不能反，面板渲染 error 不依赖回滚，但「报错的同时界面还是乐观态」自相矛盾。
