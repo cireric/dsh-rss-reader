@@ -136,6 +136,12 @@ const CONTRACTS = {
       { feedId: 'f', folder: 5 },
     ],
   },
+  reorderFeeds: {
+    // 空数组合法（= 什么都没点名 ⇒ 不写盘）；坏样本只验形状，未知 id 由 store 归一而不是这里拒绝。
+    valid: { ids: [] },
+    alsoValid: [{ ids: ['https://a.example/feed.xml'] }],
+    invalid: [{}, { ids: 'f1' }, { ids: [1] }],
+  },
   listTags: { valid: { anything: 1 }, invalid: [] },
   createTag: {
     valid: { name: 'tag' },
@@ -163,7 +169,7 @@ const CONTRACTS = {
   },
 }
 
-test('入参声明：28 个端点都有 payload，表与名字表一致', () => {
+test('入参声明：全部端点都有 payload，表与名字表一致', () => {
   assert.deepEqual(Object.keys(ENDPOINTS).sort(), [...ENDPOINT_NAMES].sort())
   assert.deepEqual(Object.keys(CONTRACTS).sort(), [...ENDPOINT_NAMES].sort(), '契约表必须覆盖全部端点')
   for (const name of ENDPOINT_NAMES) {
@@ -196,8 +202,9 @@ test('入参声明：每条坏样本都被拒，并给出字段路径', () => {
       checked += 1
     }
   }
-  // 64 是契约表的当前条数；删样本、或新增端点忘了配负例，都必须在这里显形。
-  assert.equal(checked, 64, '坏样本条数变了（当前 ' + checked + '）—— 检查契约表是否漏了必填字段')
+  // 67 是契约表的当前条数（R3 02 的 reorderFeeds 带 3 条负例：64 + 3）；
+  // 删样本、或新增端点忘了配负例，都必须在这里显形。
+  assert.equal(checked, 67, '坏样本条数变了（当前 ' + checked + '）—— 检查契约表是否漏了必填字段')
 })
 
 test('坏入参：每个接 payload 的端点，第一条坏样本都经 dispatch 回 bad-request', async () => {
@@ -212,7 +219,8 @@ test('坏入参：每个接 payload 的端点，第一条坏样本都经 dispatc
     assert.equal(result.error.code, 'bad-request',
       endpoint + ' 的第一条坏样本没有走统一信封（' + JSON.stringify(bad) + '）')
   }
-  assert.equal(covered.length, 23, '接 payload 的端点应当是 23 个，实际 ' + covered.length)
+  // R3 02 加了 reorderFeeds（有负例且经 dispatch 验过），所以接 payload 的端点从 23 变 24。
+  assert.equal(covered.length, 24, '接 payload 的端点应当是 24 个，实际 ' + covered.length)
 })
 
 test('坏入参：统一 bad-request 信封、details.issues 指出字段，且不触达 store', async () => {

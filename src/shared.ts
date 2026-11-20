@@ -33,7 +33,7 @@ export const ENDPOINT_NAMES = [
   'overview', 'refresh', 'markRead', 'unmarkRead', 'toggleStar', 'toggleKeepUnread', 'article', 'cleanup',
   'opmlExport', 'opmlImport', 'addFeed', 'removeFeed', 'discoverFeeds',
   'viewPreferences', 'saveViewPreferences', 'saveReadingProgress', 'duplicateHints', 'searchItems',
-  'listFolders', 'createFolder', 'renameFolder', 'deleteFolder', 'moveFeedToFolder',
+  'listFolders', 'createFolder', 'renameFolder', 'deleteFolder', 'moveFeedToFolder', 'reorderFeeds',
   'listTags', 'createTag', 'renameTag', 'deleteTag', 'setItemTags',
 ] as const
 export type Endpoint = (typeof ENDPOINT_NAMES)[number]

@@ -15,7 +15,7 @@ import type { CursorRecord, FeedRecord, ItemRecord, TagRecord } from './domain.j
 import type { ReaderConfigFile } from './storage/config-file.js'
 import { applyFeedIntent } from './feed-intent.js'
 import { addFolder, deleteFolder, folderViews, moveFeedToFolder, renameFolder } from './folders.js'
-import { orderedFeedEntries } from './feed-order.js'
+import { deriveFeedOrder, orderedFeedEntries, reorderFeedOrder } from './feed-order.js'
 import { normalizeTagIds, normalizeTagName, requireTagId, TagError } from './tags.js'
 import { type TagView } from './shared.js'
 import { DEFAULT_VIEW_PREFERENCES, sanitizeViewPreferences } from './preferences.js'
@@ -69,6 +69,8 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): MemoryStore
   const itemTagIds = new Map<string, string[]>()
   /** 显式目录（含空目录）：**不能**只从 feed.folder 派生，否则空文件夹活不过一次「重启」。 */
   let folderNames: string[] = []
+  /** 显式顺序：`undefined` = 从没排过（与生产 config.json 缺这个键同形）。 */
+  let feedOrder: string[] | undefined
   let preferences: ViewPreferences = DEFAULT_VIEW_PREFERENCES
   let tagSeq = 0
 
@@ -77,11 +79,13 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): MemoryStore
     version: 1,
     feeds: Object.fromEntries(feeds),
     folders: [...folderNames],
+    ...(feedOrder === undefined ? {} : { feedOrder: [...feedOrder] }),
   })
 
   /** 把纯函数返回的新 config 写回 Map —— 成员归属与目录同一次落盘（与生产同语义）。 */
   const writeConfigFile = (file: ReaderConfigFile): void => {
     folderNames = [...(file.folders ?? [])]
+    feedOrder = file.feedOrder === undefined ? undefined : [...file.feedOrder]
     for (const [feedId, record] of Object.entries(file.feeds)) feeds.set(feedId, record)
   }
 
@@ -220,6 +224,14 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): MemoryStore
     listFeeds: () => {
       const file = configFile()
       return orderedFeedEntries(file.feedOrder, file.feeds)
+    },
+    /** 与生产同一条规则：归一在 src/feed-order.ts，这里只负责把结果写进自己的 config 形状。 */
+    reorderFeeds: async (ids) => {
+      const current = configFile()
+      const next = reorderFeedOrder(current.feedOrder, current.feeds, ids)
+      if (next !== undefined) writeConfigFile({ ...current, feedOrder: next })
+      const file = configFile()
+      return deriveFeedOrder(file.feedOrder, file.feeds)
     },
     listFolders: () => folderViews(configFile()),
     createFolder: async (name) => {

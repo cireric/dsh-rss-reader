@@ -1,9 +1,10 @@
 /**
- * R3 01：订阅源顺序的唯一真相是 `config.json` 的 `feedOrder`。
+ * R3 01 + 02：订阅源顺序的唯一真相是 `config.json` 的 `feedOrder`。
  *
- * 这些用例回答两类问题：把文件关掉再打开，顺序还是不是用户排的那一份；以及「没排过」的旧配置
- * 会不会被一次无关写入悄悄变成「排过」。派生规则是纯函数，所以先用边界把规则钉死，再用真
- * config.json + 真 SQLite store 钉读写两侧。
+ * 01 的用例回答两类问题：把文件关掉再打开，顺序还是不是用户排的那一份；以及「没排过」的旧配置
+ * 会不会被一次无关写入悄悄变成「排过」。02 加了写入口，于是补上端点面：回包是落盘后的有效顺序、
+ * 未知 id/重复/未点名的归一、空数组不写盘、重启保持、旧续页游标仍可用、读态与未读账不变。
+ * 派生规则是纯函数，所以先用边界把规则钉死，再用真 config.json + 真 SQLite store 钉读写两侧。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -13,6 +14,8 @@ import { join } from 'node:path'
 import { openDatabase, migrateSchema } from '../lib/storage/db.js'
 import { readConfigFile, writeConfigFile } from '../lib/storage/config-file.js'
 import { createSqliteStore } from '../lib/store-sqlite.js'
+import { createDispatch } from '../lib/endpoints.js'
+import { Config } from '../lib/config.js'
 import { deriveFeedOrder } from '../lib/feed-order.js'
 
 const A = 'https://a.example/feed.xml'
@@ -162,4 +165,191 @@ test('文件夹成员数组保持键序（只当集合用）：源顺序只在 l
     assert.deepEqual(ctx.store.listFolders(), [{ name: '技术', feedIds: [A, B] }],
       'FolderView.feedIds 仍是 config.json 键序：它只当集合用，不是第二份展示顺序')
   } finally { dispose(ctx) }
+})
+
+// ── R3 02：写入口与落盘语义（端点面：真 SQLite store + 真 dispatch）──────────────────
+
+/**
+ * 端点级装配（照 tests/folder-endpoints.test.mjs）：临时目录里真 config.json + 真 SQLite store
+ * + 真 dispatch。`ready` 读的是可变引用，`reopen()` 换代 store 之后同一个 dispatch 照常分发 ——
+ * 「关掉重开顺序还在」因此是在端点上观察到的，而不只是 listFeeds 的局部结论。
+ */
+function makeEndpointRig({ feeds = feedsOf(A, B, C, D), feedOrder, rawConfig, maxItemsShown = 300 } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'rss-feed-order-endpoint-'))
+  const configPath = join(dir, 'config.json')
+  if (rawConfig !== undefined) writeFileSync(configPath, rawConfig)
+  else writeConfigFile(configPath, { version: 1, feeds, ...(feedOrder === undefined ? {} : { feedOrder }) })
+  const dbPath = join(dir, 'rss.db')
+  let db = openDatabase(dbPath)
+  migrateSchema(db)
+  let store = createSqliteStore(db, configPath)
+  const dispatch = createDispatch({
+    config: Config({ maxItemsShown }),
+    log: () => {},
+    ready: () => store,
+    refreshNow: async () => ({ outcome: 'not-ready', attempted: 0, total: 0 }),
+    lastRefreshCompletedAt: () => undefined,
+    articleAttempts: new Map(),
+  })
+  return {
+    dispatch,
+    configPath,
+    get store() { return store },
+    reopen() {
+      db.close()
+      db = openDatabase(dbPath)
+      migrateSchema(db)
+      store = createSqliteStore(db, configPath)
+      return store
+    },
+    cleanup() {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    },
+  }
+}
+
+/** 一条最小条目：recency 由 publishedAt 决定，读态字段按需覆盖。 */
+const itemOf = (feedId, id, publishedAt, extra = {}) => ({
+  feedId,
+  title: id,
+  link: 'https://site.example/' + id,
+  fetchedAt: publishedAt,
+  publishedAt,
+  starred: false,
+  ...extra,
+})
+
+test('reorderFeeds 端点：回包是落盘后的有效顺序；未知 id 丢弃、重复保首次、未点名的按当前顺序排末尾', async () => {
+  const h = makeEndpointRig()
+  try {
+    let result = await h.dispatch('reorderFeeds', { ids: [C, A] })
+    assert.equal(result.ok, true, JSON.stringify(result))
+    assert.deepEqual(result.value, { feedOrder: [C, A, B, D] }, '回包是完整顺序，不是只回请求那一段')
+    assert.equal('unread' in result.value, false, '排序不动未读账：回包不带 carriesAccount 的字段')
+
+    let disk = readConfigFile(h.configPath)
+    assert.deepEqual(disk.feedOrder, [C, A, B, D], '落盘的是完整 4 个 id')
+    assert.deepEqual(Object.keys(disk.feeds), [A, B, C, D], 'feeds 的键序原样不动')
+
+    const overview = await h.dispatch('overview', {})
+    assert.equal(overview.ok, true, JSON.stringify(overview))
+    assert.deepEqual(overview.value.feeds.map((feed) => feed.id), [C, A, B, D], '下一次 overview 按新顺序下发')
+
+    result = await h.dispatch('reorderFeeds', { ids: [D, 'https://missing.example/feed.xml', D, B] })
+    assert.equal(result.ok, true, JSON.stringify(result))
+    assert.deepEqual(result.value, { feedOrder: [D, B, C, A] },
+      '未知 id 忽略不拒绝；重复保首次；未点名的按当前有效顺序补齐')
+    disk = readConfigFile(h.configPath)
+    assert.deepEqual(disk.feedOrder, [D, B, C, A])
+    assert.ok(!JSON.stringify(disk).includes('missing.example'), '回包与文件里都没有未知 id')
+  } finally { h.cleanup() }
+})
+
+test('reorderFeeds：空数组与全是未知 id 都不写盘（文件逐字节不变、不新建键），回当前顺序', async () => {
+  // 手写单行 JSON：任何一次写盘都会被 writeConfigFile 按缩进重排，字节比较因此能抓到「写过」。
+  const raw = JSON.stringify({ version: 1, feeds: feedsOf(A, B, C) })
+  const h = makeEndpointRig({ rawConfig: raw })
+  try {
+    assert.equal(Object.hasOwn(JSON.parse(raw), 'feedOrder'), false, '前提：夹具原本没有 feedOrder')
+    assert.deepEqual(idsOf(h.store.listFeeds()), [A, B, C])
+
+    let result = await h.dispatch('reorderFeeds', { ids: [] })
+    assert.equal(result.ok, true, JSON.stringify(result))
+    assert.deepEqual(result.value, { feedOrder: [A, B, C] }, '空数组：回当前有效顺序')
+    assert.equal(readFileSync(h.configPath, 'utf8'), raw, '空数组不得写盘（也不物化 feedOrder）')
+
+    result = await h.dispatch('reorderFeeds', { ids: ['https://missing.example/x'] })
+    assert.equal(result.ok, true, JSON.stringify(result))
+    assert.deepEqual(result.value, { feedOrder: [A, B, C] }, '全是未知 id：回当前有效顺序')
+    assert.equal(readFileSync(h.configPath, 'utf8'), raw, '全是未知 id 同样不写盘')
+  } finally { h.cleanup() }
+})
+
+test('reorderFeeds：关掉重开（同一份 config.json 重建 store）后顺序保持', async () => {
+  const h = makeEndpointRig()
+  try {
+    const result = await h.dispatch('reorderFeeds', { ids: [D, C, B, A] })
+    assert.equal(result.ok, true, JSON.stringify(result))
+    assert.deepEqual(result.value, { feedOrder: [D, C, B, A] })
+
+    const store = h.reopen()
+    assert.deepEqual(idsOf(store.listFeeds()), [D, C, B, A], '重启后仍按 feedOrder 派生')
+    const overview = await h.dispatch('overview', {})
+    assert.deepEqual(overview.value.feeds.map((feed) => feed.id), [D, C, B, A], '重开后的 overview 同序')
+    assert.deepEqual(readConfigFile(h.configPath).feedOrder, [D, C, B, A])
+  } finally { h.cleanup() }
+})
+
+test('排序之后：排序前拿到的续页游标仍可用，翻完不重不漏（栅栏只认成员集合）', async () => {
+  const feeds = {
+    [A]: { ...record(A), folder: '技术' },
+    [B]: { ...record(B), folder: '技术' },
+    [C]: { ...record(C), folder: '技术' },
+  }
+  const h = makeEndpointRig({ feeds, maxItemsShown: 2 })
+  try {
+    const rows = [
+      ['a1', A, '2026-11-06T00:00:00.000Z'],
+      ['b1', B, '2026-11-05T00:00:00.000Z'],
+      ['a2', A, '2026-11-04T00:00:00.000Z'],
+      ['c1', C, '2026-11-03T00:00:00.000Z'],
+      ['b2', B, '2026-11-02T00:00:00.000Z'],
+      ['c2', C, '2026-11-01T00:00:00.000Z'],
+    ]
+    for (const [id, feedId, publishedAt] of rows) await h.store.saveItem(id, itemOf(feedId, id, publishedAt))
+
+    const first = await h.dispatch('overview', { folder: '技术' })
+    assert.equal(first.ok, true, JSON.stringify(first))
+    assert.deepEqual(first.value.items.map((row) => row.id), ['a1', 'b1'])
+    assert.ok(first.value.nextCursor, '第一页必须给续页游标')
+
+    // 排序前拿到的游标绑的是文件夹成员集合（键序 A,B,C 排序后哈希）；换顺序不改集合。
+    const reordered = await h.dispatch('reorderFeeds', { ids: [C, A, B] })
+    assert.equal(reordered.ok, true, JSON.stringify(reordered))
+    assert.deepEqual(reordered.value, { feedOrder: [C, A, B] })
+
+    const seen = first.value.items.map((row) => row.id)
+    let cursor = first.value.nextCursor
+    let guard = 0
+    while (cursor !== undefined) {
+      const page = await h.dispatch('overview', { folder: '技术', cursor })
+      assert.equal(page.ok, true, '排序前的续页游标必须仍然可用：' + JSON.stringify(page))
+      seen.push(...page.value.items.map((row) => row.id))
+      cursor = page.value.nextCursor
+      guard += 1
+      assert.ok(guard < 10, '翻页必须有终点')
+    }
+    assert.deepEqual(seen, ['a1', 'b1', 'a2', 'c1', 'b2', 'c2'], '不重不漏，且仍是 recency 降序')
+  } finally { h.cleanup() }
+})
+
+test('排序前后：条目流时间序、每条读态与每源未读数逐项不变', async () => {
+  const h = makeEndpointRig({ feeds: feedsOf(A, B, C) })
+  try {
+    await h.store.saveItem('a-read', itemOf(A, 'a-read', '2026-11-05T00:00:00.000Z', { readAt: '2026-11-05T01:00:00.000Z' }))
+    await h.store.saveItem('a-star', itemOf(A, 'a-star', '2026-11-04T00:00:00.000Z', { starred: true }))
+    await h.store.saveItem('b-kept', itemOf(B, 'b-kept', '2026-11-03T00:00:00.000Z', { keptUnread: true }))
+    await h.store.saveItem('c-unread', itemOf(C, 'c-unread', '2026-11-02T00:00:00.000Z'))
+    await h.store.saveItem('b-read', itemOf(B, 'b-read', '2026-11-01T00:00:00.000Z', {
+      readAt: '2026-11-01T02:00:00.000Z', starred: true,
+    }))
+
+    const stateOf = (overview) => Object.fromEntries(overview.items.map((row) => [row.id, {
+      readAt: row.readAt, starred: row.starred, keptUnread: row.keptUnread,
+    }]))
+    const before = await h.dispatch('overview', {})
+    assert.equal(before.ok, true, JSON.stringify(before))
+
+    const reordered = await h.dispatch('reorderFeeds', { ids: [C, B, A] })
+    assert.equal(reordered.ok, true, JSON.stringify(reordered))
+
+    const after = await h.dispatch('overview', {})
+    assert.deepEqual(after.value.items.map((row) => row.id), before.value.items.map((row) => row.id),
+      '条目流仍是 recency 降序：排序只整理源，不动条目')
+    assert.deepEqual(stateOf(after.value), stateOf(before.value),
+      '每条条目的 readAt / starred / keptUnread 逐项不变')
+    assert.deepEqual(after.value.perFeedUnread, before.value.perFeedUnread, '每源未读数逐项不变')
+    assert.equal(after.value.unread, before.value.unread, '未读总数不变')
+  } finally { h.cleanup() }
 })

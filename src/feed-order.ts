@@ -12,30 +12,57 @@
  */
 import type { FeedRecord } from './domain.js'
 
+/** 「列出的 id」的归一：丢空串与未知 id、重复保首次。派生与重排共用这一条，别各写一遍。 */
+function listedFeedIds(order: readonly string[], feeds: Record<string, FeedRecord>): string[] {
+  const listed: string[] = []
+  const seen = new Set<string>()
+  for (const feedId of order) {
+    // 空串与未知 id 都不是格式错（读侧不为它们报错），但在顺序里没有意义。
+    if (feedId === '' || !Object.hasOwn(feeds, feedId) || seen.has(feedId)) continue
+    seen.add(feedId)
+    listed.push(feedId)
+  }
+  return listed
+}
+
 /**
  * 有效顺序：已列出的 id 按数组顺序（重复保首次）→ 未列出的按 `feeds` 键序追加 → 未知 id 丢弃。
  *
- * 返回值只含 `feeds` 里真实存在的 id，长度恒等于 `Object.keys(feeds).length`：
+ * 返回值只含 `feeds` 里真实存在的那些 id，长度恒等于 `Object.keys(feeds).length`：
  * 「顺序」是**同一批订阅的排列**，不是另一份订阅清单。
  */
 export function deriveFeedOrder(
   order: readonly string[] | undefined,
   feeds: Record<string, FeedRecord>,
 ): string[] {
-  const listed: string[] = []
-  const seen = new Set<string>()
-  for (const feedId of order ?? []) {
-    // 空串与未知 id 都不是格式错（读侧不为它们报错），但在顺序里没有意义。
-    if (feedId === '' || !Object.hasOwn(feeds, feedId) || seen.has(feedId)) continue
-    seen.add(feedId)
-    listed.push(feedId)
-  }
+  const listed = listedFeedIds(order ?? [], feeds)
+  const seen = new Set(listed)
   for (const feedId of Object.keys(feeds)) {
     if (seen.has(feedId)) continue
     seen.add(feedId)
     listed.push(feedId)
   }
   return listed
+}
+
+/**
+ * 重排：请求里的 id 归一（去重、丢未知 / 空串）后 + 其余按**当前有效顺序**补齐。
+ *
+ * 返回 `undefined` 表示「归一后一个 id 都不剩」（空数组，或全是未知 id）：调用方据此**不写盘**，
+ * 回当前顺序 —— 「什么都没点名」不该把 `feedOrder` 物化出来（与读侧「缺省不物化」同一条纪律）。
+ *
+ * 结果总是**完整的一份**（长度 = feeds 键数），不是只落请求里那一段：只落前缀的话，未提到的
+ * 那批下次要靠键序重新推导，而键序可能已被一次退订重写 —— 同一份顺序就长出了两个来源。
+ */
+export function reorderFeedOrder(
+  order: readonly string[] | undefined,
+  feeds: Record<string, FeedRecord>,
+  requested: readonly string[],
+): string[] | undefined {
+  const named = listedFeedIds(requested, feeds)
+  if (named.length === 0) return undefined
+  const seen = new Set(named)
+  return [...named, ...deriveFeedOrder(order, feeds).filter((feedId) => !seen.has(feedId))]
 }
 
 /**

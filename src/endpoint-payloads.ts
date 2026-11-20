@@ -94,6 +94,12 @@ export const moveFeedToFolderPayload = z.object({
   folder: z.string().nullable(),
 })
 
+/**
+ * `reorderFeeds`：ids 是必需键，**允许空数组**（= 什么都没点名 ⇒ 不写盘，回当前顺序）。
+ * 未知 id 与空串不在这里判：它们是归一问题，不是形状问题 —— 归属 store（src/feed-order.ts）。
+ */
+export const reorderFeedsPayload = z.object({ ids: z.array(z.string()) })
+
 /** `setItemTags`：tagIds 的形状在这里判；去重与存在性仍在 store（normalizeTagIds）。 */
 export const setItemTagsPayload = z.object({
   itemId: z.string().min(1),

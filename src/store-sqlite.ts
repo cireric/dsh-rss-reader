@@ -46,7 +46,7 @@ import type { CleanupCandidate, ReaderStore } from './store.js'
 import type { ArticleEntry } from './retention.js'
 import { applyFeedIntent, type FeedIntent } from './feed-intent.js'
 import { addFolder, deleteFolder, folderViews, moveFeedToFolder, renameFolder } from './folders.js'
-import { orderedFeedEntries } from './feed-order.js'
+import { deriveFeedOrder, orderedFeedEntries, reorderFeedOrder } from './feed-order.js'
 import { normalizeTagIds, normalizeTagName, requireTagId, TagError } from './tags.js'
 
 /** 事务里的保存点名。写成常量即可：db 是单连接，嵌套只发生在同一个连接上。 */
@@ -484,6 +484,22 @@ function writeFolders(
 ): ReturnType<typeof folderViews> {
   updateConfig(configPath, change)
   return folderViews(readConfigFile(configPath))
+}
+
+/**
+ * 顺序变更的统一收尾（R3 02）：与 writeFolders 同一条规矩 —— 回包是**重读派生**的有效顺序。
+ *
+ * 归一后一个 id 都不剩（空数组 / 全是未知 id）时**不写盘**：readConfigFile 只读不写，
+ * 这里直接回当前顺序。「什么都没点名」不该把缺省的 feedOrder 物化成显式数组 ——
+ * 那会抹掉用户文件里「从没排过」这个事实。
+ */
+function writeFeedOrder(configPath: string, ids: readonly string[]): string[] {
+  const current = readConfigFile(configPath)
+  const next = reorderFeedOrder(current.feedOrder, current.feeds, ids)
+  if (next === undefined) return deriveFeedOrder(current.feedOrder, current.feeds)
+  updateConfig(configPath, (latest) => ({ ...latest, feedOrder: next }))
+  const file = readConfigFile(configPath)
+  return deriveFeedOrder(file.feedOrder, file.feeds)
 }
 
 /** 行 → TagRecord。列名与 tagRecordSchema 的字段逐字对齐，strict 会把多带的列当场判死。 */
@@ -944,6 +960,8 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
       const file = readConfigFile(configPath)
       return orderedFeedEntries(file.feedOrder, file.feeds)
     },
+
+    reorderFeeds: async (ids) => writeFeedOrder(configPath, ids),
 
     /**
      * 文件夹目录。读侧已把「显式目录 ∪ 当前非空分组」并好（src/storage/config-file.ts 一处），

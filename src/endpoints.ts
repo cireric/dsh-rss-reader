@@ -1,5 +1,5 @@
 /**
- * 浏览器半的读写通道：28 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
+ * 浏览器半的读写通道：29 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
  *
  * 原先这里是一个 switch：每臂各自手写 payload 解析、各自记得把未读账并进回包 ——
  * interface 的复杂度 ≈ implementation 的复杂度。现在「一个端点」是一个 module：
@@ -26,6 +26,7 @@ import {
   removeFeedPayload,
   renameFolderPayload,
   renameTagPayload,
+  reorderFeedsPayload,
   saveReadingProgressPayload,
   saveViewPreferencesPayload,
   scopePayload,
@@ -293,7 +294,7 @@ const buildOverview = (ctx: EndpointCtx, run?: RefreshRun, cursor?: Cursor, scop
   }
 }
 /**
- * 端点表：28 个端点一处声明（每项的 `payload` 是入参形状的唯一声明）。
+ * 端点表：29 个端点一处声明（每项的 `payload` 是入参形状的唯一声明）。
  *
  * 穷尽性由 `Record<Endpoint, EndpointSpec>` 保证 —— 名字表（shared.ts 的 ENDPOINT_NAMES）
  * 加了新端点而这里没跟上，编译就不过。这是本文件里唯一需要「加端点时改的地方」。
@@ -816,6 +817,16 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         throw error
       }
     },
+  }),
+
+  // ── 订阅源顺序（R3 02）──────────────────────────────────────────────
+  // 顺序是 config.json 里的一份显式数组（缺省 = 没排过）。归一规则在 src/feed-order.ts，
+  // 这里只做 payload 形状校验；回包是**落盘后重读派生**的有效顺序。
+  // 不加 carriesAccount：排序不改任何条目的读态，未读账不随这次写变化（客户端之后会 reload 重取）。
+  reorderFeeds: defineEndpoint({
+    payload: reorderFeedsPayload,
+    invalidMessage: 'reorderFeeds 需要 ids（字符串数组，可为空）',
+    to: async (input, ctx) => ok({ feedOrder: await ctx.store.reorderFeeds(input.ids) }),
   }),
 
   // ── 标签持久化与变更接口（M2 05）────────────────────────────────────

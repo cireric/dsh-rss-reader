@@ -65,6 +65,30 @@ export const contractCases = [
     },
   },
   {
+    // R3 02：写入口落地后，「已列出的源按数组序」这半边终于可观察 —— 此前只能靠手改 config.json。
+    // 三份实现必须同一份归一规则：未知 id 忽略、重复保首次、未点名的按**当前有效顺序**补末尾。
+    name: 'reorderFeeds：显式顺序写进去读得回；未知 id 忽略、重复保首次、未点名的按当前顺序补末尾',
+    async run({ store }) {
+      for (const id of ['f1', 'f2', 'f3', 'f4']) {
+        await store.saveFeed(id, { url: 'https://' + id + '.example/feed.xml' })
+      }
+      assert.deepEqual(store.listFeeds().map(([id]) => id), ['f1', 'f2', 'f3', 'f4'],
+        '前提：还没写顺序时是键序')
+
+      assert.deepEqual(await store.reorderFeeds(['f3', 'f1']), ['f3', 'f1', 'f2', 'f4'],
+        '回包是落盘后的有效顺序：点名的按请求，未点名的按原相对顺序补在末尾')
+      assert.deepEqual(store.listFeeds().map(([id]) => id), ['f3', 'f1', 'f2', 'f4'],
+        '写进去的顺序必须立刻可读')
+
+      assert.deepEqual(await store.reorderFeeds(['f4', 'missing', 'f4', 'f2']), ['f4', 'f2', 'f3', 'f1'],
+        '未知 id 忽略不拒绝，重复保首次，其余按**当前**有效顺序补齐（不是按键序）')
+
+      assert.deepEqual(await store.reorderFeeds([]), ['f4', 'f2', 'f3', 'f1'], '空数组：不写盘，回当前顺序')
+      assert.deepEqual(await store.reorderFeeds(['missing']), ['f4', 'f2', 'f3', 'f1'],
+        '全是未知 id：同样不写盘，回当前顺序')
+    },
+  },
+  {
     name: 'createFolder / listFolders：新建后出现在目录里；重名是可预期的 conflict 而不是崩溃',
     async run({ store }) {
       assert.deepEqual(store.listFolders(), [], '空目录起步')

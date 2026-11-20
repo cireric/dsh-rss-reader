@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto'
 import { readerDomain, feedRecordSchema, tagRecordSchema, type CursorRecord, type FeedRecord, type ItemRecord, type TagRecord } from './domain.js'
 import type { ReaderConfigFile } from './storage/config-file.js'
 import { addFolder, deleteFolder, folderViews, moveFeedToFolder, renameFolder } from './folders.js'
-import { orderedFeedEntries } from './feed-order.js'
+import { deriveFeedOrder, orderedFeedEntries, reorderFeedOrder } from './feed-order.js'
 import { normalizeTagIds, normalizeTagName, requireTagId, TagError } from './tags.js'
 import type { FolderView, TagView } from './shared.js'
 import { articleCharsOf, type ArticleEntry, type CleanupRow } from './retention.js'
@@ -47,7 +47,7 @@ export interface CleanupCandidate extends CleanupRow {
  * 保证切片与主接口永远一致。
  *
  * 用途：调用方只声明自己真正用到的那片，替身也只需要满足自己那一片。逐步替换即可 ——
- * 端点上下文（EndpointCtx.store）目前仍是完整 ReaderStore，收窄它是 28 个端点的活，不在这一轮。
+ * 端点上下文（EndpointCtx.store）目前仍是完整 ReaderStore，收窄它是 29 个端点的活，不在这一轮。
  */
 export type PagingStore = Pick<ReaderStore, 'listRecent'>
 /** 未读账：判据来自 unreadPerFeed，**键域**来自 listFeeds（0 未读的源也要留 0）。 */
@@ -184,6 +184,15 @@ export interface ReaderStore {
    */
   listFeeds(): Array<[string, FeedRecord]>
   /**
+   * 写入订阅源的显式顺序（R3 02）：请求里的 id 归一（去重、丢未知）后 + 其余按**当前有效顺序**
+   * 补在末尾，落盘**完整**一份（见 src/feed-order.ts 的 reorderFeedOrder）。
+   *
+   * 归一后一个 id 都不剩（空数组 / 全是未知 id）⇒ **不写盘**，回当前顺序 —— 什么都没点名不该
+   * 把「没排过」物化成「排过」。返回的是**写完重读派生**的有效顺序（与 writeFolders 同一条规矩：
+   * 回包是媒介上的实际状态，不是内存里的预期值）。
+   */
+  reorderFeeds(ids: readonly string[]): Promise<string[]>
+  /**
    * 文件夹目录（显式空目录 + 当前非空成员分组），成员按 config.json 的订阅顺序。
    *
    * 目录的**唯一真相是 config.json 的 `folders` 字段**（与订阅同住一份文件）：
@@ -266,10 +275,14 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
    * 只影响这个测试基线（生产判定严格走 createSqliteStore 的路径，由 tests/folder-storage 钉住）。
    */
   const explicitFolders = new Set<string>()
+  /** 旧适配器的顺序同样是内存态：只服务 ReaderStore 的结构比对与测试，没有 config.json 可写。 */
+  let feedOrder: string[] | undefined
   const folderFile = (): ReaderConfigFile => ({
     version: 1,
     feeds: Object.fromEntries(feeds.entries()),
     folders: [...explicitFolders],
+    // 缺省 ≠ 空数组：没排过时这个键必须缺席（读侧「缺省不物化」同一条纪律）。
+    ...(feedOrder === undefined ? {} : { feedOrder: [...feedOrder] }),
   })
   const isKnownFolder = (folder: string): boolean => explicitFolders.has(folder)
     || [...feeds.entries()].some(([, record]) => record.folder === folder)
@@ -296,6 +309,8 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
     const next = change(folderFile())
     explicitFolders.clear()
     for (const name of next.folders ?? []) explicitFolders.add(name)
+    // 顺序随同一次读改写保留：目录变更不是「重写整份订阅文件」，不得顺手丢掉用户排过的顺序。
+    feedOrder = next.feedOrder === undefined ? undefined : [...next.feedOrder]
     for (const [feedId, record] of Object.entries(next.feeds)) {
       if (before[feedId] !== record) await feeds.put(feedId, record)
     }
@@ -431,6 +446,17 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
     listFeeds: () => {
       const file = folderFile()
       return orderedFeedEntries(file.feedOrder, file.feeds)
+    },
+    /**
+     * 旧适配器没有 config.json：顺序存在 `feedOrder` 这个内存变量里，写回后照样**重读派生**，
+     * 让三份实现回同一个形状（替身不许因为「反正是内存」就少一步归一）。
+     */
+    reorderFeeds: async (ids) => {
+      const current = folderFile()
+      const next = reorderFeedOrder(current.feedOrder, current.feeds, ids)
+      if (next !== undefined) feedOrder = [...next]
+      const file = folderFile()
+      return deriveFeedOrder(file.feedOrder, file.feeds)
     },
     listFolders: () => folderViews(folderFile()),
     createFolder: async (name) => applyFolderChange((file) => addFolder(file, name)),
