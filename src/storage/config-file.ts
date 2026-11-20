@@ -31,6 +31,14 @@ export interface ReaderConfigFile {
    * 但「读旧配置」不会丢 —— 没有这个字段时，现有订阅的 folder 就是目录。
    */
   folders?: string[]
+  /**
+   * 订阅源的显式顺序（R3）：**可选**，只记录用户排过的 feedId。
+   *
+   * 缺省 ≠ 空数组：**缺省表示「从没排过」**，读取时绝不能把它物化出来 —— 一次保存视图偏好或
+   * 刷新写回就凭空多出一个键，等于把「没排过」改写成「排过」，用户手改文件时也无从分辨。
+   * 空数组则是用户/写入者明确给出的合法值。未列出的源由 src/feed-order.ts 按 `feeds` 键序追加。
+   */
+  feedOrder?: string[]
   /** 视图偏好（两列布局的单例槽）。形状归一化在 src/preferences.ts 的 sanitizeViewPreferences 做。 */
   viewPreferences?: unknown
   /** 文件格式版本。只认 1。 */
@@ -151,11 +159,36 @@ function validateConfig(parsed: unknown, path: string): ReaderConfigFile {
       explicitFolders.push(entry)
     }
   }
+  // 订阅源顺序：只判**形状**。不认识的 id 与空串是正常形态（退订残留 / 手改垃圾），
+  // 交给 src/feed-order.ts 在派生时丢弃 —— 读侧若为它们报错，一次退订残留就能让面板打不开。
+  // 也**不**在这里规范化（排序 / 去重 / 过滤）：读不写盘，原样带回去才是「读取不改写文件」。
+  const feedOrderRaw = record.feedOrder
+  let feedOrder: string[] | undefined
+  if (feedOrderRaw !== undefined) {
+    if (!Array.isArray(feedOrderRaw)) {
+      throw new Error(
+        `订阅文件 ${path} 的 feedOrder 不是字符串数组（读到 ${describe(feedOrderRaw)}）：` +
+          '顺序只能由一份显式数组表达，拒绝把认不出的形状当成「没有排过」。',
+      )
+    }
+    for (const entry of feedOrderRaw) {
+      if (typeof entry !== 'string') {
+        throw new Error(
+          `订阅文件 ${path} 的 feedOrder 里有非字符串项（读到 ${describe(entry)}）：` +
+            '每一项都必须是 feedId 字符串。',
+        )
+      }
+    }
+    feedOrder = [...feedOrderRaw]
+  }
   return {
     version: CURRENT_CONFIG_VERSION,
     feeds: valid,
     viewPreferences: record.viewPreferences,
     folders: mergeFolderDirectory(explicitFolders, valid),
+    // 缺省时**不写这个键**（值是 undefined 会让 JSON.stringify 抹掉，但对象形状里仍多一个键；
+    // 用条件展开把「没排过」保持成真正的不存在）。
+    ...(feedOrder === undefined ? {} : { feedOrder }),
   }
 }
 

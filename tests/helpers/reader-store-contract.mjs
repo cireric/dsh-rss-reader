@@ -47,6 +47,24 @@ export const contractCases = [
     },
   },
   {
+    // R3 01：顺序的唯一真相是 feedOrder，而「没列出的源」按 feeds 键序追加。
+    // 三份实现都必须在没有 feedOrder 时给出**键序**（不是按 id/标题排序，也不是任意顺序）：
+    // 这条是派生规则里唯一能被三份实现同时观察到的半边；已列出那半边的判据在
+    // tests/feed-order.test.mjs（真 config.json + 真 store 重开）。
+    name: 'listFeeds：顺序 = feeds 键序，删掉再写回排末尾（未列出的源只能追加）',
+    async run({ store }) {
+      for (const id of ['f3', 'f1', 'f2']) {
+        await store.saveFeed(id, { url: 'https://' + id + '.example/feed.xml' })
+      }
+      assert.deepEqual(store.listFeeds().map(([id]) => id), ['f3', 'f1', 'f2'],
+        '顺序是写入的键序，不按 feedId 排序')
+      await store.deleteSubscription('f1')
+      await store.saveFeed('f1', { url: 'https://f1.example/feed.xml' })
+      assert.deepEqual(store.listFeeds().map(([id]) => id), ['f3', 'f2', 'f1'],
+        '删掉再加回只能排到末尾 —— 派生不允许把未列出的源插进已列出的段落')
+    },
+  },
+  {
     name: 'createFolder / listFolders：新建后出现在目录里；重名是可预期的 conflict 而不是崩溃',
     async run({ store }) {
       assert.deepEqual(store.listFolders(), [], '空目录起步')

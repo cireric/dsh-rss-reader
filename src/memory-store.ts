@@ -15,6 +15,7 @@ import type { CursorRecord, FeedRecord, ItemRecord, TagRecord } from './domain.j
 import type { ReaderConfigFile } from './storage/config-file.js'
 import { applyFeedIntent } from './feed-intent.js'
 import { addFolder, deleteFolder, folderViews, moveFeedToFolder, renameFolder } from './folders.js'
+import { orderedFeedEntries } from './feed-order.js'
 import { normalizeTagIds, normalizeTagName, requireTagId, TagError } from './tags.js'
 import { type TagView } from './shared.js'
 import { DEFAULT_VIEW_PREFERENCES, sanitizeViewPreferences } from './preferences.js'
@@ -212,7 +213,14 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): MemoryStore
       return rows
     },
 
-    listFeeds: () => [...feeds.entries()],
+    /**
+     * 顺序与生产同一条派生（src/feed-order.ts）：`configFile()` 现造的 config 形状里没有
+     * `feedOrder`，派生结果就是 `feeds` 的键序；替身不许自写一遍排序规则。
+     */
+    listFeeds: () => {
+      const file = configFile()
+      return orderedFeedEntries(file.feedOrder, file.feeds)
+    },
     listFolders: () => folderViews(configFile()),
     createFolder: async (name) => {
       writeConfigFile(addFolder(configFile(), name))

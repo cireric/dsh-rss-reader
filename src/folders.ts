@@ -72,7 +72,14 @@ export function mergeFolderDirectory(
   return merged
 }
 
-/** 读接口的形状：目录（含空目录）与每个文件夹的成员（订阅 id 按 config.json 顺序）。 */
+/**
+ * 读接口的形状：目录（含空目录）与每个文件夹的成员（订阅 id 按 config.json 的键序）。
+ *
+ * `feedIds` **只当集合**用：范围查询的 IN 谓词（endpoints）、工具的 feedCount、游标栅栏
+ * （item-page 先排序再哈希）都只关心成员是谁，从不读它的顺序。展示顺序由 `feedOrder` 在
+ * `listFeeds()` 一侧派生（src/feed-order.ts）；**不要**把这里改成展示顺序 —— 那会让同一份
+ * 顺序出现两个来源（R3 决策 7）。
+ */
 export function folderViews(file: { folders?: readonly string[]; feeds: Record<string, FeedRecord> }): FolderView[] {
   return mergeFolderDirectory(file.folders, file.feeds).map((name) => ({
     name,

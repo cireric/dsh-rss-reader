@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto'
 import { readerDomain, feedRecordSchema, tagRecordSchema, type CursorRecord, type FeedRecord, type ItemRecord, type TagRecord } from './domain.js'
 import type { ReaderConfigFile } from './storage/config-file.js'
 import { addFolder, deleteFolder, folderViews, moveFeedToFolder, renameFolder } from './folders.js'
+import { orderedFeedEntries } from './feed-order.js'
 import { normalizeTagIds, normalizeTagName, requireTagId, TagError } from './tags.js'
 import type { FolderView, TagView } from './shared.js'
 import { articleCharsOf, type ArticleEntry, type CleanupRow } from './retention.js'
@@ -175,7 +176,12 @@ export interface ReaderStore {
    * `store-sqlite.ts` 的 `SELECT_CLEANUP_ROWS` 注释。
    */
   listCleanupCandidates(cutoffIso: string): CleanupCandidate[]
-  /** 全部订阅源（key 即归一化后的 URL）——订阅源以存储域为准，Config 只是种子 */
+  /**
+   * 全部订阅源（key 即归一化后的 URL）——订阅源以存储域为准，Config 只是种子。
+   *
+   * 顺序 = config.json 的 `feedOrder` 派生（src/feed-order.ts）：已列出的按数组序、未列出的按
+   * `feeds` 键序追加。三份实现必须回同一个顺序 —— 替身比生产宽松时，用它测出来的绿不算数。
+   */
   listFeeds(): Array<[string, FeedRecord]>
   /**
    * 文件夹目录（显式空目录 + 当前非空成员分组），成员按 config.json 的订阅顺序。
@@ -417,7 +423,15 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
       }
       return rows
     },
-    listFeeds: () => [...feeds.entries()],
+    /**
+     * 顺序与生产同一条派生（src/feed-order.ts）：这个适配器没有 config.json，`folderFile()`
+     * 现造的 config 形状里没有 `feedOrder`，于是派生结果就是 `feeds` 的键序 —— 与改造前逐字相同。
+     * 规则只此一处：适配器若自己写一遍顺序，替身就会和生产各说各话。
+     */
+    listFeeds: () => {
+      const file = folderFile()
+      return orderedFeedEntries(file.feedOrder, file.feeds)
+    },
     listFolders: () => folderViews(folderFile()),
     createFolder: async (name) => applyFolderChange((file) => addFolder(file, name)),
     renameFolder: async (from, to) => applyFolderChange((file) => renameFolder(file, from, to)),
