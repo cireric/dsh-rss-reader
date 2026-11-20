@@ -845,3 +845,113 @@ test('P0-1：条目链接是 javascript: 时，v 键不调用 window.open、也�
   assert.equal(store.get().items.find((entry) => entry.id === 'bad').readAt, undefined,
     "动作没发生就不该标已读（与 link === '' 的既有语义一致）")
 })
+
+
+/* ──────────────── R1-03：显示窗档位的客户端载荷（唯一构造器） ──────────────── */
+
+/**
+ * R1-03 的窗口载荷测试固定「现在」：本地自然日边界必须可预测。
+ * 用本地日期构造器造 now —— 边界由被测代码用同一套构造器算，测试再独立算一遍，比较的是
+ * **传下去的 ISO 时刻**，不依赖运行机器的时区。
+ */
+const WINDOW_NOW = new Date(2026, 10, 20, 10, 0, 0)
+const WINDOW_FROM = new Date(2026, 10, 20).toISOString()
+const WINDOW_TO = new Date(2026, 10, 21).toISOString()
+
+test('R1-03：列表取数 / 续页 / 四个镜像动作 / cleanup 带同一份窗口字段', async () => {
+  const { exports, sandbox } = loadClientBundle()
+  const first = [item({ id: 'a1' }), item({ id: 'r1', readAt: '2026-11-19T00:00:00.000Z' }), item({ id: 'a2' })]
+  const calls = []
+  const channel = createFakeChannel({
+    overview: { ...overviewStub(first), nextCursor: 'C1', pages: { C1: overviewStub([item({ id: 'a4' })]) } },
+    request: (endpoint) => {
+      if (endpoint === 'refresh') return { ...overviewStub(first), nextCursor: 'C1' }
+      if (endpoint === 'markRead' || endpoint === 'unmarkRead') {
+        return { changed: 1, unread: 0, perFeedUnread: { feedA: 0 } }
+      }
+      if (endpoint === 'toggleStar' || endpoint === 'toggleKeepUnread') {
+        return { changed: 1, unread: 0, perFeedUnread: { feedA: 0 } }
+      }
+      if (endpoint === 'cleanup') return { deleted: 0, freedChars: 0 }
+      return undefined
+    },
+  })
+  const rpc = async (endpoint, payload, signal) => {
+    calls.push({ endpoint, payload: payload === undefined ? undefined : JSON.parse(JSON.stringify(payload)) })
+    return channel.rpc(endpoint, payload, signal)
+  }
+  const store = exports.createReaderStore({
+    rpc, now: () => WINDOW_NOW.getTime(),
+    setTimeout: sandbox.setTimeout, clearTimeout: sandbox.clearTimeout,
+  })
+  await store.load('overview')
+  const start = calls.length
+
+  await store.setWindow('today')
+  await store.load('refresh')
+  await store.loadMore()
+  await store.markRead('a1')
+  store.select('r1')
+  await store.toggleRead()                       // 已读 → unmarkRead
+  store.select('a2')
+  await store.toggleStar()
+  await store.toggleKeepUnread('a2')
+  await store.cleanup()                          // 清理后整份重载 overview
+
+  const windowed = calls.slice(start)
+  const expected = (endpoint) => windowed.filter((call) => call.endpoint === endpoint)
+  // 列表取数（切档那一次 + cleanup 的整份重载）、刷新、续页都必须带窗。
+  const overviewCalls = expected('overview')
+  assert.equal(overviewCalls.length, 3, '切档 1 次 + 续页 1 次 + cleanup 后重载 1 次；多一次就说明有动作自己又发了一遍')
+  assert.equal(expected('refresh').length, 1, '刷新也必须带窗口（否则按一次刷新就回到「全部」）')
+  const writeCalls = ['markRead', 'unmarkRead', 'toggleStar', 'toggleKeepUnread', 'cleanup']
+  for (const endpoint of writeCalls) {
+    assert.equal(expected(endpoint).length, 1, endpoint + ' 应各发一次')
+  }
+  // 所有**带窗端点**的窗口字段必须逐字相等 —— 这就是「唯一构造器」的可观察判据；
+  // 哪一处手写 from/to，跨零点或改了档位定义时就可能只剩它一份不一样。
+  // （duplicateHints / viewPreferences 等非带窗请求不在本判据里：它们本来就不该有窗口。）
+  const windowedEndpoints = new Set(['overview', 'refresh', ...writeCalls])
+  for (const call of windowed.filter((entry) => windowedEndpoints.has(entry.endpoint))) {
+    assert.equal(call.payload?.from, WINDOW_FROM, call.endpoint + ' 的 from 必须是同一个本地日界')
+    assert.equal(call.payload?.to, WINDOW_TO, call.endpoint + ' 的 to 必须是同一个本地日界')
+  }
+})
+
+test('R1-03：切档只发一次 overview；同档重选不发；搜索中 setWindow no-op；全部档位不带窗口', async () => {
+  const { exports } = loadClientBundle()
+  const items = [item({ id: 'a1' })]
+  const channel = createFakeChannel({
+    overview: { ...overviewStub(items), search: async () => ({ items: [] }) },
+  })
+  const store = exports.createReaderStore({
+    rpc: channel.rpc, now: () => WINDOW_NOW.getTime(),
+    newAbortController: () => new AbortController(),
+  })
+  await store.load('overview')
+  const overviewCount = () => channel.calls.filter(([endpoint]) => endpoint === 'overview').length
+
+  const before = overviewCount()
+  await store.setWindow('today')
+  assert.equal(overviewCount(), before + 1, '切档必须是一次整份重取，且只发一次')
+  assert.equal(store.get().displayWindow, 'today')
+
+  await store.setWindow('today')
+  assert.equal(overviewCount(), before + 1, '同档重选不该再发请求')
+
+  // 搜索进行中：控件在 UI 上禁用（DOM 用例另钉），动作层也必须 no-op ——
+  // 搜索有自己的日期筛选（UTC 日界），窗口在搜索里没有对应物。
+  store.submitSearch({ text: '支付' })
+  await new Promise((resolve) => setImmediate(resolve))
+  const whileSearching = overviewCount()
+  await store.setWindow('7d')
+  assert.equal(store.get().displayWindow, 'today', '搜索进行中切档必须是 no-op（不悄悄退出搜索）')
+  assert.equal(overviewCount(), whileSearching, '搜索进行中切档不许发 overview')
+
+  store.submitSearch()
+  await new Promise((resolve) => setImmediate(resolve))
+  await store.setWindow('all')
+  const last = channel.calls.filter(([endpoint]) => endpoint === 'overview').at(-1)
+  assert.equal(last[1]?.from, undefined, '「全部」档位不传 from（旧请求形状逐字不变）')
+  assert.equal(last[1]?.to, undefined, '「全部」档位不传 to')
+})

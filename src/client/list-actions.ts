@@ -22,9 +22,11 @@
 import { httpUrlOrEmpty, type ArticlePayload, type CleanupResult, type ItemView, type Overview } from '../shared.js'
 import type { UnreadAccount } from '../unread.js'
 import { recencyOf } from '../cursor.js'
+import type { DisplayWindowRange } from '../display-window.js'
 import { createAccountMirror } from './account-mirror.js'
 import { selectionExists } from './nav-model.js'
 import { relativeTime } from './relative-time.js'
+import { displayWindowPayloadOf, type DisplayWindowPayload } from './window-control.js'
 import type { Filter, MarkAllRange, ReaderState, ReaderStoreDeps } from './store.js'
 
 /** 「全部标记已读」的撤销窗口（跟着 undo 状态走，所以在列表域这一侧）。 */
@@ -270,11 +272,22 @@ export function createListActions(host: ListActionHost) {
   }
 
   /**
+   * 当前显示窗的 wire 字段 —— 客户端**唯一**的窗口载荷构造器（R1-03，spec 决策 15 / 28）。
+   *
+   * 列表取数（overview / refresh）、续页与账目动作三处都只经它取 `from` / `to`；账目镜像在发请求前
+   * 把同一份字段并进动作载荷。边界算术仍归 src/display-window.ts，本函数只做「档位 + 现在 → 载荷」。
+   *
+   * 每次请求现取 `now`：跨零点后下一次取数用新的「今天」，面板不为它设定时器（spec 决策 7）。
+   */
+  const windowPayload = (): DisplayWindowPayload => displayWindowPayloadOf(get().displayWindow, new Date(now()))
+
+  /**
    * 六个动作共用「乐观 → RPC → 覆盖 / 回滚」管线（失败统一回滚，2026-10-16 拍板）。
    * 动作 × 行为的判据之家在 src/client/account-mirror.ts 头部 —— 这里只留守卫与载荷组装。
    */
   const mirror = createAccountMirror({
     callRpc: rpc,
+    windowPayload,
     applyAccount,
     fail: (failure) => { set({ error: failure instanceof Error ? failure.message : String(failure) }) },
   })
@@ -530,6 +543,20 @@ export function createListActions(host: ListActionHost) {
       nextListVersion()
       search.abort()
       set({ nextCursor: undefined, loadingMore: false })
+    } else {
+      // 整份重取 = 旧列表的续页作废（R1-03）：切档时必须让在途的 loadMore 落地时版本不符而丢弃，
+      // 顺手补上「切源 / 文件夹时在途续页把旧范围条目追加进新列表」的既有缺口。
+      // 先递增版本再清 loadingMore：两个动作之间没有 await，loadMore 不可能插进来抓到一个仍有效的组合。
+      // 搜索分支不在这里递增 —— 它有自己的 nextListVersion 调用（loadSearch 每页都会递增），
+      // 重复递增会让搜索页互相判过期。
+      //
+      // 刻意只在 overview（整份列表重取）时清 nextCursor：refresh 期间列表仍展示旧页，
+      // 旧游标本身不会造成错误；它的在途续页由版本号丢弃，新的 loadMore 由界面上的
+      // state.loading 禁用挡住。切档要「新档从第一页开始」，那是 setWindow 自己的显式清空。
+      nextListVersion()
+      set(endpoint === 'overview'
+        ? { nextCursor: undefined, loadingMore: false }
+        : { loadingMore: false })
     }
     set({ loading: true })
     try {
@@ -545,7 +572,9 @@ export function createListActions(host: ListActionHost) {
         : scopeSelection.kind === 'tag'
           ? { tagId: scopeSelection.tagId }
           : undefined
-      const overview = await rpc<Overview>(endpoint, scopePayload)
+      // 窗口与范围正交（ADR-0004 的 2026-11-19 修订）：refresh 也带窗口，否则按一次刷新就把
+      // 视图从「今天」悄悄放回「全部」。载荷只由 windowPayload 产出，这里不写 from / to。
+      const overview = await rpc<Overview>(endpoint, { ...(scopePayload ?? {}), ...windowPayload() })
       if (version !== overviewVersion) return
       const searching = get().search
       if (searching) {
@@ -615,11 +644,15 @@ export function createListActions(host: ListActionHost) {
     set({ loadingMore: true })
     try {
       const nav = get().navSelection
+      // 续页与第一页必须带**同一份**窗口字段；只给第一页带窗会让第 2 页从错误边界续起。
       const overview = await rpc<Overview>('overview', {
         cursor,
         ...(nav.kind === 'folder' ? { folder: nav.folder } : {}),
         ...(nav.kind === 'tag' ? { tagId: nav.tagId } : {}),
+        ...windowPayload(),
       })
+      // 版本不符 = 期间发生了一次整份重取（切档 / 切源 / 刷新）：这一页属于旧列表，整包丢弃。
+      // 不清 loadingMore 是安全的 —— 触发版本变化的那次 load 已经在开头把它清掉了。
       if (version !== currentListVersion()) return
       // 追加拼在**当前** state 上（不是闭包里那份快照）：请求在途时用户可能已经标读/加星，
       // 用发请求前的 items 覆盖会把那些本地动作抹掉。
@@ -748,7 +781,9 @@ export function createListActions(host: ListActionHost) {
    */
   const cleanup = async (): Promise<void> => {
     try {
-      const result = await rpc<CleanupResult>('cleanup')
+      // cleanup 不走账目镜像（它回包里的账不落地，随后整份重载 overview），但窗口必须从同一个
+      // 构造器来 —— 否则清理之后的左栏角标会被这次写端点打回全量（spec 决策 15）。
+      const result = await rpc<CleanupResult>('cleanup', windowPayload())
       set({
         notice: result.deleted === 0
           ? '没有可清理的条目（只清「已读且未星标」且早于阈值的旧条目）'
@@ -760,10 +795,35 @@ export function createListActions(host: ListActionHost) {
     }
   }
 
+  /**
+   * 切时间范围档位（R1-03，spec 决策 23）：**一次整份重取**，不是本地过滤。
+   *
+   * 顺序刻意如此：
+   *  1. 先退出正文 —— 档位是一次作用域切换，右栏还停在上一篇就自相矛盾；阅读进度由
+   *     ArticleView 的卸载清理照常落盘，不受影响（与 setFilter / selectNav 同一条规则）；
+   *  2. 立即清空 items / 游标 / 选中并清 loadingMore：新档第一页落地前不能继续展示旧档条目，
+   *     也不能让「加载更多」拿旧游标发请求；
+   *  3. load('overview') 在开头递增列表版本号，在途续页因此整包丢弃（切源时的那处既有缺口一并修好）。
+   *
+   * 搜索进行中一律 no-op：搜索有自己的日期筛选（UTC 日界，ADR-0005 明确并存），窗口在搜索里
+   * 没有对应物。UI 已把控件禁用并说明原因；动作层再挡一次，避免「切窗顺手退出搜索」把两条语义
+   * 塞进一个动作（spec 决策 27）。
+   *
+   * 不写视图记忆：档位**不持久化**（spec 决策 1），重开面板由 store.flushViewMemory 复位到全部。
+   */
+  const setWindow = async (displayWindow: DisplayWindowRange): Promise<void> => {
+    const state = get()
+    if (state.search !== undefined) return
+    if (state.displayWindow === displayWindow) return
+    leaveArticleForScope()
+    set({ displayWindow, items: [], selectedId: undefined, nextCursor: undefined, loadingMore: false })
+    await load('overview')
+  }
+
   return {
     /** 挂在 ReaderStore 公开面上的动作（与搬走前同名同签名）。 */
     actions: {
-      visible, setFilter, setLayout, setMarkAllRange, setShowUnread, select, selectRelative,
+      visible, setFilter, setWindow, setLayout, setMarkAllRange, setShowUnread, select, selectRelative,
       markRead, activate, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllRead, undoMarkAll,
       load, loadMore, cleanup, openArticle, retryArticle, closeArticle, stepArticle, canStepArticle, saveArticleProgress,
     },

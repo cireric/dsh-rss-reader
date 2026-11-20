@@ -142,7 +142,7 @@ function overviewStub(items, feeds, folders, accountItems = items, tags = []) {
 /** 本轮 mountReader 的收尾函数登记表：afterEach 统一清（消灭未决 handle ⇒ 变异不再拖死套件）。 */
 const liveCleanups = []
 
-async function mountReader({ items = [], feeds, folders, tags = [], article, holdArticle, holdOverview = false, search, folderApi, duplicates, timers, prefs = { value: undefined, writes: [] }, store: existingStore } = {}) {
+async function mountReader({ items = [], feeds, folders, tags = [], article, holdArticle, holdOverview = false, search, folderApi, overviewApi, duplicates, timers, now, badge = false, prefs = { value: undefined, writes: [] }, store: existingStore } = {}) {
   const { JSDOM } = STACK
   // P3（gate 调优轮）：挂载前拍全局快照，cleanup 时还原 —— 此前每个 mount 都把
   // window/document/fetch/ResizeObserver 覆盖成新 JSDOM 的桩且从不还原，跨用例的桩污染面
@@ -247,13 +247,30 @@ async function mountReader({ items = [], feeds, folders, tags = [], article, hol
     // 全是 undefined。这是夹具没守住契约，不是代码该容忍的形状。
     if (body.endpoint === 'overview' || body.endpoint === 'refresh') {
       if (overviewGate !== undefined) await overviewGate
+      // R1-03：用例可以整包接管 overview 回包（在途续页要控制「先扣住、后放行」的顺序）。
+      if (overviewApi !== undefined) {
+        const custom = await overviewApi(body, {
+          items, serverFeeds, serverFolders, tagDirectory, overviewStub,
+        })
+        if (custom !== undefined) return ok(custom)
+      }
       const folder = body.payload?.folder
       const tagId = body.payload?.tagId
       let visibleItems = folder === undefined
         ? items
         : items.filter((entry) => serverFeeds.some((feed) => feed.id === entry.feedId && feed.folder === folder))
       if (tagId !== undefined) visibleItems = visibleItems.filter((entry) => (entry.tagIds ?? []).includes(tagId))
-      return ok(overviewStub(visibleItems, serverFeeds, serverFolders, items, tagDirectory()))
+      // R1-03：窗口是半开区间 [from, to)，只认 publishedAt（无日期永不进窗）—— 与宿主
+      // src/store-sqlite.ts 的 WINDOW_FILTER 同一判据。桩必须照契约收窄，否则「切档后列表
+      // 只剩窗内条目」在 DOM 层根本表达不出来（docs/pitfalls.md 二、2.6）。
+      const from = body.payload?.from
+      const to = body.payload?.to
+      const windowed = typeof from === 'string' && typeof to === 'string'
+      const inWindow = (entry) => entry.publishedAt !== undefined && entry.publishedAt >= from && entry.publishedAt < to
+      if (windowed) visibleItems = visibleItems.filter(inWindow)
+      // 账目按窗且是**全局**账（不随 folder / tag 收窄）—— 与宿主 buildOverview 的 accountOf 同形。
+      const accountItems = windowed ? items.filter(inWindow) : items
+      return ok(overviewStub(visibleItems, serverFeeds, serverFolders, accountItems, tagDirectory()))
     }
     if (body.endpoint === 'searchItems' && search) return ok(await search(body.payload))
     // 跨源重复提示（M5 03）：客户端一次 load 调一次，桩按用例给的结果回
@@ -408,11 +425,24 @@ async function mountReader({ items = [], feeds, folders, tags = [], article, hol
   // 变成同步事实，而不是靠真等 300ms 赌机器速度（与 nav-persistence 的 fakeTimers 同形）。
   // 同一次面板会话可以复用既有 store 再挂载（R2 重开用例要验证「同一个 store 的第二次挂载」）；
   // 不传时与既有形态逐字一致。
-  const store = existingStore ?? (timers === undefined
-    ? exportsObj.createReaderStore()
-    : exportsObj.createReaderStore({ setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout }))
+  const store = existingStore ?? exportsObj.createReaderStore({
+    // 显示窗边界依赖「现在」：用例把本地日冻住，切档请求体才能断言到确定的 ISO 瞬间。
+    ...(now === undefined ? {} : { now }),
+    ...(timers === undefined ? {} : { setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout }),
+  })
   const rootRef = createRoot(win.document.getElementById('root'))
   rootRef.render(React.createElement(exportsObj.createReader(store)))
+  // 侧栏徽标的独立挂载（badge: true）：它不在 Reader 树里（sidebar.toggle.badge 座位单独注册），
+  // R1-03 要断言「切档后徽标与顶栏是同一个数」只能在这里自己挂一份。
+  let badgeHost = null
+  let badgeRoot = null
+  if (badge === true) {
+    badgeHost = win.document.createElement('div')
+    badgeHost.setAttribute('data-test-badge', '')
+    win.document.body.appendChild(badgeHost)
+    badgeRoot = createRoot(badgeHost)
+    badgeRoot.render(React.createElement(exportsObj.Badge, { store }))
+  }
   // 首次上屏 = React 真的把 Reader 挂上去了（root 有子节点），不是「睡够 50ms」。
   await waitFor(() => win.document.getElementById('root').childNodes.length > 0, { timeout: 2000, label: 'Reader 首次上屏' })
   // 挂载后组件自己会走一次 refresh（index.tsx:184）—— 等它落地再交给用例。
@@ -487,6 +517,7 @@ async function mountReader({ items = [], feeds, folders, tags = [], article, hol
   let mounted = true
   let domClosed = false
   const cleanup = () => {
+    if (badgeRoot !== null) { badgeRoot.unmount(); badgeRoot = null }
     if (mounted) { mounted = false; rootRef.unmount() }
     if (!domClosed) { domClosed = true; dom.window.close() }
     for (const key of Object.keys(globalSnapshot)) {
@@ -505,7 +536,7 @@ async function mountReader({ items = [], feeds, folders, tags = [], article, hol
     rootRef.unmount()
     await settle()
   }
-  return { store, win, endpoints, requests, server: { feeds: serverFeeds, folders: serverFolders }, box, byLabel, arm, observeContent, userScroll, press, exports: exportsObj, prefs, unmount, release: () => { if (releaseArticle !== undefined) releaseArticle() }, releaseOverview: () => { if (releaseOverview !== undefined) releaseOverview() }, scrollTop: (el) => (geometry.get(el) ?? (() => el.scrollTop))(), cleanup, settle, waitFor }
+  return { store, win, endpoints, requests, server: { feeds: serverFeeds, folders: serverFolders }, box, byLabel, arm, observeContent, userScroll, press, exports: exportsObj, prefs, badgeText: () => badgeHost === null ? undefined : badgeHost.textContent, unmount, release: () => { if (releaseArticle !== undefined) releaseArticle() }, releaseOverview: () => { if (releaseOverview !== undefined) releaseOverview() }, scrollTop: (el) => (geometry.get(el) ?? (() => el.scrollTop))(), cleanup, settle, waitFor }
 }
 
 /** 一条最小可用条目。 */
@@ -3319,4 +3350,260 @@ test('R2-02 恢复的滚动位置让选中行落到视口外：跟随规则把�
 
   assert.equal(h.store.get().selectedId, 'b1', '前置：恢复选中了视口外的 b1（第 3 行，offsetTop 2000）')
   assert.equal(h.scrollTop(list), 1748, '先恢复 0，再按跟随规则把 b1 带进视口（2000 + 48 - 300）')
+})
+
+/* ──────────────── R1-03：顶栏时间范围档位（真 React + jsdom + 真 bundle） ──────────────── */
+
+/** R1-03 的固定「现在」：本地自然日边界必须可预测（边界由被测代码用本地日期构造器算）。 */
+const WINDOW_NOW = new Date(2026, 10, 20, 10, 0, 0)
+const WINDOW_FROM = new Date(2026, 10, 20).toISOString()
+const WINDOW_TO = new Date(2026, 10, 21).toISOString()
+const atLocal = (day, hour = 12) => new Date(2026, 10, day, hour, 0, 0).toISOString()
+const windowFeeds = () => [
+  { id: 'f1', title: '源 1', folder: '技术' },
+  { id: 'f2', title: '源 2' },
+]
+const windowFolders = () => [{ name: '技术', feedIds: ['f1'] }]
+/**
+ * 夹具（spec 验收 1 的子集）：
+ *   今天 3 条（2 未读 + 1 已读）、2 天前 1 条未读、10 天前 1 条未读、无日期 1 条未读。
+ *   「全部」= 6 条 / 5 未读；「今天」= 3 条 / 2 未读；「近 3 天」= 4 条 / 3 未读。
+ */
+function windowItems() {
+  return [
+    item({ id: 'today-1', feedId: 'f1', publishedAt: atLocal(20, 1), starred: true, keptUnread: true }),
+    item({ id: 'today-2', feedId: 'f1', publishedAt: atLocal(20, 2) }),
+    item({ id: 'today-read', feedId: 'f2', publishedAt: atLocal(20, 3), readAt: '2026-11-20T03:00:00.000Z' }),
+    item({ id: 'two-days', feedId: 'f2', publishedAt: atLocal(18) }),
+    item({ id: 'ten-days', feedId: 'f1', publishedAt: atLocal(10) }),
+    item({ id: 'no-date', feedId: 'f2', fetchedAt: atLocal(20, 4) }),
+  ]
+}
+const windowMount = (extra = {}) => mountReader({
+  items: windowItems(), feeds: windowFeeds(), folders: windowFolders(),
+  now: () => WINDOW_NOW.getTime(), ...extra,
+})
+
+test('R1-03 窗口控件：默认全部、四个档位、与「已加载」同一行、Tab 可达且焦点守卫放行', skip, async () => {
+  const h = await windowMount()
+  await h.settle()
+  const doc = h.win.document
+  const select = doc.querySelector('[data-rss-window]')
+  assert.ok(select, '列表视图的顶栏必须有时间范围控件')
+  assert.equal(select.tagName, 'SELECT', '必须是原生 select（Tab 可达、键盘可操作）')
+  assert.equal(select.value, 'all', '默认档位是「全部」')
+  assert.deepEqual([...select.options].map((option) => option.value), ['all', 'today', '3d', '7d'])
+  assert.deepEqual([...select.options].map((option) => option.textContent), ['全部时间', '今天', '近 3 天', '近 7 天'])
+  const counts = select.closest('.dsh-rss-counts')
+  assert.ok(counts !== null, '控件与「已加载 X 条」必须在同一行（同一个计数容器）')
+  assert.match(counts.textContent, /全局 5 条未读/, '全部档位保持既有「全局 N 条未读」文案')
+  assert.match(counts.textContent, /已加载 6 条/)
+  assert.equal(select.tabIndex, 0, '原生 select 默认可 Tab 聚焦')
+  assert.equal(select.disabled, false)
+
+  // 焦点在 SELECT 上：既有的输入控件守卫必须放行（j 不生效），失焦后恢复。
+  const before = h.store.get().selectedId
+  const list = h.arm(h.box('list'), { scrollHeight: 3000, clientHeight: 300 })
+  select.focus()
+  const jEvent = new h.win.KeyboardEvent('keydown', { key: 'j', bubbles: true, cancelable: true })
+  select.dispatchEvent(jEvent)
+  assert.equal(h.store.get().selectedId, before, '焦点在 SELECT 上时 j 不得移动选中')
+  assert.equal(jEvent.defaultPrevented, false, '守卫应直接放行，而不是拦下按键')
+  select.dispatchEvent(new h.win.KeyboardEvent('keydown', { key: 'k', bubbles: true, cancelable: true }))
+  assert.equal(h.store.get().selectedId, before, '焦点在 SELECT 上时 k 不得移动选中')
+  select.dispatchEvent(new h.win.KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true }))
+  assert.equal(h.scrollTop(list), 0, '焦点在 SELECT 上时空格不得翻页')
+  select.blur()
+  h.press('j')
+  assert.notEqual(h.store.get().selectedId, before, '失焦后 j 必须恢复')
+
+  // A 的文案两处（界面 + 帮助表）都写明「当前列表」。
+  assert.match(doc.querySelector('.dsh-rss-settings-panel').textContent, /A 键范围（当前列表）/)
+  h.press('?')
+  await h.settle()
+  assert.match(doc.querySelector('[data-rss-help]').textContent, /当前列表/)
+
+  // 只在列表视图渲染：切到订阅管理后控件必须消失（顶栏标题换了，计数行整块不渲染）。
+  h.store.toggleFeeds()
+  await h.settle()
+  assert.equal(doc.querySelector('[data-rss-window]'), null, '非列表视图不得渲染时间范围控件')
+})
+
+test('R1-03 切档：只发一次 overview（本地日界）、items 整体替换、选中落第一条、账目与角标按窗', skip, async () => {
+  const h = await windowMount({ badge: true })
+  await h.settle()
+  const doc = h.win.document
+  setControlValue(h.win, doc.querySelector('[data-rss-window]'), 'today')
+  await h.settle()
+
+  const overviewCalls = h.requests.filter((request) => request.endpoint === 'overview')
+  assert.equal(overviewCalls.length, 1, '切档必须只发一次 overview（新档第一页）')
+  assert.deepEqual(overviewCalls[0].payload, { from: WINDOW_FROM, to: WINDOW_TO },
+    '请求体必须带本地自然日的半开区间，由唯一构造器产出')
+
+  const state = h.store.get()
+  assert.deepEqual([...state.items].map((entry) => entry.id), ['today-1', 'today-2', 'today-read'],
+    'items 必须整体替换成新档第一页，而不是在旧列表上追加')
+  assert.equal(state.selectedId, 'today-1', '选中落到新列表第一条')
+  assert.equal([...doc.querySelectorAll('[data-rss-row]')].length, 3, '界面上旧档条目必须消失')
+  assert.equal(state.displayWindow, 'today')
+
+  const counts = doc.querySelector('.dsh-rss-counts')
+  assert.match(counts.textContent, /今天 2 条未读/, '窗口档位的顶栏文案是「今天 N 条未读」')
+  assert.match(counts.textContent, /已加载 3 条/)
+
+  // 同一档位下的守恒：顶栏总未读 = 各源角标之和；文件夹角标 = 成员角标之和。
+  const sum = Object.values({ ...state.perFeedUnread }).reduce((acc, n) => acc + n, 0)
+  assert.equal(sum, state.unread, '顶栏总未读必须等于各源角标之和')
+  const folderBadge = [...doc.querySelectorAll('[data-rss-nav-badge]')]
+    .find((element) => element.textContent.includes('技术'))
+  assert.equal(folderBadge?.getAttribute('data-rss-nav-badge'), '2', '文件夹角标 = 成员源角标之和（f1 今天 2 未读）')
+
+  // 侧栏徽标读同一个 state.unread：切档一起变，不另存「全局总数」。
+  assert.equal(h.badgeText(), '2', '侧栏徽标与顶栏必须是同一个数')
+})
+
+test('R1-03 窗口选空：只发一次请求、显示空态、不自动放宽', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'old', feedId: 'f1', publishedAt: atLocal(10) })],
+    feeds: windowFeeds(), folders: windowFolders(),
+    now: () => WINDOW_NOW.getTime(),
+  })
+  await h.settle()
+  setControlValue(h.win, h.win.document.querySelector('[data-rss-window]'), 'today')
+  await h.settle()
+
+  assert.equal(h.requests.filter((request) => request.endpoint === 'overview').length, 1,
+    '空窗口只发一次 overview，不得自动换更宽的档位再发一次')
+  assert.equal(h.store.get().items.length, 0)
+  assert.equal(h.store.get().displayWindow, 'today', '不得自动放宽档位')
+  assert.equal(h.win.document.querySelector('[data-rss-window]').value, 'today')
+  assert.match(h.box('list').textContent, /「今天」内暂无内容，可换一个时间范围/)
+})
+
+test('R1-03 窗口为空且请求失败：照旧显示错误，不拿「暂无内容」掩盖', skip, async () => {
+  const h = await windowMount({
+    overviewApi: async (body) => {
+      if (body.payload?.from !== undefined) throw new Error('injected-window-failure')
+      return undefined
+    },
+  })
+  await h.settle()
+  setControlValue(h.win, h.win.document.querySelector('[data-rss-window]'), 'today')
+  await h.settle()
+  const doc = h.win.document
+  assert.match(doc.querySelector('[role="alert"]').textContent, /injected-window-failure/,
+    '错误必须照旧显示（空态不许掩盖失败）')
+  assert.doesNotMatch(h.box('list').textContent, /可换一个时间范围/,
+    '有 error 时不许显示「暂无内容」的空态文案')
+})
+
+test('R1-03 搜索进行中控件 disabled 并说明原因，退出搜索恢复', skip, async () => {
+  const h = await windowMount({ search: async () => ({ items: [] }) })
+  await h.settle()
+  h.store.submitSearch({ text: '支付' })
+  await h.settle()
+  const doc = h.win.document
+  const select = doc.querySelector('[data-rss-window]')
+  assert.equal(select.disabled, true, '搜索进行中必须禁用时间范围控件')
+  assert.match(doc.querySelector('[data-rss-window-reason]').textContent, /搜索有自己的日期筛选/,
+    '禁用必须给出可见原因')
+
+  h.store.submitSearch()
+  await h.settle()
+  assert.equal(doc.querySelector('[data-rss-window]').disabled, false, '退出搜索后恢复')
+})
+
+test('R1-03 切档不动范围/过滤/A 范围/条目读态，切文件夹也不重置档位', skip, async () => {
+  const h = await windowMount()
+  await h.settle()
+  h.store.setFilter('unread')
+  h.store.setMarkAllRange('week')
+  await h.settle()
+  const writesBeforeWindow = h.prefs.writes.length
+  setControlValue(h.win, h.win.document.querySelector('[data-rss-window]'), 'today')
+  await h.settle()
+
+  assert.equal(h.prefs.writes.length, writesBeforeWindow, '切档本身不写视图记忆（档位不持久化）')
+  const state = h.store.get()
+  assert.equal(state.filter, 'unread', '切档不改变过滤三连')
+  assert.equal(state.markAllRange, 'week', '切档不改变 A 键范围')
+  assert.equal(state.navSelection.kind, 'virtual', '切档不改变当前源/文件夹/标签')
+  const todayOne = state.items.find((entry) => entry.id === 'today-1')
+  assert.equal(todayOne.starred, true, '切档不改星标')
+  assert.equal(todayOne.keptUnread, true, '切档不改保持未读')
+  assert.equal(todayOne.readAt, undefined, '切档不改已读态')
+  assert.equal(state.items.find((entry) => entry.id === 'today-read').readAt, '2026-11-20T03:00:00.000Z',
+    '窗内的已读条目仍是已读')
+
+  // 切文件夹（会触发一次带窗重取）不重置档位。
+  h.store.selectNav({ kind: 'folder', folder: '技术' })
+  await h.settle()
+  assert.equal(h.store.get().displayWindow, 'today', '切文件夹不重置档位')
+  assert.equal(h.win.document.querySelector('[data-rss-window]').value, 'today')
+  const lastOverview = h.requests.filter((request) => request.endpoint === 'overview').at(-1)
+  assert.equal(lastOverview.payload.folder, '技术', '文件夹范围照旧带给宿主')
+  assert.equal(lastOverview.payload.from, WINDOW_FROM, '切文件夹后的取数仍带同一份窗口')
+
+  // 切单个源同样不重置档位（源切换不重取，但档位是视野设置，与范围正交）。
+  h.store.selectNav({ kind: 'feed', feedId: 'f1' })
+  assert.equal(h.store.get().displayWindow, 'today', '切源不重置档位')
+})
+
+test('R1-03 在途续页：切档后旧回包不得把旧档条目追加进来（hold 控制回包顺序）', skip, async () => {
+  let releaseOldPage
+  const oldPageGate = new Promise((resolve) => { releaseOldPage = resolve })
+  const h = await windowMount({
+    overviewApi: async (body, ctx) => {
+      if (body.payload?.cursor === 'C1') {
+        // 旧档的第二页：先扣住，等切档与新档第一页都落地后再放行。
+        await oldPageGate
+        return {
+          ...ctx.overviewStub([item({ id: 'old-page', feedId: 'f1', publishedAt: atLocal(10) })], ctx.serverFeeds, ctx.serverFolders),
+          nextCursor: undefined,
+        }
+      }
+      if (body.endpoint === 'refresh') {
+        return { ...ctx.overviewStub(ctx.items, ctx.serverFeeds, ctx.serverFolders), nextCursor: 'C1' }
+      }
+      return undefined
+    },
+  })
+  await h.settle()
+  const doc = h.win.document
+  const more = [...doc.querySelectorAll('button')].find((button) => button.textContent.includes('加载更多'))
+  assert.ok(more !== undefined, '前置：第一页必须有续页入口')
+  more.click()
+  await h.waitFor(() => h.store.get().loadingMore === true, { label: '旧档续页在途' })
+
+  setControlValue(h.win, doc.querySelector('[data-rss-window]'), 'today')
+  await h.waitFor(() => h.store.get().displayWindow === 'today' && h.store.get().items.length === 3,
+    { label: '新档第一页落地' })
+  await h.settle({ allowPending: true })
+
+  releaseOldPage()
+  await h.settle()
+  assert.deepEqual([...h.store.get().items].map((entry) => entry.id), ['today-1', 'today-2', 'today-read'],
+    '旧档续页的回包必须整包丢弃，最终 items 全部属于新档')
+  assert.equal(h.store.get().loadingMore, false, '切档必须清掉在途续页的 loadingMore 标记')
+})
+
+test('R1-03 重开面板：档位不持久化，回到「全部」', skip, async () => {
+  const now = () => WINDOW_NOW.getTime()
+  const first = await mountReader({ items: windowItems(), feeds: windowFeeds(), folders: windowFolders(), now })
+  await first.settle()
+  setControlValue(first.win, first.win.document.querySelector('[data-rss-window]'), 'today')
+  await first.settle()
+  assert.equal(first.store.get().displayWindow, 'today', '前置：已切到「今天」')
+
+  await first.unmount()
+  assert.equal(first.store.get().displayWindow, 'all', '面板卸载 = 会话结束：档位复位（不写视图记忆）')
+
+  const second = await mountReader({ items: windowItems(), feeds: windowFeeds(), folders: windowFolders(), now, store: first.store })
+  await second.settle()
+  assert.equal(second.store.get().displayWindow, 'all')
+  assert.equal(second.win.document.querySelector('[data-rss-window]').value, 'all', '重开面板默认「全部」')
+  const refresh = second.requests.filter((request) => request.endpoint === 'refresh')
+  assert.equal(refresh.length, 1)
+  assert.equal(refresh[0].payload?.from, undefined, '重开后的首屏取数不带窗口（旧行为）')
 })
