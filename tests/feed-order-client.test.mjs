@@ -11,6 +11,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createFakeChannel, loadClientModule } from './helpers/client-channel.mjs'
 import { overviewStub } from './helpers/overview-fixture.mjs'
+import { deriveFeedOrder, reorderFeedOrder } from '../lib/feed-order.js'
 
 const feedIds = (store) => store.get().feeds.map((feed) => feed.id)
 const reorderCalls = (channel) => channel.calls.filter(([endpoint]) => endpoint === 'reorderFeeds')
@@ -19,21 +20,18 @@ const overviewCalls = (channel) => channel.calls.filter(([endpoint]) => endpoint
 /**
  * 一台「真宿主」替身：overview 永远下发它当下的顺序，reorderFeeds 按宿主的归一规则改它。
  *
- * 桩件必须守它模仿的那条契约（docs/pitfalls.md 2.6）：未知 id 忽略、重复保首次、
- * 未点名的按当前相对顺序补末尾 —— 与 src/feed-order.ts 的实现同义，否则「未点名补末尾」
- * 这类用例会被一个更宽松的替身放过去。
+ * 桩件必须守它模仿的那条契约（docs/pitfalls.md 2.6）。但规则本身只留一份：下面只是把
+ * 「宿主状态」适配成 config 形状后交给 src/feed-order.ts 的共享纯函数，桩负责写回状态 ——
+ * 不复刻「未知忽略 / 重复保首次 / 未点名补末尾」，否则替身迟早比生产更宽松。
  */
 function harness({ order = ['a', 'b', 'c'], script = [] } = {}) {
   const server = { feeds: order.map((id) => ({ id, title: '源 ' + id.toUpperCase() })) }
   const applyOrder = (requested) => {
-    const next = []
-    for (const id of requested) {
-      const feed = server.feeds.find((entry) => entry.id === id)
-      if (feed !== undefined && !next.includes(feed)) next.push(feed)
-    }
-    for (const feed of server.feeds) if (!next.includes(feed)) next.push(feed)
-    server.feeds = next
-    return next.map((feed) => feed.id)
+    const byId = Object.fromEntries(server.feeds.map((feed) => [feed.id, feed]))
+    const current = server.feeds.map((feed) => feed.id)
+    const next = reorderFeedOrder(current, byId, requested) ?? deriveFeedOrder(current, byId)
+    server.feeds = next.map((id) => byId[id])
+    return next
   }
   const channel = createFakeChannel({
     overview: { items: [] },
