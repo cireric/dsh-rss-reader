@@ -26,8 +26,9 @@ const ITEM_ID = 'item-0001'
 const ROUND = '2026-10-11T09:00:00.000Z'
 
 test('端点名字表非空、无重复、全为非空字符串', () => {
-  assert.equal(ENDPOINT_NAMES.length, 28)
-  assert.equal(new Set(ENDPOINT_NAMES).size, 28)
+  // R3 02 新增 reorderFeeds 端点：28 → 29。这个数字是「端点表变更必须显形」的判据本身。
+  assert.equal(ENDPOINT_NAMES.length, 29)
+  assert.equal(new Set(ENDPOINT_NAMES).size, 29)
   for (const name of ENDPOINT_NAMES) assert.equal(typeof name, 'string')
 })
 
