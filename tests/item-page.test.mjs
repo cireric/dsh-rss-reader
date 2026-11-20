@@ -32,20 +32,28 @@ function item(feedId, over = {}) {
 
 /**
  * 假取数：行为与 ReaderStore.listRecent 的契约一致（排序键固定，调用方按 recency 降序 + id 升序
- * 排序传入），并**记录每次被请求的 limit** —— 窗口放大没有别的观察面，它只体现在这里。
+ * 排序传入），并**记录每次被请求的参数** —— 窗口放大没有别的观察面，它只体现在 limit 上；
+ * 而时间窗有没有传下去，只能从这里看。
+ *
+ * 窗口过滤在这里按契约自己写一遍（`published_at` 有值且在 `[from, to)` 内），**不 import**
+ * 被测模块的谓词：桩件引用被测代码的判据会让「窗口没传下去」也能绿（docs/pitfalls.md §2.6）。
  */
 function fakeSource(rows, tagIdsByItem = {}) {
   const calls = []
   return {
     calls,
-    listRecent(limit, cursor, feedIds, tagId) {
-      calls.push(limit)
+    listRecent(limit, cursor, feedIds, tagId, window) {
+      calls.push({ limit, cursor, feedIds, tagId, window })
       if (limit <= 0) return []
       let found = rows
       if (feedIds !== undefined) found = found.filter(([id, record]) => feedIds.includes(record.feedId))
       // 标签在 item_tags 里，不在 ItemRecord 上（src/domain.ts 的 schema 是 .strict() 的）：
       // 桩件照真实关系建模，否则「标签范围」测的是桩自己的想象（docs/pitfalls.md §2.6）。
       if (tagId !== undefined) found = found.filter(([id]) => (tagIdsByItem[id] ?? []).includes(tagId))
+      if (window !== undefined) {
+        found = found.filter(([, record]) =>
+          record.publishedAt !== undefined && record.publishedAt >= window.from && record.publishedAt < window.to)
+      }
       if (cursor !== undefined) {
         found = found.filter(([id, record]) => afterCursor({ recency: record.publishedAt ?? record.fetchedAt, id }, cursor))
       }
@@ -182,4 +190,101 @@ test('afterCursor：recency 降序、同 recency 内 id 升序的「严格之后
   assert.equal(afterCursor({ recency: T(10), id: 'c' }, cursor), true, '同 recency 内 id 升序：c 在 b 之后')
   assert.equal(afterCursor({ recency: T(10), id: 'a' }, cursor), false, '同 recency 内更小的 id 在前面')
   assert.equal(afterCursor({ recency: T(10), id: 'b' }, cursor), false, '边界行本身不算「之后」——否则每页都会重复它')
+})
+
+/**
+ * ── R1 显示窗：窗口进栅栏（ADR-0004 的 2026-11-19 修订）────────────────────────────
+ *
+ * 窗口一变，游标边界行可能整个落在窗外：沿用旧游标会从错误的位置继续（重复或断档），
+ * 所以 `(scope, window)` 一起决定前缀。而无窗口时前缀必须**一个字都不变** —— 升级瞬间
+ * 用户浏览器里可能还握着旧游标，面板不重载就该继续能用（spec 补充说明第 3 条）。
+ */
+const WINDOW_TODAY = { from: '2026-11-20T00:00:00.000Z', to: '2026-11-21T00:00:00.000Z' }
+const WINDOW_7D = { from: '2026-11-14T00:00:00.000Z', to: '2026-11-21T00:00:00.000Z' }
+
+test('窗口栅栏：无窗口时前缀逐字不变（旧游标继续有效）', () => {
+  const cursor = { recency: T(0), id: 'it-1' }
+  const folder = { kind: 'folder', name: '技术', feedIds: ['b', 'a'] }
+
+  // 无范围：裸体 "<recency>|<id>"，与加窗之前逐字相同
+  assert.equal(encodePageCursor(undefined, cursor), T(0) + '|it-1')
+  // 有范围：仍是既有的 folder:<hash>: 前缀，窗口缺席不追加任何段
+  assert.equal(encodePageCursor(folder, cursor), fenceKeyOf(folder) + ':' + T(0) + '|it-1')
+  // 显式传 undefined 与省略参数逐字相同（调用方不必区分两种写法）
+  assert.equal(encodePageCursor(folder, cursor, undefined), encodePageCursor(folder, cursor))
+  assert.deepEqual(decodePageCursor(folder, encodePageCursor(folder, cursor)), { status: 'ok', cursor },
+    '不带窗口的旧游标必须照常解出 —— 否则升级那一刻所有人的翻页都会断')
+})
+
+test('窗口栅栏：同窗口往返可解；切窗口 / 带窗游标带回「全部」一律 mismatch', () => {
+  const cursor = { recency: T(0), id: 'it-1' }
+  const scopes = [undefined, { kind: 'tag', id: 't1' }, { kind: 'folder', name: '技术', feedIds: ['a'] }]
+
+  for (const scope of scopes) {
+    const wire = encodePageCursor(scope, cursor, WINDOW_TODAY)
+    assert.deepEqual(decodePageCursor(scope, wire, WINDOW_TODAY), { status: 'ok', cursor },
+      '同一 (范围, 窗口) 往返必须逐字段相同：' + JSON.stringify(scope))
+    assert.deepEqual(decodePageCursor(scope, wire, WINDOW_7D), { status: 'mismatch' },
+      '切档后旧游标必须失配，绝不能静默按旧边界续页：' + JSON.stringify(scope))
+    assert.deepEqual(decodePageCursor(scope, wire), { status: 'mismatch' },
+      '带窗游标带回「全部」同样失配（反过来也一样）')
+  }
+
+  // 无窗口旧游标带到带窗口请求：失配（窗口段的失配必须响亮，不许当成「第一页」）
+  const oldWire = encodePageCursor(undefined, cursor)
+  assert.deepEqual(decodePageCursor(undefined, oldWire, WINDOW_TODAY), { status: 'mismatch' })
+  // 同一范围、两个窗口的键必须彼此不同（否则切档不会失配）
+  assert.notEqual(encodePageCursor(undefined, cursor, WINDOW_TODAY), encodePageCursor(undefined, cursor, WINDOW_7D))
+})
+
+test('窗口栅栏：带窗口前缀下的坏游标体是 malformed（与 mismatch 分开）', () => {
+  const cursor = { recency: T(0), id: 'it-1' }
+  const good = encodePageCursor(undefined, cursor, WINDOW_TODAY)
+  // 前缀 = 去掉裸游标后的那段；用它拼一个形状对、内容坏的体
+  const prefix = good.slice(0, good.length - encodeCursorLength(cursor))
+  assert.deepEqual(decodePageCursor(undefined, prefix + 'garbage', WINDOW_TODAY), { status: 'malformed' })
+  assert.deepEqual(decodePageCursor(undefined, prefix, WINDOW_TODAY), { status: 'malformed' },
+    '只剩前缀（没有游标体）也是 malformed —— 不许被当成「没有游标」')
+})
+
+/** 裸游标在 wire 里的长度（`<recency>|<id>`）；测试里只用来切前缀。 */
+function encodeCursorLength(cursor) {
+  return cursor.recency.length + 1 + cursor.id.length
+}
+
+test('窗口透传：窗口原样交给取数，与 folder / tag 范围正交（范围仍是那两态）', () => {
+  const rows = sorted([
+    ['today-a', item('a', { publishedAt: '2026-11-20T10:00:00.000Z' })],
+    ['today-b', item('b', { publishedAt: '2026-11-20T09:00:00.000Z' })],
+    ['old-a', item('a', { publishedAt: '2026-11-10T10:00:00.000Z' })],
+    ['no-date', item('a', { fetchedAt: '2026-11-20T10:30:00.000Z' })],
+  ])
+  const source = fakeSource(rows, { 'today-a': ['t1'] })
+
+  const page = buildItemPage(source, {
+    scope: { kind: 'tag', id: 't1' },
+    window: WINDOW_TODAY,
+    pageSize: 5,
+    knownFeedIds: new Set(['a', 'b']),
+  })
+  assert.deepEqual(page.rows.map(([id]) => id), ['today-a'],
+    '窗口 + 标签范围叠加：只给该范围里窗内的行（无发布日期的今天抓到的条目也不许进窗）')
+  const call = source.calls.at(-1)
+  assert.deepEqual(call.window, WINDOW_TODAY, '窗口必须原样传给 listRecent（取数才是真过滤的地方）')
+  assert.equal(call.tagId, 't1', '标签范围照旧落到 listRecent 的 tagId 参数上')
+
+  const folderPage = buildItemPage(source, {
+    scope: { kind: 'folder', name: '技术', feedIds: ['a', 'b'] },
+    window: WINDOW_TODAY,
+    pageSize: 5,
+    knownFeedIds: new Set(['a', 'b']),
+  })
+  assert.deepEqual(folderPage.rows.map(([id]) => id), ['today-a', 'today-b'], '文件夹范围 + 窗口：只少不少')
+  const folderCall = source.calls.at(-1)
+  assert.deepEqual(folderCall.feedIds, ['a', 'b'])
+  assert.deepEqual(folderCall.window, WINDOW_TODAY)
+
+  // 不带窗口：窗口参数必须是 undefined（不是空对象、不是 undefined 之外的东西）
+  buildItemPage(source, { pageSize: 5, knownFeedIds: new Set(['a']) })
+  assert.equal(source.calls.at(-1).window, undefined, '无窗口时必须传 undefined —— 旧行为逐字不变')
 })
