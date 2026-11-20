@@ -63,6 +63,48 @@ export function countUnreadPerFeed(
 }
 
 /**
+ * 未读三联拆分：**全部未读**的构成，只数未读、与显示窗无关（R1 04，spec 决策 16 / 17）。
+ *
+ * 三个桶共用**一个**阈值 `todayFrom`（读者本地「今天」的起点）：
+ *   - `today`  = `publishedAt >= todayFrom`
+ *   - `earlier` = `publishedAt < todayFrom`
+ *   - `noDate` = 没有 `publishedAt`
+ * 所以 `today + earlier + noDate` 恒等于全量未读 —— 时间戳在未来的未读算进「今天」，不另开
+ * 第四类；`publishedAt IS NULL` 由 `noDate` 单独接住，不落进前两桶。
+ */
+export interface UnreadSplit {
+  today: number
+  earlier: number
+  noDate: number
+}
+
+/**
+ * 未读三联拆分的 **JS 侧唯一算法**（SQL 侧见 store-sqlite.ts 的 unreadSplitSql）。
+ *
+ * 与 countUnreadPerFeed 同一把尺子：键域先按传进来的 feeds 表收窄，再看 isUnread。这样
+ * 三分之和才等于 `unreadPerFeed` 求和出来的总数（已退订源的残留条目不进账）。
+ *
+ * `todayFrom` 是**唯一**的时间输入：没有窗口、没有终点。字符串比较等于时间比较的前提与
+ * 显示窗相同（publishedAt 已由 toIsoUtc 归一成毫秒三位 + Z）。
+ */
+export function countUnreadSplit(
+  feedIds: Iterable<string>,
+  items: Iterable<{ readonly feedId: string; readonly readAt?: string; readonly publishedAt?: string }>,
+  todayFrom: string,
+): UnreadSplit {
+  const domain = new Set(feedIds)
+  const split: UnreadSplit = { today: 0, earlier: 0, noDate: 0 }
+  for (const item of items) {
+    if (!domain.has(item.feedId)) continue
+    if (!isUnread(item)) continue
+    if (item.publishedAt === undefined) split.noDate += 1
+    else if (item.publishedAt >= todayFrom) split.today += 1
+    else split.earlier += 1
+  }
+  return split
+}
+
+/**
  * 未读账的 wire 形状：overview 与 markRead / unmarkRead **共用同一份**。
  *
  * 标读端点必须回它（不能只回 unread）：客户端只拿得到 maxItemsShown 条 items，截断之外那部分
@@ -74,4 +116,11 @@ export interface UnreadAccount {
   unread: number
   /** 键域 = feeds 表，见 countUnreadPerFeed */
   perFeedUnread: Record<string, number>
+  /**
+   * 未读三联拆分；**只在请求给了 `todayFrom` 时出现**（R1 04）。
+   *
+   * 为什么可选而不是恒有：不带 `todayFrom` 的旧请求必须逐字回旧形状（spec 验收 14），
+   * 客户端据此区分「宿主没算拆分」与「拆分真的是 0/0/0」—— 前者回落到旧的「全局 X 条未读」。
+   */
+  unreadSplit?: UnreadSplit
 }

@@ -250,7 +250,9 @@ export function createListActions(host: ListActionHost) {
    * 乐观更新仍由调用方先做（手感），回包到达时以宿主为准纠正。
    */
   const applyAccount = (account: UnreadAccount): void => {
-    set({ unread: account.unread, perFeedUnread: account.perFeedUnread })
+    // unreadSplit 也整份覆盖（R1 04）：回包缺席 ⇒ state 里也缺席（不沿用上一份）。
+    // 客户端绝不本地推导三分、也不按动作做增量 —— 那是「拿截断视图当真相」的同一类错误。
+    set({ unread: account.unread, perFeedUnread: account.perFeedUnread, unreadSplit: account.unreadSplit })
   }
 
   /**
@@ -516,6 +518,8 @@ export function createListActions(host: ListActionHost) {
       tags,
       unread: overview.unread,
       perFeedUnread: overview.perFeedUnread,
+      // 拆分同样整份覆盖：宿主没给（不带 todayFrom 的旧形状）就清成缺席，不许留着上一份。
+      unreadSplit: overview.unreadSplit,
       // 第一页的游标由宿主给（缺省 = 这一页就是全部）。整份重取时它必须**跟着换掉**：
       // 沿用旧游标会让下一页从旧快照的边界开始，追加出一段不连续的历史。
       nextCursor: overview.nextCursor,
@@ -583,7 +587,7 @@ export function createListActions(host: ListActionHost) {
         const missing = !selectionExists(nav, overview.feeds, overview.folders, tags)
         set({
           feeds: overview.feeds, folders: overview.folders, tags,
-          unread: overview.unread, perFeedUnread: overview.perFeedUnread,
+          unread: overview.unread, perFeedUnread: overview.perFeedUnread, unreadSplit: overview.unreadSplit,
           ...(missing ? { navSelection: { kind: 'virtual' }, filter: 'all', navCursor: { kind: 'filter', filter: 'all' } } : {}),
         })
         if (missing) persistView()

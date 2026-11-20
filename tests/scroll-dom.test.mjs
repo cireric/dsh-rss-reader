@@ -213,15 +213,57 @@ async function mountReader({ items = [], feeds, folders, tags = [], article, hol
   })()).map((folder) => ({ name: folder.name, feedIds: [...folder.feedIds] }))
   const account = overviewStub(items, serverFeeds, serverFolders)
   const feedOf = new Map(items.map((entry) => [entry.id, entry.feedId]))
-  const markReply = (endpoint, ids) => {
+  // R1 04：未读三联拆分的桩。判据必须与宿主同形（src/unread.ts / unreadSplitSql）：
+  // today = publishedAt >= todayFrom、earlier = 更早、noDate = 无发布日；只数未读、键域 = feeds 表。
+  // 读态必须单独记账：items 数组是夹具的初始快照，客户端乐观改的是它自己的 state，不回头改这里。
+  const readIds = new Set(items.filter((entry) => entry.readAt !== undefined).map((entry) => entry.id))
+  const splitOf = (todayFrom) => {
+    const split = { today: 0, earlier: 0, noDate: 0 }
+    for (const entry of items) {
+      if (readIds.has(entry.id)) continue
+      if (account.perFeedUnread[entry.feedId] === undefined) continue
+      if (entry.publishedAt === undefined) split.noDate += 1
+      else if (entry.publishedAt >= todayFrom) split.today += 1
+      else split.earlier += 1
+    }
+    return split
+  }
+  /** 只有请求带了 todayFrom 才回 unreadSplit（缺席即缺席，与宿主的旧形状一致）。 */
+  const withSplit = (value, todayFrom) => todayFrom === undefined || todayFrom === null
+    ? value
+    : { ...value, unreadSplit: splitOf(todayFrom) }
+  /** 半开区间判据与宿主同形：只认 publishedAt，无日期永不进窗。 */
+  const inWindowOf = (entry, from, to) => entry.publishedAt !== undefined
+    && entry.publishedAt >= from && entry.publishedAt < to
+  /**
+   * 回包的账目必须按请求的窗口算（src/endpoints.ts 的 accountOf 同形），否则「今天档位标读
+   * 回窗内账」在 DOM 层根本表达不出来 —— 桩件只回全量账会被当成宿主行为。
+   */
+  const replyAccount = (payload) => {
+    if (typeof payload?.from !== 'string' || typeof payload?.to !== 'string') {
+      return { unread: account.unread, perFeedUnread: { ...account.perFeedUnread } }
+    }
+    const perFeedUnread = {}
+    for (const feed of serverFeeds) perFeedUnread[feed.id] = 0
+    for (const entry of items) {
+      if (readIds.has(entry.id) || perFeedUnread[entry.feedId] === undefined) continue
+      if (!inWindowOf(entry, payload.from, payload.to)) continue
+      perFeedUnread[entry.feedId] += 1
+    }
+    return { unread: Object.values(perFeedUnread).reduce((sum, count) => sum + count, 0), perFeedUnread }
+  }
+  const accountReply = (extra, payload) => withSplit({ ...extra, ...replyAccount(payload) }, payload?.todayFrom)
+  const markReply = (endpoint, ids, payload) => {
     const delta = endpoint === 'markRead' ? -1 : 1
     for (const id of ids) {
       const feedId = feedOf.get(id)
+      if (endpoint === 'markRead') readIds.add(id)
+      else readIds.delete(id)
       if (feedId === undefined || account.perFeedUnread[feedId] === undefined) continue
       account.perFeedUnread[feedId] = Math.max(0, account.perFeedUnread[feedId] + delta)
       account.unread += delta
     }
-    return { changed: ids.length, unread: account.unread, perFeedUnread: { ...account.perFeedUnread } }
+    return accountReply({ changed: ids.length }, payload)
   }
   let releaseArticle
   const gate = holdArticle === true ? new Promise((resolve) => { releaseArticle = resolve }) : undefined
@@ -266,11 +308,14 @@ async function mountReader({ items = [], feeds, folders, tags = [], article, hol
       const from = body.payload?.from
       const to = body.payload?.to
       const windowed = typeof from === 'string' && typeof to === 'string'
-      const inWindow = (entry) => entry.publishedAt !== undefined && entry.publishedAt >= from && entry.publishedAt < to
+      const inWindow = (entry) => inWindowOf(entry, from, to)
       if (windowed) visibleItems = visibleItems.filter(inWindow)
       // 账目按窗且是**全局**账（不随 folder / tag 收窄）—— 与宿主 buildOverview 的 accountOf 同形。
       const accountItems = windowed ? items.filter(inWindow) : items
-      return ok(overviewStub(visibleItems, serverFeeds, serverFolders, accountItems, tagDirectory()))
+      return ok(withSplit(
+        overviewStub(visibleItems, serverFeeds, serverFolders, accountItems, tagDirectory()),
+        body.payload?.todayFrom,
+      ))
     }
     if (body.endpoint === 'searchItems' && search) return ok(await search(body.payload))
     // 跨源重复提示（M5 03）：客户端一次 load 调一次，桩按用例给的结果回
@@ -357,7 +402,12 @@ async function mountReader({ items = [], feeds, folders, tags = [], article, hol
     }
     if (body.endpoint === 'markRead' || body.endpoint === 'unmarkRead') {
       const ids = Array.isArray(body.payload?.itemIds) ? body.payload.itemIds : []
-      return ok(markReply(body.endpoint, ids))
+      return ok(markReply(body.endpoint, ids, body.payload))
+    }
+    // 星标 / 保持未读：账目一格不动，但契约上回包必须带账（五个带账端点同一个信封）。
+    // 桩件漏了 perFeedUnread 会把客户端账目覆盖成 undefined —— 那是夹具比生产宽松。
+    if (body.endpoint === 'toggleStar' || body.endpoint === 'toggleKeepUnread') {
+      return ok(accountReply({ changed: 1 }, body.payload))
     }
     return ok({ changed: 1, unread: 0 })
   }
@@ -3396,7 +3446,9 @@ test('R1-03 窗口控件：默认全部、四个档位、与「已加载」同�
   assert.deepEqual([...select.options].map((option) => option.textContent), ['全部时间', '今天', '近 3 天', '近 7 天'])
   const counts = select.closest('.dsh-rss-counts')
   assert.ok(counts !== null, '控件与「已加载 X 条」必须在同一行（同一个计数容器）')
-  assert.match(counts.textContent, /全局 5 条未读/, '全部档位保持既有「全局 N 条未读」文案')
+  // R1-04 起「全部」档位把未读的构成说出来（R1-03 这里是「全局 N 条未读」）。
+  assert.match(counts.textContent, /共 5 条未读/, '全部档位的总未读')
+  assert.match(counts.textContent, /今天 2 · 更早 2 · 无日期 1/, '全部档位带三联拆分（数字来自宿主回包）')
   assert.match(counts.textContent, /已加载 6 条/)
   assert.equal(select.tabIndex, 0, '原生 select 默认可 Tab 聚焦')
   assert.equal(select.disabled, false)
@@ -3438,8 +3490,8 @@ test('R1-03 切档：只发一次 overview（本地日界）、items 整体替�
 
   const overviewCalls = h.requests.filter((request) => request.endpoint === 'overview')
   assert.equal(overviewCalls.length, 1, '切档必须只发一次 overview（新档第一页）')
-  assert.deepEqual(overviewCalls[0].payload, { from: WINDOW_FROM, to: WINDOW_TO },
-    '请求体必须带本地自然日的半开区间，由唯一构造器产出')
+  assert.deepEqual(overviewCalls[0].payload, { from: WINDOW_FROM, to: WINDOW_TO, todayFrom: WINDOW_FROM },
+    '请求体必须带本地自然日的半开区间与「今天」的起点，由唯一构造器一次产出')
 
   const state = h.store.get()
   assert.deepEqual([...state.items].map((entry) => entry.id), ['today-1', 'today-2', 'today-read'],
@@ -3606,4 +3658,133 @@ test('R1-03 重开面板：档位不持久化，回到「全部」', skip, async
   const refresh = second.requests.filter((request) => request.endpoint === 'refresh')
   assert.equal(refresh.length, 1)
   assert.equal(refresh[0].payload?.from, undefined, '重开后的首屏取数不带窗口（旧行为）')
+})
+
+/* ──────────────── R1-04：未读三联拆分与顶栏文案（真 React + jsdom + 真 bundle） ──────────────── */
+
+/**
+ * 夹具（比 R1-03 的 windowItems 多一条**已读**的无日期条目）：
+ *   今天 3 条（2 未读 + 1 已读）、2 天前 1 未读、10 天前 1 未读、无日期 2 条（1 未读 + 1 已读）。
+ *   全部 = 7 条 / 5 未读；三联 = 今天 2 / 更早 2 / 无日期 1（已读的 no-date-read 不进 K）。
+ *   「今天」窗 = 3 条 / 2 未读，split 仍是同一份（与窗口无关）。
+ */
+function splitItems() {
+  return [
+    item({ id: 'today-1', feedId: 'f1', publishedAt: atLocal(20, 1) }),
+    item({ id: 'today-2', feedId: 'f1', publishedAt: atLocal(20, 2) }),
+    item({ id: 'today-read', feedId: 'f2', publishedAt: atLocal(20, 3), readAt: '2026-11-20T03:00:00.000Z' }),
+    item({ id: 'two-days', feedId: 'f2', publishedAt: atLocal(18) }),
+    item({ id: 'ten-days', feedId: 'f1', publishedAt: atLocal(10) }),
+    item({ id: 'no-date', feedId: 'f2', fetchedAt: atLocal(20, 4) }),
+    item({ id: 'no-date-read', feedId: 'f2', fetchedAt: atLocal(20, 4), readAt: '2026-11-19T00:00:00.000Z' }),
+  ]
+}
+const splitMount = (extra = {}) => mountReader({
+  items: splitItems(), feeds: windowFeeds(), folders: windowFolders(),
+  now: () => WINDOW_NOW.getTime(), ...extra,
+})
+
+test('R1-04 全部档位文案：三个桶来自宿主回包，K 只数未读', skip, async () => {
+  const h = await splitMount()
+  await h.settle()
+  const counts = h.win.document.querySelector('.dsh-rss-counts')
+
+  assert.match(counts.textContent, /共 5 条未读/, 'X = 总未读（不是 items 条数 7）')
+  assert.match(counts.textContent, /今天 2/, 'today = publishedAt >= todayFrom 的未读')
+  assert.match(counts.textContent, /更早 2/, 'earlier = 今天之前的未读')
+  assert.match(counts.textContent, /无日期 1/, 'K 只数未读：两条无日期里那条已读的不能算')
+
+  // 「全部」档位也必须把今天起点带给宿主，否则回包没有拆分 —— 客户端不本地推导。
+  const first = h.requests.find((request) => request.endpoint === 'refresh' || request.endpoint === 'overview')
+  assert.equal(first.payload.todayFrom, WINDOW_FROM, '全部档位的请求也带今天起点')
+  assert.equal(first.payload.from, undefined, '全部档位不带窗口（旧行为）')
+})
+
+test('R1-04 全部档位省零：今天 0 省「今天 0」、无日期 0 省「无日期 0」', skip, async () => {
+  const onlyEarlier = await mountReader({
+    items: [item({ id: 'old', feedId: 'f1', publishedAt: atLocal(10) })],
+    feeds: windowFeeds(), folders: windowFolders(), now: () => WINDOW_NOW.getTime(),
+  })
+  await onlyEarlier.settle()
+  const onlyEarlierText = onlyEarlier.win.document.querySelector('.dsh-rss-counts').textContent
+  assert.match(onlyEarlierText, /共 1 条未读/, '总未读照常')
+  assert.match(onlyEarlierText, /更早 1/, '更早永远显示（基线只规定省掉两个 0）')
+  assert.doesNotMatch(onlyEarlierText, /今天 0/, 'today = 0 时不许写「今天 0」')
+  assert.doesNotMatch(onlyEarlierText, /无日期 0/, 'noDate = 0 时不许写「无日期 0」')
+
+  const todayNoDateZero = await mountReader({
+    items: splitItems().filter((entry) => !entry.id.startsWith('no-date')),
+    feeds: windowFeeds(), folders: windowFolders(), now: () => WINDOW_NOW.getTime(),
+  })
+  await todayNoDateZero.settle()
+  const text = todayNoDateZero.win.document.querySelector('.dsh-rss-counts').textContent
+  assert.match(text, /共 4 条未读/, '4 = 今天 2 + 更早 2')
+  assert.match(text, /今天 2/, '不是零的那一项照常显示')
+  assert.doesNotMatch(text, /无日期 0/, 'noDate = 0 时省掉')
+})
+
+test('R1-04 窗口档位文案：窗内数 + 无日期未计入提示（K=0 不提示）；没有 split 时回落旧文案', skip, async () => {
+  const h = await splitMount()
+  await h.settle()
+  const doc = h.win.document
+  setControlValue(h.win, doc.querySelector('[data-rss-window]'), 'today')
+  await h.settle()
+
+  const counts = doc.querySelector('.dsh-rss-counts')
+  assert.match(counts.textContent, /今天 2 条未读/, '窗口档位的 N 是窗内未读（今天窗 = 2）')
+  assert.match(counts.textContent, /另有 1 条未读没有发布日期，未计入/,
+    'K > 0 时追加提示；K 来自同一份 split，不是客户端数 items')
+  assert.deepEqual(h.store.get().unreadSplit, { today: 2, earlier: 2, noDate: 1 },
+    '窗口档位下 state 里保存的 split 仍是「全部未读」的三分')
+
+  // 验收 12 的 DOM 半边：今天档位标掉一条今天的未读 —— 窗内数减 1，split.today 也减 1，
+  // 无日期的 K 一格不动（它描述的是全量未读，与窗口无关）。
+  await h.store.markRead('today-1')
+  await h.settle()
+  assert.deepEqual(h.store.get().unreadSplit, { today: 1, earlier: 2, noDate: 1 })
+  assert.match(counts.textContent, /今天 1 条未读/)
+  assert.match(counts.textContent, /另有 1 条未读没有发布日期，未计入/)
+
+  // K = 0：同一条提示不许出现（把无日期条目从夹具里去掉）。
+  const noNoDate = await mountReader({
+    items: splitItems().filter((entry) => !entry.id.startsWith('no-date')),
+    feeds: windowFeeds(), folders: windowFolders(), now: () => WINDOW_NOW.getTime(),
+  })
+  await noNoDate.settle()
+  setControlValue(noNoDate.win, noNoDate.win.document.querySelector('[data-rss-window]'), 'today')
+  await noNoDate.settle()
+  const noNoDateText = noNoDate.win.document.querySelector('.dsh-rss-counts').textContent
+  assert.match(noNoDateText, /今天 2 条未读/)
+  assert.doesNotMatch(noNoDateText, /没有发布日期/, 'K = 0 时不许出现「未计入」提示')
+
+  // 宿主没给 split（旧宿主 / 回包缺席）：全部档位回落到既有的「全局 X 条未读」。
+  const legacy = await mountReader({
+    items: splitItems(), feeds: windowFeeds(), folders: windowFolders(), now: () => WINDOW_NOW.getTime(),
+    overviewApi: async (_body, ctx) => ctx.overviewStub(ctx.items, ctx.serverFeeds, ctx.serverFolders),
+  })
+  await legacy.settle()
+  const legacyText = legacy.win.document.querySelector('.dsh-rss-counts').textContent
+  assert.match(legacyText, /全局 5 条未读/, 'split 缺席 ⇒ 回落旧文案，不编造 0/0/0')
+  assert.equal(legacy.store.get().unreadSplit, undefined, '缺席即缺席，不沿用旧值')
+})
+
+test('R1-04 写操作后 split 由回包整份覆盖：标读后今天减 1，星标后原样保留', skip, async () => {
+  const h = await splitMount()
+  await h.settle()
+  const doc = h.win.document
+
+  await h.store.markRead('today-1')
+  await h.settle()
+  assert.deepEqual(h.store.get().unreadSplit, { today: 1, earlier: 2, noDate: 1 },
+    '标掉一条今天的未读：回包的 split 整体覆盖（today 2 → 1），不是被清空')
+  assert.match(doc.querySelector('.dsh-rss-counts').textContent, /共 4 条未读/)
+  assert.match(doc.querySelector('.dsh-rss-counts').textContent, /今天 1/)
+  const markRequest = h.requests.filter((request) => request.endpoint === 'markRead').at(-1)
+  assert.equal(markRequest.payload.todayFrom, WINDOW_FROM, '账目镜像也带同一份今天起点（窗随账走）')
+
+  await h.store.toggleStar('two-days')
+  await h.settle()
+  assert.deepEqual(h.store.get().unreadSplit, { today: 1, earlier: 2, noDate: 1 },
+    '不改读态的动作（星标）也必须把 split 原样带回，不能抹掉')
+  assert.match(doc.querySelector('.dsh-rss-counts').textContent, /共 4 条未读/)
 })

@@ -11,6 +11,7 @@ import { DEFAULT_READING_PREFERENCES, sanitizeViewPreferences, validListScrollTo
 import type { ReadingPreferences, ViewPreferences } from '../preferences.js'
 import { clampScrollTop } from '../list-scroll.js'
 import type { DisplayWindowRange } from '../display-window.js'
+import type { UnreadSplit } from '../unread.js'
 
 export type Filter = 'all' | 'unread' | 'starred'
 
@@ -97,6 +98,13 @@ export interface ReaderState {
   /** 标签目录（含空标签）。左栏筛选与编辑器的名称来源。 */
   tags: TagView[]
   unread: number
+  /**
+   * 未读三联拆分（R1 04）：**只在宿主回包给了它时存在**，整份覆盖、客户端不推导、不做增量。
+   *
+   * 缺席（旧宿主 / 不带 todayFrom 的请求）= 顶栏回落到「全局 X 条未读」；`undefined` 与
+   * 「0/0/0」是两件事，别用 `?? {0,0,0}` 把它抹平。
+   */
+  unreadSplit: UnreadSplit | undefined
   filter: Filter
   selectedId: string | undefined
   loading: boolean
@@ -283,7 +291,7 @@ const browserDeps: ReaderStoreDeps = {
 export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   const deps: ReaderStoreDeps = { ...browserDeps, ...overrides }
   let state: ReaderState = {
-    items: [], feeds: [], folders: [], tags: [], unread: 0, filter: 'all',
+    items: [], feeds: [], folders: [], tags: [], unread: 0, unreadSplit: undefined, filter: 'all',
     selectedId: undefined, loading: true, error: undefined, undo: undefined,
     view: 'list', layout: 'list', markAllRange: 'all', displayWindow: 'all', showUnread: true, article: undefined, notice: undefined,
     importReport: undefined, discovery: undefined, feedsBusy: false,

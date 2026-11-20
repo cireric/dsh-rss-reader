@@ -94,17 +94,30 @@ export interface EndpointCtx {
 }
 
 /**
- * 一次端点调用的**解析回执**：回包 + 合并账目要用的窗口。
+ * 账目的**视野**：显示窗（收窄 unread / perFeedUnread）+ 读者本地「今天」的起点
+ * （只在给了它时算 `unreadSplit`，见 R1 04 的 spec 决策 16 / 17）。
  *
- * 账目窗口必须取自 `defineEndpoint` 的**那一次**解析（R1 02 决策 21 / ADR-0003）。
+ * 两者都是**可选**且互相独立：不带窗口 = 全量账；不带 todayFrom = 回包没有拆分。
+ * 它们必须一起取自 `defineEndpoint` 的**那一次**解析（R1 02 决策 21 / ADR-0003）——
+ * dispatch 若能为了拿字段再 `safeParse` 一遍，就有了第二个裁决者。
+ */
+export interface AccountFrame {
+  readonly window?: DisplayWindowBounds
+  readonly todayFrom?: string
+}
+
+/**
+ * 一次端点调用的**解析回执**：回包 + 合并账目要用的视野。
+ *
+ * 视野必须取自 `defineEndpoint` 的**那一次**解析（R1 02 决策 21 / ADR-0003）。
  * 如果 dispatch 为了拿窗口再 `safeParse` 一遍，就有了第二个裁决者；如果 handler 自己算账，
  * overview 与写端点就会各有一份口径 —— 本票要收敛掉的正是后者。所以把「同一份解析结果里的
- * 窗口」显式交回分发核，而不是让它去翻原始 payload。
+ * 窗口与今天起点」显式交回分发核，而不是让它去翻原始 payload。
  */
 export interface EndpointOutcome {
   readonly result: RpcResult<unknown>
-  /** 解析后的账目窗口；缺省 = 全量（不带窗口的旧请求）。 */
-  readonly accountWindow?: DisplayWindowBounds
+  /** 解析后的账目视野；缺省 = 全量账、无拆分（不带窗口的旧请求）。 */
+  readonly accountFrame?: AccountFrame
 }
 
 /**
@@ -115,9 +128,9 @@ export interface EndpointOutcome {
  * （`...accountOf(target)`），任一处漏掉就是「幽灵未读」——客户端拿本地增量当真相，
  * 左栏各源之和 ≠ 顶栏总数（spec §4 不变量 1）。
  *
- * `accountWindowOf`：带账端点的窗口提取器，入参是**已解析**的那份值。声明成必填的约定
- * （代码层面可选是因为非带账端点不需要）：带账却漏了它，窗口会被静默忽略、账目回全量，
- * 端点用例会立刻翻红 —— 那是这条约定唯一的守卫。
+ * `accountFrameOf`：带账端点的视野提取器（显示窗 + todayFrom），入参是**已解析**的那份值。
+ * 声明成必填的约定（代码层面可选是因为非带账端点不需要）：带账却漏了它，窗口会被静默忽略、
+ * 账目回全量，端点用例会立刻翻红 —— 那是这条约定唯一的守卫。
  *
  * `payload`：入参形状的**唯一**声明（`src/endpoint-payloads.ts`）。`to` 收到的已经是解析后的值，
  * 所以 handler 体内不再有 `payload as`。零入参端点写 `noPayload`（= `z.unknown()`）。
@@ -144,8 +157,8 @@ function defineEndpoint<P>(spec: {
   readonly carriesAccount?: true
   readonly payload: ZodType<P>
   readonly invalidMessage?: string
-  /** 带账端点必须声明：从**已解析**的入参里取窗口（见 EndpointOutcome 的注释）。 */
-  readonly accountWindowOf?: (input: P) => DisplayWindowBounds | undefined
+  /** 带账端点必须声明：从**已解析**的入参里取账目视野（见 EndpointOutcome 的注释）。 */
+  readonly accountFrameOf?: (input: P) => AccountFrame
   readonly to: (input: P, ctx: EndpointCtx) => Promise<RpcResult<unknown>>
 }): EndpointSpec {
   return {
@@ -162,10 +175,10 @@ function defineEndpoint<P>(spec: {
         }
       }
       const result = await spec.to(parsed.data, ctx)
-      // 窗口与回包来自**同一次** safeParse 的 parsed.data：没有第二遍解析，也没有 handler 自算。
-      return spec.accountWindowOf === undefined
+      // 账目视野与回包来自**同一次** safeParse 的 parsed.data：没有第二遍解析，也没有 handler 自算。
+      return spec.accountFrameOf === undefined
         ? { result }
-        : { result, accountWindow: spec.accountWindowOf(parsed.data) }
+        : { result, accountFrame: spec.accountFrameOf(parsed.data) }
     },
   }
 }
@@ -200,10 +213,11 @@ const tagFailure = (error: unknown): RpcResult<never> | undefined =>
  * **这是全仓库唯一的算账处**（R1 02 决策 20）：overview 与分发核（五个带账写端点）都调它。
  * 总账由每源账目**求和派生**，绝不另数一遍 —— 两处各算一次时，截断/漂移截面下迟早对不上。
  *
- * @param window 显示窗；缺省 = 全量。窗口取自调用方**已经解析过**的那份入参（overview 的
- *               from/to 或 dispatch 的 EndpointOutcome.accountWindow），这里不再解析任何东西。
+ * @param frame 账目视野（显示窗 + 今天的起点）；缺省 = 全量账、无拆分。取自调用方**已经解析过**
+ *              的那份入参（overview 的 from/to/todayFrom 或 dispatch 的 EndpointOutcome.accountFrame），
+ *              这里不再解析任何东西。
  */
-const accountOf = (target: UnreadStore, window?: DisplayWindowBounds): UnreadAccount => {
+const accountOf = (target: UnreadStore, frame?: AccountFrame): UnreadAccount => {
   // 键域与判据都走**存储侧那一份**实现：未读判据就是 unread.ts 的 isUnread（自持实现里写作
   // `read_at IS NULL`，两者是同一件事的两种写法，有测试在同一夹具上逐键对账），键域 =
   // listFeeds() 的全量键（0 未读的源也留 0）。
@@ -211,8 +225,13 @@ const accountOf = (target: UnreadStore, window?: DisplayWindowBounds): UnreadAcc
   // 为什么不再在这里对 allItems() 跑 countUnreadPerFeed：① 口径会分家 —— 这里算一遍、SQL 里
   // 再算一遍，正是任务 1 的键域与任务 5 的 unread 漂过两次的那条路；② 10 万行下每次标读/撤销/
   // 星标/保持未读/清理都拖着一次全表物化（spec §3.1 列的五处调用点）。
-  const perFeedUnread = target.unreadPerFeed(target.listFeeds().map(([feedId]) => feedId), window)
-  return { unread: sumOf(perFeedUnread), perFeedUnread }
+  const feedIds = target.listFeeds().map(([feedId]) => feedId)
+  const perFeedUnread = target.unreadPerFeed(feedIds, frame?.window)
+  const account: UnreadAccount = { unread: sumOf(perFeedUnread), perFeedUnread }
+  // 拆分只在请求给了 todayFrom 时出现：不带窗口的旧请求回包形状逐字不变（spec 验收 14）。
+  // 它描述的是**全部未读**的构成，所以即使带了窗口也按同一键域算同一份（spec 决策 17）。
+  if (frame?.todayFrom === undefined) return account
+  return { ...account, unreadSplit: target.unreadSplit(feedIds, frame.todayFrom) }
 }
 
 /**
@@ -227,6 +246,24 @@ function displayWindowOf(
   const { from, to } = input
   if (from === undefined || from === null || to === undefined || to === null) return undefined
   return { from, to }
+}
+
+/**
+ * 从**已解析**入参里取账目的完整视野：显示窗 + 今天的起点（`todayFrom`）。
+ *
+ * 三个字段同属一段 `windowShape` 声明，所以这里也是同一次解析的产物；`null` 与缺席同义
+ * （浏览器通道把缺省序列化成 null）。两个值互相独立：只有 from/to 时照旧按窗算账，
+ * 只有 todayFrom 时照旧回全量账 + 拆分（「全部」档位就是这种组合）。
+ */
+function accountFrameOf(
+  input: { readonly from?: string | null; readonly to?: string | null; readonly todayFrom?: string | null },
+): AccountFrame {
+  const window = displayWindowOf(input)
+  const todayFrom = input.todayFrom ?? undefined
+  return {
+    ...(window === undefined ? {} : { window }),
+    ...(todayFrom === undefined ? {} : { todayFrom }),
+  }
 }
 
 /** 从 overview/refresh 的**已解析**入参里把范围落到库上（形状由 payload 声明判，这里只判存在性）。 */
@@ -255,16 +292,19 @@ function overviewScopeOf(
  * @param cursor    续页边界（keyset）；缺省 = 第一页。游标由 overview 端点围栏解码后传入，
  *                  这里**不再判形状** —— 认不出的游标在那一层就被响亮拒了（见 ENDPOINTS.overview）
  * @param scope     浏览范围；缺省 = 普通跨源契约（逐字不变）。有它时取页在 SQL 侧先按成员/标签过滤再限页。
- * @param window    显示窗（半开区间）；缺省 = 「全部」，取数与栅栏行为与加窗之前逐字相同。
- *                  窗口只作用于**列表取数** —— 账目按窗是 R1 02 的票，本轮不提前改口径。
+ * @param frame     账目视野（显示窗 + 今天的起点）；缺省 = 「全部」、无拆分 —— 取数与栅栏行为
+ *                  与加窗之前逐字相同。窗口只作用于**列表取数与 unread / perFeedUnread**；
+ *                  `unreadSplit` 描述全部未读的构成，与窗口无关（spec 决策 17）。
  */
 const buildOverview = (
   ctx: EndpointCtx,
   run?: RefreshRun,
   cursor?: Cursor,
   scope?: PageScope,
-  window?: DisplayWindowBounds,
+  frame?: AccountFrame,
 ): Overview => {
+  // 列表取数只看窗口这一半；拆分不参与取页（它描述全部未读的构成，与窗口无关）。
+  const window = frame?.window
   const refreshedAtMs = ctx.lastRefreshCompletedAt()
   // refreshed 是布尔概况（客户端历史上就靠它），refresh 说明细节 —— 两者由同一个 run 派生，
   // 不允许各自算一遍：否则「refreshed=true 而 outcome=throttled」这种自相矛盾迟早出现。
@@ -294,10 +334,10 @@ const buildOverview = (
   const titles = new Map<string, string>()
   for (const feed of feeds) titles.set(feed.id, feed.title)
 
-  // 账目**不再由这里自己算**（R1 02 决策 20）：与分发核共用 accountOf，窗口也传同一份。
+  // 账目**不再由这里自己算**（R1 02 决策 20）：与分发核共用 accountOf，视野也传同一份。
   // 原先这里与 accountOf 各写一段 unreadPerFeed 调用 —— 两段代码自洽、合起来漂移时，
   // 单快照断言永远看不见；「overview 与写端点在同一个窗口下逐项相等」由端点用例钉住。
-  const account = accountOf(target, window)
+  const account = accountOf(target, frame)
 
   // 一页条目交给 src/item-page.ts（ADR-0004）：窗口放大、多取一行判尾、游标围栏都在那里。
   // 这里只做投影（行 → ItemView）与标签批量补 —— 两者是 wire 形状，不是分页协议。
@@ -343,6 +383,8 @@ const buildOverview = (
     // 总数由每源账目**求和派生**（accountOf 内），不再单独数一遍 —— 见 accountOf 的注释。
     unread: account.unread,
     perFeedUnread: account.perFeedUnread,
+    // 拆分是可选字段：不带 todayFrom 时**不出现**（旧形状逐字不变），不是 0/0/0。
+    ...(account.unreadSplit === undefined ? {} : { unreadSplit: account.unreadSplit }),
     refreshed,
     ...(run === undefined ? {} : { refresh: run }),
     // 让界面能说明「上次到底什么时候抓过」——否则「按住刷新没反应」无从判断
@@ -386,17 +428,18 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       const resolved = overviewScopeOf(ctx, input)
       if (resolved.failure !== undefined) return resolved.failure
       const scope = resolved.scope
-      // 窗口只解析这一次：下游（取页、栅栏）都拿这同一份值，不许各自再从 payload 里抠一遍。
-      const window = displayWindowOf(input)
+      // 窗口与 todayFrom 只解析这一次：下游（取页、栅栏、账目）都拿这同一份值，
+      // 不许各自再从 payload 里抠一遍。
+      const frame = accountFrameOf(input)
       const raw = input.cursor
-      if (raw === undefined || raw === null) return ok(buildOverview(ctx, undefined, undefined, scope, window))
+      if (raw === undefined || raw === null) return ok(buildOverview(ctx, undefined, undefined, scope, frame))
       // 围栏（前缀 = 范围键 + 窗口键）与形状都由一页条目模块判（ADR-0004）；两种失败各留一句文案：
       // 「范围变了」要客户端重载当前范围，「格式认不出」是调用方传了垃圾 —— 处置不同，不能合并。
       // 窗口进栅栏：切档后旧游标在这里失配，绝不静默按旧边界续页。
-      const parsed = decodePageCursor(scope, raw, window)
+      const parsed = decodePageCursor(scope, raw, frame.window)
       if (parsed.status === 'mismatch') return fail('bad-request', '分页游标与当前范围不匹配，请重新加载')
       if (parsed.status === 'malformed') return fail('bad-request', '未知的续页游标（格式应为 "<recency>|<id>"）：' + raw)
-      return ok(buildOverview(ctx, undefined, parsed.cursor, scope, window))
+      return ok(buildOverview(ctx, undefined, parsed.cursor, scope, frame))
     },
   }),
 
@@ -408,9 +451,10 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       const resolved = overviewScopeOf(ctx, input)
       if (resolved.failure !== undefined) return resolved.failure
       // 窗口同理：refresh 回的是同一页 + 同一份账，不带窗口就会把视图悄悄放回「全部」。
-      const window = displayWindowOf(input)
+      // 拆分也要跟着同一份视野走，否则刷新一次顶栏的三分就消失了。
+      const frame = accountFrameOf(input)
       const run = await ctx.refreshNow()
-      return ok(buildOverview(ctx, run, undefined, resolved.scope, window))
+      return ok(buildOverview(ctx, run, undefined, resolved.scope, frame))
     },
   }),
 
@@ -418,7 +462,7 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
     payload: markReadPayload,
     invalidMessage: 'markRead 需要 itemIds 数组，时间窗口必须成对且合法',
     carriesAccount: true,
-    accountWindowOf: displayWindowOf,
+    accountFrameOf,
     to: async (input, ctx) => {
       const itemIds = input.itemIds
       // 「全部标为已读」（A 键）走这条时带 skipKept：**保持未读的条目要活下来**
@@ -454,7 +498,7 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
     payload: unmarkReadPayload,
     invalidMessage: 'unmarkRead 需要 itemIds 数组，时间窗口必须成对且合法',
     carriesAccount: true,
-    accountWindowOf: displayWindowOf,
+    accountFrameOf,
     to: async (input, ctx) => {
       // 只服务于「全部标记已读」的短时撤销
       const itemIds = input.itemIds
@@ -739,7 +783,7 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
     // cleanup 是零业务入参，但窗口字段有形状：坏窗口必须响亮拒绝而不是被当成「忽略 payload」。
     invalidMessage: 'cleanup 的时间窗口无效（from / to 必须成对且 from < to）',
     carriesAccount: true,
-    accountWindowOf: displayWindowOf,
+    accountFrameOf,
     to: async (_input, ctx) => {
       // 显式清理（用户点按钮触发，**不设定时器**——验收项之一就是不残留定时器）。
       // 判据刻意保守：已读 + 未星标 + 未保持未读 + 早于阈值，四个条件缺一不可（见 retention.ts 注释）。
@@ -772,7 +816,7 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
     payload: itemIdWindowPayload,
     invalidMessage: 'toggleKeepUnread 需要 itemId，时间窗口必须成对且合法',
     carriesAccount: true,
-    accountWindowOf: displayWindowOf,
+    accountFrameOf,
     to: async (input, ctx) => {
       // 「保持未读」在 GR 里**没有快捷键**（规格 §3.4 的键位列是「—」），是条目下方的链接。
       // 所以这个端点服务于客户端的那个链接，不接键位。
@@ -971,7 +1015,7 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
     payload: itemIdWindowPayload,
     invalidMessage: 'toggleStar 需要 itemId，时间窗口必须成对且合法',
     carriesAccount: true,
-    accountWindowOf: displayWindowOf,
+    accountFrameOf,
     to: async (input, ctx) => {
       const itemId = input.itemId
       const existing = ctx.store.item(itemId)
@@ -1012,10 +1056,15 @@ export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: 
       const outcome = await spec.to(payload, ctx)
       const { result } = outcome
       if (spec.carriesAccount === true && result.ok) {
-        // 窗口来自 defineEndpoint 那一次解析的同一份入参（EndpointOutcome.accountWindow）——
+        // 视野来自 defineEndpoint 那一次解析的同一份入参（EndpointOutcome.accountFrame）——
         // 不在这里重新解析 payload，也不让 handler 自己算账（R1 02 决策 21）。
-        const account = accountOf(target, outcome.accountWindow)
-        return ok({ ...(result.value as object), unread: account.unread, perFeedUnread: account.perFeedUnread })
+        const account = accountOf(target, outcome.accountFrame)
+        return ok({
+          ...(result.value as object),
+          unread: account.unread,
+          perFeedUnread: account.perFeedUnread,
+          ...(account.unreadSplit === undefined ? {} : { unreadSplit: account.unreadSplit }),
+        })
       }
       return result
     } catch (error) {

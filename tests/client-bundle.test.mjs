@@ -915,6 +915,8 @@ test('R1-03：列表取数 / 续页 / 四个镜像动作 / cleanup 带同一份�
   for (const call of windowed.filter((entry) => windowedEndpoints.has(entry.endpoint))) {
     assert.equal(call.payload?.from, WINDOW_FROM, call.endpoint + ' 的 from 必须是同一个本地日界')
     assert.equal(call.payload?.to, WINDOW_TO, call.endpoint + ' 的 to 必须是同一个本地日界')
+    // R1 04：今天起点也由同一个构造器产出 —— 任何一处手写就会让标读回包的 split 漂成第二套。
+    assert.equal(call.payload?.todayFrom, WINDOW_FROM, call.endpoint + ' 的 todayFrom 必须是同一个本地日界')
   }
 })
 
@@ -954,4 +956,5 @@ test('R1-03：切档只发一次 overview；同档重选不发；搜索中 setWi
   const last = channel.calls.filter(([endpoint]) => endpoint === 'overview').at(-1)
   assert.equal(last[1]?.from, undefined, '「全部」档位不传 from（旧请求形状逐字不变）')
   assert.equal(last[1]?.to, undefined, '「全部」档位不传 to')
+  assert.equal(last[1]?.todayFrom, WINDOW_FROM, '「全部」档位仍带今天起点（顶栏三联拆分要用）')
 })
