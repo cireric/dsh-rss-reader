@@ -25,6 +25,8 @@ import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import { createReaderStore, nextExpandedOf, relativeTime, useReaderStore, VIRTUAL_VIEWS, type Filter, type MarkAllRange, type ReaderStore, type ReaderStoreDeps } from './store.js'
+import { DISPLAY_WINDOW_OPTIONS, displayWindowCountLabelOf, displayWindowNameOf } from './window-control.js'
+import type { DisplayWindowRange } from '../display-window.js'
 // 导出面是构建产物对外的契约（契约测试直接调它），store 搬家后仍要从入口转出去
 export { createReaderStore }
 // **仅供单测取用的 re-export**：键盘路由住在 ./keyboard-routing.ts，而 client 半只出单文件
@@ -95,6 +97,13 @@ const STYLE = `
 .dsh-rss-toolbar-title strong { display:block; font-size:16px; line-height:1.35; }
 .dsh-rss-meta { display:block; color:var(--rss-muted); font-size:12px; line-height:1.45; }
 .dsh-rss-counts { display:flex; flex-wrap:wrap; gap:2px 12px; margin-top:3px; }
+/* 时间范围档位（R1-03）：与计数同一行的原生 select。font:inherit 让它跟 .dsh-rss-meta 的
+   12px 走；显式 max-width 是为了窄面板下不把「已加载 N 条」挤到第二行（值为自然日名，最长 5 字）。 */
+.dsh-rss-window { font:inherit; font-size:12px; line-height:1.4; max-width:8.5em;
+  padding:1px 4px; border-radius:4px; color:inherit; background:var(--rss-bg);
+  border:1px solid var(--rss-line); }
+.dsh-rss-window:disabled { opacity:.55; }
+.dsh-rss-window-hint { font-size:11px; color:var(--rss-muted); }
 .dsh-rss-actions { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
 .dsh-rss-settings { position:relative; }
 .dsh-rss-settings > summary::-webkit-details-marker { display:none; }
@@ -455,7 +464,28 @@ export function createReader(store: ReaderStore): () => ReactNode {
               : 'RSS 阅读器'}</strong>
             {state.view === 'list' && (
               <div className="dsh-rss-meta dsh-rss-counts">
-                {state.showUnread && <span>全局 {state.unread} 条未读</span>}
+                {/* 时间范围档位（R1-03，spec 决策 22）：只在列表视图、与「已加载 X 条」同一行。
+                    原生 select = Tab 可达、键盘可操作；焦点在它上面时键盘路由的输入控件守卫
+                    （keyboard-routing.ts 的 isTypingTarget，已把 SELECT 算作输入控件）会放行，
+                    j / k / 空格不会吞键。搜索有自己的日期筛选（UTC 日界，口径不同），
+                    所以搜索进行中禁用并给出可见原因（spec 决策 27）。 */}
+                <select className="dsh-rss-window" data-rss-window="" aria-label="时间范围"
+                  value={state.displayWindow}
+                  disabled={state.search !== undefined}
+                  title={state.search !== undefined
+                    ? '搜索进行中不可用：搜索有自己的日期筛选，退出搜索后可切换'
+                    : '按本地自然日筛选列表与未读计数'}
+                  onChange={(event) => { void store.setWindow(event.target.value as DisplayWindowRange) }}>
+                  {DISPLAY_WINDOW_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+                {state.search !== undefined && (
+                  <span className="dsh-rss-window-hint" data-rss-window-reason="">搜索进行中不可用：搜索有自己的日期筛选</span>
+                )}
+                {state.showUnread && (
+                  <span>{displayWindowCountLabelOf(state.displayWindow)} {state.unread} 条未读</span>
+                )}
                 <span>已加载 {state.items.length} 条</span>
               </div>
             )}
@@ -499,7 +529,9 @@ export function createReader(store: ReaderStore): () => ReactNode {
               <label>显示未读计数
                 <input type="checkbox" checked={state.showUnread} onChange={(event) => store.setShowUnread(event.target.checked)} />
               </label>
-              <label>A 键范围
+              {/* A 的作用范围是**当前列表**（已加载页 + 当前范围 + 当前过滤 + 当前显示窗）。
+                  文案只在这里与 keys.ts 的帮助表出现两次（spec 决策 31），别处不抄第三份。 */}
+              <label>A 键范围（当前列表）
                 <select value={state.markAllRange} onChange={(event) => store.setMarkAllRange(event.target.value as MarkAllRange)}>
                   <option value="all">全部</option>
                   <option value="day">早于 1 天</option>
@@ -658,7 +690,12 @@ export function createReader(store: ReaderStore): () => ReactNode {
             <div style={{ padding: 20, opacity: 0.7 }}>
               {state.search
                 ? '没有找到匹配的本地文章。'
-                : navSelection.kind === 'folder'
+                // 档位非「全部」且列表为空：这是**真空**，不是加载失败 —— 明说档位名并提示换档，
+                // 但绝不自动放宽（spec 决策 26 / 验收 13）。有 error 时走下面的既有文案，
+                // 错误条照旧显示，不用空态掩盖。
+                : state.displayWindow !== 'all' && state.error === undefined
+                  ? '「' + displayWindowNameOf(state.displayWindow) + '」内暂无内容，可换一个时间范围。'
+                  : navSelection.kind === 'folder'
                   ? (selectedFolder?.feedIds.length === 0
                     ? '这个文件夹还没有订阅源。可以在订阅管理里把订阅移进来。'
                     : state.filter === 'starred'
@@ -765,7 +802,9 @@ export function createReader(store: ReaderStore): () => ReactNode {
               在途时禁用（loadingMore）：连点会堆出多个请求，每次都要过一次 SQL 与一次 feeds 文件读。 */}
           {state.nextCursor !== undefined && (
             <div style={{ padding: '10px 20px', textAlign: 'center' }}>
-              <button type="button" className="dsh-rss-btn" disabled={state.loadingMore}
+              {/* 整份重取在途时也禁用：旧游标还在 state 里（refresh 不改写当前页），此时发续页
+                  会与新第一页并发落地，两边都往「当前列表」拼。 */}
+              <button type="button" className="dsh-rss-btn" disabled={state.loadingMore || state.loading}
                 onClick={() => { void store.loadMore() }}>
                 {state.loadingMore ? '加载中…' : '加载更多'}
               </button>
@@ -782,7 +821,14 @@ export function createReader(store: ReaderStore): () => ReactNode {
   }
 }
 
-function Badge({ store }: { store: ReaderStore }): ReactNode {
+/**
+ * 侧栏未读徽标。数据源是**同一个 store 的 state.unread**（宿主下发的账目，切档后就是窗内账），
+ * 不另存「全局总数」——那会变成第二套账目口径（spec 补充说明）。
+ *
+ * 刻意 export 给 DOM 层测试：R1-03 要断言「切档后徽标与顶栏是同一个数」，而这颗组件不在
+ * Reader 树里（它是 sidebar.toggle.badge 座位单独注册的），测试只能自己挂一次。
+ */
+export function Badge({ store }: { store: ReaderStore }): ReactNode {
   const state = useReaderStore(store)
   // 计数被隐藏时徽标也必须消失 —— 否则「隐藏」只做了一半
   if (!state.showUnread || state.unread === 0) return null

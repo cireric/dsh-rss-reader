@@ -1598,7 +1598,8 @@ export const MUTATIONS = [
     // 判据：tests/nav-selection.test.mjs 的「续页是追加…」里的 pageCalls 断言。
     // 2026-11-15 重锚：同上（deps.rpc）。
     // 2026-11-16 重锚：同上一族（deps.rpc → rpc、state.navSelection → 本地 nav 快照）。
-    from: 'const overview = await rpc("overview", {\n\t\t\t\t\t\tcursor,\n\t\t\t\t\t\t...nav.kind === "folder" ? { folder: nav.folder } : {},\n\t\t\t\t\t\t...nav.kind === "tag" ? { tagId: nav.tagId } : {}\n\t\t\t\t\t});',
+    // 2026-11-20 重锚（R1-03）：续页载荷加上了唯一窗口构造器的展开 ...windowPayload()。
+    from: 'const overview = await rpc("overview", {\n\t\t\t\t\t\tcursor,\n\t\t\t\t\t\t...nav.kind === "folder" ? { folder: nav.folder } : {},\n\t\t\t\t\t\t...nav.kind === "tag" ? { tagId: nav.tagId } : {},\n\t\t\t\t\t\t...windowPayload()\n\t\t\t\t\t});',
     // 2026-11-16 评审修复：callRpc 在产物里不存在（只有 rpc / deps.callRpc）—— 改成真的打第一页。
     to: 'const overview = await rpc("overview", {});' },
   { id: 'paging-在途不挡重复请求', file: 'lib/client.js',
@@ -1728,8 +1729,9 @@ export const MUTATIONS = [
   { id: 'client-回包账目必须落地', file: 'lib/client.js',
     judges: ['client-bundle.test.mjs'],
     judgeTests: ['C3：toggleStar 成功后账目以宿主回包为准落地（旧实现把回包整个丢掉）'],
-    from: 'deps.applyAccount(await deps.callRpc(action.endpoint, action.payload));',
-    to: 'void (await deps.callRpc(action.endpoint, action.payload));' },
+    // 2026-11-20 重锚（R1-03）：窗口字段由镜像在发请求前并入后，实参名从 action.payload 变成局部 payload。
+    from: 'deps.applyAccount(await deps.callRpc(action.endpoint, payload));',
+    to: 'void (await deps.callRpc(action.endpoint, payload));' },
   { id: 'client-撤销失败必须恢复撤销条', file: 'lib/client.js',
     judges: ['client-bundle.test.mjs'],
     judgeTests: ['C3：undoMarkAll 失败恢复撤销条并重新武装 5 秒窗口（只塞回 state 会常驻）'],
@@ -2170,6 +2172,21 @@ export const MUTATIONS = [
     from: `const unreadPerFeedSql = (window) => 'SELECT i.feed_id AS feed_id, COUNT(*) AS unread FROM items i WHERE i.read_at IS NULL'
     + (window === undefined ? '' : ' AND ' + WINDOW_FILTER)`,
     to: `const unreadPerFeedSql = (window) => 'SELECT i.feed_id AS feed_id, COUNT(*) AS unread FROM items i WHERE i.read_at IS NULL'` },
+  // ── R1 03：客户端顶栏窗口控件 ─────────────────────────────────────────
+  { id: '显示窗-客户端只给 overview 带窗', file: 'lib/client.js',
+    judges: ['client-bundle.test.mjs'],
+    judgeTests: ['R1-03：列表取数 / 续页 / 四个镜像动作 / cleanup 带同一份窗口字段'],
+    // 账目镜像不装饰动作载荷：视图停在「今天」时标一次读，回包的账被打回全量，窗内未读数
+    // 立刻跳回全局数（spec 验收 12 的客户端半边）。判据是请求体断言 —— 它直接看 from/to。
+    from: '...deps.windowPayload()',
+    to: '...{}' },
+  { id: '显示窗-切档不失效在途续页', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['R1-03 在途续页：切档后旧回包不得把旧档条目追加进来（hold 控制回包顺序）'],
+    // 整份重取不递增列表版本号：切档前发出的 loadMore 回包落地时仍被判「版本一致」，
+    // 旧档条目被追加进新档列表（spec 验收 17 翻红）。
+    from: 'nextListVersion();\n\t\t\t\t\tset(endpoint === "overview" ? {',
+    to: 'set(endpoint === "overview" ? {' },
   { id: 'client-排序后不重载', file: 'lib/client.js',
     judges: ['feed-order-client.test.mjs'],
     judgeTests: ['moveFeedOrder：按当前 feeds 顺序整体推出 ids，成功后 reload 用宿主快照改行序'],

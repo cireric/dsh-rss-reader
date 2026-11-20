@@ -175,7 +175,7 @@ export const READER_KEY_HELP: ReaderHelpSection[] = [
         bindings: [{ key: 's', action: 'star' }] },
       { label: 'm', summary: '切换已读 / 未读', scope: 'any',
         bindings: [{ key: 'm', action: 'toggleRead' }] },
-      { label: 'A', summary: '全部标为已读（范围取头部「A 键范围」）', scope: 'any',
+      { label: 'A', summary: '把当前列表里的未读全部标为已读（范围取头部「A 键范围」）', scope: 'any',
         bindings: [{ key: 'A', shift: true, action: 'markAll' }] },
     ],
   },

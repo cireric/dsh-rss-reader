@@ -10,6 +10,7 @@ import { ROUTE_PATH, type DiscoveryResult, type Endpoint, type FeedView, type Fo
 import { DEFAULT_READING_PREFERENCES, sanitizeViewPreferences, validListScrollTop } from '../preferences.js'
 import type { ReadingPreferences, ViewPreferences } from '../preferences.js'
 import { clampScrollTop } from '../list-scroll.js'
+import type { DisplayWindowRange } from '../display-window.js'
 
 export type Filter = 'all' | 'unread' | 'starred'
 
@@ -112,6 +113,14 @@ export interface ReaderState {
   layout: 'list' | 'expanded'
   /** 「全部标为已读」的时间范围，见 MarkAllRange */
   markAllRange: MarkAllRange
+  /**
+   * 显示窗档位（R1-03）：全部 / 今天 / 近 3 天 / 近 7 天。
+   *
+   * **不持久化**（spec 决策 1）：它不在 ViewPreferences 里，面板卸载时由 flushViewMemory 复位成
+   * `all` —— 重开面板看到的是稳定的默认视图。它是**视野**设置，不是范围：切源 / 文件夹 / 标签
+   * 与过滤三连都不读写它，它也不读写 markAllRange。
+   */
+  displayWindow: DisplayWindowRange
   /** 是否显示未读计数（规格 §5 不变量 8：**未读计数可隐藏**）。默认显示 = 既有行为。 */
   showUnread: boolean
   /** 最近一次导入的报告（坏源要逐条列出，不能只报总数） */
@@ -254,7 +263,7 @@ const browserDeps: ReaderStoreDeps = {
  *
  * | 域 | 拥有的 state | 动作 | 允许改别人的什么 |
  * |---|---|---|---|
- * | 列表 | `items` / `selectedId` / `nextCursor` / `loadingMore` / `filter` / `layout` / `markAllRange` / `undo`（账目 `unread` / `perFeedUnread` 由 account-mirror 的回包整体覆盖） | load / loadMore / visible / setFilter / setLayout / activate / selectRelative / markRead / toggleStar / toggleKeepUnread / toggleRead / markAllRead / undoMarkAll / cleanup / stepArticle / openArticle / retryArticle / rememberListScrollTop / takeListScrollTop | 只**读** feeds / tags；改账目一律经 account-mirror（回包整体覆盖）。**跨域写入逐条登记在此**：① setFilter 同步 `navCursor`（光标跟着过滤走，2026-10-10 的既有规则）；② overview 整份落地（applyOverview 与 load 的搜索分支）把 feeds / folders / tags 按宿主快照原样写回；③ 选中项失效时 applyOverview / load 把 navSelection + navCursor 回落虚拟视图（与「源被退订」同一条规则）；④ 正文动作（openArticle / retryArticle / stepArticle）写 `view` / `article` —— 这两份是跨域呈现状态，不归任何一块私有；⑤ setFilter 经 leaveArticleForScope 写 `view` / `article`（切过滤退出正文） |
+ * | 列表 | `items` / `selectedId` / `nextCursor` / `loadingMore` / `filter` / `layout` / `markAllRange` / `displayWindow` / `undo`（账目 `unread` / `perFeedUnread` 由 account-mirror 的回包整体覆盖） | load / loadMore / visible / setFilter / setWindow / setLayout / activate / selectRelative / markRead / toggleStar / toggleKeepUnread / toggleRead / markAllRead / undoMarkAll / cleanup / stepArticle / openArticle / retryArticle / rememberListScrollTop / takeListScrollTop | 只**读** feeds / tags；改账目一律经 account-mirror（回包整体覆盖）。**跨域写入逐条登记在此**：① setFilter 同步 `navCursor`（光标跟着过滤走，2026-10-10 的既有规则）；② overview 整份落地（applyOverview 与 load 的搜索分支）把 feeds / folders / tags 按宿主快照原样写回；③ 选中项失效时 applyOverview / load 把 navSelection + navCursor 回落虚拟视图（与「源被退订」同一条规则）；④ 正文动作（openArticle / retryArticle / stepArticle）写 `view` / `article` —— 这两份是跨域呈现状态，不归任何一块私有；⑤ setFilter / setWindow 经 leaveArticleForScope 写 `view` / `article`（切过滤 / 切档退出正文） |
  * | 搜索 | `search` / `searchRevision` / `searchRequest` / `searchPages` | submitSearch / loadSearch / resetSearchPage | 借列表的 items / selectedId / nextCursor / loading 展示；**不许**改 filter |
  * | 订阅 | `feeds` / `folders` / `discovery` / `feedsBusy` / `importReport` / `navSelection` / `navCursor` / `navVisible` / `foldedFolders` / `viewPreferences`（**deleteFolder 例外**：删掉当前所在文件夹时会把 `filter` 回落成 `all`，这条跨域写入登记在此） | addFeed / removeFeed / moveFeedOrder / importOpml / exportOpml / discover / createFolder / renameFolder / deleteFolder / moveFeedToFolder / selectNav / moveNavCursor / openNavCursor / toggleNav / toggleFolder / flushViewMemory | 改 navSelection 后必须走 persistView；**整份覆盖写必须带上当下的 selectedId**（否则一次普通导航就抹掉阅读位置）；选中 / j/k / 打开条目经 300ms 去抖写手记 lastItemId，面板卸载时 flush；退订只能经 `deleteSubscription`；selectNav 经列表域的 leaveArticleForScope 写 `view` / `article`（切作用域退出正文） |
  * | 标签 | `tags` / 条目的 `tagIds` | createTag / renameTag / deleteTag / toggleItemTag | 乐观改 tagIds，失败回取当前页拉回真相（tagWrite 串行化 + tagEpoch 身份） |
@@ -276,7 +285,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   let state: ReaderState = {
     items: [], feeds: [], folders: [], tags: [], unread: 0, filter: 'all',
     selectedId: undefined, loading: true, error: undefined, undo: undefined,
-    view: 'list', layout: 'list', markAllRange: 'all', showUnread: true, article: undefined, notice: undefined,
+    view: 'list', layout: 'list', markAllRange: 'all', displayWindow: 'all', showUnread: true, article: undefined, notice: undefined,
     importReport: undefined, discovery: undefined, feedsBusy: false,
     navSelection: { kind: 'virtual' }, perFeedUnread: {}, navVisible: true,
     reading: DEFAULT_READING_PREFERENCES, duplicates: {},
@@ -550,6 +559,9 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
    * 的 load 就再也不会读记忆；viewTouched 停在 true 会让它即使读到也整份放弃；待恢复的滚动
    * 位置与 listScrollTouched 也会让滚动恢复永远取不到值。复位放在 flush 里是因为它就是
    * 「面板卸载」的唯一入口（真实面板与测试都走这里）。
+   *
+   * 显示窗档位也在这一组里：它**不持久化**（spec 决策 1），重开面板必须回到「全部」。
+   * 只复位档位、不动 items / 账目 —— 下一次挂载的 refresh 会按新的档位重取，顺手把账目换回来。
    */
   const flushViewMemory = (): void => {
     if (pendingViewWrite !== undefined) {
@@ -560,6 +572,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     viewTouched = false
     listScrollTouched = false
     restoredListScrollTop = undefined
+    if (state.displayWindow !== 'all') set({ displayWindow: 'all' })
   }
 
   /**
