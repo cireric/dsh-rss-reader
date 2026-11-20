@@ -21,7 +21,8 @@ import type { ViewPreferences } from './preferences.js'
 import { recencyOf } from './cursor.js'
 import type { Cursor } from './cursor.js'
 import type { DisplayWindowBounds } from './display-window.js'
-import { afterCursor, inDisplayWindow } from './item-page.js'
+import { afterCursor } from './item-page.js'
+import { inDisplayWindow } from './display-window.js'
 import { linkKeyOf, type DuplicateRow } from './duplicates.js'
 
 /**
@@ -142,8 +143,12 @@ export interface ReaderStore {
    * **只保证「传进来的键都有值」，不保证「只有传进来的键」**：自持实现的 SQL 按全表聚合，
    * 已退订源的残留条目也会被数进去（只有拿到 feeds 表的人才做得准键域判定）。调用方一律
    * 「先按 feeds 表铺 0、再用有值的覆盖」—— unread.ts 的 countUnreadPerFeed 同此约定。
+   *
+   * `window`（R1 02）：可选显示窗（半开区间）。判据与 listRecent **共用同一段**
+   * （`publishedAt` 非空 + `recency` 半开区间），只在未读判据之后生效；无日期未读永不计入窗内账。
+   * 缺省 = 全量（旧行为逐字不变）。三份实现同判据由 contracts 用例逐键对账。
    */
-  unreadPerFeed(feedIds: readonly string[]): Record<string, number>
+  unreadPerFeed(feedIds: readonly string[], window?: DisplayWindowBounds): Record<string, number>
   /**
    * 跨源最近的 limit 条（`recency` 降序 + id 升序 —— 与 allItems 同一套排序键，见 cursor.ts 的
    * recencyOf；缺发布时间的条目按抓取时间归位）。
@@ -395,14 +400,18 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
       return entries
     },
     /**
-     * 旧路径**行为不变**（Task 5 的接口扩展）：先按传进来的键铺 0，再把全表里的未读累加上去。
-     * 键域判据（`unread[feedId] === undefined` 就跳过）与 unread.ts 的 countUnreadPerFeed
+     * 旧路径**行为不变**（Task 5 的接口扩展，R1 02 加可选窗口）：先按传进来的键铺 0，再把全表里的未读
+     * 累加上去。键域判据（`unread[feedId] === undefined` 就跳过）与 unread.ts 的 countUnreadPerFeed
      * 逐字一致 —— 已退订源的残留条目因此不进账。代价是全表遍历，但这条是历史路径
      * （生产早已是 createSqliteStore），不拿性能目标去重写它。
+     *
+     * 窗口判据同样下沉到 countUnreadPerFeed（JS 侧唯一一份 inDisplayWindow），
+     * 所以「全量 / 带窗」是同一算法的两种参数，不是两段代码。
      */
-    unreadPerFeed: (feedIds) => countUnreadPerFeed(
+    unreadPerFeed: (feedIds, window) => countUnreadPerFeed(
       feedIds,
       [...items.entries()].map(([, record]) => record),
+      window,
     ),
     /**
      * 旧路径同样行为不变：全表按 recency 降序 + id 升序排完取前缀。
@@ -416,7 +425,7 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
       const rows = [...items.entries()].filter(([itemId, record]) => {
         if (allowed !== undefined && !allowed.has(record.feedId)) return false
         if (tagId !== undefined && !(itemTagIds.get(itemId)?.has(tagId) ?? false)) return false
-        // 显示窗判据与自持实现同源（JS 侧唯一一份是 src/item-page.ts 的 inDisplayWindow）：
+        // 显示窗判据与自持实现同源（JS 侧唯一一份是 src/display-window.ts 的 inDisplayWindow）：
         // 只认 publishedAt、无日期的不进窗 —— 这里绝不拿 recencyOf 兜底。
         if (window !== undefined && !inDisplayWindow(record, window)) return false
         if (cursor === undefined) return true

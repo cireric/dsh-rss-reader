@@ -1346,8 +1346,10 @@ export const MUTATIONS = [
     // 未读判据一旦写反（read_at IS NOT NULL），账目就变成「已读数」——而它与「各源之和 === 总未读」
     // 的关系看着仍然自洽（两边一起错），所以只有那条**与 shared.ts 逐键对账**的用例能抓到它。
     // 判据：tests/store-sqlite.test.mjs 的「unreadPerFeed：与 unread.ts 的唯一口径…逐键相等」。
-    from: "const SELECT_UNREAD_PER_FEED = 'SELECT feed_id AS feed_id, COUNT(*) AS unread FROM items WHERE read_at IS NULL GROUP BY feed_id';",
-    to: "const SELECT_UNREAD_PER_FEED = 'SELECT feed_id AS feed_id, COUNT(*) AS unread FROM items WHERE read_at IS NOT NULL GROUP BY feed_id';" },
+    // R1 02 起这条 SQL 由 unreadPerFeedSql 拼装（同一段 WINDOW_FILTER 也供带窗账目）：
+    // from 锚定编译产物里的首行字符串，判据仍在 read_at IS NULL 这一半。
+    from: "const unreadPerFeedSql = (window) => 'SELECT i.feed_id AS feed_id, COUNT(*) AS unread FROM items i WHERE i.read_at IS NULL'",
+    to: "const unreadPerFeedSql = (window) => 'SELECT i.feed_id AS feed_id, COUNT(*) AS unread FROM items i WHERE i.read_at IS NOT NULL'" },
   { id: 'unreadPerFeed-丢键域（0 未读的源不留键）', file: 'lib/store-sqlite.js',
     judges: ['overview-paging.test.mjs', 'overview-scale.test.mjs', 'store-sqlite.test.mjs'],
     judgeTests: ['逐方法同义性：unreadPerFeed 与旧实现逐键相等（0 未读的源两边都留 0 值键）', '10 万行：overview 不再物化全表，且账目守恒（键域 = feeds 表）', 'unreadPerFeed：与 unread.ts 的唯一口径在同一夹具上逐键相等，且键域 = 传入的 feeds 表（Ruling P-6）'],
@@ -1554,8 +1556,8 @@ export const MUTATIONS = [
     // 键域退回「条目里出现过的源」⇒ 0 未读的源丢键（左栏那一行的角标变空白而不是 0），
     // 与自持实现「先按 feeds 表铺 0」不再同义。
     // 判据：tests/overview-paging.test.mjs 的「逐方法同义性：unreadPerFeed…逐键相等」。
-    from: 'unreadPerFeed: (feedIds) => countUnreadPerFeed(feedIds, [...items.entries()].map(([, record]) => record)),',
-    to: 'unreadPerFeed: (feedIds) => countUnreadPerFeed([...items.entries()].map(([, record]) => record.feedId), [...items.entries()].map(([, record]) => record)),' },
+    from: 'unreadPerFeed: (feedIds, window) => countUnreadPerFeed(feedIds, [...items.entries()].map(([, record]) => record), window),',
+    to: 'unreadPerFeed: (feedIds, window) => countUnreadPerFeed([...items.entries()].map(([, record]) => record.feedId), [...items.entries()].map(([, record]) => record), window),' },
   { id: 'store-旧实现正文清单字符数恒 0', file: 'lib/store.js',
     judges: ['overview-paging.test.mjs'],
     judgeTests: ['逐方法同义性：listArticleCacheEntries 与旧实现逐条相等（只交出 { id, chars, fetchedAt }）'],
@@ -2152,6 +2154,22 @@ export const MUTATIONS = [
     // d - 3 而不是 d - 2：近 3 天变成「今天 + 前 3 天」共 4 天（档位用例翻红）。
     from: 'now.getDate() - (days - 1)',
     to: 'now.getDate() - days' },
+  // ── R1 02：账目按窗 ───────────────────────────────────────────────────
+  { id: '显示窗-账目忽略窗口', file: 'lib/endpoints.js',
+    judges: ['time-window-endpoints.test.mjs'],
+    judgeTests: ['五个带账写端点：带窗回窗内账、不带窗回全量，各源之和恒等于总未读', '窗内标读 / 撤销：总数与所属源角标同步 ±1，全程不回全量'],
+    // dispatch 合并账目时不传 EndpointOutcome.accountWindow：五个写端点回全量账，
+    // 「窗内标读后数字被打回全量」在界面上正是本票要修的病象（验收 12 翻红）。
+    from: 'const account = accountOf(target, outcome.accountWindow);',
+    to: 'const account = accountOf(target);' },
+  { id: '显示窗-账目SQL忽略窗口', file: 'lib/store-sqlite.js',
+    judges: ['store-contract.test.mjs', 'time-window-endpoints.test.mjs'],
+    judgeTests: ['unreadPerFeed：带窗时与窗口取数同一判据（无日期不进窗），键域不变、各源之和 = 窗内总数', 'overview 带窗账目：只算窗内未读，键域 = feeds 表（0 未读留键），各源之和 = 总未读'],
+    // 自持实现的每源账目不再拼 WINDOW_FILTER：SQL 回全量，窗口只在列表取数上生效
+    // —— 顶栏 / 每源角标与窗内列表从此对不上（只有带窗账目的对账用例能抓到）。
+    from: `const unreadPerFeedSql = (window) => 'SELECT i.feed_id AS feed_id, COUNT(*) AS unread FROM items i WHERE i.read_at IS NULL'
+    + (window === undefined ? '' : ' AND ' + WINDOW_FILTER)`,
+    to: `const unreadPerFeedSql = (window) => 'SELECT i.feed_id AS feed_id, COUNT(*) AS unread FROM items i WHERE i.read_at IS NULL'` },
   { id: 'client-排序后不重载', file: 'lib/client.js',
     judges: ['feed-order-client.test.mjs'],
     judgeTests: ['moveFeedOrder：按当前 feeds 顺序整体推出 ids，成功后 reload 用宿主快照改行序'],

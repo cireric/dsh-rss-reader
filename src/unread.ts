@@ -5,6 +5,8 @@
  * 在 SQL 侧有一个**第二实现**（`read_at IS NULL`），两者必须在同一夹具上逐键对账；
  * 它和 wire 形状挤在 shared.ts 里时，「改判据要同时改 SQL」这件事没有一个固定的地址可以指。
  */
+import type { DisplayWindowBounds } from './display-window.js'
+import { inDisplayWindow } from './display-window.js'
 
 /**
  * 未读的**唯一判据**：已读 = readAt 有值（粒度见上面的 ItemView.readAt，用户 2026-10-05 定）。
@@ -13,8 +15,8 @@
  * 「同一条不变式在两个地方各算一遍」上（任务 1 的键域、任务 5 的 unread 口径），每次都表现为
  * 两个数各自自洽、合起来对不上，且只在特定截断/漂移截面才显形。
  *
- * **本函数是这条判据的定义处**；JS 侧任何算未读的地方都必须走它（唯一现役调用方是下面的
- * countUnreadPerFeed，createStore 的 unreadPerFeed 经它实现）。
+ * **本函数是这条判据的定义处**；JS 侧任何算未读的地方都必须走它（现役调用方：下面的
+ * countUnreadPerFeed —— 旧适配器 createStore 与内存替身 src/memory-store.ts 都经它实现）。
  *
  * ⚠️ Task 5 之后**两条端点路径**（buildOverview / accountOf）不再有 JS 侧的全表记账：都改走存储侧的
  * unreadPerFeed，而自持实现为了不物化 10 万行，在 SQL 里写作 `read_at IS NULL` ——
@@ -34,19 +36,28 @@ export const isUnread = (item: { readonly readAt?: string }): boolean => item.re
  *     buildOverview 注释）：从截断后的 items 派生，各源之和必然小于顶栏总未读。
  *  ② **已退订源的残留条目不进账**——键域严格 = feeds 表，多一个键就等于左栏多一行幽灵。
  *
+ * `window`（R1 02）：可选的显示窗；判据与列表取数**共用** `display-window.ts` 的 inDisplayWindow
+ * —— 只认 `publishedAt`、无日期永不进窗，半开区间 `[from, to)`。它在未读判据**之后**生效，
+ * 所以窗内账目恒等于「窗内列表里的未读行数」。无窗口 = 全量，旧行为逐字不变。
+ *
  * @param feedIds 订阅表当前的全部源 id（只用于定键域，顺序不影响结果）
  * @param items   条目表（宿主传全量；已退订源的残留条目会被 ① 的键域判定挡掉）
+ * @param window  可选的显示窗（半开区间）；缺省 = 「全部」
  */
 export function countUnreadPerFeed(
   feedIds: Iterable<string>,
-  items: Iterable<{ readonly feedId: string; readonly readAt?: string }>,
+  items: Iterable<{ readonly feedId: string; readonly readAt?: string; readonly publishedAt?: string }>,
+  window?: DisplayWindowBounds,
 ): Record<string, number> {
   const unread: Record<string, number> = {}
   // 先按 feeds 表铺 0：左栏按 feeds 表逐行渲染时无条件命中，不必区分「缺键」与「0」
   for (const feedId of feedIds) unread[feedId] = 0
   for (const item of items) {
     if (unread[item.feedId] === undefined) continue
-    if (isUnread(item)) unread[item.feedId] += 1
+    if (!isUnread(item)) continue
+    // 窗口判据只此一份（src/display-window.ts 的 inDisplayWindow）：与 listRecent 的 JS 半边同源。
+    if (window !== undefined && !inDisplayWindow(item, window)) continue
+    unread[item.feedId] += 1
   }
   return unread
 }

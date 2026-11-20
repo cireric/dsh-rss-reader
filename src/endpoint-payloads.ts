@@ -18,30 +18,6 @@ import { z } from 'zod'
 /** 零入参端点：接受并忽略 payload（与阶段 5 之前的语义一致）。 */
 export const noPayload = z.unknown()
 
-/** 单条目端点：`article` / `toggleStar` / `toggleKeepUnread`。 */
-export const itemIdPayload = z.object({ itemId: z.string().min(1) })
-
-const itemIdsShape = { itemIds: z.array(z.string().min(1)).min(1) }
-
-/** 批量条目端点：`unmarkRead`。空数组是坏入参，不是「什么都不做」。 */
-export const itemIdsPayload = z.object(itemIdsShape)
-
-/** `markRead`：A 键会带 skipKept 与时间范围；单条打开只带 itemIds。 */
-export const markReadPayload = z.object({
-  ...itemIdsShape,
-  skipKept: z.boolean().nullish(),
-  // 空串仍是「没有范围」（旧行为）；只判类型，别让 '' 变成「一条都不标」。
-  before: z.string().nullish(),
-})
-
-/** `duplicateHints`：可选批次，空数组/缺省/null 都表示「没有可提示的条目」，不是错误。 */
-export const duplicateHintsPayload = z.object({ itemIds: z.array(z.string().min(1)).nullish() })
-
-const scopeShape = {
-  folder: z.string().min(1).nullish(),
-  tagId: z.string().min(1).nullish(),
-}
-
 /**
  * 显示窗的**传输时刻**：只认 `toISOString()` 的形态（毫秒三位 + `Z`）。
  *
@@ -75,12 +51,56 @@ const windowShape = {
  * 浏览器通道把缺省序列化成 null 的先例见 emptyAsObject。
  * 「只有一半」是坏入参而不是「半开窗口」：下界与上界缺一，窗口要么无意义、要么退化成全量。
  */
-const windowRule = (input: { readonly from?: string | null; readonly to?: string | null }): boolean => {
+const windowRule = (input: { readonly from?: unknown; readonly to?: unknown }): boolean => {
   const from = input.from ?? undefined
   const to = input.to ?? undefined
   if (from === undefined && to === undefined) return true
-  if (from === undefined || to === undefined) return false
+  // 类型由 windowShape 的 transferInstant 保证；这里只再核一遍，是为了让 withWindow 的泛型
+  // 推断不依赖某一组具体字段（否则 refine 回调的类型会跟着 T 漂移）。
+  if (typeof from !== 'string' || typeof to !== 'string') return false
   return from < to
+}
+
+/**
+ * 带账端点的共用形状：端点自己的字段 + **同一段**显示窗声明（R1 02 决策 14）。
+ *
+ * 五个带账端点（markRead / unmarkRead / cleanup / toggleKeepUnread / toggleStar）共用下面这份
+ * `windowShape` 与 `windowRule`（前四个经 withWindow 组装；cleanup 没有业务字段，直接用它）。
+ * 手抄一份 from/to 的后果是某个端点悄悄漏掉 `windowRule`，而那只在坏入参时才显形
+ * （ADR-0003 的「声明不是第二个裁决者」）。
+ */
+const withWindow = <T extends z.ZodRawShape>(shape: T) =>
+  z.object({ ...shape, ...windowShape }).refine(windowRule)
+
+/** 单条目端点：`article`（不带账，因此不挂窗口）。 */
+export const itemIdPayload = z.object({ itemId: z.string().min(1) })
+
+/**
+ * `toggleStar` / `toggleKeepUnread`：单条目 + 账目窗口。
+ *
+ * 这两个端点不改读态、但回包的账目仍必须按当前窗口算 —— 否则星标一次就把左栏角标打回全量。
+ */
+export const itemIdWindowPayload = withWindow({ itemId: z.string().min(1) })
+
+const itemIdsShape = { itemIds: z.array(z.string().min(1)).min(1) }
+
+/** 批量条目端点：`unmarkRead`。空数组是坏入参，不是「什么都不做」；带账 → 窗口片段。 */
+export const unmarkReadPayload = withWindow(itemIdsShape)
+
+/** `markRead`：A 键会带 skipKept 与时间范围；单条打开只带 itemIds。带账 → 窗口片段。 */
+export const markReadPayload = withWindow({
+  ...itemIdsShape,
+  skipKept: z.boolean().nullish(),
+  // 空串仍是「没有范围」（旧行为）；只判类型，别让 '' 变成「一条都不标」。
+  before: z.string().nullish(),
+})
+
+/** `duplicateHints`：可选批次，空数组/缺省/null 都表示「没有可提示的条目」，不是错误。 */
+export const duplicateHintsPayload = z.object({ itemIds: z.array(z.string().min(1)).nullish() })
+
+const scopeShape = {
+  folder: z.string().min(1).nullish(),
+  tagId: z.string().min(1).nullish(),
 }
 
 /** 浏览类端点共用的形状：范围（folder / tag 互斥）+ 显示窗（半开区间）。 */
@@ -92,6 +112,13 @@ const browseShape = { ...scopeShape, ...windowShape }
  * 漏掉它，首屏与顶栏刷新（无 folder / tagId 的常态）会在真机上直接回 bad-request。
  */
 const emptyAsObject = (value: unknown): unknown => (value === null || value === undefined ? {} : value)
+
+/**
+ * `cleanup`：零业务入参（旧语义是「接受并忽略 payload」），但它是五个带账端点之一 ——
+ * 窗口片段与其它四个共用同一段声明。`null` / 缺省 / 带无关键的对象必须继续接受
+ * （浏览器通道把「没有 payload」序列化成 null）；坏窗口则回自己的 invalidMessage。
+ */
+export const cleanupPayload = z.preprocess(emptyAsObject, z.object(windowShape).refine(windowRule))
 
 /**
  * `refresh`：浏览范围 + 显示窗（cursor 被忽略，保持旧行为）。

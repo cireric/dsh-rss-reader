@@ -1,10 +1,16 @@
 /**
  * 显示窗：**读者本地日 → 半开区间**的唯一裁决者（ADR-0005 决定 2）。
  *
- * 这个模块只做两件事，也只该做这两件事：
+ * 这个模块只做三件事，也只该做这三件：
  *   1. 档位 + 现在 → `{ from, to }`（半开区间 `[from, to)`，ISO 瞬间；「全部」是 undefined）；
- *   2. 现在 → 今天的起点（未读三联拆分只用得着这一个阈值，见 spec 第三节第 16 条）。
+ *   2. 现在 → 今天的起点（未读三联拆分只用得着这一个阈值，见 spec 第三节第 16 条）；
+ *   3. 一行是否落在窗内（`publishedAt` 非空 + 半开区间）。
  * 它不读 store、不碰 DOM、不发查询 —— 宿主与浏览器半共用同一份算术，谁都不许再写第二份。
+ *
+ * **为什么「落在窗内」也在这里**（R1 02）：列表取数（SQL / JS 适配器）与未读账目（unread.ts）
+ * 必须共用同一段窗口判据。把它留在 item-page.ts 会让 unread.ts（被客户端以类型引用）
+ * 反向依赖 item-page.ts 的 `node:crypto`，浏览器半直接编译不过；而且窗口判据本来就只认
+ * 边界与 `publishedAt`，正是本模块的职责。
  *
  * **为什么不用毫秒减法**：`now - 3 * 86400e3` 假设了「一天 = 24 小时」。DST 的春季自然日只有
  * 23 小时、秋季有 25 小时，用毫秒减法算出来的 `from` 会落在前一天的 23:00 或第二天 01:00，
@@ -56,4 +62,21 @@ export function displayWindowBoundsOf(range: DisplayWindowRange, now: Date): Dis
   const from = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (days - 1))
   const to = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
   return { from: from.toISOString(), to: to.toISOString() }
+}
+
+/**
+ * 「这一行落在显示窗内吗」—— JS 侧**唯一一份**显示窗谓词（ADR-0005 决定 1）。
+ *
+ * 判据只认 `publishedAt`：没有发布日期的条目**永不进窗**（不许拿 fetchedAt 兜底 —— 那会把
+ * 「刚抓到的老文章」算成今天）。半开区间 `[from, to)`：等于 `from` 的在窗内，等于 `to` 的不在。
+ *
+ * SQL 侧的同一份判据是 `src/store-sqlite.ts` 的 WINDOW_FILTER（每种语言各一处）；两份语义
+ * 「逐字同义」由 tests/helpers/reader-store-contract.mjs 的窗口契约与端点用例钉住。
+ * 列表取数（store / memory-store）与未读账目（unread.ts）都走这里 —— 账目与列表必须是
+ * 同一段时间判据，否则只在「无日期 + fetchedAt 落在窗内」这种截面与列表对不上。
+ */
+export function inDisplayWindow(record: { readonly publishedAt?: string }, window: DisplayWindowBounds): boolean {
+  return record.publishedAt !== undefined
+    && record.publishedAt >= window.from
+    && record.publishedAt < window.to
 }

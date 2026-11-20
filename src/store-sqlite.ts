@@ -166,7 +166,8 @@ const SELECT_ALL_ITEMS = ITEM_SELECT + ITEM_ORDER
 const AFTER_CURSOR = '(i.recency < ? OR (i.recency = ? AND i.id > ?))'
 
 /**
- * 显示窗（ADR-0005 决定 4）：**SQL 侧唯一的窗口片段**，六个范围/续页变体共用。
+ * 显示窗（ADR-0005 决定 4）：**SQL 侧唯一的窗口片段**，六个范围/续页变体与每源未读聚合
+ * （R1 02 的 unreadPerFeedSql）共用。
  *
  * 为什么写成 `published_at IS NOT NULL AND recency >= ? AND recency < ?` 而不是直接比
  * `published_at`：对非空行，`recency`（= COALESCE(published_at, fetched_at)）与 `published_at`
@@ -264,9 +265,17 @@ const COPY_ITEM_TAGS = 'INSERT OR IGNORE INTO item_tags (item_id, tag_id) SELECT
  * 只保证「传进来的键都有值」——已退订源的残留条目也会被数进来，键域判定由拿到 feeds 表的
  * 调用方做（见 store.ts 的 unreadPerFeed 契约）。
  *
+ * **带窗与全量是同一段 SQL 的两种参数**（R1 02）：窗口片段原样拼 `WINDOW_FILTER` —— 与
+ * listRecent 的窗口取数共用那唯一一份常量。不另抄一版 `published_at >= ?`：账目若长出
+ * 第二份时间判据，只会在「无日期 + fetchedAt 落在窗内」这种截面与列表对不上。
+ * 顺序固定为「先 read_at IS NULL，再窗口」：未读判据在前，窗口只做收窄。
+ *
  * `COUNT(*)` 在 node:sqlite 下返回 number（实测；本仓库用不到 2^53 以上的计数）。
  */
-const SELECT_UNREAD_PER_FEED = 'SELECT feed_id AS feed_id, COUNT(*) AS unread FROM items WHERE read_at IS NULL GROUP BY feed_id'
+const unreadPerFeedSql = (window: DisplayWindowBounds | undefined): string =>
+  'SELECT i.feed_id AS feed_id, COUNT(*) AS unread FROM items i WHERE i.read_at IS NULL'
+  + (window === undefined ? '' : ' AND ' + WINDOW_FILTER)
+  + ' GROUP BY i.feed_id'
 
 /** 释放量原料：候选的 id 逐条取摘要与正文，**不带** items 行的其余列（几千条候选下差别可观）。 */
 const SELECT_ITEM_CHARS = 'SELECT i.recency AS recency, i.summary AS summary, t.body AS body FROM items i LEFT JOIN texts t ON t.item_id = i.id WHERE i.id = ?'
@@ -923,10 +932,11 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
      * 而 `GROUP BY feed_id` 只返回**有未读行的**源：直接拿它当账目，未读为 0 的源会从回包里
      * 消失（界面上表现为左栏那一行的角标变成空白）。
      */
-    unreadPerFeed: (feedIds) => {
+    unreadPerFeed: (feedIds, window) => {
       const unread: Record<string, number> = {}
       for (const feedId of feedIds) unread[feedId] = 0
-      for (const row of sql(SELECT_UNREAD_PER_FEED).all()) {
+      const args = window === undefined ? [] : [window.from, window.to]
+      for (const row of sql(unreadPerFeedSql(window)).all(...args)) {
         const feedId = requiredText(row.feed_id, 'items.feed_id')
         // 只认传进来的键：已退订源的残留条目照样被 SQL 数出来，但账目上没有它的位置
         if (unread[feedId] === undefined) continue

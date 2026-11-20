@@ -120,21 +120,6 @@ export function decodePageCursor(scope: PageScope | undefined, raw: string, wind
 }
 
 /**
- * 「这一行落在显示窗内吗」—— JS 侧**唯一一份**显示窗谓词（ADR-0005 决定 1）。
- *
- * 判据只认 `publishedAt`：没有发布日期的条目**永不进窗**（不许拿 fetchedAt 兜底 —— 那会把
- * 「刚抓到的老文章」算成今天）。半开区间 `[from, to)`：等于 `from` 的在窗内，等于 `to` 的不在。
- *
- * SQL 侧的同一份判据是 `src/store-sqlite.ts` 的 WINDOW_FILTER（每种语言各一处）；两份语义
- * 「逐字同义」由 tests/helpers/reader-store-contract.mjs 的窗口契约与端点用例钉住。
- */
-export function inDisplayWindow(record: { readonly publishedAt?: string }, window: DisplayWindowBounds): boolean {
-  return record.publishedAt !== undefined
-    && record.publishedAt >= window.from
-    && record.publishedAt < window.to
-}
-
-/**
  * 「这一行严格排在游标之后吗」—— JS 侧的唯一一份续页谓词（ADR-0004 决定 4）。
  *
  * 行与游标是**同一个形状**（`Cursor`：排序键 + id 的一对值，定义在 src/cursor.ts），所以两边都收

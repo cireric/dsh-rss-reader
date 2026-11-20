@@ -12,11 +12,12 @@
 import type { ZodType } from 'zod'
 import {
   addFeedPayload,
+  cleanupPayload,
   discoverFeedsPayload,
   duplicateHintsPayload,
   idPayload,
   itemIdPayload,
-  itemIdsPayload,
+  itemIdWindowPayload,
   markReadPayload,
   moveFeedToFolderPayload,
   namePayload,
@@ -32,6 +33,7 @@ import {
   scopePayload,
   searchQueryPayload,
   setItemTagsPayload,
+  unmarkReadPayload,
 } from './endpoint-payloads.js'
 import type { createSearch } from './search.js'
 import type { Config } from './config.js'
@@ -92,12 +94,30 @@ export interface EndpointCtx {
 }
 
 /**
+ * 一次端点调用的**解析回执**：回包 + 合并账目要用的窗口。
+ *
+ * 账目窗口必须取自 `defineEndpoint` 的**那一次**解析（R1 02 决策 21 / ADR-0003）。
+ * 如果 dispatch 为了拿窗口再 `safeParse` 一遍，就有了第二个裁决者；如果 handler 自己算账，
+ * overview 与写端点就会各有一份口径 —— 本票要收敛掉的正是后者。所以把「同一份解析结果里的
+ * 窗口」显式交回分发核，而不是让它去翻原始 payload。
+ */
+export interface EndpointOutcome {
+  readonly result: RpcResult<unknown>
+  /** 解析后的账目窗口；缺省 = 全量（不带窗口的旧请求）。 */
+  readonly accountWindow?: DisplayWindowBounds
+}
+
+/**
  * 一个端点的声明。
  *
  * `carriesAccount`：该端点的回包是否**必须**并入未读账（总数 + 每源）。
  * 收进声明而不是让每个 handler 自己拼：这条横切不变量原先在 5 个 case 里各写一遍
  * （`...accountOf(target)`），任一处漏掉就是「幽灵未读」——客户端拿本地增量当真相，
  * 左栏各源之和 ≠ 顶栏总数（spec §4 不变量 1）。
+ *
+ * `accountWindowOf`：带账端点的窗口提取器，入参是**已解析**的那份值。声明成必填的约定
+ * （代码层面可选是因为非带账端点不需要）：带账却漏了它，窗口会被静默忽略、账目回全量，
+ * 端点用例会立刻翻红 —— 那是这条约定唯一的守卫。
  *
  * `payload`：入参形状的**唯一**声明（`src/endpoint-payloads.ts`）。`to` 收到的已经是解析后的值，
  * 所以 handler 体内不再有 `payload as`。零入参端点写 `noPayload`（= `z.unknown()`）。
@@ -107,7 +127,7 @@ export interface EndpointSpec {
   readonly payload: ZodType<unknown>
   /** 解析失败时给调用方看的那一句话；零入参端点没有这条路径，可以省。 */
   readonly invalidMessage?: string
-  readonly to: (payload: unknown, ctx: EndpointCtx) => Promise<RpcResult<unknown>>
+  readonly to: (payload: unknown, ctx: EndpointCtx) => Promise<EndpointOutcome>
 }
 
 /**
@@ -124,6 +144,8 @@ function defineEndpoint<P>(spec: {
   readonly carriesAccount?: true
   readonly payload: ZodType<P>
   readonly invalidMessage?: string
+  /** 带账端点必须声明：从**已解析**的入参里取窗口（见 EndpointOutcome 的注释）。 */
+  readonly accountWindowOf?: (input: P) => DisplayWindowBounds | undefined
   readonly to: (input: P, ctx: EndpointCtx) => Promise<RpcResult<unknown>>
 }): EndpointSpec {
   return {
@@ -133,11 +155,17 @@ function defineEndpoint<P>(spec: {
     to: async (raw, ctx) => {
       const parsed = spec.payload.safeParse(raw)
       if (!parsed.success) {
-        return fail('bad-request', spec.invalidMessage ?? '入参无效', {
-          issues: parsed.error.issues.map((issue) => ({ path: issue.path.map(String), code: issue.code })),
-        })
+        return {
+          result: fail('bad-request', spec.invalidMessage ?? '入参无效', {
+            issues: parsed.error.issues.map((issue) => ({ path: issue.path.map(String), code: issue.code })),
+          }),
+        }
       }
-      return spec.to(parsed.data, ctx)
+      const result = await spec.to(parsed.data, ctx)
+      // 窗口与回包来自**同一次** safeParse 的 parsed.data：没有第二遍解析，也没有 handler 自算。
+      return spec.accountWindowOf === undefined
+        ? { result }
+        : { result, accountWindow: spec.accountWindowOf(parsed.data) }
     },
   }
 }
@@ -166,8 +194,16 @@ const folderFailure = (error: unknown): RpcResult<never> | undefined =>
 const tagFailure = (error: unknown): RpcResult<never> | undefined =>
   error instanceof TagError ? fail(error.code, error.message) : undefined
 
-/** 读一次完整的未读账（总数 + 每源）。只读，不改任何条目。 */
-const accountOf = (target: UnreadStore): UnreadAccount => {
+/**
+ * 读一次未读账（总数 + 每源）。只读，不改任何条目。
+ *
+ * **这是全仓库唯一的算账处**（R1 02 决策 20）：overview 与分发核（五个带账写端点）都调它。
+ * 总账由每源账目**求和派生**，绝不另数一遍 —— 两处各算一次时，截断/漂移截面下迟早对不上。
+ *
+ * @param window 显示窗；缺省 = 全量。窗口取自调用方**已经解析过**的那份入参（overview 的
+ *               from/to 或 dispatch 的 EndpointOutcome.accountWindow），这里不再解析任何东西。
+ */
+const accountOf = (target: UnreadStore, window?: DisplayWindowBounds): UnreadAccount => {
   // 键域与判据都走**存储侧那一份**实现：未读判据就是 unread.ts 的 isUnread（自持实现里写作
   // `read_at IS NULL`，两者是同一件事的两种写法，有测试在同一夹具上逐键对账），键域 =
   // listFeeds() 的全量键（0 未读的源也留 0）。
@@ -175,7 +211,7 @@ const accountOf = (target: UnreadStore): UnreadAccount => {
   // 为什么不再在这里对 allItems() 跑 countUnreadPerFeed：① 口径会分家 —— 这里算一遍、SQL 里
   // 再算一遍，正是任务 1 的键域与任务 5 的 unread 漂过两次的那条路；② 10 万行下每次标读/撤销/
   // 星标/保持未读/清理都拖着一次全表物化（spec §3.1 列的五处调用点）。
-  const perFeedUnread = target.unreadPerFeed(target.listFeeds().map(([feedId]) => feedId))
+  const perFeedUnread = target.unreadPerFeed(target.listFeeds().map(([feedId]) => feedId), window)
   return { unread: sumOf(perFeedUnread), perFeedUnread }
 }
 
@@ -258,13 +294,10 @@ const buildOverview = (
   const titles = new Map<string, string>()
   for (const feed of feeds) titles.set(feed.id, feed.title)
 
-  // 每源账目走**与标读回包同一份**实现（store 的 unreadPerFeed，见 accountOf）：
-  // 键域 = feeds 表、判据 = isUnread（自持实现里就是 `read_at IS NULL`）。
-  // **重点在「不再物化全表」**（Task 5，spec §3.1）：原先这里对 allItems() 遍历 10 万行来
-  // 同时建列表与记账 —— 每次打开面板/刷新一次全表遍历，而 SQL 侧聚合只需 3–12 ms（§3 的账）。
-  // 先按 listFeeds() 铺 0、再用结果覆盖：GROUP BY 只返回有未读的源，反过来会让 0 未读的源
-  // 从回包里消失（左栏那一行角标变空白，界面上无从分辨）。
-  const perFeedUnread = target.unreadPerFeed(feeds.map((feed) => feed.id))
+  // 账目**不再由这里自己算**（R1 02 决策 20）：与分发核共用 accountOf，窗口也传同一份。
+  // 原先这里与 accountOf 各写一段 unreadPerFeed 调用 —— 两段代码自洽、合起来漂移时，
+  // 单快照断言永远看不见；「overview 与写端点在同一个窗口下逐项相等」由端点用例钉住。
+  const account = accountOf(target, window)
 
   // 一页条目交给 src/item-page.ts（ADR-0004）：窗口放大、多取一行判尾、游标围栏都在那里。
   // 这里只做投影（行 → ItemView）与标签批量补 —— 两者是 wire 形状，不是分页协议。
@@ -307,10 +340,9 @@ const buildOverview = (
     tags,
     items,
     ...(nextCursor === undefined ? {} : { nextCursor }),
-    // 总数由每源账目**求和派生**，不再单独数一遍：两处各算一次时，截断/漂移截面下迟早对不上，
-    // 而「左栏各源之和 === 顶栏总未读」正是 spec §4 不变量 1。
-    unread: sumOf(perFeedUnread),
-    perFeedUnread,
+    // 总数由每源账目**求和派生**（accountOf 内），不再单独数一遍 —— 见 accountOf 的注释。
+    unread: account.unread,
+    perFeedUnread: account.perFeedUnread,
     refreshed,
     ...(run === undefined ? {} : { refresh: run }),
     // 让界面能说明「上次到底什么时候抓过」——否则「按住刷新没反应」无从判断
@@ -384,8 +416,9 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
 
   markRead: defineEndpoint({
     payload: markReadPayload,
-    invalidMessage: 'markRead 需要 itemIds 数组',
+    invalidMessage: 'markRead 需要 itemIds 数组，时间窗口必须成对且合法',
     carriesAccount: true,
+    accountWindowOf: displayWindowOf,
     to: async (input, ctx) => {
       const itemIds = input.itemIds
       // 「全部标为已读」（A 键）走这条时带 skipKept：**保持未读的条目要活下来**
@@ -418,9 +451,10 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
   }),
 
   unmarkRead: defineEndpoint({
-    payload: itemIdsPayload,
-    invalidMessage: 'unmarkRead 需要 itemIds 数组',
+    payload: unmarkReadPayload,
+    invalidMessage: 'unmarkRead 需要 itemIds 数组，时间窗口必须成对且合法',
     carriesAccount: true,
+    accountWindowOf: displayWindowOf,
     to: async (input, ctx) => {
       // 只服务于「全部标记已读」的短时撤销
       const itemIds = input.itemIds
@@ -701,8 +735,11 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
   }),
 
   cleanup: defineEndpoint({
-    payload: noPayload,
+    payload: cleanupPayload,
+    // cleanup 是零业务入参，但窗口字段有形状：坏窗口必须响亮拒绝而不是被当成「忽略 payload」。
+    invalidMessage: 'cleanup 的时间窗口无效（from / to 必须成对且 from < to）',
     carriesAccount: true,
+    accountWindowOf: displayWindowOf,
     to: async (_input, ctx) => {
       // 显式清理（用户点按钮触发，**不设定时器**——验收项之一就是不残留定时器）。
       // 判据刻意保守：已读 + 未星标 + 未保持未读 + 早于阈值，四个条件缺一不可（见 retention.ts 注释）。
@@ -732,9 +769,10 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
   }),
 
   toggleKeepUnread: defineEndpoint({
-    payload: itemIdPayload,
-    invalidMessage: 'toggleKeepUnread 需要 itemId',
+    payload: itemIdWindowPayload,
+    invalidMessage: 'toggleKeepUnread 需要 itemId，时间窗口必须成对且合法',
     carriesAccount: true,
+    accountWindowOf: displayWindowOf,
     to: async (input, ctx) => {
       // 「保持未读」在 GR 里**没有快捷键**（规格 §3.4 的键位列是「—」），是条目下方的链接。
       // 所以这个端点服务于客户端的那个链接，不接键位。
@@ -930,9 +968,10 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
   }),
 
   toggleStar: defineEndpoint({
-    payload: itemIdPayload,
-    invalidMessage: 'toggleStar 需要 itemId',
+    payload: itemIdWindowPayload,
+    invalidMessage: 'toggleStar 需要 itemId，时间窗口必须成对且合法',
     carriesAccount: true,
+    accountWindowOf: displayWindowOf,
     to: async (input, ctx) => {
       const itemId = input.itemId
       const existing = ctx.store.item(itemId)
@@ -970,9 +1009,12 @@ export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: 
       const ctx: EndpointCtx = {
         store: target, ready, config, log, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, signal,
       }
-      const result = await spec.to(payload, ctx)
+      const outcome = await spec.to(payload, ctx)
+      const { result } = outcome
       if (spec.carriesAccount === true && result.ok) {
-        const account = accountOf(target)
+        // 窗口来自 defineEndpoint 那一次解析的同一份入参（EndpointOutcome.accountWindow）——
+        // 不在这里重新解析 payload，也不让 handler 自己算账（R1 02 决策 21）。
+        const account = accountOf(target, outcome.accountWindow)
         return ok({ ...(result.value as object), unread: account.unread, perFeedUnread: account.perFeedUnread })
       }
       return result
