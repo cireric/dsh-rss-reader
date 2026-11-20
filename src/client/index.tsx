@@ -617,6 +617,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
             onRenameFolder={(from, to) => { void store.renameFolder(from, to) }}
             onDeleteFolder={(name) => { void store.deleteFolder(name) }}
             onMoveFeed={(feedId, folder) => { void store.moveFeedToFolder(feedId, folder) }}
+            onMoveOrder={(feedId, direction) => { void store.moveFeedOrder(feedId, direction) }}
             tags={state.tags}
             onCreateTag={(name) => { void store.createTag(name) }}
             onRenameTag={(id, name) => { void store.renameTag(id, name) }}

@@ -319,6 +319,20 @@ async function mountReader({ items = [], feeds, folders, tags = [], article, hol
       for (const entry of serverFolders) entry.feedIds = serverFeeds.filter((f) => f.folder === entry.name).map((f) => f.id)
       return ok({ folders: serverFolders })
     }
+    if (body.endpoint === 'reorderFeeds') {
+      // 宿主语义（src/feed-order.ts）：未知 id 忽略、重复保首次、未点名的按当前相对顺序补末尾。
+      // 桩件按同一条规则改 serverFeeds —— 否则「overview 随后按新顺序下发」这条验收在 DOM 层
+      // 根本表达不出来（docs/pitfalls.md 2.6：桩件的派生数据要守它模仿的那条契约）。
+      const ids = Array.isArray(body.payload?.ids) ? body.payload.ids : []
+      const ordered = []
+      for (const id of ids) {
+        const feed = serverFeeds.find((entry) => entry.id === id)
+        if (feed !== undefined && !ordered.includes(feed)) ordered.push(feed)
+      }
+      for (const feed of serverFeeds) if (!ordered.includes(feed)) ordered.push(feed)
+      serverFeeds.splice(0, serverFeeds.length, ...ordered)
+      return ok({ feedOrder: serverFeeds.map((feed) => feed.id) })
+    }
     if (body.endpoint === 'article') {
       if (gate !== undefined) await gate
       // article 可以是函数：阅读进度的用例需要「a 有进度、b 没有」这种按条目区分的回包
@@ -643,6 +657,171 @@ test('订阅管理页按翻页键不该刷警告（无容器的视图是正常�
     console.warn = original
   }
   assert.deepEqual(warnings, [], '订阅管理页本来就没有滚动容器，不该产生警告：' + warnings.join(' | '))
+})
+
+/**
+ * 订阅管理页的排序按钮（R3-03）。
+ *
+ * 这一层必须用真 DOM 的理由：验收要求「点一下行序变、首末置灰、busy 全灰、宿主拒绝后屏幕不变」——
+ * 全是**画在 DOM 上**的事实，只断言 store 状态会漏掉「state 变了但 attribute 没写」这类接线故障。
+ */
+function feedOrderRows(doc) {
+  return [...doc.querySelectorAll('[data-rss-feed-row]')].map((row) => row.getAttribute('data-rss-feed-row'))
+}
+/** 左栏的源行序：两处必须读同一份 state.feeds（spec 验收 1 的「三处同序」的界面侧证据）。 */
+function navFeedOrder(doc) {
+  return [...doc.querySelectorAll('[data-rss-nav-row]')]
+    .map((row) => row.getAttribute('data-rss-nav-row'))
+    .filter((key) => key.startsWith('feed:'))
+    .map((key) => key.slice('feed:'.length))
+}
+
+test('订阅管理页 ↑ / ↓：只挪一格、其它行相对序不变，首末置灰，说明文案在导出按钮附近', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a1', feedId: 'a' }), item({ id: 'b1', feedId: 'b' }), item({ id: 'c1', feedId: 'c' })],
+    feeds: [
+      { id: 'a', title: '源 A' },
+      { id: 'b', title: '源 B' },
+      { id: 'c', title: '源 C' },
+    ],
+  })
+  await h.store.load('overview')
+  await h.settle()
+  h.press('f')
+  await h.settle()
+  const doc = h.win.document
+  assert.deepEqual(feedOrderRows(doc), ['a', 'b', 'c'], '前置：管理页按宿主下发的顺序渲染')
+  assert.deepEqual(navFeedOrder(doc), ['a', 'b', 'c'], '前置：左栏与管理页同序')
+
+  assert.equal(doc.querySelector('[data-rss-feed-order-up="a"]').disabled, true, '首行的 ↑ 必须置灰')
+  assert.equal(doc.querySelector('[data-rss-feed-order-up="b"]').disabled, false, '中间行的 ↑ 可用')
+  assert.equal(doc.querySelector('[data-rss-feed-order-down="c"]').disabled, true, '末行的 ↓ 必须置灰')
+  assert.equal(doc.querySelector('[data-rss-feed-order-down="b"]').disabled, false, '中间行的 ↓ 可用')
+
+  // 键盘可达：原生 button 默认可 Tab 到、可聚焦（不许为了「不抢快捷键」加 tabIndex={-1}）。
+  // Enter 的激活是浏览器原生行为，jsdom 不模拟默认动作，所以这里只钉可聚焦与 tabIndex。
+  const upC = doc.querySelector('[data-rss-feed-order-up="c"]')
+  assert.equal(upC.tabIndex, 0, '排序按钮必须在 Tab 序列里（tabIndex 0）')
+  upC.focus()
+  assert.equal(doc.activeElement, upC, '排序按钮必须能获得焦点')
+
+  // R3-4：说明文案原样落在导出按钮附近，提前讲清「OPML 不记录顺序」
+  const hint = doc.querySelector('[data-rss-feed-order-hint]')
+  assert.ok(hint !== null, '订阅管理页必须有一句排序说明')
+  assert.equal(hint.textContent, '↑ / ↓ 调整顺序，只影响显示先后；OPML 不记录顺序，导出再导入不保证原顺序。')
+
+  doc.querySelector('[data-rss-feed-order-up="c"]').click()
+  await h.settle()
+  assert.deepEqual(feedOrderRows(doc), ['a', 'c', 'b'], '点 ↑ 只把 c 挪一格；a 与 b 的相对先后不变')
+  assert.deepEqual(navFeedOrder(doc), ['a', 'c', 'b'], '左栏与订阅管理页读同一份 state.feeds，同序变化')
+  const reorders = h.requests.filter((entry) => entry.endpoint === 'reorderFeeds')
+  assert.equal(reorders.length, 1, '一次点击只发一次重排请求')
+  assert.deepEqual(reorders[0].payload, { ids: ['a', 'c', 'b'] }, 'ids 由当前 state.feeds 整体推出（相邻交换）')
+})
+
+test('订阅管理页：导入 / 加源在途时排序按钮全部置灰（不借 feedsBusy 的文案撒谎）', skip, async () => {
+  let releaseAdd
+  const addGate = new Promise((resolve) => { releaseAdd = resolve })
+  const h = await mountReader({
+    items: [item({ id: 'a1', feedId: 'a' }), item({ id: 'b1', feedId: 'b' })],
+    feeds: [{ id: 'a', title: '源 A' }, { id: 'b', title: '源 B' }],
+    folderApi: async (body) => {
+      if (body.endpoint !== 'addFeed') return undefined
+      // 加源要逐源抓取校验：扣住它就得到「长操作在途」的真实时序
+      await addGate
+      return { ok: true, status: 200, json: async () => ({ ok: true, value: { added: 1, existed: 0, failed: [], skipped: [] } }) }
+    },
+  })
+  await h.store.load('overview')
+  await h.settle()
+  h.press('f')
+  await h.settle()
+  const doc = h.win.document
+  const pending = h.store.addFeed('https://new.example/feed')
+  await h.waitFor(() => h.store.get().feedsBusy === true, { timeout: 900, label: '加源在途' })
+  await h.settle({ allowPending: true })
+
+  for (const id of ['a', 'b']) {
+    for (const direction of ['up', 'down']) {
+      assert.equal(doc.querySelector('[data-rss-feed-order-' + direction + '="' + id + '"]').disabled, true,
+        'busy 时 ' + id + ' 的 ' + direction + ' 必须置灰（两个写手不能同时改同一份订阅文件）')
+    }
+  }
+  assert.match(doc.body.textContent, /正在逐源抓取校验/, '前置：此刻确实处于加源忙态')
+
+  releaseAdd()
+  await pending
+  await h.settle()
+  assert.equal(h.store.get().feedsBusy, false)
+  assert.equal(doc.querySelector('[data-rss-feed-order-up="b"]').disabled, false, '加源完成后按钮恢复可用')
+})
+
+test('订阅管理页：宿主拒绝重排时行序不变、错误可见', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a1', feedId: 'a' }), item({ id: 'b1', feedId: 'b' }), item({ id: 'c1', feedId: 'c' })],
+    feeds: [{ id: 'a', title: '源 A' }, { id: 'b', title: '源 B' }, { id: 'c', title: '源 C' }],
+    folderApi: async (body) => {
+      if (body.endpoint !== 'reorderFeeds') return undefined
+      // 传输层成功、信封失败：走的是 callRpc 的错误分支（与「写盘失败」同一条路径）
+      return {
+        ok: true, status: 200,
+        json: async () => ({ ok: false, error: { code: 'storage', message: '写入失败（模拟）', details: {} } }),
+      }
+    },
+  })
+  await h.store.load('overview')
+  await h.settle()
+  h.press('f')
+  await h.settle()
+  const doc = h.win.document
+
+  doc.querySelector('[data-rss-feed-order-up="b"]').click()
+  await h.settle()
+  assert.deepEqual(feedOrderRows(doc), ['a', 'b', 'c'], '宿主拒绝时界面顺序必须保持宿主快照（绝不乐观重排）')
+  const alert = doc.querySelector('[role="alert"]')
+  assert.ok(alert !== null, '失败必须有一条可见的错误')
+  assert.match(alert.textContent, /storage: 写入失败（模拟）/, '错误内容要能指向原因')
+})
+
+test('订阅管理页：连点两次 ↑ 只发一次重排请求', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a1', feedId: 'a' }), item({ id: 'b1', feedId: 'b' }), item({ id: 'c1', feedId: 'c' })],
+    feeds: [{ id: 'a', title: '源 A' }, { id: 'b', title: '源 B' }, { id: 'c', title: '源 C' }],
+  })
+  await h.store.load('overview')
+  await h.settle()
+  h.press('f')
+  await h.settle()
+  const doc = h.win.document
+
+  const up = doc.querySelector('[data-rss-feed-order-up="c"]')
+  up.click()
+  up.click() // 同一 tick 的第二次点击：第一次还在途，必须被忽略
+  await h.settle()
+  const reorders = h.requests.filter((entry) => entry.endpoint === 'reorderFeeds')
+  assert.equal(reorders.length, 1, '连点不能堆出两个请求（界面否则来回抽动）')
+  assert.deepEqual(feedOrderRows(doc), ['a', 'c', 'b'], '只生效一次移动')
+})
+
+test('订阅管理页：改过的顺序在关掉重开后保持（宿主快照驱动）', skip, async () => {
+  const items = [item({ id: 'a1', feedId: 'a' }), item({ id: 'b1', feedId: 'b' }), item({ id: 'c1', feedId: 'c' })]
+  const feeds = [{ id: 'a', title: '源 A' }, { id: 'b', title: '源 B' }, { id: 'c', title: '源 C' }]
+  const first = await mountReader({ items, feeds })
+  await first.store.load('overview')
+  await first.settle()
+  first.press('f')
+  await first.settle()
+  first.win.document.querySelector('[data-rss-feed-order-up="b"]').click()
+  await first.settle()
+  assert.deepEqual(feedOrderRows(first.win.document), ['b', 'a', 'c'], '前置：宿主已落成新顺序')
+  await first.unmount()
+
+  // 重开面板 = 重新走 overview 读宿主（这里的 serverFeeds 就是「重启后的 config.json」）
+  const second = await mountReader({ items, feeds: first.server.feeds })
+  await second.settle()
+  second.press('f')
+  await second.settle()
+  assert.deepEqual(feedOrderRows(second.win.document), ['b', 'a', 'c'], '重开 / 重启后顺序保持，不回到键序')
 })
 
 test('按键守卫不依赖环境全局：本 realm 没有 HTMLElement 时，快捷键照样能用', skip, async () => {
