@@ -364,6 +364,47 @@ export const contractCases = [
     },
   },
   {
+    // R1 显示窗（ADR-0005）：三份实现的取数契约同时被钉 —— 替身若忽略窗口，端点测出来的绿不算数。
+    // 判据全部来自**发布时间**：无发布日期的条目即使 fetchedAt 落在窗内也不许出现（不许拿 recency
+    // 兜底）；半开区间 `[from, to)`：等于 from 的在窗内、等于 to 的不在。
+    name: 'listRecent：时间窗只取 published_at 在 [from, to) 的行，无日期的不进窗，与范围正交',
+    async run({ store }) {
+      const base = { feedId: 'f1', link: 'https://a.example/', fetchedAt: '2026-11-20T23:00:00.000Z', starred: false }
+      await store.saveItem('at-from', { ...base, title: 'at-from', publishedAt: '2026-11-20T00:00:00.000Z' })
+      await store.saveItem('inside', { ...base, title: 'inside', publishedAt: '2026-11-20T12:00:00.000Z' })
+      await store.saveItem('at-to', { ...base, title: 'at-to', publishedAt: '2026-11-21T00:00:00.000Z' })
+      await store.saveItem('before', { ...base, title: 'before', publishedAt: '2026-11-19T23:59:59.999Z' })
+      // ⚠️ 这一条的 fetchedAt 就在窗内（23:00）、但没有 publishedAt —— 拿 recency 兜底就会把它算成今天。
+      await store.saveItem('no-date', { ...base, title: 'no-date' })
+      await store.saveItem('other-feed', { ...base, feedId: 'f2', title: 'other-feed', publishedAt: '2026-11-20T10:00:00.000Z' })
+
+      const window = { from: '2026-11-20T00:00:00.000Z', to: '2026-11-21T00:00:00.000Z' }
+      assert.deepEqual(store.listRecent(10, undefined, undefined, undefined, window).map(([id]) => id),
+        ['inside', 'other-feed', 'at-from'],
+        '窗口取数：等于 from 的在窗内、等于 to 的不在、无日期的不出现（即使它的 fetchedAt 在窗内）')
+      assert.deepEqual(store.listRecent(10, undefined, ['f1'], undefined, window).map(([id]) => id),
+        ['inside', 'at-from'], '窗口 + 源范围正交：先按成员筛，再按窗口筛')
+      assert.deepEqual(store.listRecent(10, undefined, ['f2'], undefined, window).map(([id]) => id),
+        ['other-feed'], '单源范围 + 窗口：只剩那一个源的窗内行')
+      assert.deepEqual(store.listRecent(2, { recency: '2026-11-20T12:00:00.000Z', id: 'inside' }, ['f1'], undefined, window)
+        .map(([id]) => id), ['at-from'], '窗口内续页：只取严格排在边界之后、且仍在窗内的行')
+      assert.deepEqual(store.listRecent(10, undefined, undefined, undefined,
+        { from: '2026-10-01T00:00:00.000Z', to: '2026-10-02T00:00:00.000Z' }), [],
+        '窗口没覆盖任何行 ⇒ 空列表（不许回落成无窗口）')
+
+      const tag = await store.createTag('窗内标签')
+      await store.setItemTags('inside', [tag.id])
+      assert.deepEqual(store.listRecent(10, undefined, undefined, tag.id, window).map(([id]) => id), ['inside'],
+        '窗口 + 标签范围正交')
+
+      // 无窗口（含显式 undefined）：旧行为逐字不变 —— 无日期条目照常按 recency 参与排序
+      const unwindowed = store.listRecent(10).map(([id]) => id)
+      assert.deepEqual(store.listRecent(10, undefined, undefined, undefined, undefined).map(([id]) => id), unwindowed,
+        '无窗口与显式 undefined 必须是同一份结果')
+      assert.ok(unwindowed.includes('no-date'), '无窗口时无日期条目照常出现（「全部」档位）')
+    },
+  },
+  {
     name: 'unreadPerFeed：只保证传入的键都有值，数得准',
     async run({ store }) {
       const base = { feedId: 'f1', link: 'https://a.example/', fetchedAt: '2026-11-01T00:00:00.000Z', starred: false }

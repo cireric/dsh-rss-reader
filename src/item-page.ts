@@ -17,6 +17,7 @@ import { createHash } from 'node:crypto'
 import type { ItemRecord } from './domain.js'
 import { decodeCursor, encodeCursor, recencyOf } from './cursor.js'
 import type { Cursor } from './cursor.js'
+import type { DisplayWindowBounds } from './display-window.js'
 
 /**
  * 浏览范围：文件夹（成员参与栅栏键）或标签（id 参与）。
@@ -36,7 +37,8 @@ export type PageScope =
  * 「第一页的成员快照」去查「第二页的新成员」，结果既不连续也不可解释；绑上排序后的成员列表后，
  * 成员一变旧游标自然失配，客户端必须从第一页重来。标签 id 是稳定主键：改名不失效、删除才失效。
  */
-export function fenceKeyOf(scope: PageScope): string {
+function scopeFenceOf(scope: PageScope | undefined): string {
+  if (scope === undefined) return ''
   switch (scope.kind) {
     case 'tag':
       return 'tag:' + scope.id
@@ -45,6 +47,33 @@ export function fenceKeyOf(scope: PageScope): string {
       return 'folder:' + createHash('sha256').update(JSON.stringify([scope.name, members])).digest('base64url')
     }
   }
+}
+
+/** 带窗游标的第二个栅栏段前缀。单独成常量：decoder 要靠它把「别的窗口的游标」判成 mismatch。 */
+const WINDOW_FENCE_PREFIX = 'window:'
+
+/**
+ * 窗口段的键 = `[from, to)` 的哈希。
+ *
+ * 为什么不把 ISO 串直接拼进前缀：它含 `:` 与 `-`，与「档位段之间用 `:` 分隔」的读法撞车，
+ * 而 `|` 又是游标体的分隔符。哈希（与文件夹成员同一个手法）让前缀永远是 `[A-Za-z0-9_-]+`。
+ */
+function windowFenceOf(window: DisplayWindowBounds): string {
+  return WINDOW_FENCE_PREFIX
+    + createHash('sha256').update(JSON.stringify([window.from, window.to])).digest('base64url')
+}
+
+/**
+ * 一页的栅栏键（不含尾部冒号）：范围段 + 窗口段。
+ *
+ * **无窗口时逐字维持旧键**（`''` / `folder:<hash>` / `tag:<id>`）：升级瞬间用户浏览器里可能还
+ * 握着旧游标，前缀不变才能让它们继续有效。带窗时追加 `:window:<hash>`，于是切档后旧游标
+ * 一定对不上前缀 —— 这是「窗口进栅栏」的可观察半边（ADR-0004 的 2026-11-19 修订）。
+ */
+export function fenceKeyOf(scope?: PageScope, window?: DisplayWindowBounds): string {
+  return [scopeFenceOf(scope), window === undefined ? '' : windowFenceOf(window)]
+    .filter((part) => part !== '')
+    .join(':')
 }
 
 /**
@@ -59,9 +88,14 @@ export type CursorParse =
   | { readonly status: 'mismatch' }
   | { readonly status: 'malformed' }
 
-/** 游标 → wire 字符串；有范围时带栅栏前缀（`folder:<hash>:` / `tag:<id>:`），无范围就是裸体。 */
-export function encodePageCursor(scope: PageScope | undefined, cursor: Cursor): string {
-  return (scope === undefined ? '' : fenceKeyOf(scope) + ':') + encodeCursor(cursor)
+/**
+ * 游标 → wire 字符串；栅栏前缀 = `(范围, 窗口)` 的键。
+ *
+ * 无范围无窗口时就是裸体 `"<recency>|<id>"` —— 与加窗之前逐字相同。
+ */
+export function encodePageCursor(scope: PageScope | undefined, cursor: Cursor, window?: DisplayWindowBounds): string {
+  const fence = fenceKeyOf(scope, window)
+  return (fence === '' ? '' : fence + ':') + encodeCursor(cursor)
 }
 
 /**
@@ -69,12 +103,35 @@ export function encodePageCursor(scope: PageScope | undefined, cursor: Cursor): 
  *
  * ⚠️ 两种失败都**不许**被当成「没有游标 ⇒ 从第一页开始」：那会让翻页永远翻不完（每页都回同一批
  * 条目，界面无限追加，用户看到的是「永远滚不到底」而不是一句报错）。
+ *
+ * **反方向也要认出来**：请求不带窗口、游标却带着窗口段（切回「全部」后续页）时，期望前缀可能是
+ * 空串（无范围），`startsWith('')` 恒真，游标体则被 decodeCursor 判成 malformed —— 于是「切档后
+ * 旧游标」会被报成「你传了垃圾」。这里先看前缀之后是不是窗口段：是就说明它属于**另一个栅栏**，
+ * 回 mismatch，端点才能说「分页游标与当前范围不匹配，请重新加载」。
  */
-export function decodePageCursor(scope: PageScope | undefined, raw: string): CursorParse {
-  const prefix = scope === undefined ? '' : fenceKeyOf(scope) + ':'
+export function decodePageCursor(scope: PageScope | undefined, raw: string, window?: DisplayWindowBounds): CursorParse {
+  const fence = fenceKeyOf(scope, window)
+  const prefix = fence === '' ? '' : fence + ':'
   if (!raw.startsWith(prefix)) return { status: 'mismatch' }
-  const cursor = decodeCursor(raw.slice(prefix.length))
+  const rest = raw.slice(prefix.length)
+  if (window === undefined && rest.startsWith(WINDOW_FENCE_PREFIX)) return { status: 'mismatch' }
+  const cursor = decodeCursor(rest)
   return cursor === undefined ? { status: 'malformed' } : { status: 'ok', cursor }
+}
+
+/**
+ * 「这一行落在显示窗内吗」—— JS 侧**唯一一份**显示窗谓词（ADR-0005 决定 1）。
+ *
+ * 判据只认 `publishedAt`：没有发布日期的条目**永不进窗**（不许拿 fetchedAt 兜底 —— 那会把
+ * 「刚抓到的老文章」算成今天）。半开区间 `[from, to)`：等于 `from` 的在窗内，等于 `to` 的不在。
+ *
+ * SQL 侧的同一份判据是 `src/store-sqlite.ts` 的 WINDOW_FILTER（每种语言各一处）；两份语义
+ * 「逐字同义」由 tests/helpers/reader-store-contract.mjs 的窗口契约与端点用例钉住。
+ */
+export function inDisplayWindow(record: { readonly publishedAt?: string }, window: DisplayWindowBounds): boolean {
+  return record.publishedAt !== undefined
+    && record.publishedAt >= window.from
+    && record.publishedAt < window.to
 }
 
 /**
@@ -102,7 +159,13 @@ export function afterCursor(row: Cursor, cursor: Cursor): boolean {
  * 但读起来是两个模块互相依赖）。形状与 ReaderStore.listRecent 逐字一致，由契约测试保证。
  */
 export interface PageSource {
-  listRecent(limit: number, cursor?: Cursor, feedIds?: readonly string[], tagId?: string): Array<[string, ItemRecord]>
+  listRecent(
+    limit: number,
+    cursor?: Cursor,
+    feedIds?: readonly string[],
+    tagId?: string,
+    window?: DisplayWindowBounds,
+  ): Array<[string, ItemRecord]>
 }
 
 export interface PageRequest {
@@ -110,6 +173,13 @@ export interface PageRequest {
   readonly scope?: PageScope
   /** 续页边界；缺省 = 第一页。 */
   readonly cursor?: Cursor
+  /**
+   * 显示窗（半开区间）；缺省 = 「全部」，取数与栅栏行为与加窗之前逐字相同。
+   *
+   * 窗口**不进** `PageScope`（ADR-0004 修订）：范围回答「哪些源」，窗口回答「哪段时间」，
+   * 两者正交 —— 文件夹里也能问「今天剩什么」。
+   */
+  readonly window?: DisplayWindowBounds
   /** 一页要下发多少条（config.maxItemsShown）。 */
   readonly pageSize: number
   /**
@@ -154,11 +224,11 @@ export interface ItemPage {
  * 少给一页 = 用户翻不到底；多给一页 = 多一次往返，且末页空页会让「加载更多」闪一下。
  */
 export function buildItemPage(source: PageSource, request: PageRequest): ItemPage {
-  const { scope, cursor, pageSize, knownFeedIds } = request
+  const { scope, cursor, window, pageSize, knownFeedIds } = request
   // 范围落到 listRecent 的两个可选参数上（映射本身是一个穷尽 switch，见 listRecentArgsOf）。
   const { feedIds, tagId } = listRecentArgsOf(scope)
 
-  let window = pageSize
+  let windowSize = pageSize
   let fetched: Array<[string, ItemRecord]> = []
   let rows: Array<[string, ItemRecord]> = []
   // 最后一条**真正下发**的行在本批 fetched 里的下标（-1 = 这一页一条都没下）
@@ -166,7 +236,7 @@ export function buildItemPage(source: PageSource, request: PageRequest): ItemPag
   // 存储侧是否已给不出更多行（请求 window + 1 行却只拿到 ≤ window 行）
   let exhausted = false
   while (true) {
-    fetched = source.listRecent(window + 1, cursor, feedIds, tagId)
+    fetched = source.listRecent(windowSize + 1, cursor, feedIds, tagId, window)
     rows = []
     lastDelivered = -1
     for (let index = 0; index < fetched.length; index += 1) {
@@ -177,9 +247,9 @@ export function buildItemPage(source: PageSource, request: PageRequest): ItemPag
       rows.push(row)
       lastDelivered = index
     }
-    exhausted = fetched.length <= window
+    exhausted = fetched.length <= windowSize
     if (rows.length >= pageSize || exhausted) break
-    window *= 2
+    windowSize *= 2
   }
 
   // 续页游标 = 下发批次的**最后一行**（recency + id 一对值）。判据是「它后面还有行」：
@@ -187,7 +257,7 @@ export function buildItemPage(source: PageSource, request: PageRequest): ItemPag
   // 两者都不成立 ⇒ 到底，nextCursor 缺省 —— 客户端据此停止翻页（Overview 契约）。
   const boundary = rows[rows.length - 1]
   const nextCursor = lastDelivered >= 0 && (lastDelivered + 1 < fetched.length || !exhausted)
-    ? encodePageCursor(scope, { recency: recencyOf(boundary[1]), id: boundary[0] })
+    ? encodePageCursor(scope, { recency: recencyOf(boundary[1]), id: boundary[0] }, window)
     : undefined
   return nextCursor === undefined ? { rows } : { rows, nextCursor }
 }

@@ -41,6 +41,7 @@ import { SCHEMA_VERSION } from './storage/db.js'
 import { clampReadingRatio, type TagView } from './shared.js'
 import { sanitizeViewPreferences } from './preferences.js'
 import type { Cursor } from './cursor.js'
+import type { DisplayWindowBounds } from './display-window.js'
 import { linkKeyOf, type DuplicateRow } from './duplicates.js'
 import type { CleanupCandidate, ReaderStore } from './store.js'
 import type { ArticleEntry } from './retention.js'
@@ -145,25 +146,6 @@ const SELECT_ITEM_BY_FEED = ITEM_SELECT + ' WHERE i.feed_id = ?' + ITEM_ORDER
 const SELECT_ALL_ITEMS = ITEM_SELECT + ITEM_ORDER
 
 /**
- * 跨源最近 N 条（Task 5）。排序键与 ITEM_ORDER 逐字相同（recency 降序 + id 升序），
- * 所以执行计划是 i2 索引上的有界扫描 —— 而不是「读回 10 万行再 slice(0, 300)」。
- *
- * LIMIT 走绑定参数：调用方传负数时**在 JS 侧短路成空列表**（store.ts 的契约），
- * 绝不能下传 —— SQLite 把 `LIMIT -1` 当「无上限」，那正好把整表读回来。
- */
-const SELECT_RECENT = ITEM_SELECT + ITEM_ORDER + ' LIMIT ?'
-
-/**
- * 按来源范围取最近 N 条（文件夹浏览）。`json_each(?)` 只绑**一个**参数：
- * 用 `IN (?,?,…)` 会让占位符数量随源数增长，撞上 SQLite 的参数上限时是运行期错误。
- * 空数组**不在这里**处理（调用方必须先短路）：`IN (SELECT … WHERE value IN ())` 会退化成空集，
- * 语义上正确，但把「空文件夹」与「无范围」混在 SQL 层不利于判据阅读。
- */
-const SELECT_RECENT_IN_FEEDS = ITEM_SELECT
-  + ' WHERE i.feed_id IN (SELECT value FROM json_each(?))'
-  + ITEM_ORDER + ' LIMIT ?'
-
-/**
  * 续页（keyset 分页，Task 6）：**严格排在游标之后**的那批。三个范围变体（无范围 / 按源 /
  * 按标签）都拼这**一个**片段 —— 续页关系只有一处（ADR-0004 决定 4）。
  *
@@ -183,22 +165,74 @@ const SELECT_RECENT_IN_FEEDS = ITEM_SELECT
  */
 const AFTER_CURSOR = '(i.recency < ? OR (i.recency = ? AND i.id > ?))'
 
-/** 标签范围的同一页查询；标签 id 稳定，改名不换范围。 */
-const SELECT_RECENT_BY_TAG = ITEM_SELECT
-  + ' WHERE i.id IN (SELECT item_id FROM item_tags WHERE tag_id = ?)'
-  + ITEM_ORDER + ' LIMIT ?'
-const SELECT_RECENT_AFTER_BY_TAG = ITEM_SELECT
-  + ' WHERE i.id IN (SELECT item_id FROM item_tags WHERE tag_id = ?)'
-  + ' AND ' + AFTER_CURSOR
-  + ITEM_ORDER + ' LIMIT ?'
+/**
+ * 显示窗（ADR-0005 决定 4）：**SQL 侧唯一的窗口片段**，六个范围/续页变体共用。
+ *
+ * 为什么写成 `published_at IS NOT NULL AND recency >= ? AND recency < ?` 而不是直接比
+ * `published_at`：对非空行，`recency`（= COALESCE(published_at, fetched_at)）与 `published_at`
+ * 相等，于是窗口条件可以继续走 `i2(recency DESC, id ASC)` 的范围扫描；而 `IS NOT NULL` 这一半
+ * **不能省** —— 没有发布日期的条目会退到 fetched_at，刚抓到的老文章就会被算成「今天」
+ * （ADR-0005 的背景一节）。半开区间：等于 `from` 的在窗内、等于 `to` 的不在。
+ */
+const WINDOW_FILTER = '(i.published_at IS NOT NULL AND i.recency >= ? AND i.recency < ?)'
 
-/** 同上 + keyset 续页；谓词与无范围版本共用一个片段，只是多了来源范围。 */
-const SELECT_RECENT_AFTER_IN_FEEDS = ITEM_SELECT
-  + ' WHERE i.feed_id IN (SELECT value FROM json_each(?))'
-  + ' AND ' + AFTER_CURSOR
-  + ITEM_ORDER + ' LIMIT ?'
+/** 源范围（文件夹浏览）：`json_each` 只绑**一个**参数，避免 IN (?,?,…) 撞参数上限。 */
+const IN_FEEDS = 'i.feed_id IN (SELECT value FROM json_each(?))'
 
-const SELECT_RECENT_AFTER = ITEM_SELECT + ' WHERE ' + AFTER_CURSOR + ITEM_ORDER + ' LIMIT ?'
+/** 标签范围：标签 id 稳定，改名不换范围。 */
+const BY_TAG = 'i.id IN (SELECT item_id FROM item_tags WHERE tag_id = ?)'
+
+/**
+ * 六个范围/续页变体的**唯一装配处**：条件片段按「范围 → 续页 → 窗口」定序用 AND 连接。
+ *
+ * 为什么装配而不是手写 12 条完整语句：窗口子句只要有一处被抄成 `published_at >= ?`（漏掉
+ * `IS NOT NULL` 或方向反了），它就会成为第二份判据 —— 而它只在「无日期 + 抓取时间落在窗内」
+ * 这种截面才显形。片段常量 + 一处装配让「加窗口」不可能改错其中一两个变体。
+ *
+ * LIMIT 走绑定参数：调用方传负数时**在 JS 侧短路成空列表**（store.ts 的契约），
+ * 绝不能下传 —— SQLite 把 `LIMIT -1` 当「无上限」，那正好把整表读回来。
+ * 排序键与 ITEM_ORDER 逐字相同，所以无窗口时执行计划仍是 i2 索引上的有界扫描，
+ * 而不是「读回 10 万行再 slice(0, 300)」（窗口版是否仍走 i2 由 05 票的 EXPLAIN 证据回答）。
+ */
+function recentSql(conditions: readonly string[]): string {
+  return ITEM_SELECT
+    + (conditions.length === 0 ? '' : ' WHERE ' + conditions.join(' AND '))
+    + ITEM_ORDER + ' LIMIT ?'
+}
+
+/**
+ * 「一页 + 续页边界 + (范围, 窗口, 上限) → 语句与绑定参数」。
+ *
+ * 参数顺序与 `recentSql` 的条件顺序严格同源（先范围、后续页、再窗口、最后 LIMIT），
+ * 所以不存在「SQL 片段按一个顺序拼、参数按另一个顺序绑」的错位。
+ */
+function recentQuery(
+  scope: { readonly feedIdsJson?: string; readonly tagId?: string },
+  cursor: Cursor | undefined,
+  window: DisplayWindowBounds | undefined,
+  limit: number,
+): { readonly text: string; readonly args: Array<string | number> } {
+  const conditions: string[] = []
+  const args: Array<string | number> = []
+  if (scope.tagId !== undefined) {
+    conditions.push(BY_TAG)
+    args.push(scope.tagId)
+  }
+  if (scope.feedIdsJson !== undefined) {
+    conditions.push(IN_FEEDS)
+    args.push(scope.feedIdsJson)
+  }
+  if (cursor !== undefined) {
+    conditions.push(AFTER_CURSOR)
+    args.push(cursor.recency, cursor.recency, cursor.id)
+  }
+  if (window !== undefined) {
+    conditions.push(WINDOW_FILTER)
+    args.push(window.from, window.to)
+  }
+  args.push(limit)
+  return { text: recentSql(conditions), args }
+}
 
 // ── 标签（M2 05）────────────────────────────────────────────────────────
 const TAG_VIEWS = `SELECT t.id AS id, t.name AS name, t.created_at AS created_at,
@@ -908,24 +942,20 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
      * 那是静默的性能悬崖（结果看着还挺对）。非整数上限交给 SQLite 响亮报
      * 「datatype mismatch」，不在这里悄悄取整。
      */
-    listRecent: (limit, cursor, feedIds, tagId) => {
+    listRecent: (limit, cursor, feedIds, tagId, window) => {
       if (limit <= 0) return []
       // 空范围 = 空结果，绝不回落成「无范围」：空文件夹若走全表会让用户看到别的源。
       if (feedIds !== undefined && feedIds.length === 0) return []
       const scoped = feedIds === undefined
         ? undefined
         : JSON.stringify([...new Set(feedIds)])
-      const rows = tagId !== undefined
-        ? (cursor === undefined
-          ? sql(SELECT_RECENT_BY_TAG).all(tagId, limit)
-          : sql(SELECT_RECENT_AFTER_BY_TAG).all(tagId, cursor.recency, cursor.recency, cursor.id, limit))
-        : scoped === undefined
-          ? (cursor === undefined
-            ? sql(SELECT_RECENT).all(limit)
-            : sql(SELECT_RECENT_AFTER).all(cursor.recency, cursor.recency, cursor.id, limit))
-          : (cursor === undefined
-            ? sql(SELECT_RECENT_IN_FEEDS).all(scoped, limit)
-            : sql(SELECT_RECENT_AFTER_IN_FEEDS).all(scoped, cursor.recency, cursor.recency, cursor.id, limit))
+      const query = recentQuery(
+        { ...(tagId === undefined ? {} : { tagId }), ...(scoped === undefined ? {} : { feedIdsJson: scoped }) },
+        cursor,
+        window,
+        limit,
+      )
+      const rows = sql(query.text).all(...query.args)
       return rows.map((row) => {
         const itemId = requiredText(row.id, 'items.id')
         return [itemId, toItemRecord(row)] as [string, ItemRecord]

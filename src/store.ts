@@ -20,7 +20,8 @@ import { sanitizeViewPreferences } from './preferences.js'
 import type { ViewPreferences } from './preferences.js'
 import { recencyOf } from './cursor.js'
 import type { Cursor } from './cursor.js'
-import { afterCursor } from './item-page.js'
+import type { DisplayWindowBounds } from './display-window.js'
+import { afterCursor, inDisplayWindow } from './item-page.js'
 import { linkKeyOf, type DuplicateRow } from './duplicates.js'
 
 /**
@@ -161,8 +162,17 @@ export interface ReaderStore {
    * `feedIds`：可选的来源范围（文件夹浏览用）。**筛选必须发生在取数/分页之前**，
    * 否则旧跨源首页之外的成员条目会被截断窗口挡掉（M2 03 的硬要求）。
    * 传空数组 = 空结果，绝不回落成「无范围」。
+   *
+   * `window`：可选的显示窗（半开区间，ADR-0005）。判据只认 `publishedAt`（`inDisplayWindow`），
+   * 没有发布日期的条目永不进窗；与 `feedIds` / `tagId` 正交，三者都在限页之前生效。
    */
-  listRecent(limit: number, cursor?: Cursor, feedIds?: readonly string[], tagId?: string): Array<[string, ItemRecord]>
+  listRecent(
+    limit: number,
+    cursor?: Cursor,
+    feedIds?: readonly string[],
+    tagId?: string,
+    window?: DisplayWindowBounds,
+  ): Array<[string, ItemRecord]>
   /**
    * 显式清理的候选行（Task 5；原先由调用方 allItems() 全表物化后再筛）。
    *
@@ -398,7 +408,7 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
      * 旧路径同样行为不变：全表按 recency 降序 + id 升序排完取前缀。
      * limit ≤ 0 短路成空列表（`slice(0, -1)` 会返回到倒数第二项，那是静默的错答案）。
      */
-    listRecent: (limit, cursor, feedIds, tagId) => {
+    listRecent: (limit, cursor, feedIds, tagId, window) => {
       if (limit <= 0) return []
       // 空数组 = 空结果：绝不能把「空范围」当成「没有范围」（那会让空文件夹查出全库）。
       const allowed = feedIds === undefined ? undefined : new Set(feedIds)
@@ -406,6 +416,9 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
       const rows = [...items.entries()].filter(([itemId, record]) => {
         if (allowed !== undefined && !allowed.has(record.feedId)) return false
         if (tagId !== undefined && !(itemTagIds.get(itemId)?.has(tagId) ?? false)) return false
+        // 显示窗判据与自持实现同源（JS 侧唯一一份是 src/item-page.ts 的 inDisplayWindow）：
+        // 只认 publishedAt、无日期的不进窗 —— 这里绝不拿 recencyOf 兜底。
+        if (window !== undefined && !inDisplayWindow(record, window)) return false
         if (cursor === undefined) return true
         // 与自持实现逐字同义：JS 侧只有一份续页谓词（src/item-page.ts 的 afterCursor），
         // SQL 侧是 store-sqlite 的 AFTER_CURSOR —— 两种语言各一处，别在这里再写第三份。

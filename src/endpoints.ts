@@ -53,6 +53,7 @@ import { sanitizeViewPreferences } from './preferences.js'
 import { recencyOf } from './cursor.js'
 import { decodeFencedCursor, encodeFencedCursor, queryFenceKey } from './cursor-fence.js'
 import type { Cursor } from './cursor.js'
+import type { DisplayWindowBounds } from './display-window.js'
 import { buildItemPage, decodePageCursor, type PageScope } from './item-page.js'
 
 /** 端点需要的运行时依赖（显式传入，不靠闭包）。 */
@@ -178,6 +179,20 @@ const accountOf = (target: UnreadStore): UnreadAccount => {
   return { unread: sumOf(perFeedUnread), perFeedUnread }
 }
 
+/**
+ * 从 overview/refresh 的**已解析**入参里取显示窗（形状与 `from < to` 已由 payload 声明判过，
+ * 这里只做「缺席 ⇒ 不传窗口」的归一 —— 判据只有一处，别在这里重新校验）。
+ *
+ * `null` 与缺席同义：浏览器通道把缺省序列化成 `null`（与 folder / tagId 同一条 wire 形状）。
+ */
+function displayWindowOf(
+  input: { readonly from?: string | null; readonly to?: string | null },
+): DisplayWindowBounds | undefined {
+  const { from, to } = input
+  if (from === undefined || from === null || to === undefined || to === null) return undefined
+  return { from, to }
+}
+
 /** 从 overview/refresh 的**已解析**入参里把范围落到库上（形状由 payload 声明判，这里只判存在性）。 */
 function overviewScopeOf(
   ctx: EndpointCtx,
@@ -204,8 +219,16 @@ function overviewScopeOf(
  * @param cursor    续页边界（keyset）；缺省 = 第一页。游标由 overview 端点围栏解码后传入，
  *                  这里**不再判形状** —— 认不出的游标在那一层就被响亮拒了（见 ENDPOINTS.overview）
  * @param scope     浏览范围；缺省 = 普通跨源契约（逐字不变）。有它时取页在 SQL 侧先按成员/标签过滤再限页。
+ * @param window    显示窗（半开区间）；缺省 = 「全部」，取数与栅栏行为与加窗之前逐字相同。
+ *                  窗口只作用于**列表取数** —— 账目按窗是 R1 02 的票，本轮不提前改口径。
  */
-const buildOverview = (ctx: EndpointCtx, run?: RefreshRun, cursor?: Cursor, scope?: PageScope): Overview => {
+const buildOverview = (
+  ctx: EndpointCtx,
+  run?: RefreshRun,
+  cursor?: Cursor,
+  scope?: PageScope,
+  window?: DisplayWindowBounds,
+): Overview => {
   const refreshedAtMs = ctx.lastRefreshCompletedAt()
   // refreshed 是布尔概况（客户端历史上就靠它），refresh 说明细节 —— 两者由同一个 run 派生，
   // 不允许各自算一遍：否则「refreshed=true 而 outcome=throttled」这种自相矛盾迟早出现。
@@ -248,6 +271,7 @@ const buildOverview = (ctx: EndpointCtx, run?: RefreshRun, cursor?: Cursor, scop
   const page = buildItemPage(target, {
     ...(scope === undefined ? {} : { scope }),
     ...(cursor === undefined ? {} : { cursor }),
+    ...(window === undefined ? {} : { window }),
     pageSize: ctx.config.maxItemsShown,
     knownFeedIds: new Set(titles.keys()),
   })
@@ -322,7 +346,7 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
   }),
   overview: defineEndpoint({
     payload: overviewPayload,
-    invalidMessage: 'overview 的 folder / tagId / cursor 无效',
+    invalidMessage: 'overview 的 folder / tagId / cursor / 时间窗口无效',
     to: async (input, ctx) => {
       // 续页游标**必须解码成功**才继续（Overview 的契约）。认不出时**响亮拒绝**：
       // 「解不出就从第一页开始」会让翻页永远翻不完 —— 每页都回同一批条目，界面无限追加重复行，
@@ -330,26 +354,31 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       const resolved = overviewScopeOf(ctx, input)
       if (resolved.failure !== undefined) return resolved.failure
       const scope = resolved.scope
+      // 窗口只解析这一次：下游（取页、栅栏）都拿这同一份值，不许各自再从 payload 里抠一遍。
+      const window = displayWindowOf(input)
       const raw = input.cursor
-      if (raw === undefined || raw === null) return ok(buildOverview(ctx, undefined, undefined, scope))
-      // 围栏（前缀 = 范围键）与形状都由一页条目模块判（ADR-0004）；两种失败各留一句文案：
+      if (raw === undefined || raw === null) return ok(buildOverview(ctx, undefined, undefined, scope, window))
+      // 围栏（前缀 = 范围键 + 窗口键）与形状都由一页条目模块判（ADR-0004）；两种失败各留一句文案：
       // 「范围变了」要客户端重载当前范围，「格式认不出」是调用方传了垃圾 —— 处置不同，不能合并。
-      const parsed = decodePageCursor(scope, raw)
+      // 窗口进栅栏：切档后旧游标在这里失配，绝不静默按旧边界续页。
+      const parsed = decodePageCursor(scope, raw, window)
       if (parsed.status === 'mismatch') return fail('bad-request', '分页游标与当前范围不匹配，请重新加载')
       if (parsed.status === 'malformed') return fail('bad-request', '未知的续页游标（格式应为 "<recency>|<id>"）：' + raw)
-      return ok(buildOverview(ctx, undefined, parsed.cursor, scope))
+      return ok(buildOverview(ctx, undefined, parsed.cursor, scope, window))
     },
   }),
 
   refresh: defineEndpoint({
     payload: scopePayload,
-    invalidMessage: 'refresh 的 folder / tagId 无效',
+    invalidMessage: 'refresh 的 folder / tagId / 时间窗口无效',
     to: async (input, ctx) => {
       // 在文件夹里点刷新时必须留在同一范围：否则列表会突然跳回跨源首页（用户会以为选中的文件夹丢了）。
       const resolved = overviewScopeOf(ctx, input)
       if (resolved.failure !== undefined) return resolved.failure
+      // 窗口同理：refresh 回的是同一页 + 同一份账，不带窗口就会把视图悄悄放回「全部」。
+      const window = displayWindowOf(input)
       const run = await ctx.refreshNow()
-      return ok(buildOverview(ctx, run, undefined, resolved.scope))
+      return ok(buildOverview(ctx, run, undefined, resolved.scope, window))
     },
   }),
 

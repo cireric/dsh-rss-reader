@@ -22,7 +22,7 @@ import { DEFAULT_VIEW_PREFERENCES, sanitizeViewPreferences } from './preferences
 import type { ViewPreferences } from './preferences.js'
 import { recencyOf } from './cursor.js'
 import { linkKeyOf } from './duplicates.js'
-import { afterCursor } from './item-page.js'
+import { afterCursor, inDisplayWindow } from './item-page.js'
 
 export interface MemoryStore extends ReaderStore {
   /** 裸露的 Map：用例直接断言 / 注入并发写（见 tests/helpers/reader-store-memory.mjs）。 */
@@ -179,7 +179,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): MemoryStore
       return unread
     },
 
-    listRecent: (limit, cursor, feedIds, tagId) => {
+    listRecent: (limit, cursor, feedIds, tagId, window) => {
       if (limit <= 0) return []
       // 传空数组 = 空结果（绝不回落成「无范围」）；undefined 才是「无范围」。
       if (feedIds !== undefined && feedIds.length === 0) return []
@@ -187,6 +187,9 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): MemoryStore
       const rows = [...items.entries()].filter(([itemId, record]) => {
         if (scope !== undefined && !scope.has(record.feedId)) return false
         if (tagId !== undefined && !(itemTagIds.get(itemId) ?? []).includes(tagId)) return false
+        // 与另外两份实现同一条判据（JS 侧唯一一份：src/item-page.ts 的 inDisplayWindow）：
+        // 替身不许比生产更宽松 —— 窗口语义上偷懒会让端点测出来的绿不算数。
+        if (window !== undefined && !inDisplayWindow(record, window)) return false
         return true
       })
       rows.sort(([idA, a], [idB, b]) => {

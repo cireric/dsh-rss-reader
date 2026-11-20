@@ -1399,7 +1399,7 @@ export const MUTATIONS = [
     // 改锚到新产物的同一处判定（window 不再放大 = 残留行会被当成「已到底」）。
     // ⚠️ 2026-11-18 阶段 6：循环搬进 src/item-page.ts（ADR-0004），批次变量从 rows 改名 fetched
     // （rows 现在专指「要下发的行」）⇒ 随搬家重锚。
-    from: 'exhausted = fetched.length <= window;',
+    from: 'exhausted = fetched.length <= windowSize;',
     to: 'exhausted = true;',
   },
   // ── 列表分页 keyset + 客户端契约（2026-10-11 大规模存储任务 6）────────────────────
@@ -1941,7 +1941,9 @@ export const MUTATIONS = [
   { id: 'tag-浏览忽略tagId', file: 'lib/store-sqlite.js',
     judges: ['tag-browse.test.mjs'],
     judgeTests: ['标签浏览先按 id 筛选再限页：深页文章不漏，目录保留空标签'],
-    from: 'const rows = tagId !== undefined', to: 'const rows = false' },
+    // 2026-11-20 R1-01 重锚：六个取数变体收成 recentQuery 一处装配后，原锚串（`const rows = tagId !== undefined`）
+    // 消失；同一个判定现在是「范围参数里到底放不放 tagId」——不放进条件就退化成跨源列表。
+    from: '...(tagId === undefined ? {} : { tagId })', to: '...({})' },
   { id: 'tag-搜索忽略tagId', file: 'lib/search-worker.js',
     judges: ['tag-browse.test.mjs'],
     judgeTests: ['搜索 + 标签 + 未读取交集，搜索结果也带 tagIds'],
@@ -2122,6 +2124,34 @@ export const MUTATIONS = [
     // 回滚只写回 feeds：失败的退订把该源悄悄挪到末尾，整份文件也不再逐字一致（验收 9 回滚段翻红）。
     from: 'if (before.feedOrder === undefined)',
     to: 'if (true)' },
+  // ── R1：显示窗（2026-11-20，01 票的宿主半边）────────────────────────────
+  // spec「测试决策」列的 8 条里，01 票负责这 4 条（账目 / 拆分 / 客户端三条留给 02–04）。
+  // from 全部按 lib/ 产物实际字节锚定（构建后逐条 grep 核对 OCCURRENCES=1，见 docs/pitfalls.md 1.4）。
+  { id: '显示窗-用 recency 兜底', file: 'lib/store-sqlite.js',
+    judges: ['time-window-endpoints.test.mjs'],
+    judgeTests: ['窗口取数：只判 published_at 的半开区间；等于 from 的在、等于 to 的不在、无日期的不出现'],
+    // 去掉 IS NOT NULL 守卫：没有发布日期的条目会退到 fetched_at，刚抓到的老文章被算成今天
+    // （验收 6 的无日期探针翻红 —— 它的 fetchedAt 恰好落在窗内）。
+    from: "const WINDOW_FILTER = '(i.published_at IS NOT NULL AND i.recency >= ? AND i.recency < ?)';",
+    to: "const WINDOW_FILTER = '(i.recency >= ? AND i.recency < ?)';" },
+  { id: '显示窗-栅栏不含窗口', file: 'lib/item-page.js',
+    judges: ['time-window-endpoints.test.mjs', 'item-page.test.mjs'],
+    judgeTests: ['窗口进栅栏：切档后的旧游标被响亮拒绝（两个方向），同窗口内正常续页', '窗口栅栏：同窗口往返可解；切窗口 / 带窗游标带回「全部」一律 mismatch'],
+    // 前缀只拼 scope：切档后旧游标与当前窗口同前缀，游标静默续页（验收 7 翻红）。
+    from: "return [scopeFenceOf(scope), window === undefined ? '' : windowFenceOf(window)]",
+    to: 'return [scopeFenceOf(scope)]' },
+  { id: '显示窗-日界用毫秒减法', file: 'lib/display-window.js',
+    judges: ['display-window.test.mjs'],
+    judgeTests: ['今天：本地今天午夜到本地明天午夜（不是 UTC 日界，也不是 24 小时前的此刻）', 'DST 春季：23 小时的自然日仍是「今天」，近 3 天 = 71 小时（不是毫秒减法）'],
+    // 毫秒减法假设一天 24 小时：DST 那天 from 落在 23:00/01:00，窗口少看或多看一段（Seam 4 翻红）。
+    from: 'const from = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (days - 1));',
+    to: 'const from = new Date(now.getTime() - (days - 1) * 86400000);' },
+  { id: '显示窗-近 3 天算成 3 天前', file: 'lib/display-window.js',
+    judges: ['display-window.test.mjs'],
+    judgeTests: ['近 3 天 = 含今天在内的 3 个自然日（from 是今天 − 2 天的午夜）'],
+    // d - 3 而不是 d - 2：近 3 天变成「今天 + 前 3 天」共 4 天（档位用例翻红）。
+    from: 'now.getDate() - (days - 1)',
+    to: 'now.getDate() - days' },
   { id: 'client-排序后不重载', file: 'lib/client.js',
     judges: ['feed-order-client.test.mjs'],
     judgeTests: ['moveFeedOrder：按当前 feeds 顺序整体推出 ids，成功后 reload 用宿主快照改行序'],
