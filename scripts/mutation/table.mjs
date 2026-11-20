@@ -1212,7 +1212,17 @@ export const MUTATIONS = [
     // 库事务失败时不把订阅写回 ⇒ config 已经删了、条目还在。退掉最后一个源时，下次装载会被
     // 「订阅映射丢了」的守卫判死，插件直接起不来（2026-11-14 评审发现的最坏形态）。
     // 判据：store-sqlite 的「deleteSubscription：库事务失败时把订阅原样写回」。
-    from: '                    writeFeeds(configPath, () => before);\n',
+    // 2026-11-20 R3-04 重锚：退订失败的回写从 writeFeeds(() => before) 改成 updateConfig 整份回写
+    // （顺序也要一起回滚）。守的仍是同一件事——失败后必须把订阅写回；锚点跟着编译产物走。
+    from: `                    updateConfig(configPath, (current) => {
+                        const restored = { ...current, feeds: before.feeds };
+                        if (before.feedOrder === undefined)
+                            delete restored.feedOrder;
+                        else
+                            restored.feedOrder = [...before.feedOrder];
+                        return restored;
+                    });
+`,
     to: '' },
   { id: 'store-退订不删条目', file: 'lib/store-sqlite.js',
     judges: ['store-sqlite.test.mjs', 'tag-endpoints.test.mjs'],
