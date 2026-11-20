@@ -24,7 +24,7 @@ import { recencyOf } from './cursor.js'
 import { linkKeyOf } from './duplicates.js'
 import { afterCursor } from './item-page.js'
 import { inDisplayWindow } from './display-window.js'
-import { countUnreadPerFeed } from './unread.js'
+import { countUnreadPerFeed, countUnreadSplit } from './unread.js'
 
 export interface MemoryStore extends ReaderStore {
   /** 裸露的 Map：用例直接断言 / 注入并发写（见 tests/helpers/reader-store-memory.mjs）。 */
@@ -176,6 +176,9 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): MemoryStore
      * 替身不许自己再写一遍 `record.readAt !== undefined`：那正是「替身比生产宽松」的起点。
      */
     unreadPerFeed: (feedIds, window) => countUnreadPerFeed(feedIds, items.values(), window),
+
+    /** 三联拆分：与旧适配器共用 unread.ts 的 countUnreadSplit —— 替身不另写一遍判据。 */
+    unreadSplit: (feedIds, todayFrom) => countUnreadSplit(feedIds, items.values(), todayFrom),
 
     listRecent: (limit, cursor, feedIds, tagId, window) => {
       if (limit <= 0) return []

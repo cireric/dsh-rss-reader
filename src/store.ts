@@ -15,7 +15,7 @@ import type { FolderView, TagView } from './shared.js'
 import { articleCharsOf, type ArticleEntry, type CleanupRow } from './retention.js'
 import { applyFeedIntent, type FeedIntent } from './feed-intent.js'
 import { clampReadingRatio } from './shared.js'
-import { countUnreadPerFeed } from './unread.js'
+import { countUnreadPerFeed, countUnreadSplit, type UnreadSplit } from './unread.js'
 import { sanitizeViewPreferences } from './preferences.js'
 import type { ViewPreferences } from './preferences.js'
 import { recencyOf } from './cursor.js'
@@ -53,7 +53,7 @@ export interface CleanupCandidate extends CleanupRow {
  */
 export type PagingStore = Pick<ReaderStore, 'listRecent'>
 /** 未读账：判据来自 unreadPerFeed，**键域**来自 listFeeds（0 未读的源也要留 0）。 */
-export type UnreadStore = Pick<ReaderStore, 'unreadPerFeed' | 'listFeeds'>
+export type UnreadStore = Pick<ReaderStore, 'unreadPerFeed' | 'unreadSplit' | 'listFeeds'>
 /** 清理：候选由存储侧成本过滤，删除由调用方按判据执行。 */
 export type CleanupStore = Pick<ReaderStore, 'listCleanupCandidates' | 'deleteItem'>
 /** 标签批量读：列表/搜索页每行一次查询的替代品。 */
@@ -149,6 +149,18 @@ export interface ReaderStore {
    * 缺省 = 全量（旧行为逐字不变）。三份实现同判据由 contracts 用例逐键对账。
    */
   unreadPerFeed(feedIds: readonly string[], window?: DisplayWindowBounds): Record<string, number>
+  /**
+   * 未读三联拆分（R1 04）：`today` = `publishedAt >= todayFrom`、`earlier` = 更早、
+   * `noDate` = 没有发布日期的未读。只数未读，**与显示窗无关**（窗口只影响 unreadPerFeed）。
+   *
+   * 时间输入只有 `todayFrom` 一个（读者本地「今天」的起点）：没有「今天终点」，所以时间戳在
+   * 未来的未读算进 `today`，换取 `today + earlier + noDate` **恒等于**全量未读（spec 决策 16）。
+   *
+   * 键域与 `unreadPerFeed` 相同：`feedIds` 是 feeds 表的键，残留的已退订源条目照 SQL 会被数到，
+   * 但实现必须按传进来的键收窄 —— 否则三分之和会大于账目总数，顶栏「共 X 条未读 · 今天 N …」
+   * 的守恒式当场破掉。三份实现同判据由 contracts 用例钉住（三数之和 = unreadPerFeed 之和）。
+   */
+  unreadSplit(feedIds: readonly string[], todayFrom: string): UnreadSplit
   /**
    * 跨源最近的 limit 条（`recency` 降序 + id 升序 —— 与 allItems 同一套排序键，见 cursor.ts 的
    * recencyOf；缺发布时间的条目按抓取时间归位）。
@@ -412,6 +424,15 @@ export function createStore(domain: Domain<typeof readerDomain>): ReaderStore {
       feedIds,
       [...items.entries()].map(([, record]) => record),
       window,
+    ),
+    /**
+     * 三联拆分的旧路径：与内存替身共用 unread.ts 的 countUnreadSplit（JS 侧唯一一份算法）——
+     * 三份实现里两份走同一条判据，SQL 那一份由契约用例在同一夹具上对账。
+     */
+    unreadSplit: (feedIds, todayFrom) => countUnreadSplit(
+      feedIds,
+      [...items.entries()].map(([, record]) => record),
+      todayFrom,
     ),
     /**
      * 旧路径同样行为不变：全表按 recency 降序 + id 升序排完取前缀。

@@ -456,6 +456,42 @@ export const contractCases = [
     },
   },
   {
+    // R1 04：三联拆分是「全部未读」的**构成**，与显示窗无关，只收一个「今天的起点」。
+    // 三份实现必须同判据：today = publishedAt >= todayFrom、earlier = 更早、noDate = 无发布日；
+    // 三数之和 = 全量未读（同一键域，已退订源的残留条目不进账）。未来时间戳算「今天」是刻意的
+    // —— 只用一个阈值换三分恒等于总数，不另开第四类（spec 决策 16）。
+    name: 'unreadSplit：today / earlier / noDate 三分恒等于全量未读，只数未读且键域 = 传入的 feeds 表',
+    async run({ store }) {
+      const base = { feedId: 'f1', link: 'https://a.example/', fetchedAt: '2026-11-20T23:00:00.000Z', starred: false }
+      await store.saveItem('today-unread', { ...base, title: 'today-unread', publishedAt: '2026-11-20T12:00:00.000Z' })
+      // 半开边界的另一端不属于本方法（没有「今天终点」）；等于 todayFrom 的必须算今天。
+      await store.saveItem('today-at-from', { ...base, title: 'today-at-from', publishedAt: '2026-11-20T00:00:00.000Z' })
+      // 未来的未读也算今天：这是「一个阈值、三分恒等于总数」的直接结果。
+      await store.saveItem('future-unread', { ...base, title: 'future-unread', publishedAt: '2026-12-01T00:00:00.000Z' })
+      await store.saveItem('earlier-unread', { ...base, title: 'earlier-unread', publishedAt: '2026-11-19T23:59:59.999Z' })
+      await store.saveItem('no-date-unread', { ...base, title: 'no-date-unread' })
+      // 已读的三类都不进桶：K / today / earlier 只数未读。
+      await store.saveItem('today-read', { ...base, title: 'today-read', publishedAt: '2026-11-20T10:00:00.000Z', readAt: '2026-11-20T11:00:00.000Z' })
+      await store.saveItem('earlier-read', { ...base, title: 'earlier-read', publishedAt: '2026-11-19T10:00:00.000Z', readAt: '2026-11-19T11:00:00.000Z' })
+      await store.saveItem('no-date-read', { ...base, title: 'no-date-read', readAt: '2026-11-20T11:00:00.000Z' })
+      // 已退订源的残留条目：全量账的键域是 feeds 表，拆分必须用同一把尺子（否则三分之和 > 总数）。
+      await store.saveItem('orphan-unread', { ...base, feedId: 'gone', title: 'orphan-unread', publishedAt: '2026-11-20T11:00:00.000Z' })
+
+      const feedIds = ['f1', 'f2']
+      const split = store.unreadSplit(feedIds, '2026-11-20T00:00:00.000Z')
+      assert.deepEqual(split, { today: 3, earlier: 1, noDate: 1 },
+        '三分：今天 3（含等于 todayFrom 的与未来发布的）+ 更早 1 + 无日期 1；已读与残留源都不算')
+
+      const counts = store.unreadPerFeed(feedIds)
+      const total = Object.values(counts).reduce((sum, count) => sum + count, 0)
+      assert.equal(split.today + split.earlier + split.noDate, total,
+        '三数之和恒等于全量未读（与 unreadPerFeed 同一键域、同一未读判据）')
+
+      assert.deepEqual(store.unreadSplit(['f2'], '2026-11-20T00:00:00.000Z'), { today: 0, earlier: 0, noDate: 0 },
+        '键域内没有任何条目 ⇒ 三个 0，而不是缺席')
+    },
+  },
+  {
     name: 'listCleanupCandidates：真该删的行必须在候选里；候选行携带的字段必须是真的',
     async run({ store }) {
       const base = { feedId: 'f1', link: 'https://a.example/', fetchedAt: '2026-01-01T00:00:00.000Z', starred: false }

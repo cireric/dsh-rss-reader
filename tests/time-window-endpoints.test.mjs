@@ -4,7 +4,8 @@
  * 前半（R1 01 票）钉窗口的**取数**半边：条目的窗内/窗外、半开边界、无日期排除、窗口进栅栏、
  * 范围组合、refresh、旧行为不变、坏入参。后半（R1 02 票）钉**账目**半边：overview 与五个带账
  * 写端点在同一个窗口下回同一个数、窗内标读/撤销守恒、cleanup 的窗口入参。
- * 三联拆分（todayFrom → unreadSplit）仍是 04 票的判据，不在这里提前钉 —— 否则改一处只红一半。
+ * 三联拆分（todayFrom → unreadSplit）在文件末尾的 R1 04 一节：它描述「全部未读」的构成，
+ * 与窗口无关，所以两条判据（窗内账 / 三分恒等）在同一份夹具上各钉各的。
  *
  * 为什么必须真库：窗口的正确性全在 SQL 谓词与取数窗口上（`published_at IS NOT NULL` 那一半
  * 只在「无日期 + 抓取时间落在窗内」的截面显形）。内存桩的 listRecent 是我自己写的，
@@ -318,7 +319,7 @@ test('坏入参：五种窗口形态全部 bad-request，且不触达 store', as
  * 01 票只钉窗口取数；这里补的是**账目半边**：overview 与五个带账写端点在同一个窗口下
  * 回同一个数。夹具按 spec 验收的共用夹具：今天 3 条（2 未读 + 1 已读）、2 天前 1 条未读、
  * 10 天前 2 条未读、无日期 3 条（2 未读 + 1 已读）⇒ 全部 9 条 / 7 未读；今天 2 未读；
- * 近 3 天 / 近 7 天 3 未读。三联拆分（todayFrom）是 04 票，不在这里提前钉。
+ * 近 3 天 / 近 7 天 3 未读。三联拆分（todayFrom）见文件末尾的 R1 04 一节。
  */
 
 const FEED_C = 'https://c.example.com/atom.xml'
@@ -416,11 +417,11 @@ test('overview 带窗账目：只算窗内未读，键域 = feeds 表（0 未读
  * 每个端点用一份**新的**夹具，保证两次调用从同一初始态出发。
  */
 const ACCOUNT_ENDPOINT_CASES = [
-  { endpoint: 'markRead', payload: { itemIds: ['today-a'] }, window: { unread: 1, perFeed: { [FEED_A]: 0, [FEED_B]: 1, [FEED_C]: 0 } }, full: { unread: 6, perFeed: { [FEED_A]: 3, [FEED_B]: 3, [FEED_C]: 0 } } },
-  { endpoint: 'unmarkRead', payload: { itemIds: ['today-read'] }, window: { unread: 3, perFeed: { [FEED_A]: 1, [FEED_B]: 2, [FEED_C]: 0 } }, full: { unread: 8, perFeed: { [FEED_A]: 4, [FEED_B]: 4, [FEED_C]: 0 } } },
-  { endpoint: 'toggleStar', payload: { itemId: 'today-a' }, window: { unread: 2, perFeed: { [FEED_A]: 1, [FEED_B]: 1, [FEED_C]: 0 } }, full: { unread: 7, perFeed: { [FEED_A]: 4, [FEED_B]: 3, [FEED_C]: 0 } } },
-  { endpoint: 'toggleKeepUnread', payload: { itemId: 'today-a' }, window: { unread: 2, perFeed: { [FEED_A]: 1, [FEED_B]: 1, [FEED_C]: 0 } }, full: { unread: 7, perFeed: { [FEED_A]: 4, [FEED_B]: 3, [FEED_C]: 0 } } },
-  { endpoint: 'cleanup', payload: {}, window: { unread: 2, perFeed: { [FEED_A]: 1, [FEED_B]: 1, [FEED_C]: 0 } }, full: { unread: 7, perFeed: { [FEED_A]: 4, [FEED_B]: 3, [FEED_C]: 0 } } },
+  { endpoint: 'markRead', payload: { itemIds: ['today-a'] }, window: { unread: 1, perFeed: { [FEED_A]: 0, [FEED_B]: 1, [FEED_C]: 0 } }, full: { unread: 6, perFeed: { [FEED_A]: 3, [FEED_B]: 3, [FEED_C]: 0 } }, split: { today: 1, earlier: 3, noDate: 2 } },
+  { endpoint: 'unmarkRead', payload: { itemIds: ['today-read'] }, window: { unread: 3, perFeed: { [FEED_A]: 1, [FEED_B]: 2, [FEED_C]: 0 } }, full: { unread: 8, perFeed: { [FEED_A]: 4, [FEED_B]: 4, [FEED_C]: 0 } }, split: { today: 3, earlier: 3, noDate: 2 } },
+  { endpoint: 'toggleStar', payload: { itemId: 'today-a' }, window: { unread: 2, perFeed: { [FEED_A]: 1, [FEED_B]: 1, [FEED_C]: 0 } }, full: { unread: 7, perFeed: { [FEED_A]: 4, [FEED_B]: 3, [FEED_C]: 0 } }, split: { today: 2, earlier: 3, noDate: 2 } },
+  { endpoint: 'toggleKeepUnread', payload: { itemId: 'today-a' }, window: { unread: 2, perFeed: { [FEED_A]: 1, [FEED_B]: 1, [FEED_C]: 0 } }, full: { unread: 7, perFeed: { [FEED_A]: 4, [FEED_B]: 3, [FEED_C]: 0 } }, split: { today: 2, earlier: 3, noDate: 2 } },
+  { endpoint: 'cleanup', payload: {}, window: { unread: 2, perFeed: { [FEED_A]: 1, [FEED_B]: 1, [FEED_C]: 0 } }, full: { unread: 7, perFeed: { [FEED_A]: 4, [FEED_B]: 3, [FEED_C]: 0 } }, split: { today: 2, earlier: 3, noDate: 2 } },
 ]
 
 test('五个带账写端点：带窗回窗内账、不带窗回全量，各源之和恒等于总未读', async () => {
@@ -527,5 +528,112 @@ test('cleanup 入参：仍接受 null / 缺省 / 带无关键的对象；坏窗�
     assert.equal(result.ok, false, 'cleanup 放过了坏窗口（' + label + '）')
     assert.equal(result.error.code, 'bad-request')
     assert.ok(result.error.details.issues.length > 0, 'cleanup 的坏窗口必须给出字段路径')
+  }
+})
+
+/* ── 三联拆分（R1 04）─────────────────────────────────────────────────
+ * `unreadSplit` 描述**全部未读**的构成（今天 / 更早 / 无日期），与显示窗无关；请求给了
+ * `todayFrom` 才回它。夹具沿用上面的 ACCOUNT_ROWS：全部 7 未读 = 今天 2 + 更早 3 + 无日期 2。
+ */
+
+/** 读者本地「今天」的起点；与 WINDOW_TODAY.from 同一刻（边界由客户端算，宿主只比较）。 */
+const TODAY_FROM = WINDOW_TODAY.from
+
+test('unreadSplit：三分只数未读，且与请求是否带窗口无关；不带 todayFrom 的 overview / refresh 没有这个字段', async () => {
+  const { store, db, dir } = await openAccountFixture('split-shape')
+  try {
+    const dispatch = accountDispatch(store)
+
+    const all = await ok(dispatch, 'overview', { todayFrom: TODAY_FROM })
+    assert.deepEqual(all.unreadSplit, { today: 2, earlier: 3, noDate: 2 },
+      '全部未读 7 = 今天 2 + 更早 3 + 无日期 2（已读的 today-read / no-date-read 都不算）')
+    assert.equal(all.unread, 7, '前置：不带窗口时总未读是全量')
+    assert.equal(all.unreadSplit.today + all.unreadSplit.earlier + all.unreadSplit.noDate, all.unread,
+      '不带窗口时三数之和恒等于总未读')
+
+    // 带窗口请求：unread 收窄，但 split 仍是「全部未读」的构成 —— 同一份。
+    for (const window of [WINDOW_TODAY, WINDOW_3D]) {
+      const windowed = await ok(dispatch, 'overview', { ...window, todayFrom: TODAY_FROM })
+      assert.deepEqual(windowed.unreadSplit, all.unreadSplit, 'split 与窗口无关：带窗请求回同一份')
+      assert.notEqual(windowed.unread, all.unread, '前置：窗口确实收窄了 unread（否则上一条断言没意义）')
+    }
+
+    const refreshed = await ok(dispatch, 'refresh', { todayFrom: TODAY_FROM })
+    assert.deepEqual(refreshed.unreadSplit, all.unreadSplit, 'refresh 也把同一份 split 回下去')
+
+    const legacyOverview = await ok(dispatch, 'overview', {})
+    assert.equal('unreadSplit' in legacyOverview, false, '不带 todayFrom 的 overview 没有 unreadSplit（旧形状逐字不变）')
+    const legacyRefresh = await ok(dispatch, 'refresh', {})
+    assert.equal('unreadSplit' in legacyRefresh, false, '不带 todayFrom 的 refresh 没有 unreadSplit')
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('五个带账写端点：带 todayFrom 回 unreadSplit（带窗口也是同一份），不带时没有这个字段', async () => {
+  for (const { endpoint, payload, split } of ACCOUNT_ENDPOINT_CASES) {
+    const windowedFixture = await openAccountFixture('split-endpoint-' + endpoint + '-windowed')
+    try {
+      const windowed = await ok(accountDispatch(windowedFixture.store), endpoint,
+        { ...payload, ...WINDOW_TODAY, todayFrom: TODAY_FROM })
+      assert.deepEqual(windowed.unreadSplit, split,
+        endpoint + '：带窗口 + todayFrom 也回同一份「全部未读」三分')
+    } finally {
+      windowedFixture.db.close()
+      rmSync(windowedFixture.dir, { recursive: true, force: true })
+    }
+
+    const plainFixture = await openAccountFixture('split-endpoint-' + endpoint + '-plain')
+    try {
+      const plain = await ok(accountDispatch(plainFixture.store), endpoint, { ...payload, todayFrom: TODAY_FROM })
+      assert.deepEqual(plain.unreadSplit, split, endpoint + '：不带窗口也回同一份三分')
+      assert.equal(sumOf(plain.perFeedUnread), plain.unread, endpoint + '：各源之和 = 总未读')
+      assert.equal(split.today + split.earlier + split.noDate, plain.unread,
+        endpoint + '：不带窗口时三分之和 = 总未读')
+    } finally {
+      plainFixture.db.close()
+      rmSync(plainFixture.dir, { recursive: true, force: true })
+    }
+
+    const legacyFixture = await openAccountFixture('split-endpoint-' + endpoint + '-legacy')
+    try {
+      const legacy = await ok(accountDispatch(legacyFixture.store), endpoint, payload)
+      assert.equal('unreadSplit' in legacy, false, endpoint + '：不带 todayFrom 的回包没有 unreadSplit')
+    } finally {
+      legacyFixture.db.close()
+      rmSync(legacyFixture.dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test('窗口档位标读：unread 减 1、unreadSplit.today 减 1，撤销后逐一恢复；无日期的 K 只数未读且已读后仍在「全部」里', async () => {
+  const { store, db, dir } = await openAccountFixture('split-mark-undo')
+  try {
+    const dispatch = accountDispatch(store)
+    const before = await ok(dispatch, 'overview', { ...WINDOW_TODAY, todayFrom: TODAY_FROM })
+    assert.equal(before.unread, 2, '前置：今天窗内 2 条未读')
+    assert.deepEqual(before.unreadSplit, { today: 2, earlier: 3, noDate: 2 })
+
+    const marked = await ok(dispatch, 'markRead', { itemIds: ['today-a'], ...WINDOW_TODAY, todayFrom: TODAY_FROM })
+    assert.equal(marked.unread, before.unread - 1, '窗内总未读减 1')
+    assert.equal(sumOf(marked.perFeedUnread), marked.unread, '各源之和 = 总未读')
+    assert.deepEqual(marked.unreadSplit, { today: 1, earlier: 3, noDate: 2 },
+      'split 是「全部未读」的三分：只有 today 减 1，更早 / 无日期一格不动')
+
+    const undone = await ok(dispatch, 'unmarkRead', { itemIds: ['today-a'], ...WINDOW_TODAY, todayFrom: TODAY_FROM })
+    assert.equal(undone.unread, before.unread, '撤销后窗内总数恢复')
+    assert.deepEqual(undone.unreadSplit, before.unreadSplit, '撤销后三分逐一恢复')
+
+    // K 只数未读：把一条无日期未读标掉，K 减 1；已读条目仍留在「全部」列表里（可见但不再计数）。
+    const markedNoDate = await ok(dispatch, 'markRead', { itemIds: ['no-date-a'], todayFrom: TODAY_FROM })
+    assert.deepEqual(markedNoDate.unreadSplit, { today: 2, earlier: 3, noDate: 1 },
+      '标掉一条无日期未读：K 2 → 1（已读的 no-date-read 本来就没算），今天那桶不动')
+    const allAfter = await ok(dispatch, 'overview', {})
+    assert.ok(allAfter.items.some((entry) => entry.id === 'no-date-a'),
+      '已读的无日期条目仍在「全部」列表里可见（K 减 1 不等于条目消失）')
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
   }
 })

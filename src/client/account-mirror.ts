@@ -82,8 +82,9 @@ export function createAccountMirror(deps: AccountMirrorDeps): { run(action: Mirr
   return {
     async run(action: MirrorAction): Promise<void> {
       action.optimistic()
-      // 窗随账走（R1-03）：五个带账端点共用同一份窗口字段。全部档位时 windowPayload 是空对象，
-      // 载荷与加窗口之前逐字同形 —— 旧行为不变由这一点保证，而不是靠调用方各判一次档位。
+      // 窗随账走（R1-03）：五个带账端点共用同一份窗口字段。全部档位时 windowPayload 只有
+      // `todayFrom`（R1 04 起，用于回包的未读三联拆分）—— 旧宿主忽略这个未知字段，旧行为不变
+      // 由构造器一处保证，而不是靠调用方各判一次档位。
       const payload = { ...(action.payload ?? {}), ...deps.windowPayload() }
       try {
         // 成功 = 以宿主回包为准整体覆盖账目（不变量 ①）；动作结果字段不落地（不变量 ④）。

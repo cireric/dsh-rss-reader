@@ -965,11 +965,14 @@ export const MUTATIONS = [
   // （lib/endpoints.js:494-496），旧的 `...accountOf(target)` 串已从产物消失 ⇒ 原锚会变「未应用」
   // （比幸存更隐蔽）。语义不变：仍是「标读回包只带 unread、不带每源账目」。
   // 锚点唯一性实测 OCCURRENCES=1（`if (spec.carriesAccount === true` 在产物里只有分发核这一处）。
+  // ⚠️ 2026-11-20（R1 04）重锚：回包多了可选的 unreadSplit，账目合并的 return 从一行变多行；
+  // 旧锚 `return ok({ ...result.value, unread: account.unread, perFeedUnread: ... })` 已从产物消失。
+  // 语义不变：仍是「标读回包只带 unread、不带每源账目」。
   { id: 'endpoints-标读回包不带每源账目', file: 'lib/endpoints.js',
     judges: ['overview-scale.test.mjs', 'unread-accounting.test.mjs'],
     judgeTests: ['10 万行：标读回包（accountOf）也不物化全表，回包与 overview 同口径', '10 万行：cleanup 的候选集由 SQL 选（不再全表），且释放量与删除数如实', 'host：markRead / unmarkRead 的回包必须带 perFeedUnread（客户端在截断场景下只能靠它）'],
-    from: 'return ok({ ...result.value, unread: account.unread, perFeedUnread: account.perFeedUnread });',
-    to: 'return ok({ ...result.value, unread: account.unread });' },
+    from: 'return ok({\n                    ...result.value,\n                    unread: account.unread,\n                    perFeedUnread: account.perFeedUnread,\n                    ...(account.unreadSplit === undefined ? {} : { unreadSplit: account.unreadSplit }),\n                });',
+    to: 'return ok({\n                    ...result.value,\n                    unread: account.unread,\n                    ...(account.unreadSplit === undefined ? {} : { unreadSplit: account.unreadSplit }),\n                });' },
   // 客户端这一侧的承重点：回包到手必须**整体覆盖**。退回「只覆盖 unread」= 又用本地那份
   // 看不见全量的账当真相，与上面那条是同一个不变式的两端，各自都要有人看着。
   // from 照**编译产物**的真实形状写：lib/client.js:416-421 的 applyAccount，独立实测 OCCURRENCES=1。
@@ -2160,9 +2163,11 @@ export const MUTATIONS = [
   { id: '显示窗-账目忽略窗口', file: 'lib/endpoints.js',
     judges: ['time-window-endpoints.test.mjs'],
     judgeTests: ['五个带账写端点：带窗回窗内账、不带窗回全量，各源之和恒等于总未读', '窗内标读 / 撤销：总数与所属源角标同步 ±1，全程不回全量'],
-    // dispatch 合并账目时不传 EndpointOutcome.accountWindow：五个写端点回全量账，
+    // dispatch 合并账目时不传 EndpointOutcome.accountFrame：五个写端点回全量账，
     // 「窗内标读后数字被打回全量」在界面上正是本票要修的病象（验收 12 翻红）。
-    from: 'const account = accountOf(target, outcome.accountWindow);',
+    // ⚠️ 2026-11-20（R1 04）重锚：视野从 accountWindow 扩成 accountFrame（窗口 + todayFrom），
+    // 对应产物是 `accountOf(target, outcome.accountFrame)`。语义不变：dispatch 不传视野 ⇒ 账目回全量。
+    from: 'const account = accountOf(target, outcome.accountFrame);',
     to: 'const account = accountOf(target);' },
   { id: '显示窗-账目SQL忽略窗口', file: 'lib/store-sqlite.js',
     judges: ['store-contract.test.mjs', 'time-window-endpoints.test.mjs'],
@@ -2193,4 +2198,12 @@ export const MUTATIONS = [
     // 成功后跳过 reload：界面停在旧顺序，直到下一次无关刷新（「屏幕旧、文件新」的另一种形态）。
     from: '\t\t\t\t\tawait rpc("reorderFeeds", { ids });\n\t\t\t\t\tawait reload();',
     to: '\t\t\t\t\tawait rpc("reorderFeeds", { ids });' },
+  // ── R1 04：未读三联拆分 ────────────────────────────────────────────────
+  { id: '显示窗-拆分漏无日期', file: 'lib/store-sqlite.js',
+    judges: ['store-contract.test.mjs', 'time-window-endpoints.test.mjs'],
+    judgeTests: ['unreadSplit：today / earlier / noDate 三分恒等于全量未读，只数未读且键域 = 传入的 feeds 表', 'unreadSplit：三分只数未读，且与请求是否带窗口无关；不带 todayFrom 的 overview / refresh 没有这个字段'],
+    // 无日期桶恒为 0（`THEN 0 ELSE 0`）：三分之和小于全量未读，顶栏「共 X 条未读 · 今天 N ·
+    // 更早 M · 无日期 K」的守恒式当场破掉。不删行、不改参数个数 —— 崩溃式变异是假通过。
+    from: "' COALESCE(SUM(CASE WHEN i.published_at IS NULL THEN 1 ELSE 0 END), 0) AS no_date'",
+    to: "' COALESCE(SUM(CASE WHEN i.published_at IS NULL THEN 0 ELSE 0 END), 0) AS no_date'" },
 ]

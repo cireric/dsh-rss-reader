@@ -277,6 +277,24 @@ const unreadPerFeedSql = (window: DisplayWindowBounds | undefined): string =>
   + (window === undefined ? '' : ' AND ' + WINDOW_FILTER)
   + ' GROUP BY i.feed_id'
 
+/**
+ * 未读三联拆分（R1 04）：**一条聚合 SQL** 把三桶数出来，不把行搬进 JS（spec 决策 19）。
+ *
+ * 判据刻意直接比 `published_at`（不是 recency）：拆分的定义就是「发布时间的构成」，
+ * `todayFrom` 只有一个阈值 —— `published_at >= ?` 连未来时间戳一起算进「今天」，
+ * 于是 `today + earlier + noDate` 恒等于 `read_at IS NULL` 的总数（spec 决策 16）。
+ * 无日期的行绝不参与前两桶（`IS NOT NULL` 两道守卫，`noDate` 单独接住）。
+ *
+ * 键域与 `unreadPerFeed` 共用 `IN_FEEDS`：账目总数来自 feeds 表键域求和，拆分若数进残留的
+ * 已退订源条目，顶栏「共 X 条未读 · 今天 N …」的守恒式就会差出来。
+ */
+const unreadSplitSql =
+  'SELECT'
+  + ' COALESCE(SUM(CASE WHEN i.published_at IS NOT NULL AND i.published_at >= ? THEN 1 ELSE 0 END), 0) AS today,'
+  + ' COALESCE(SUM(CASE WHEN i.published_at IS NOT NULL AND i.published_at < ? THEN 1 ELSE 0 END), 0) AS earlier,'
+  + ' COALESCE(SUM(CASE WHEN i.published_at IS NULL THEN 1 ELSE 0 END), 0) AS no_date'
+  + ' FROM items i WHERE i.read_at IS NULL AND ' + IN_FEEDS
+
 /** 释放量原料：候选的 id 逐条取摘要与正文，**不带** items 行的其余列（几千条候选下差别可观）。 */
 const SELECT_ITEM_CHARS = 'SELECT i.recency AS recency, i.summary AS summary, t.body AS body FROM items i LEFT JOIN texts t ON t.item_id = i.id WHERE i.id = ?'
 
@@ -943,6 +961,24 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
         unread[feedId] = optionalNumber(row.unread, 'COUNT(*)') ?? 0
       }
       return unread
+    },
+
+    /**
+     * 未读三联拆分（R1 04）：一条聚合 SQL（unreadSplitSql）把 today / earlier / noDate 数出来。
+     *
+     * 不用先读全表再在 JS 里分桶：标读、星标、保持未读、清理的每一次回包都会算它，10 万行下
+     * 那等于每次动作拖一次全表物化（spec §3.1 的扫描族）。聚合走 `i2` 或全表扫都由 SQLite 决定，
+     * 05 票才做 EXPLAIN 证据；本轮不预加索引。
+     */
+    unreadSplit: (feedIds, todayFrom) => {
+      const feedsJson = JSON.stringify([...new Set(feedIds)])
+      // 参数顺序 = SQL 文本里的占位符顺序：today 阈值、earlier 阈值、feeds 键域。
+      const row = sql(unreadSplitSql).get(todayFrom, todayFrom, feedsJson)
+      return {
+        today: optionalNumber(row?.today ?? null, 'SUM(today)') ?? 0,
+        earlier: optionalNumber(row?.earlier ?? null, 'SUM(earlier)') ?? 0,
+        noDate: optionalNumber(row?.no_date ?? null, 'SUM(no_date)') ?? 0,
+      }
     },
 
     /**

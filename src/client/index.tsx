@@ -25,7 +25,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import { createReaderStore, nextExpandedOf, relativeTime, useReaderStore, VIRTUAL_VIEWS, type Filter, type MarkAllRange, type ReaderStore, type ReaderStoreDeps } from './store.js'
-import { DISPLAY_WINDOW_OPTIONS, displayWindowCountLabelOf, displayWindowNameOf } from './window-control.js'
+import { DISPLAY_WINDOW_OPTIONS, displayWindowNameOf, unreadCountTextOf } from './window-control.js'
 import type { DisplayWindowRange } from '../display-window.js'
 // 导出面是构建产物对外的契约（契约测试直接调它），store 搬家后仍要从入口转出去
 export { createReaderStore }
@@ -484,7 +484,8 @@ export function createReader(store: ReaderStore): () => ReactNode {
                   <span className="dsh-rss-window-hint" data-rss-window-reason="">搜索进行中不可用：搜索有自己的日期筛选</span>
                 )}
                 {state.showUnread && (
-                  <span>{displayWindowCountLabelOf(state.displayWindow)} {state.unread} 条未读</span>
+                  // 数字与三分全部来自宿主回包（state.unread / state.unreadSplit），客户端不数条目。
+                  <span data-rss-unread-count="">{unreadCountTextOf(state.displayWindow, state)}</span>
                 )}
                 <span>已加载 {state.items.length} 条</span>
               </div>
