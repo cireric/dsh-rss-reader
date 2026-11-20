@@ -35,7 +35,8 @@ function feedHealthLabel(feed: FeedView): string {
 export function FeedsView({
   feeds, folders, busy, report, notice, discovery,
   onImport, onExport, onAdd, onRemove, onDiscover, onClearDiscovery,
-  onCreateFolder, onRenameFolder, onDeleteFolder, onMoveFeed, tags, onCreateTag, onRenameTag, onDeleteTag, onBack,
+  onCreateFolder, onRenameFolder, onDeleteFolder, onMoveFeed, onMoveOrder,
+  tags, onCreateTag, onRenameTag, onDeleteTag, onBack,
 }: {
   feeds: FeedView[]
   folders: FolderView[]
@@ -55,6 +56,8 @@ export function FeedsView({
   onRenameFolder: (from: string, to: string) => void
   onDeleteFolder: (name: string) => void
   onMoveFeed: (feedId: string, folder: string | undefined) => void
+  /** 上 / 下挪一格（R3-03）。只发意图，行序等宿主回包后的 reload。 */
+  onMoveOrder: (feedId: string, direction: -1 | 1) => void
   tags: TagView[]
   onCreateTag: (name: string) => void
   onRenameTag: (id: string, name: string) => void
@@ -136,6 +139,11 @@ export function FeedsView({
         <button type="button" className="dsh-rss-btn" data-rss-discover=""
           disabled={busy || draft.trim() === ''}
           onClick={() => { onDiscover(draft.trim()) }}>发现候选</button>
+      </div>
+
+      {/* 说明文案提前讲清边界（R3-4）：排序只是显示先后，OPML 标准没有顺序字段，别把它当备份。 */}
+      <div data-rss-feed-order-hint="" style={{ fontSize: 12, opacity: 0.65, marginBottom: 10 }}>
+        ↑ / ↓ 调整顺序，只影响显示先后；OPML 不记录顺序，导出再导入不保证原顺序。
       </div>
 
       {discovery !== undefined && (
@@ -385,8 +393,8 @@ export function FeedsView({
 
       <div style={{ borderTop: '1px solid color-mix(in srgb, currentColor 12%, transparent)' }}>
         {feeds.length === 0 && <div style={{ padding: '12px 0', opacity: 0.7 }}>还没有订阅源。可以用上面的「导入 OPML…」。</div>}
-        {feeds.map((feed) => (
-          <div key={feed.id} style={{
+        {feeds.map((feed, index) => (
+          <div key={feed.id} data-rss-feed-row={feed.id} style={{
             display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0',
             borderBottom: '1px solid color-mix(in srgb, currentColor 8%, transparent)',
           }}>
@@ -405,6 +413,20 @@ export function FeedsView({
                 {feed.lastFailure !== undefined ? ' · 最近错误：' + feed.lastFailure : ''}
               </span>
             </span>
+            {/* 原生按钮即可满足「可聚焦、回车触发」；**不承诺空格**（空格是全局翻页键）。
+                首行 ↑ / 末行 ↓ 置灰；busy（导入/加源在途）时全灰——两个写手不能同时改同一份订阅文件。 */}
+            <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
+              data-rss-feed-order-up={feed.id}
+              aria-label={'上移「' + (feed.title ?? feed.id) + '」'}
+              title="上移一位"
+              disabled={busy || index === 0}
+              onClick={() => onMoveOrder(feed.id, -1)}>↑</button>
+            <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
+              data-rss-feed-order-down={feed.id}
+              aria-label={'下移「' + (feed.title ?? feed.id) + '」'}
+              title="下移一位"
+              disabled={busy || index === feeds.length - 1}
+              onClick={() => onMoveOrder(feed.id, 1)}>↓</button>
             <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 4 }}>
               移动到
               <select data-rss-feed-folder={feed.id} value={feed.folder ?? ''} disabled={busy}
