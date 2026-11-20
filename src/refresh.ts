@@ -119,7 +119,8 @@ function stalenessKey(record: FeedRecord): string {
  * 两条（纯函数 200/20/K=20 与真装配 3 源 / 1 个 500 / K=1）。
  *
  * ⇒ 也因此这条排序必须是**确定**的：等值（同一时间戳 / 都没抓过）时按传入顺序
- * （= `listFeeds()` 的键序 = config.json 的键序）稳定排列。tie-break 一旦是随机的，
+ * （= `listFeeds()` 的顺序 = config.json 的 `feedOrder` 派生，没排过时就是键序）稳定排列。
+ * tie-break 一旦是随机的，
  * 同一批等值的源可能反复被挑中，排在后面的源就饿死了 —— 那是本条唯一的失效模式。
  * 判据是 tests/refresh.test.mjs 的「陈旧度调度的饥饿不变式」（5 源 / K=2 ⇒ 3 轮覆盖全部）。
  *

@@ -23,10 +23,14 @@ import { parseOpml } from '../lib/opml.js'
 
 const FEED_ID = 'https://a.example/feed.xml'
 
-function makeDispatch(feeds = {}) {
+function makeDispatch(feeds = {}, feedOrder) {
   const dir = mkdtempSync(join(tmpdir(), 'rss-folder-endpoint-'))
   const configPath = join(dir, 'config.json')
-  writeConfigFile(configPath, { version: 1, feeds })
+  writeConfigFile(configPath, {
+    version: 1,
+    feeds,
+    ...(feedOrder === undefined ? {} : { feedOrder }),
+  })
   const db = openDatabase(':memory:')
   migrateSchema(db)
   const store = createSqliteStore(db, configPath)
@@ -105,7 +109,10 @@ const rssOf = (title) => '<?xml version="1.0"?><rss version="2.0"><channel><titl
 
 async function feedServer() {
   const server = createServer((req, res) => {
-    const title = req.url === '/existing.xml' ? '已有源' : req.url === '/new.xml' ? '新源' : ''
+    const title = req.url === '/existing.xml' ? '已有源'
+      : req.url === '/new.xml' ? '新源'
+        : req.url === '/new2.xml' ? '新源 2'
+          : req.url === '/new3.xml' ? '新源 3' : ''
     if (title === '') {
       res.writeHead(404, { 'content-type': 'text/plain' })
       res.end('no')
@@ -171,6 +178,54 @@ test('OPML：新源继承分组，重复导入保留本地未分类，导出保�
     assert.equal(exported.skipped.length, 0)
     assert.equal(exported.subscriptions.find((sub) => sub.xmlUrl === existing).folder, '本地分组')
     assert.equal(exported.subscriptions.find((sub) => sub.xmlUrl === added).folder, '导入分组')
+  } finally {
+    await server.close()
+    h.cleanup()
+  }
+})
+
+/**
+ * R3 01：OPML 导入只往 `feeds` 末尾追加新键，绝不碰 `feedOrder`。
+ *
+ * 这是「新订阅不打断用户排好的段落」在真实导入路径上的判据：导入要出网校验 3 个新源，
+ * 所以复用本文件的本地 HTTP 桩（不出公网）；顺序判据读的是**派生后的 listFeeds**，
+ * 不是 feeds 的键序本身 —— 两者在没排过时才恰好相同。
+ */
+test('OPML 导入 3 个新源：追加在 feedOrder 末尾、已有顺序不动；导出文本没有顺序字段', async () => {
+  const server = await feedServer()
+  const existing = server.origin + '/existing.xml'
+  const addedB = server.origin + '/new2.xml'
+  const addedC = server.origin + '/new3.xml'
+  const addedA = server.origin + '/new.xml'
+  const other = 'https://b.example/feed.xml'
+  const opml = '<opml version="2.0"><body><outline text="导入分组">'
+    + '<outline text="新" type="rss" xmlUrl="' + addedA + '"/>'
+    + '<outline text="新 2" type="rss" xmlUrl="' + addedB + '"/>'
+    + '<outline text="新 3" type="rss" xmlUrl="' + addedC + '"/>'
+    + '</outline></body></opml>'
+  const h = makeDispatch(
+    { [existing]: { url: existing, title: '已有源' }, [other]: { url: other, title: '乙' } },
+    [other, existing],
+  )
+  try {
+    assert.deepEqual(h.store.listFeeds().map(([id]) => id), [other, existing], '前提：读侧按 feedOrder')
+
+    const result = await h.dispatch('opmlImport', { opml })
+    assert.equal(result.ok, true, JSON.stringify(result))
+    assert.equal(result.value.added, 3, '三条新源都通过校验并落盘')
+
+    assert.deepEqual(h.store.listFeeds().map(([id]) => id), [other, existing, addedA, addedB, addedC],
+      '新源按导入先后追加在末尾，已有顺序不动')
+    const disk = readConfigFile(h.configPath)
+    assert.deepEqual(disk.feedOrder, [other, existing], '导入不得重写顺序数组')
+    assert.deepEqual(Object.keys(disk.feeds), [existing, other, addedA, addedB, addedC],
+      'feeds 键序也不重排：追加是唯一允许的写形态')
+
+    const exported = await h.dispatch('opmlExport', {})
+    assert.equal(exported.ok, true)
+    assert.ok(!exported.value.opml.includes('feedOrder'), 'OPML 不记录顺序（标准里没有这个字段）')
+    assert.ok(!/\border\s*=/.test(exported.value.opml), '导出文本里不许出现任何顺序属性')
+    assert.equal(parseOpml(exported.value.opml).subscriptions.length, 5, '导出仍是可解析的 5 条订阅')
   } finally {
     await server.close()
     h.cleanup()

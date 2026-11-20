@@ -46,6 +46,7 @@ import type { CleanupCandidate, ReaderStore } from './store.js'
 import type { ArticleEntry } from './retention.js'
 import { applyFeedIntent, type FeedIntent } from './feed-intent.js'
 import { addFolder, deleteFolder, folderViews, moveFeedToFolder, renameFolder } from './folders.js'
+import { orderedFeedEntries } from './feed-order.js'
 import { normalizeTagIds, normalizeTagName, requireTagId, TagError } from './tags.js'
 
 /** 事务里的保存点名。写成常量即可：db 是单连接，嵌套只发生在同一个连接上。 */
@@ -934,10 +935,15 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
     },
 
     /**
-     * 全部订阅源。顺序 = config.json 里 feeds 映射的键序（新订阅追加在末尾）：
-     * 界面左栏就按这个顺序渲染，而它是用户订阅的自然顺序，也是他能在文件里核对到的那一份。
+     * 全部订阅源。顺序由 config.json 的 `feedOrder` 派生（src/feed-order.ts 一处）：
+     * 已列出的按数组序（重复保首次）→ 未列出的按 `feeds` 键序追加 → 未知 id 丢弃。
+     * 没排过的旧配置因此仍是键序；而排过的顺序是用户能备份、能手改、能核对的那一份 ——
+     * 对象键序只是隐式行为，删源再加会跑到末尾，不能当展示顺序的真相。
      */
-    listFeeds: () => Object.entries(readFeeds(configPath)),
+    listFeeds: () => {
+      const file = readConfigFile(configPath)
+      return orderedFeedEntries(file.feedOrder, file.feeds)
+    },
 
     /**
      * 文件夹目录。读侧已把「显式目录 ∪ 当前非空分组」并好（src/storage/config-file.ts 一处），
