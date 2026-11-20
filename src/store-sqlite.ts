@@ -46,7 +46,7 @@ import type { CleanupCandidate, ReaderStore } from './store.js'
 import type { ArticleEntry } from './retention.js'
 import { applyFeedIntent, type FeedIntent } from './feed-intent.js'
 import { addFolder, deleteFolder, folderViews, moveFeedToFolder, renameFolder } from './folders.js'
-import { deriveFeedOrder, orderedFeedEntries, reorderFeedOrder } from './feed-order.js'
+import { deriveFeedOrder, orderedFeedEntries, reorderFeedOrder, withoutFeedOrder } from './feed-order.js'
 import { normalizeTagIds, normalizeTagName, requireTagId, TagError } from './tags.js'
 
 /** 事务里的保存点名。写成常量即可：db 是单连接，嵌套只发生在同一个连接上。 */
@@ -713,10 +713,15 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
       // 就把订阅**原样写回**（下面的 catch）—— 失败必须等于「什么都没发生」。
       // 不写回的话：退掉最后一个源会让 config 变空、条目还在，下次装载被守卫判成「订阅映射丢了」
       // 直接拒绝启动，比留孤儿更糟（2026-11-14 评审发现）。
-      const before = readFeeds(configPath)
-      writeFeeds(configPath, (feeds) => {
-        const next = { ...feeds }
-        delete next[feedId]
+      const before = readConfigFile(configPath)
+      // 订阅项与顺序是**同一次** config 写（R3 04）：分两次写盘的话，中间失败会留下
+      // 「源没了、order 里还挂着它」的半截状态，而读侧为了容忍旧垃圾并不会报错。
+      updateConfig(configPath, (current) => {
+        const feeds = { ...current.feeds }
+        delete feeds[feedId]
+        const next: ReaderConfigFile = { ...current, feeds }
+        // 从未排过顺序（缺省）时不得物化这个键：退订不能把「没排过」改写成「排过」。
+        if (current.feedOrder !== undefined) next.feedOrder = withoutFeedOrder(current.feedOrder, feedId)
         return next
       })
       let removed = 0
@@ -733,10 +738,17 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
           sql(DELETE_CURSOR).run(feedId)
         })
       } catch (error) {
-        // 写回整份「退订前」的订阅（连同键序）：这一次退订就当没发生过。
+        // 写回整份「退订前」的订阅（连同键序）与**整份顺序**：这一次退订就当没发生过。
+        // 顺序必须一起回滚（R3 04）：只过滤不回写的话，源会悄悄从用户排好的位置掉到末尾 ——
+        // 一次失败的退订把「什么都没发生」变成了「顺序被重排」，用户记住的位置就丢了。
         // 写回也失败（磁盘满 / 权限）才落到「订阅没了、条目还在」，那时两个错误一起抛，别只留一个。
         try {
-          writeFeeds(configPath, () => before)
+          updateConfig(configPath, (current) => {
+            const restored: ReaderConfigFile = { ...current, feeds: before.feeds }
+            if (before.feedOrder === undefined) delete restored.feedOrder
+            else restored.feedOrder = [...before.feedOrder]
+            return restored
+          })
         } catch (restoreError) {
           throw new Error('退订失败，且订阅写回也失败：' + String(error) + '；写回错误：' + String(restoreError))
         }

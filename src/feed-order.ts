@@ -66,6 +66,19 @@ export function reorderFeedOrder(
 }
 
 /**
+ * 退订时把该 id 从顺序里摘掉（R3 04）：**其余元素一格不动**，同一 id 的出现全部清掉。
+ *
+ * 为什么单独成函数：三份 store 的 `deleteSubscription` 都要做这一件事，各写一遍迟早出现
+ * 「生产过滤了、内存替身忘了」。重复项一并清掉而不是只删首次：读侧本来就只认首次，
+ * 留下的第二份是永远派不上用场的垃圾（验收要求「文件里不再含该 id」）。
+ *
+ * 只在 `order` 已存在时调用 —— 从未排过顺序（缺省）时退订不得物化这个键。
+ */
+export function withoutFeedOrder(order: readonly string[], feedId: string): string[] {
+  return order.filter((entry) => entry !== feedId)
+}
+
+/**
  * 与 {@link deriveFeedOrder} 同一个顺序的 `[feedId, record]` 列表 —— store 的 `listFeeds()` 直接回它。
  *
  * 独立成函数只是为了让三份实现都只写一行，避免各自再写一遍 map 而把「顺序从哪来」的判定
