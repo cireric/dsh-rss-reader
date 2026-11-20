@@ -162,6 +162,33 @@ test('撤销（unmarkRead）之后账目回到标记前：守恒式在往返中�
   assert.equal(sumUnread(after.perFeedUnread), after.unread)
 })
 
+test('窗口内标读：回包与随后的 overview 都按窗算账，不被打回全量（R1 02）', async () => {
+  // 这条补的是时间维度：既有用例都在「全部」档位上。窗口来自入参，账目必须跟着它走 ——
+  // 标掉一条今天的未读之后，窗内总数减 1；窗外的旧条目与无日期条目不许把数字撑回全量。
+  const store = memoryStore()
+  store.feeds.set('A', { url: 'A', title: 'A' })
+  store.feeds.set('B', { url: 'B', title: 'B' })
+  store.items.set('a-today', item('A', { publishedAt: '2026-11-20T09:00:00.000Z' }))
+  store.items.set('a-old', item('A', { publishedAt: '2026-11-01T09:00:00.000Z' }))
+  store.items.set('a-no-date', item('A', { publishedAt: undefined }))
+  store.items.set('b-today', item('B', { publishedAt: '2026-11-20T10:00:00.000Z' }))
+  const window = { from: '2026-11-20T00:00:00.000Z', to: '2026-11-21T00:00:00.000Z' }
+
+  const before = await callEndpoint(store, 'overview', window)
+  assert.equal(before.unread, 2, '前置条件：窗内 2 未读（a-today + b-today）')
+  assert.equal(before.perFeedUnread.A, 1)
+
+  const marked = await callEndpoint(store, 'markRead', { itemIds: ['a-today'], ...window })
+  assert.equal(marked.unread, 1, '窗内标读：回包必须是窗内账，不许被打回全量 3')
+  assert.equal(marked.perFeedUnread.A, 0, '所属源角标同步减 1')
+  assert.equal(marked.perFeedUnread.B, 1, '别的源一格不动')
+  assert.equal(sumUnread(marked.perFeedUnread), marked.unread)
+
+  const after = await callEndpoint(store, 'overview', window)
+  assert.equal(after.unread, 1, '随后的 overview 仍留在窗内（没有回全量）')
+  assert.equal((await overview(store)).unread, 3, '全量账仍是 3（窗外两条 + 无日期一条）')
+})
+
 test('host：markRead / unmarkRead 的回包必须带 perFeedUnread（客户端在截断场景下只能靠它）', async () => {
   // 为什么这条必须在**宿主侧**断言：客户端那几条用的都是桩 fetch，桩回什么它就收什么 ——
   // 宿主真的回了什么，只有走到 createDispatch 才测得出来。只写客户端用例的话，

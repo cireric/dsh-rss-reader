@@ -29,6 +29,24 @@ const dispatchOf = () => createDispatch({
   articleAttempts: new Map(),
 })
 
+/**
+ * 显示窗的合法样本与坏样本（R1 02）：overview / refresh 与五个带账端点共用**同一段**声明，
+ * 所以坏样本也必须是同一组。五个带账端点各自再写一遍窗口负例，是为了让「某个端点漏挂
+ * windowShape / windowRule」在这里当场显形 —— zod 默认丢弃未知键，只测合法样本是测不出来的。
+ */
+const WINDOW_FROM = '2026-11-20T00:00:00.000Z'
+const WINDOW_TO = '2026-11-21T00:00:00.000Z'
+const withWindow = (payload) => ({ ...payload, from: WINDOW_FROM, to: WINDOW_TO, todayFrom: WINDOW_FROM })
+const windowBadSamples = (payload) => [
+  { ...payload, from: WINDOW_FROM },
+  { ...payload, to: WINDOW_TO },
+  { ...payload, from: WINDOW_TO, to: WINDOW_FROM },
+  { ...payload, from: '2026-11-20T00:00:00Z', to: WINDOW_TO },
+  { ...payload, from: '2026-11-20T00:00:00.000+08:00', to: WINDOW_TO },
+  { ...payload, from: '2026-11-20', to: WINDOW_TO },
+  { ...payload, todayFrom: '2026-11-20' },
+]
+
 /** 一行 = 一个端点的入参契约：最小合法 payload + 必须被拒的样本。 */
 const CONTRACTS = {
   searchItems: {
@@ -88,17 +106,20 @@ const CONTRACTS = {
   },
   markRead: {
     valid: { itemIds: ['a'], skipKept: true, before: '2026-01-01T00:00:00.000Z' },
+    alsoValid: [withWindow({ itemIds: ['a'] })],
     invalid: [
       {},
       { itemIds: [] },
       { itemIds: 'a' },
       { itemIds: ['a'], skipKept: 'yes' },
       { itemIds: ['a'], before: 5 },
+      ...windowBadSamples({ itemIds: ['a'] }),
     ],
   },
   unmarkRead: {
     valid: { itemIds: ['a'] },
-    invalid: [{}, { itemIds: [] }, { itemIds: 'a' }],
+    alsoValid: [withWindow({ itemIds: ['a'] })],
+    invalid: [{}, { itemIds: [] }, { itemIds: 'a' }, ...windowBadSamples({ itemIds: ['a'] })],
   },
   article: {
     valid: { itemId: 'a' },
@@ -134,10 +155,16 @@ const CONTRACTS = {
     valid: { url: 'https://example.com/feed.xml' },
     invalid: [{}, { url: '' }, { url: 5 }],
   },
-  cleanup: { valid: { anything: 1 }, invalid: [] },
+  cleanup: {
+    // 零业务入参：多余键照旧接受（旧语义），null / 缺省也接受；窗口字段则必须合法。
+    valid: { anything: 1 },
+    alsoValid: [null, {}, withWindow({ anything: 1 })],
+    invalid: windowBadSamples({}),
+  },
   toggleKeepUnread: {
     valid: { itemId: 'a' },
-    invalid: [{}, { itemId: '' }],
+    alsoValid: [withWindow({ itemId: 'a' })],
+    invalid: [{}, { itemId: '' }, ...windowBadSamples({ itemId: 'a' })],
   },
   viewPreferences: { valid: { anything: 1 }, invalid: [] },
   saveViewPreferences: {
@@ -194,7 +221,8 @@ const CONTRACTS = {
   },
   toggleStar: {
     valid: { itemId: 'a' },
-    invalid: [{}, { itemId: 5 }, { itemId: '' }],
+    alsoValid: [withWindow({ itemId: 'a' })],
+    invalid: [{}, { itemId: 5 }, { itemId: '' }, ...windowBadSamples({ itemId: 'a' })],
   },
 }
 
@@ -231,9 +259,9 @@ test('入参声明：每条坏样本都被拒，并给出字段路径', () => {
       checked += 1
     }
   }
-  // 81 = R3 02 时的 67 + R1 01 给 overview / refresh 各补的 7 条窗口负例；
+  // 116 = R1 01 时的 81 + R1 02 给五个带账端点各补的 7 条窗口负例。
   // 删样本、或新增端点忘了配负例，都必须在这里显形。
-  assert.equal(checked, 81, '坏样本条数变了（当前 ' + checked + '）—— 检查契约表是否漏了必填字段')
+  assert.equal(checked, 116, '坏样本条数变了（当前 ' + checked + '）—— 检查契约表是否漏了必填字段')
 })
 
 test('坏入参：每个接 payload 的端点，第一条坏样本都经 dispatch 回 bad-request', async () => {
@@ -249,7 +277,8 @@ test('坏入参：每个接 payload 的端点，第一条坏样本都经 dispatc
       endpoint + ' 的第一条坏样本没有走统一信封（' + JSON.stringify(bad) + '）')
   }
   // R3 02 加了 reorderFeeds（有负例且经 dispatch 验过），所以接 payload 的端点从 23 变 24。
-  assert.equal(covered.length, 24, '接 payload 的端点应当是 24 个，实际 ' + covered.length)
+  // R1 02 给 cleanup 补了窗口负例（它原本是零入参、无负例），所以现在是 25。
+  assert.equal(covered.length, 25, '接 payload 的端点应当是 25 个，实际 ' + covered.length)
 })
 
 test('坏入参：统一 bad-request 信封、details.issues 指出字段，且不触达 store', async () => {

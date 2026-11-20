@@ -1,9 +1,10 @@
 /**
  * 显示窗的**宿主最高缝**：真 SQLite + 真 dispatch（ADR-0005）。
  *
- * 这里只钉窗口的**取数**半边（R1 01 票）：条目的窗内/窗外、半开边界、无日期排除、窗口进栅栏、
- * 范围组合、refresh、旧行为不变、坏入参。账目按窗与三联拆分是 02 / 04 票的判据，不在这里提前钉
- * —— 否则同一件事会有两套验收，改一处永远只红一半。
+ * 前半（R1 01 票）钉窗口的**取数**半边：条目的窗内/窗外、半开边界、无日期排除、窗口进栅栏、
+ * 范围组合、refresh、旧行为不变、坏入参。后半（R1 02 票）钉**账目**半边：overview 与五个带账
+ * 写端点在同一个窗口下回同一个数、窗内标读/撤销守恒、cleanup 的窗口入参。
+ * 三联拆分（todayFrom → unreadSplit）仍是 04 票的判据，不在这里提前钉 —— 否则改一处只红一半。
  *
  * 为什么必须真库：窗口的正确性全在 SQL 谓词与取数窗口上（`published_at IS NOT NULL` 那一半
  * 只在「无日期 + 抓取时间落在窗内」的截面显形）。内存桩的 listRecent 是我自己写的，
@@ -235,10 +236,13 @@ test('refresh 也接受窗口：回包 items 仍在窗内（不带窗口会悄�
     assert.deepEqual(idsOf(refreshed), ['today-noon', 'today-b', 'today-from'],
       'refresh 带窗口：列表必须留在「今天」，不能悄悄把视图放回全部')
     assert.equal(refreshed.refreshed, true, '前置条件：这确实是一轮刷新回包')
+    assert.equal(refreshed.unread, 3, 'refresh 的账目同样按窗（与同一页的 items 一致）')
+    assert.equal(sumOf(refreshed.perFeedUnread), refreshed.unread, 'refresh 回包也守守恒式')
 
     const unwindowed = await ok(dispatch, 'refresh', {})
     assert.ok(idsOf(unwindowed).includes('ten-days-a'),
       '不带窗口的 refresh 仍是全部（旧行为）')
+    assert.equal(unwindowed.unread, 8, '不带窗口的 refresh 回全量账（8 条全都未读）')
   } finally {
     db.close()
     rmSync(dir, { recursive: true, force: true })
@@ -307,5 +311,221 @@ test('坏入参：五种窗口形态全部 bad-request，且不触达 store', as
       assert.ok(Array.isArray(result.error.details.issues) && result.error.details.issues.length > 0,
         endpoint + ' ' + label + ' 必须给出字段路径')
     }
+  }
+})
+
+/* ── 账目按窗（R1 02）──────────────────────────────────────────────────
+ * 01 票只钉窗口取数；这里补的是**账目半边**：overview 与五个带账写端点在同一个窗口下
+ * 回同一个数。夹具按 spec 验收的共用夹具：今天 3 条（2 未读 + 1 已读）、2 天前 1 条未读、
+ * 10 天前 2 条未读、无日期 3 条（2 未读 + 1 已读）⇒ 全部 9 条 / 7 未读；今天 2 未读；
+ * 近 3 天 / 近 7 天 3 未读。三联拆分（todayFrom）是 04 票，不在这里提前钉。
+ */
+
+const FEED_C = 'https://c.example.com/atom.xml'
+
+const ACCOUNT_ROWS = [
+  { id: 'today-a', feedId: FEED_A, publishedAt: '2026-11-20T09:00:00.000Z', fetchedAt: '2026-11-20T09:01:00.000Z', readAt: null },
+  { id: 'today-b', feedId: FEED_B, publishedAt: '2026-11-20T08:00:00.000Z', fetchedAt: '2026-11-20T08:01:00.000Z', readAt: null },
+  { id: 'today-read', feedId: FEED_B, publishedAt: '2026-11-20T07:00:00.000Z', fetchedAt: '2026-11-20T07:01:00.000Z', readAt: '2026-11-20T07:30:00.000Z' },
+  { id: 'two-days', feedId: FEED_A, publishedAt: '2026-11-18T09:00:00.000Z', fetchedAt: '2026-11-18T09:01:00.000Z', readAt: null },
+  { id: 'ten-days-a', feedId: FEED_A, publishedAt: '2026-11-10T09:00:00.000Z', fetchedAt: '2026-11-10T09:01:00.000Z', readAt: null },
+  { id: 'ten-days-b', feedId: FEED_B, publishedAt: '2026-11-09T09:00:00.000Z', fetchedAt: '2026-11-09T09:01:00.000Z', readAt: null },
+  { id: 'no-date-a', feedId: FEED_A, publishedAt: null, fetchedAt: '2026-11-20T23:00:00.000Z', readAt: null },
+  { id: 'no-date-b', feedId: FEED_B, publishedAt: null, fetchedAt: '2026-11-19T23:00:00.000Z', readAt: null },
+  { id: 'no-date-read', feedId: FEED_B, publishedAt: null, fetchedAt: '2026-11-18T23:00:00.000Z', readAt: '2026-11-19T00:00:00.000Z' },
+]
+
+/** 与 openFixture 同形，但带已读态；三个源里 C 一条条目都没有（0 未读键的探针）。 */
+async function openAccountFixture(tag = 'account') {
+  const dir = mkdtempSync(join(tmpdir(), 'rss-account-' + tag + '-'))
+  const db = openDatabase(':memory:')
+  migrateSchema(db)
+  const store = createSqliteStore(db, join(dir, 'config.json'))
+  const insert = db.prepare(
+    'INSERT INTO items (id, feed_id, title, link, published_at, fetched_at, read_at, starred)'
+    + ' VALUES (?, ?, ?, ?, ?, ?, ?, 0)',
+  )
+  db.exec('BEGIN')
+  for (const row of ACCOUNT_ROWS) {
+    insert.run(row.id, row.feedId, '标题 ' + row.id, 'https://site.example/' + row.id,
+      row.publishedAt, row.fetchedAt, row.readAt)
+  }
+  db.exec('COMMIT')
+  writeConfigFile(join(dir, 'config.json'), {
+    version: 1,
+    feeds: {
+      [FEED_A]: { url: FEED_A, title: '源 A', folder: '技术' },
+      [FEED_B]: { url: FEED_B, title: '源 B' },
+      [FEED_C]: { url: FEED_C, title: '源 C' },
+    },
+  })
+  return { store, db, dir }
+}
+
+function accountDispatch(store) {
+  return createDispatch({
+    config: Config({}),
+    log: () => {},
+    ready: () => store,
+    refreshNow: async () => ({ outcome: 'ran', attempted: 2, total: 2 }),
+    lastRefreshCompletedAt: () => undefined,
+    articleAttempts: new Map(),
+  })
+}
+
+const sumOf = (perFeedUnread) => Object.values(perFeedUnread).reduce((sum, count) => sum + count, 0)
+
+test('overview 带窗账目：只算窗内未读，键域 = feeds 表（0 未读留键），各源之和 = 总未读', async () => {
+  const { store, db, dir } = await openAccountFixture('overview')
+  try {
+    const dispatch = accountDispatch(store)
+    const today = await ok(dispatch, 'overview', WINDOW_TODAY)
+    assert.equal(today.unread, 2, '今天窗内未读 = today-a + today-b（today-read 已读不算）')
+    assert.deepEqual(today.perFeedUnread, { [FEED_A]: 1, [FEED_B]: 1, [FEED_C]: 0 },
+      '每源窗内账：C 一条条目都没有也必须留 0 键（键域 = feeds 表）')
+    assert.equal(sumOf(today.perFeedUnread), today.unread, '各源之和 = 顶栏总未读')
+
+    // 窗内账目必须与窗内列表里的未读行数一致（同一窗口、同一判据）。
+    assert.equal(today.items.filter((entry) => entry.readAt === undefined).length, today.unread,
+      '窗内总未读 = 窗内列表里的未读行数')
+
+    const threeDays = await ok(dispatch, 'overview', WINDOW_3D)
+    assert.equal(threeDays.unread, 3, '近 3 天含 2 天前那条')
+    assert.deepEqual(threeDays.perFeedUnread, { [FEED_A]: 2, [FEED_B]: 1, [FEED_C]: 0 })
+
+    // 范围只筛列表，不筛账目：顶栏 / 角标是全局视野（spec 验收 10）。
+    const scoped = await ok(dispatch, 'overview', { folder: '技术', ...WINDOW_TODAY })
+    assert.deepEqual(scoped.items.map((entry) => entry.id), ['today-a'], '前置条件：文件夹范围只剩 A 的窗内行')
+    assert.equal(scoped.unread, 2, '账目是全局的，不随文件夹范围变')
+    assert.deepEqual(scoped.perFeedUnread, { [FEED_A]: 1, [FEED_B]: 1, [FEED_C]: 0 })
+
+    // 不带窗口 = 全量（旧行为）：7 未读 = 今天 2 + 更早 3 + 无日期 2
+    const all = await ok(dispatch, 'overview', {})
+    assert.equal(all.unread, 7, '「全部」是 7 未读（无日期未读也计入全量）')
+    assert.deepEqual(all.perFeedUnread, { [FEED_A]: 4, [FEED_B]: 3, [FEED_C]: 0 })
+    assert.equal(sumOf(all.perFeedUnread), all.unread)
+    assert.equal('unreadSplit' in all, false, '不带 todayFrom 的旧请求不带 unreadSplit（旧形状逐字不变）')
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+/**
+ * 五个带账写端点：同一份窗口必须得到同一份窗内账；不带窗口回全量。
+ * 每个端点用一份**新的**夹具，保证两次调用从同一初始态出发。
+ */
+const ACCOUNT_ENDPOINT_CASES = [
+  { endpoint: 'markRead', payload: { itemIds: ['today-a'] }, window: { unread: 1, perFeed: { [FEED_A]: 0, [FEED_B]: 1, [FEED_C]: 0 } }, full: { unread: 6, perFeed: { [FEED_A]: 3, [FEED_B]: 3, [FEED_C]: 0 } } },
+  { endpoint: 'unmarkRead', payload: { itemIds: ['today-read'] }, window: { unread: 3, perFeed: { [FEED_A]: 1, [FEED_B]: 2, [FEED_C]: 0 } }, full: { unread: 8, perFeed: { [FEED_A]: 4, [FEED_B]: 4, [FEED_C]: 0 } } },
+  { endpoint: 'toggleStar', payload: { itemId: 'today-a' }, window: { unread: 2, perFeed: { [FEED_A]: 1, [FEED_B]: 1, [FEED_C]: 0 } }, full: { unread: 7, perFeed: { [FEED_A]: 4, [FEED_B]: 3, [FEED_C]: 0 } } },
+  { endpoint: 'toggleKeepUnread', payload: { itemId: 'today-a' }, window: { unread: 2, perFeed: { [FEED_A]: 1, [FEED_B]: 1, [FEED_C]: 0 } }, full: { unread: 7, perFeed: { [FEED_A]: 4, [FEED_B]: 3, [FEED_C]: 0 } } },
+  { endpoint: 'cleanup', payload: {}, window: { unread: 2, perFeed: { [FEED_A]: 1, [FEED_B]: 1, [FEED_C]: 0 } }, full: { unread: 7, perFeed: { [FEED_A]: 4, [FEED_B]: 3, [FEED_C]: 0 } } },
+]
+
+test('五个带账写端点：带窗回窗内账、不带窗回全量，各源之和恒等于总未读', async () => {
+  for (const { endpoint, payload, window: windowedExpect, full: fullExpect } of ACCOUNT_ENDPOINT_CASES) {
+    const windowedFixture = await openAccountFixture('endpoint-' + endpoint + '-window')
+    try {
+      const windowed = await ok(accountDispatch(windowedFixture.store), endpoint, { ...payload, ...WINDOW_TODAY })
+      assert.equal(windowed.unread, windowedExpect.unread, endpoint + ' 带窗：总未读必须是窗内账，不许回全量')
+      assert.deepEqual(windowed.perFeedUnread, windowedExpect.perFeed, endpoint + ' 带窗：每源窗内账')
+      assert.equal(sumOf(windowed.perFeedUnread), windowed.unread, endpoint + ' 带窗：各源之和 = 总未读')
+    } finally {
+      windowedFixture.db.close()
+      rmSync(windowedFixture.dir, { recursive: true, force: true })
+    }
+
+    const fullFixture = await openAccountFixture('endpoint-' + endpoint + '-full')
+    try {
+      const full = await ok(accountDispatch(fullFixture.store), endpoint, payload)
+      assert.equal(full.unread, fullExpect.unread, endpoint + ' 不带窗：旧行为是回全量')
+      assert.deepEqual(full.perFeedUnread, fullExpect.perFeed, endpoint + ' 不带窗：每源全量账')
+      assert.equal(sumOf(full.perFeedUnread), full.unread, endpoint + ' 不带窗：各源之和 = 总未读')
+    } finally {
+      fullFixture.db.close()
+      rmSync(fullFixture.dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test('窗内标读 / 撤销：总数与所属源角标同步 ±1，全程不回全量', async () => {
+  const { store, db, dir } = await openAccountFixture('mark-undo')
+  try {
+    const dispatch = accountDispatch(store)
+    const before = await ok(dispatch, 'overview', WINDOW_TODAY)
+    assert.equal(before.unread, 2, '前置条件：今天 2 条未读')
+
+    const marked = await ok(dispatch, 'markRead', { itemIds: ['today-a'], ...WINDOW_TODAY })
+    assert.equal(marked.unread, 1, '标掉一条今天的未读：窗内总数减 1，不许被打回全量 6')
+    assert.equal(marked.perFeedUnread[FEED_A], 0, '所属源角标同步减 1')
+    assert.equal(marked.perFeedUnread[FEED_B], 1, '别的源一格不动')
+    assert.equal(sumOf(marked.perFeedUnread), marked.unread, '守恒式在回包里成立')
+
+    const afterMark = await ok(dispatch, 'overview', WINDOW_TODAY)
+    assert.equal(afterMark.unread, 1, '下一次 overview 仍是窗内账（没有回全量）')
+
+    const undone = await ok(dispatch, 'unmarkRead', { itemIds: ['today-a'], ...WINDOW_TODAY })
+    assert.equal(undone.unread, 2, '撤销后窗内总数加回 1')
+    assert.equal(undone.perFeedUnread[FEED_A], 1, '所属源角标同步加回 1')
+    assert.equal(sumOf(undone.perFeedUnread), undone.unread)
+
+    const all = await ok(dispatch, 'overview', {})
+    assert.equal(all.unread, 7, '全量账始终 7：窗内标读 / 撤销不许改变窗外账')
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('账目只有一个算账处：overview 与写端点在同一个窗口 / 夹具上逐项相等', async () => {
+  const { store, db, dir } = await openAccountFixture('same-account')
+  try {
+    const dispatch = accountDispatch(store)
+    const overview = await ok(dispatch, 'overview', WINDOW_TODAY)
+    const toggled = await ok(dispatch, 'toggleStar', { itemId: 'two-days', ...WINDOW_TODAY })
+    assert.equal(toggled.unread, overview.unread, '写端点与 overview 的总未读必须来自同一个算账函数')
+    assert.deepEqual(toggled.perFeedUnread, overview.perFeedUnread, '每源账目逐键相等')
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('cleanup 入参：仍接受 null / 缺省 / 带无关键的对象；坏窗口回 bad-request 且不触达 store', async () => {
+  const { store, db, dir } = await openAccountFixture('cleanup-payload')
+  try {
+    const dispatch = accountDispatch(store)
+    // 旧语义：零入参端点「接受并忽略 payload」；null / 缺省 / 多余键都不能变成坏入参。
+    for (const payload of [undefined, null, {}, { anything: 1 }]) {
+      const result = await ok(dispatch, 'cleanup', payload)
+      assert.equal(result.unread, 7, '不带窗口的 cleanup 仍回全量账（' + JSON.stringify(payload) + '）')
+    }
+    const windowed = await ok(dispatch, 'cleanup', { ...WINDOW_TODAY, anything: 1 })
+    assert.equal(windowed.unread, 2, 'cleanup 也接受窗口：回包按窗算账')
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+
+  // 坏窗口必须在入参层被拒 —— 用碰一下就炸的 store 证明没有触达 handler。
+  const EXPLODING_STORE = new Proxy({}, { get() { throw new Error('坏入参不该触达 store') } })
+  const dispatch = createDispatch({
+    config: Config({}),
+    log: () => {},
+    ready: () => EXPLODING_STORE,
+    refreshNow: async () => ({ outcome: 'not-ready', attempted: 0, total: 0 }),
+    lastRefreshCompletedAt: () => undefined,
+    articleAttempts: new Map(),
+  })
+  for (const [label, payload] of [
+    ['缺 to', { from: WINDOW_TODAY.from }],
+    ['from >= to', { from: WINDOW_TODAY.to, to: WINDOW_TODAY.from }],
+    ['今天起点不是时刻', { todayFrom: '2026-11-20' }],
+  ]) {
+    const result = await dispatch('cleanup', payload)
+    assert.equal(result.ok, false, 'cleanup 放过了坏窗口（' + label + '）')
+    assert.equal(result.error.code, 'bad-request')
+    assert.ok(result.error.details.issues.length > 0, 'cleanup 的坏窗口必须给出字段路径')
   }
 })

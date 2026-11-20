@@ -419,6 +419,43 @@ export const contractCases = [
     },
   },
   {
+    // R1 02：账目按窗。三份实现必须与窗口取数**共用同一段判据**（publishedAt 非空 + recency 半开区间），
+    // 只在它前面加「未读」；无窗口 = 全量（旧行为），两者在同一夹具上逐键对账。
+    // 这条契约是「窗内角标 = 窗内列表里的未读行数」的存储侧保证，端点层只是消费它。
+    name: 'unreadPerFeed：带窗时与窗口取数同一判据（无日期不进窗），键域不变、各源之和 = 窗内总数',
+    async run({ store }) {
+      const base = { feedId: 'f1', link: 'https://a.example/', fetchedAt: '2026-11-20T23:00:00.000Z', starred: false }
+      await store.saveItem('today-unread', { ...base, title: 'today-unread', publishedAt: '2026-11-20T12:00:00.000Z' })
+      await store.saveItem('today-read', { ...base, title: 'today-read', publishedAt: '2026-11-20T10:00:00.000Z', readAt: '2026-11-20T11:00:00.000Z' })
+      await store.saveItem('older-unread', { ...base, title: 'older-unread', publishedAt: '2026-11-18T09:00:00.000Z' })
+      await store.saveItem('at-to-unread', { ...base, title: 'at-to-unread', publishedAt: '2026-11-21T00:00:00.000Z' })
+      // ⚠️ fetchedAt 恰好落在今天的窗内、但没有 publishedAt：拿 recency 兜底就会把它算进窗内账。
+      await store.saveItem('no-date-unread', { ...base, title: 'no-date-unread' })
+      await store.saveItem('other-feed-unread', { ...base, feedId: 'f2', title: 'other-feed-unread', publishedAt: '2026-11-20T08:00:00.000Z' })
+      await store.saveItem('other-feed-read', { ...base, feedId: 'f2', title: 'other-feed-read', publishedAt: '2026-11-20T07:00:00.000Z', readAt: '2026-11-20T07:30:00.000Z' })
+
+      const window = { from: '2026-11-20T00:00:00.000Z', to: '2026-11-21T00:00:00.000Z' }
+      const feedIds = ['f1', 'f2', 'f3']
+      const windowed = store.unreadPerFeed(feedIds, window)
+      assert.deepEqual(windowed, { f1: 1, f2: 1, f3: 0 },
+        '窗内账：today-unread 与 other-feed-unread 各 1；已读、窗外、无日期的都不算；0 未读的源留键')
+
+      // 与窗口取数**逐源对账**：同一份 listRecent 窗口结果里未读行数就是该源账目。
+      for (const [feedId, count] of Object.entries(windowed)) {
+        const rows = store.listRecent(50, undefined, [feedId], undefined, window)
+        const unreadRows = rows.filter(([, record]) => record.readAt === undefined).length
+        assert.equal(count, unreadRows, '窗内账目必须等于窗内列表里的未读行数：' + feedId)
+      }
+      const sum = Object.values(windowed).reduce((acc, count) => acc + count, 0)
+      assert.equal(sum, 2, '各源之和 = 窗内总未读')
+
+      // 不带窗口 = 全量：同一夹具上逐键对账（f1 = today-unread / older / at-to / no-date；f2 = other-feed-unread）
+      assert.deepEqual(store.unreadPerFeed(feedIds), { f1: 4, f2: 1, f3: 0 }, '无窗口仍是全量账')
+      assert.deepEqual(store.unreadPerFeed(feedIds, undefined), store.unreadPerFeed(feedIds),
+        '显式 undefined 与缺省同义（「全部」档位）')
+    },
+  },
+  {
     name: 'listCleanupCandidates：真该删的行必须在候选里；候选行携带的字段必须是真的',
     async run({ store }) {
       const base = { feedId: 'f1', link: 'https://a.example/', fetchedAt: '2026-01-01T00:00:00.000Z', starred: false }
