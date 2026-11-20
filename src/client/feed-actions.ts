@@ -1,7 +1,7 @@
 /**
  * 订阅源动作（阶段 4b 票据 05 的第四切片，收口）。
  *
- * discover / addFeed / removeFeed / clearDiscovery 四个动作。写入的是 discovery / feedsBusy /
+ * discover / addFeed / removeFeed / clearDiscovery / moveFeedOrder 五个动作。写入的是 discovery / feedsBusy /
  * importReport / notice / error —— **不直接写 feeds**（订阅的真相在宿主，写完靠 host.reload 重取）。
  *
  * R3-03 增加 moveFeedOrder：排序同样是宿主的真相，客户端只发「整份目标顺序」，

@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
 import { READER_KEY_HELP } from '../lib/keys.js'
 import { DEFAULT_READING_PREFERENCES } from '../lib/preferences.js'
+import { deriveFeedOrder, reorderFeedOrder } from '../lib/feed-order.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const BUNDLE = join(ROOT, 'lib', 'client.js')
@@ -320,18 +321,16 @@ async function mountReader({ items = [], feeds, folders, tags = [], article, hol
       return ok({ folders: serverFolders })
     }
     if (body.endpoint === 'reorderFeeds') {
-      // 宿主语义（src/feed-order.ts）：未知 id 忽略、重复保首次、未点名的按当前相对顺序补末尾。
-      // 桩件按同一条规则改 serverFeeds —— 否则「overview 随后按新顺序下发」这条验收在 DOM 层
-      // 根本表达不出来（docs/pitfalls.md 2.6：桩件的派生数据要守它模仿的那条契约）。
+      // 宿主语义只留一份（src/feed-order.ts）：桩只把当前 serverFeeds 适配成 config 形状、
+      // 交给共享纯函数，再把结果写回状态 —— 不再复刻「未知忽略 / 未点名补末尾 / 重复保首次」。
+      // 否则「overview 随后按新顺序下发」这条验收可能被一个更宽松的替身放过去
+      //（docs/pitfalls.md 2.6：桩件的派生数据要守它模仿的那条契约）。
       const ids = Array.isArray(body.payload?.ids) ? body.payload.ids : []
-      const ordered = []
-      for (const id of ids) {
-        const feed = serverFeeds.find((entry) => entry.id === id)
-        if (feed !== undefined && !ordered.includes(feed)) ordered.push(feed)
-      }
-      for (const feed of serverFeeds) if (!ordered.includes(feed)) ordered.push(feed)
-      serverFeeds.splice(0, serverFeeds.length, ...ordered)
-      return ok({ feedOrder: serverFeeds.map((feed) => feed.id) })
+      const byId = Object.fromEntries(serverFeeds.map((feed) => [feed.id, feed]))
+      const current = serverFeeds.map((feed) => feed.id)
+      const next = reorderFeedOrder(current, byId, ids) ?? deriveFeedOrder(current, byId)
+      serverFeeds.splice(0, serverFeeds.length, ...next.map((id) => byId[id]))
+      return ok({ feedOrder: next })
     }
     if (body.endpoint === 'article') {
       if (gate !== undefined) await gate
@@ -676,6 +675,23 @@ function navFeedOrder(doc) {
     .map((key) => key.slice('feed:'.length))
 }
 
+/**
+ * 展开的文件夹里紧随目录行之后的成员行序（navRowsOf 把同一文件夹的成员连续排在一起）。
+ * 成员行序必须来自宿主下发的 feeds 顺序，而不是 FolderView.feedIds 的键序 —— 后者只当集合用。
+ */
+function folderMemberRows(doc, folder) {
+  const rows = [...doc.querySelectorAll('[data-rss-nav-row]')]
+  const start = rows.findIndex((row) => row.getAttribute('data-rss-nav-row') === 'folder:' + folder)
+  if (start < 0) return undefined
+  const members = []
+  for (const row of rows.slice(start + 1)) {
+    const key = row.getAttribute('data-rss-nav-row')
+    if (!key.startsWith('feed:')) break
+    members.push(key.slice('feed:'.length))
+  }
+  return members
+}
+
 test('订阅管理页 ↑ / ↓：只挪一格、其它行相对序不变，首末置灰，说明文案在导出按钮附近', skip, async () => {
   const h = await mountReader({
     items: [item({ id: 'a1', feedId: 'a' }), item({ id: 'b1', feedId: 'b' }), item({ id: 'c1', feedId: 'c' })],
@@ -710,6 +726,20 @@ test('订阅管理页 ↑ / ↓：只挪一格、其它行相对序不变，首�
   assert.ok(hint !== null, '订阅管理页必须有一句排序说明')
   assert.equal(hint.textContent, '↑ / ↓ 调整顺序，只影响显示先后；OPML 不记录顺序，导出再导入不保证原顺序。')
 
+  // 结构判据（不只看文本在不在）：提示必须和导出按钮同处一个工具条容器，且是这个节点**最近的**
+  // 共同祖先 —— 否则文案被挪到面板外或别的区块里，本用例名里的「在导出按钮附近」就是空话。
+  const exportButton = [...doc.querySelectorAll('button')].find((button) => button.textContent.trim() === '导出 OPML')
+  assert.ok(exportButton !== undefined, '前置：导出按钮必须存在')
+  const ancestors = new Set()
+  for (let node = exportButton; node !== null; node = node.parentElement) ancestors.add(node)
+  let common = hint
+  while (common !== null && !ancestors.has(common)) common = common.parentElement
+  assert.notEqual(common, null, '提示必须与导出按钮处在同一个面板里')
+  assert.equal(common, hint.parentElement, '提示必须直接挂在它与导出按钮的最近共同容器上')
+  // 共同祖先不能只是 <body>：那说明提示被挪出了订阅管理面板，「在导出按钮附近」已经名不副实。
+  assert.notEqual(common, doc.body, '提示不能飘到面板外（最近共同容器不是 body）')
+  assert.notEqual(common, doc.documentElement, '提示不能飘到文档根')
+
   doc.querySelector('[data-rss-feed-order-up="c"]').click()
   await h.settle()
   assert.deepEqual(feedOrderRows(doc), ['a', 'c', 'b'], '点 ↑ 只把 c 挪一格；a 与 b 的相对先后不变')
@@ -717,6 +747,35 @@ test('订阅管理页 ↑ / ↓：只挪一格、其它行相对序不变，首�
   const reorders = h.requests.filter((entry) => entry.endpoint === 'reorderFeeds')
   assert.equal(reorders.length, 1, '一次点击只发一次重排请求')
   assert.deepEqual(reorders[0].payload, { ids: ['a', 'c', 'b'] }, 'ids 由当前 state.feeds 整体推出（相邻交换）')
+})
+
+test('文件夹内成员行序跟随宿主下发顺序（不是成员数组的键序），与管理页同序变化', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'b1', feedId: 'b' }), item({ id: 'a1', feedId: 'a' })],
+    // 宿主下发的顺序是 b、a；而 FolderView.feedIds 仍是 feeds 键序 a、b（它只当集合用）。
+    feeds: [
+      { id: 'b', title: '源 B', folder: '技术' },
+      { id: 'a', title: '源 A', folder: '技术' },
+    ],
+    folders: [{ name: '技术', feedIds: ['a', 'b'] }],
+  })
+  await h.store.load('overview')
+  await h.settle()
+  const doc = h.win.document
+
+  assert.equal(doc.querySelector('[data-rss-nav-row="folder:技术"]').getAttribute('aria-expanded'), 'true',
+    '前置：文件夹已展开，成员行就在左栏')
+  assert.deepEqual(folderMemberRows(doc, '技术'), ['b', 'a'],
+    '展开的文件夹里，成员行序 = 宿主下发顺序；若读 feedIds 的键序会变成 a、b')
+  h.press('f')
+  await h.settle()
+  assert.deepEqual(feedOrderRows(doc), ['b', 'a'], '前置：左栏与订阅管理页同序（都读 state.feeds）')
+
+  doc.querySelector('[data-rss-feed-order-up="a"]').click()
+  await h.settle()
+  assert.deepEqual(folderMemberRows(doc, '技术'), ['a', 'b'],
+    '↑ 挪一格后文件夹成员行序仍然只跟宿主下发顺序（左栏同序）')
+  assert.deepEqual(feedOrderRows(doc), ['a', 'b'], '订阅管理页同步到同一份顺序（不是各算一套）')
 })
 
 test('订阅管理页：导入 / 加源在途时排序按钮全部置灰（不借 feedsBusy 的文案撒谎）', skip, async () => {

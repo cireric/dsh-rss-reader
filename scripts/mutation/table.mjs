@@ -2088,4 +2088,44 @@ export const MUTATIONS = [
     // 判据：tests/article.test.mjs 的 paragraphsOf 用例逐段 deepEqual 三段。
     from: "return htmlToText(html).split('\\n');",
     to: 'return [htmlToText(html)];' },
+
+  // ── R3：订阅源排序（2026-11-20 评审补条目）──────────────────────────────
+  // spec「测试决策」列出的 5 条关键判定 + 退订回滚单独一条。from 全部按 lib/ 产物实际字节
+  // 锚定（构建后逐条 grep 核对 OCCURRENCES=1，见 docs/pitfalls.md 1.4）。
+  { id: 'feed-order-读侧丢弃未列出源', file: 'lib/feed-order.js',
+    judges: ['feed-order.test.mjs'],
+    judgeTests: ['派生：已列出的按数组序，未列出的按 feeds 键序追加；未知 id 与空串丢弃，重复保首次', '手改 feedOrder（故意与键序不同）后：读入与关掉重开都按它，且读取不改写文件'],
+    // 派生不再追加键序尾部：没排过的源会从 listFeeds / overview 里整批消失（验收 4、13 翻红）。
+    from: 'for (const feedId of Object.keys(feeds)) {',
+    to: 'for (const feedId of []) {' },
+  { id: 'feed-order-写侧落盘未知 id', file: 'lib/feed-order.js',
+    judges: ['feed-order.test.mjs'],
+    judgeTests: ['派生：已列出的按数组序，未列出的按 feeds 键序追加；未知 id 与空串丢弃，重复保首次', 'reorderFeeds 端点：回包是落盘后的有效顺序；未知 id 丢弃、重复保首次、未点名的按当前顺序排末尾'],
+    // 归一不丢未知 id：请求里的垃圾会被写进 config.json（验收 3 的「文件里也没有它」翻红）。
+    from: "if (feedId === '' || !Object.hasOwn(feeds, feedId) || seen.has(feedId))",
+    to: "if (feedId === '' || seen.has(feedId))" },
+  { id: 'feed-order-重排只落请求前缀', file: 'lib/feed-order.js',
+    judges: ['feed-order.test.mjs'],
+    judgeTests: ['reorderFeeds 端点：回包是落盘后的有效顺序；未知 id 丢弃、重复保首次、未点名的按当前顺序排末尾'],
+    // 只落请求前缀：未点名的源下次要靠键序重新推导，同一份顺序长出两个来源（验收 4 翻红）。
+    from: 'return [...named, ...deriveFeedOrder(order, feeds).filter((feedId) => !seen.has(feedId))];',
+    to: 'return [...named];' },
+  { id: 'feed-order-退订不清顺序', file: 'lib/feed-order.js',
+    judges: ['feed-order.test.mjs'],
+    judgeTests: ['withoutFeedOrder：删掉该 id 的全部出现，其余元素一格不动', '退订：落盘的 feedOrder 里不再有该 id，其它源的相对先后一格不动；重开保持'],
+    // 退订不过滤：config.json 的 feedOrder 里永远留着已退订 id（验收 9 的文件级断言翻红）。
+    from: 'return order.filter((entry) => entry !== feedId);',
+    to: 'return [...order];' },
+  { id: 'feed-order-退订回滚丢顺序', file: 'lib/store-sqlite.js',
+    judges: ['feed-order.test.mjs'],
+    judgeTests: ['退订的库事务失败：顺序回滚到与退订前逐字一致（含被删掉的那一项与它的原位置）'],
+    // 回滚只写回 feeds：失败的退订把该源悄悄挪到末尾，整份文件也不再逐字一致（验收 9 回滚段翻红）。
+    from: 'if (before.feedOrder === undefined)',
+    to: 'if (true)' },
+  { id: 'client-排序后不重载', file: 'lib/client.js',
+    judges: ['feed-order-client.test.mjs'],
+    judgeTests: ['moveFeedOrder：按当前 feeds 顺序整体推出 ids，成功后 reload 用宿主快照改行序'],
+    // 成功后跳过 reload：界面停在旧顺序，直到下一次无关刷新（「屏幕旧、文件新」的另一种形态）。
+    from: '\t\t\t\t\tawait rpc("reorderFeeds", { ids });\n\t\t\t\t\tawait reload();',
+    to: '\t\t\t\t\tawait rpc("reorderFeeds", { ids });' },
 ]

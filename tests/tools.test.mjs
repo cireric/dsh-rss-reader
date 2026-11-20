@@ -313,6 +313,26 @@ test('rss_list_feeds：三个目录各自成信封（total / truncated / items�
   assert.equal(page.tags.items[0].id, tag.id)
 })
 
+test('rss_list_feeds：源行序 = listFeeds() 的返回序，工具不再按 id/标题排一次', async () => {
+  // 宿主已经按 feedOrder 派生好顺序：feeds 的**键序**是 a、b，但 listFeeds 返回 b、a。
+  // 工具若顺手再 sort 一次（或按文件夹重组），模型看到的目录就会和用户在左栏排的顺序分家。
+  const store = {
+    listFeeds: () => [
+      ['b', { url: 'https://b.example/rss', title: 'B 源' }],
+      ['a', { url: 'https://a.example/rss', title: 'A 源' }],
+    ],
+    unreadPerFeed: () => ({}),
+    listFolders: () => [],
+    listTags: () => [],
+    feed: () => undefined,
+    item: () => undefined,
+  }
+  const page = await mount({ ready: () => store, searchItems: searchStub().run }).get('rss_list_feeds').execute({}, exec)
+  assert.deepEqual(page.feeds.items.map((row) => row.id), ['b', 'a'],
+    '行序必须原样跟随宿主 listFeeds（非键序 b、a），不能由工具重新排序')
+  assert.deepEqual(page.feeds.items.map((row) => row.title), ['B 源', 'A 源'])
+})
+
 test('rss_list_feeds：大目录按预算截断并如实报告（不静默丢源/目录/标签）', async () => {
   // 源表用最小只读桩：真 store 每条 saveFeed 都要整份重写 config.json，305 条要 1.7 s，
   // 而这条用例只关心「超限怎么办」，不关心落盘。

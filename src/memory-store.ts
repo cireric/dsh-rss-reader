@@ -221,8 +221,9 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): MemoryStore
     },
 
     /**
-     * 顺序与生产同一条派生（src/feed-order.ts）：`configFile()` 现造的 config 形状里没有
-     * `feedOrder`，派生结果就是 `feeds` 的键序；替身不许自写一遍排序规则。
+     * 顺序与生产同一条派生（src/feed-order.ts）：`configFile()` 现造的 config 形状里带着
+     * 替身自己维护的 `feedOrder`（与生产 config.json 同形）。排过就按它，从没排过则回落成
+     * `feeds` 的键序；替身不许自写一遍排序规则。
      */
     listFeeds: () => {
       const file = configFile()
