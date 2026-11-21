@@ -19,6 +19,9 @@
  * `ctx.connection.requestRejection(req)` 套用同一套 Host/Origin 与浏览器鉴权。
  */
 import type { UnreadAccount } from './unread.js'
+// 表格块没有 text / items，只有它能摊出可读文字。article-text.ts 零 node 依赖（本文件要进 client
+// bundle），行列摊平也只有那一份实现 —— 不在这里再写一遍遍历（spec 决策 9 / 10）。
+import { tableToText } from './article-text.js'
 
 export const ROUTE_PATH = '/rss-reader-api'
 
@@ -276,6 +279,10 @@ const WORD_PATTERN = /[\p{L}\p{N}]/u
  * 只吃块列表而不是拼好的字符串：正文块是客户端唯一拿到了缓存正文的地方（ArticlePayload.blocks），
  * 图片没有文本、不计入；标题/列表/引用都算正文（它们确实要读）。
  *
+ * **表格必须单独认**（2026-11-21，R5 05）：`table` 块既没有 `text` 也没有 `items`，只读那两个字段
+ * 会把整张表算成 0 —— 含表格的正文时长系统性偏小，而界面上看不出来（时长本来就标着「估算」）。
+ * 行列摊平复用 `article-text.ts` 的 `tableToText`，不在这里另写一份遍历。
+ *
  * @returns 分钟数；没有可读文本时返回 0（调用方据此不显示任何数字，而不是显示「约 0 分钟」）
  */
 export function estimateReadingMinutes(blocks: ReadonlyArray<Record<string, unknown>>): number {
@@ -284,6 +291,7 @@ export function estimateReadingMinutes(blocks: ReadonlyArray<Record<string, unkn
   for (const block of blocks) {
     if (block['kind'] === 'img') continue
     const texts: string[] = []
+    if (block['kind'] === 'table') texts.push(tableToText(block))
     if (typeof block['text'] === 'string') texts.push(block['text'])
     if (Array.isArray(block['items'])) for (const entry of block['items']) texts.push(String(entry))
     for (const text of texts) {

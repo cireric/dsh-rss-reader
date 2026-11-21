@@ -131,6 +131,72 @@ function optionalBoolean(args: Record<string, unknown>, name: string): boolean |
 }
 
 /**
+ * 一份 `runs` → Markdown 行内文本；**形状认不出就返回 undefined**，由调用方退回 `text`。
+ *
+ * 为什么只给 `link` 加标记（spec 决策 11 的原文就是这一条）：模型读的是 Markdown，`[文字](href)`
+ * 是它唯一拿得到地址的形态 —— 丢了它，正文里「详见官方文档」就再也回不到原文链接。加粗/斜体/
+ * 行内代码刻意不还原：ticket 明确「其余 kind 只要文字」，而且 `code` 里若含反引号还要一套转义
+ * 规则，那是没有实测样本的扩规则（AGENTS.md 不为未验证的样本扩规则）。
+ *
+ * 为什么校验形状而不是直接读字段：缓存里的块是从 JSON 读回来的 `Record<string, unknown>`，
+ * 本仓库禁 `as any`；形状不对时**退回 `text`** 而不是拼出半截（半截 Markdown 比纯文本更糟）。
+ */
+function markdownRunsOf(value: unknown): string | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined
+  const parts: string[] = []
+  for (const entry of value) {
+    if (entry === null || typeof entry !== 'object') return undefined
+    const run = entry as Record<string, unknown>
+    const text = run['text']
+    if (typeof text !== 'string') return undefined
+    const href = run['href']
+    if (run['kind'] === 'link' && typeof href === 'string' && href !== '') {
+      parts.push('[' + text + '](' + href + ')')
+      continue
+    }
+    parts.push(text)
+  }
+  return parts.join('')
+}
+
+/**
+ * 表格块 → **Markdown 表格**（`| a | b |` + 分隔行）。
+ *
+ * 为什么不能像纯文本投影那样只按行拼空格：模型读 Markdown，行列关系是这张表存在的全部意义 ——
+ * 摊成流水文字之后，「5W 属于额定功率还是峰值功率」就无从判断了（与读者侧表格渲染同一条理由）。
+ *
+ * 两处防御都不是装饰：
+ * ① **列宽取所有行的最大值并右补空串**：Markdown 表格要求每行列数一致，否则整张表渲染失败；
+ *    抽取侧已经归一过（决策 17），但工具读的是缓存 JSON，形状不由这里保证。
+ * ② **单元格里的 `|` 转义成 `\|`**：不转义会把一格切成两格，行错位比丢格更难发现。
+ *
+ * 没有 `header` 时输出一行**空表头**而不是把首行数据提成表头：Markdown 表格必须有表头行，而
+ * 「提成表头」会让一条数据在渲染时变成表头（语义被改，且与读者侧显示不一致）。
+ */
+function tableToMarkdown(block: Record<string, unknown>): string {
+  const cellsOf = (value: unknown): string[] | undefined => {
+    if (!Array.isArray(value)) return undefined
+    return value.map((cell) => String(cell ?? '').replace(/\s+/g, ' ').replace(/\|/g, '\\|').trim())
+  }
+  const header = cellsOf(block['header'])
+  const rows = Array.isArray(block['rows'])
+    ? block['rows'].map(cellsOf).filter((row): row is string[] => row !== undefined)
+    : []
+  const width = Math.max(header?.length ?? 0, 0, ...rows.map((row) => row.length))
+  if (width === 0) return ''
+  const lineOf = (cells: readonly string[]): string => {
+    const padded = [...cells]
+    while (padded.length < width) padded.push('')
+    return '| ' + padded.join(' | ') + ' |'
+  }
+  return [
+    lineOf(header ?? []),
+    '| ' + Array.from({ length: width }, () => '---').join(' | ') + ' |',
+    ...rows.map(lineOf),
+  ].join('\n')
+}
+
+/**
  * 把结构化正文块摊成 **Markdown**（模型读的那一份）；`paragraphs` 是升级前老缓存的兼容读。
  *
  * ⚠️ 名字里的 `Markdown` 是判据不是装饰：`article-text.ts` 的 `blocksToText` 输出的是**纯文本**
@@ -138,12 +204,18 @@ function optionalBoolean(args: Record<string, unknown>, name: string): boolean |
  * 纯文本」合成一个口径，而下一个改 Markdown 形态的人不会想到自己顺手改了缓存额度口径。
  *
  * 正文回给模型的文本逐字节由本函数决定：`## 小节`、`- ` 列表、`pre` 围栏都是既有形态，改动即回归。
+ *
+ * **`table` 与 `runs` 是本函数自己的分支**（R5 05）：纯文本投影加表格分支只让统计/搜索/时长受益，
+ * 模型侧不会自动跟着生效 —— 漏了它，模型读到的正文里整张表凭空消失，而没有任何界面信号。
  */
 function blocksToMarkdown(
   blocks: ReadonlyArray<Record<string, unknown>> | undefined,
   paragraphs: readonly string[] | undefined,
 ): string {
   if (blocks === undefined || blocks.length === 0) return (paragraphs ?? []).join('\n\n')
+  // 带 runs 的块按 runs 摊平（`text` 是 runs 的派生投影，两者文字相同，差别只在链接地址）；
+  // runs 形状认不出时退回 `text` —— 宁可少一个链接，不许把内容丢了。
+  const textOf = (block: Record<string, unknown>): string => markdownRunsOf(block['runs']) ?? String(block['text'] ?? '')
   const lines: string[] = []
   for (const block of blocks) {
     const kind = block.kind
@@ -157,15 +229,20 @@ function blocksToMarkdown(
       lines.push('[图片] ' + String(block.alt ?? block.src ?? ''))
       continue
     }
+    if (kind === 'table') {
+      lines.push(tableToMarkdown(block))
+      continue
+    }
     if (kind === 'h') {
-      lines.push('#'.repeat(Math.max(1, Number(block.level ?? 1))) + ' ' + String(block.text ?? ''))
+      lines.push('#'.repeat(Math.max(1, Number(block.level ?? 1))) + ' ' + textOf(block))
       continue
     }
     if (kind === 'pre') {
+      // pre 没有 runs（spec 决策 8：代码块内部没有需要保留的行内语义），仍读 text。
       lines.push('```\n' + String(block.text ?? '') + '\n```')
       continue
     }
-    lines.push(String(block.text ?? ''))
+    lines.push(textOf(block))
   }
   return lines.filter(line => line !== '').join('\n\n')
 }

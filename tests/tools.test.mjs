@@ -522,3 +522,50 @@ test('写工具的逐次审批：pre-execute 只对本工具 ask，其它工具�
   )
   assert.deepEqual(pass, { kind: 'allow' }, '非写工具必须原样放行 —— 漏一句 next 就是全站工具闸死')
 })
+
+/**
+ * 模型读到的正文里必须有表格与链接（R5 05）。
+ *
+ * 为什么这条必须落在工具层：`rss_read_article` 回给模型的是 **Markdown**，而统计/搜索读的是
+ * `article-text.ts` 的纯文本投影 —— 两个口径**刻意不合并**（spec 决策 11）。于是「表格块加进来了」
+ * 这件事对纯文本侧自动生效，对模型侧却要显式补分支：漏了它，模型读到的正文里整张表凭空消失，
+ * 而所有其它测试照样绿（模型看不到的内容没有任何界面信号）。
+ *
+ * 旧块（标题 / 列表 / 代码围栏 / 段落）的输出形态由既有用例逐字节守着，这里只补新块。
+ */
+test('rss_read_article：表格摊成 Markdown 表格，带 runs 的块按 runs 摊平且链接成 [文字](href)', async () => {
+  const { store } = freshStore('tools-markdown')
+  await store.saveFeed('https://feed.example/rss', { url: 'https://feed.example/rss', title: '探针源' })
+  const base = { feedId: 'https://feed.example/rss', title: '标题', link: 'https://feed.example/post/1', fetchedAt: '2026-11-01T00:00:00.000Z', starred: false }
+  await store.saveItem('rich', {
+    ...base,
+    article: {
+      fetchedAt: '2026-11-01T00:00:00.000Z',
+      revision: EXTRACTOR_REVISION,
+      blocks: [
+        { kind: 'table', header: ['参数', '标称值'], rows: [['额定功率', '5W'], ['输入电压', '220V']] },
+        // 带 runs 的段落：link 必须渲染成 `[文字](href)`，其余 kind 只要文字（模型读不了样式）
+        {
+          kind: 'p',
+          text: '详见官方文档。',
+          runs: [
+            { kind: 'text', text: '详见' },
+            { kind: 'link', text: '官方文档', href: 'https://ex.test/docs' },
+            { kind: 'text', text: '。' },
+          ],
+        },
+        { kind: 'p', text: '纯文本段落', runs: [{ kind: 'strong', text: '纯文本段落' }] },
+      ],
+    },
+  })
+  const read = mount({ ready: () => store, searchItems: searchStub().run }).get('rss_read_article')
+  const page = await read.execute({ itemId: 'rich' }, exec)
+
+  assert.equal(page.cached, true)
+  assert.ok(page.text.includes('| 参数 | 标称值 |'), '表头必须是 Markdown 表格行，实际：' + page.text)
+  assert.ok(page.text.includes('| 额定功率 | 5W |'), '单元格必须是 Markdown 表格行，实际：' + page.text)
+  assert.ok(page.text.includes('| --- | --- |'), 'Markdown 表格必须有分隔行（否则渲染不成表格），实际：' + page.text)
+  assert.ok(page.text.includes('[官方文档](https://ex.test/docs)'), '链接必须渲染成 [文字](href)，实际：' + page.text)
+  assert.ok(page.text.includes('纯文本段落'), 'strong run 的文字必须保留（模型读不了加粗，但文字不能丢）')
+  assert.ok(!page.text.includes('{'), '正文里不许出现 JSON 形状的 runs 残留')
+})

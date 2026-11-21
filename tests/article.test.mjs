@@ -725,6 +725,17 @@ test('表格：align 只认 align 属性，style="text-align" 不读，全列未
   assert.equal('align' in byJustify, false, 'justify 不在 left/center/right 里，必须忽略')
 })
 
+test('纯文本投影：表格块摊成「表头一行 + 每行一行」，不许算成空', () => {
+  // 为什么钉字面值而不是「runs 拼接」之类的派生量：期望值必须来自独立来源（spec 决策 10 的
+  // 「表头 + 各行单元格按行拼接（行内用空格分隔）」）。表头与单元格各一行的形态也是搜索投影
+  // 与字符统计的口径 —— 表格若被投影成空串，搜索搜不到、额度算成 0、时长算成 0，三处一起瞎。
+  const text = blocksToText([{ kind: 'table', header: ['参数', '标称值'], rows: [['额定功率', '5W'], ['输入电压', '220V']] }])
+  assert.equal(text, '参数 标称值\n额定功率 5W\n输入电压 220V')
+
+  // 没有表头的表格（纯 td）只有数据行，不许凭空补一行表头
+  assert.equal(blocksToText([{ kind: 'table', rows: [['甲', '乙']] }]), '甲 乙')
+})
+
 test('表格：<figure> 里的表格不被吞（三种形态都要救回来）', () => {
   const table = '<table><tr><th>参数</th><th>值</th></tr><tr><td>电压</td><td>220V</td></tr></table>'
   const tableOf = (html) => extractArticle('<article>' + html + '<p>' + PAD + '</p></article>', BASE)
