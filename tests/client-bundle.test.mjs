@@ -958,3 +958,59 @@ test('R1-03：切档只发一次 overview；同档重选不发；搜索中 setWi
   assert.equal(last[1]?.to, undefined, '「全部」档位不传 to')
   assert.equal(last[1]?.todayFrom, WINDOW_FROM, '「全部」档位仍带今天起点（顶栏三联拆分要用）')
 })
+
+/**
+ * —— R6 01：正文图片不泄漏 Referer（产物字节断言）——
+ *
+ * 为什么要在**产物**上断言，而不是只靠 DOM 用例：`referrerPolicy` 是 React 的受控 prop，
+ * 写成 `referrer_policy`、`referrerpolicy`（小写字符串键）或塞进 `style` 时 DOM 用例会红、
+ * 但「拼错成别的属性名」这类形态只有读产物字节才看得见。反过来，产物断言也**独立于折叠/
+ * 灯箱**：它只认「正文图片那一处渲染点」，别处新增的 `<img>` 不会让它失效（R6 其余票与本票
+ * 并行开发，判据不该互相绊住）。
+ *
+ * 定位方式：`("img", {` 的调用点在产物里唯一，props 对象用配平花括号扫出来 —— 不按行号、
+ * 不按固定偏移，`lib/client.js` 的任何无关增删都不影响。
+ */
+function jsxPropsObjectAt(source, callIndex) {
+  // callIndex 指向 `("img", ` 之后，从第一个 `{` 开始配平（跳过字符串字面量里的花括号）。
+  const start = source.indexOf('{', callIndex)
+  if (start === -1) return undefined
+  let depth = 0
+  let quote = ''
+  for (let i = start; i < source.length; i += 1) {
+    const ch = source[i]
+    if (quote !== '') {
+      if (ch === '\\') i += 1
+      else if (ch === quote) quote = ''
+      continue
+    }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue }
+    if (ch === '{') depth += 1
+    else if (ch === '}') {
+      depth -= 1
+      if (depth === 0) return source.slice(start, i + 1)
+    }
+  }
+  return undefined
+}
+
+test('R6 01：产物里正文图片的 props 带 referrerPolicy: "no-referrer"', () => {
+  const source = readFileSync(BUNDLE, 'utf8')
+  const sites = []
+  for (let at = source.indexOf('("img", '); at !== -1; at = source.indexOf('("img", ', at + 1)) {
+    sites.push(jsxPropsObjectAt(source, at))
+  }
+  assert.ok(sites.length > 0, '产物里找不到任何 ("img", { ... }) 渲染点 —— 先确认构建产物是新的')
+
+  // 正文图片那处的稳定标记：限高常量（`ArticleBlockView` 的 img 分支专有）。
+  const articleSite = sites.find((props) => props !== undefined && props.includes('ARTICLE_IMAGE_MAX_HEIGHT'))
+  assert.ok(articleSite !== undefined, '产物里找不到正文图片渲染点（ARTICLE_IMAGE_MAX_HEIGHT）—— 定位标记失效了，先修这条断言')
+
+  assert.ok(
+    /referrerPolicy:\s*"no-referrer"/.test(articleSite),
+    '正文 <img> 的 props 里没有 referrerPolicy: "no-referrer" —— 图片请求会带上 Referer，第三方图床因此知道读者在读哪一篇',
+  )
+  // 既有属性不许被挤掉：同一处 props，加一条最容易顺手改坏另一条
+  assert.ok(articleSite.includes('loading: "lazy"'), 'loading="lazy" 不许被这条改动挤掉')
+  assert.ok(articleSite.includes('decoding: "async"'), 'decoding="async" 不许被这条改动挤掉')
+})

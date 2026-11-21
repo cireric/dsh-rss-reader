@@ -160,10 +160,13 @@ function ArticleBlockView({ block }: { block: Record<string, unknown> }): ReactN
         {/*
          * loading=lazy：长文里的图片很多，一次性加载会拖慢首屏。
          * decoding=async 让解码不阻塞滚动。
+         * referrerPolicy=no-referrer：默认的 Referer 会把「读者正在读哪一篇」的 URL 交给图片所在的
+         * 第三方域名（图床、CDN、跟踪像素）。这是正文里唯一一处会主动外泄阅读行为的请求，所以在这里
+         * 逐图关掉；`rel=noreferrer` 只作用于 `<a>`，管不到 `<img>`。
          * maxHeight 与 objectFit：正文里混着长截图与原图，只限宽的话一张 1×3000 的图会把版面撑出
          * 几十屏。限高之后超长图缩成可辨认的尺寸（点开原站看大图），版面保持连续。
          */}
-        <img src={src} alt={alt} loading="lazy" decoding="async"
+        <img src={src} alt={alt} loading="lazy" decoding="async" referrerPolicy="no-referrer"
           style={{
             display: 'block', margin: '0 auto', maxWidth: '100%', height: 'auto',
             maxHeight: ARTICLE_IMAGE_MAX_HEIGHT, objectFit: 'contain', borderRadius: 6,
