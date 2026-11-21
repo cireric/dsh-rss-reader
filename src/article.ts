@@ -15,6 +15,20 @@ import { createHash } from 'node:crypto'
 import { fetchFeed, type FetchLimits } from './feed/fetch.js'
 import { MIN_CONTENT_CHARS } from './shared.js'
 import { decodeEntities, htmlToText, preToText } from './html-text.js'
+import { blocksToText, collapseWhitespace, safeUrl } from './article-text.js'
+
+/**
+ * 纯文本投影住在零 node 依赖的 `article-text.ts`（2026-11-21，R5 01），本文件只做 re-export。
+ *
+ * 为什么必须搬走：本文件 import 了 `node:crypto` 与 `feed/fetch.js`，是 host-only 的；而投影的
+ * 消费者里 `shared.ts` 的 `estimateReadingMinutes` 会打进客户端 bundle。投影留在这里，client 侧
+ * 一 import 就把 node 内建拉进浏览器包，而构建不会失败（失败推迟到运行期）。见 `docs/pitfalls.md` §1.7b。
+ *
+ * re-export 而不是让调用点改 import：`endpoints.ts` 与 `tests/article.test.mjs` 都在用
+ * `import { blocksToText } from './article.js'`，这一票是**行为零变化**的预重构。
+ */
+export { blocksToText, collapseWhitespace, safeUrl, blockToText, tableToText, runsToText } from './article-text.js'
+export type { InlineRun } from './article-text.js'
 
 /**
  * 抽取器的**内容版本**：抽取行为一变就要 +1。
@@ -101,19 +115,6 @@ export function isFrameable(headers: Headers): boolean {
     }
   }
   return true
-}
-
-/** 只放行 http/https（挡掉 javascript: / data: —— 后者还可能是 1x1 跟踪像素）。 */
-function safeUrl(raw: string | undefined, base: string | undefined): string | undefined {
-  if (raw === undefined) return undefined
-  const trimmed = raw.trim()
-  if (trimmed === '' || trimmed.startsWith('data:')) return undefined
-  try {
-    const resolved = base === undefined ? new URL(trimmed) : new URL(trimmed, base)
-    return resolved.protocol === 'http:' || resolved.protocol === 'https:' ? resolved.toString() : undefined
-  } catch {
-    return undefined
-  }
 }
 
 /** 从标签串里取属性（大小写不敏感，支持单双引号与无引号）。 */
@@ -683,7 +684,9 @@ function collectBlocks(html: string, baseUrl: string | undefined): ArticleBlock[
     }
     // 一个 piece 里可能含多行（被换行切开的相邻块）：逐行判断，避免把两段并成一段
     for (const line of htmlToText(piece).split('\n')) {
-      const text = line.replace(/\s+/g, ' ').trim()
+      // 归一化走 article-text.ts 的那一份：runs 化之后「先归一化再切 run」用的必须是同一个函数，
+      // 否则 run 文本与 text 会各按一套空白规则收敛，严格相等那条不变量就失去意义。
+      const text = collapseWhitespace(line)
       if (text.length >= MIN_CONTENT_CHARS) blocks.push({ kind: 'p', text })
     }
   }
@@ -715,17 +718,6 @@ function dedupeImages(blocks: readonly ArticleBlock[]): ArticleBlock[] {
     out.push(block)
   }
   return out
-}
-
-/** 正文纯文本（用于长度统计与日志）。 */
-export function blocksToText(blocks: readonly ArticleBlock[]): string {
-  return blocks
-    .map((block) => {
-      if (block.kind === 'img') return block.alt ?? ''
-      if (block.kind === 'list') return block.items.join(' ')
-      return block.text
-    })
-    .join('\n')
 }
 
 /**

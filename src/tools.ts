@@ -130,8 +130,16 @@ function optionalBoolean(args: Record<string, unknown>, name: string): boolean |
   return value
 }
 
-/** 把结构化正文块摊成纯文本；`paragraphs` 是升级前老缓存的兼容读。 */
-function blocksToText(
+/**
+ * 把结构化正文块摊成 **Markdown**（模型读的那一份）；`paragraphs` 是升级前老缓存的兼容读。
+ *
+ * ⚠️ 名字里的 `Markdown` 是判据不是装饰：`article-text.ts` 的 `blocksToText` 输出的是**纯文本**
+ * （统计 / 搜索 / 时长读它），两者语义不同、**不许合并**。合并会把「模型读 Markdown」与「统计读
+ * 纯文本」合成一个口径，而下一个改 Markdown 形态的人不会想到自己顺手改了缓存额度口径。
+ *
+ * 正文回给模型的文本逐字节由本函数决定：`## 小节`、`- ` 列表、`pre` 围栏都是既有形态，改动即回归。
+ */
+function blocksToMarkdown(
   blocks: ReadonlyArray<Record<string, unknown>> | undefined,
   paragraphs: readonly string[] | undefined,
 ): string {
@@ -359,7 +367,7 @@ function articleTool(deps: ReadToolDeps): ToolDefinition {
           reason: '缓存正文已过期（抽取器版本变化），需在阅读器里重新打开该篇',
         }
       }
-      const text = blocksToText(article.blocks, article.paragraphs)
+      const text = blocksToMarkdown(article.blocks, article.paragraphs)
       const clipped = clip(text, ARTICLE_MAX_CHARS)
       return {
         ...base,
