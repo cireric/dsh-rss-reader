@@ -1169,12 +1169,15 @@ export const MUTATIONS = [
     to: 'role: "dialog",' },
   // ⚠️ 2026-10-15（C1）重锚：依赖数组现在多了 expanded（routeKey 的 o 键要读它），
   // 且 tsdown 把它展开成多行 tab 形态（含 }, [ 前缀）。
+  // ⚠️ 2026-11-21（R6 04）再锚：依赖数组尾部又多了 imagesExpanded 与 expandedGroups
+  // （`i` 键要读篇级覆盖、要清组覆盖），所以 from/to 一起延长到新的尾部。
+  // 变异意图不变：拿掉 helpOpen ⇒ 按键处理器读到的永远是注册那一刻的 false。
   { id: 'client-helpOpen 不进依赖数组', file: 'lib/client.js',
     judges: ['overview-scale.test.mjs', 'scroll-dom.test.mjs'],
     // lib/client.js:2534-2538。少了 helpOpen，按键处理器读到的永远是注册那一刻的 false：
     // 浮窗开着按 Esc → 走「关文章」分支，浮窗留在屏幕上（与上面第三条同一个病象、不同根因）。
-    from: '}, [\n\t\t\t\t\troot,\n\t\t\t\t\tstore,\n\t\t\t\t\texpanded,\n\t\t\t\t\thelpOpen\n\t\t\t\t]);',
-    to: '}, [\n\t\t\t\t\troot,\n\t\t\t\t\tstore,\n\t\t\t\t\texpanded\n\t\t\t\t]);' },
+    from: '}, [\n\t\t\t\t\troot,\n\t\t\t\t\tstore,\n\t\t\t\t\texpanded,\n\t\t\t\t\thelpOpen,\n\t\t\t\t\timagesExpanded,\n\t\t\t\t\texpandedGroups\n\t\t\t\t]);',
+    to: '}, [\n\t\t\t\t\troot,\n\t\t\t\t\tstore,\n\t\t\t\t\texpanded,\n\t\t\t\t\timagesExpanded,\n\t\t\t\t\texpandedGroups\n\t\t\t\t]);' },
   // ── 自持存储骨架（2026-10-11 大规模存储任务 2）─────────────────────────────────
   // 这三个模块是「下次装载还能不能读到用户数据」的全部承重点，而它们的失效**全都安静**：
   // 版本闸写错 ⇒ 好库被当成坏库拒掉，界面表现是「重启之后订阅全没了」；
@@ -2485,4 +2488,63 @@ export const MUTATIONS = [
     // lib/client.js 实测 OCCURRENCES=1（ImageFoldHint 的 onClick 只此一处）。
     from: "onClick: () => {\n\t\t\t\t\tonExpand(group.index);\n\t\t\t\t},\n\t\t\t\tstyle: {\n\t\t\t\t\tmargin: \"0 0 1.1em\",\n\t\t\t\t\tpadding: \"6px 10px\",",
     to: "onClick: () => {\n\t\t\t\t\tonExpand(group.index);\n\t\t\t\t},\n\t\t\t\tonKeyDown: (event) => {\n\t\t\t\t\tif (event.key === \" \") event.preventDefault();\n\t\t\t\t},\n\t\t\t\tstyle: {\n\t\t\t\t\tmargin: \"0 0 1.1em\",\n\t\t\t\t\tpadding: \"6px 10px\"," },
+  // ── R6 04：`i` 键切换整篇图片 ───────────────────────────────────────────────
+  // 这四条守的是「一次按键收掉全篇」这条主路径的三个不同环节：
+  //   ① `routeKey` 里写不写篇级覆盖（语义本身）；
+  //   ② 状态有没有进 `KeyRoutingCtx`（按键与渲染的接线）；
+  //   ③ 状态有没有进 effect 依赖数组（闭包捕获旧值）；
+  //   ④ 动作在产物里是不是**字面量** return（反向覆盖正则看不看得见它）。
+  // ①②③ 必须各有一条：03 的实测教训是「测试全绿但按键与渲染脱钩」与「第二次按不生效」
+  // 是两种不同缺陷，一条变异守不住另一条。
+  { id: 'client-i 键不改会话覆盖', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: [
+      'i 键切换整篇图片：折叠偏好下按一次全部出现，再按一次全部消失（依赖数组没漏）',
+      'i 清空组覆盖：先点开某一组再按 i，全篇统一到同一形态（不是「部分展开取反」）',
+    ],
+    // `i` 解析出动作、`routeKey` 也进了分支，但**不写**篇级覆盖（把那次写入抹成空操作）。
+    // 症状正是本票要修的那件事：按 `i` 毫无反应，DOM 里的 `<img>` 一个都不变（spec 验收 4）。
+    // 判据是「按一次 ⇒ 三张图全部出现」，不依赖 store 里的布尔值。
+    // lib/client.js 实测 OCCURRENCES=1（`ctx.setImagesExpanded(!baseline)` 只此一处）。
+    from: "\t\t\t\t\t\tctx.setImagesExpanded(!baseline);",
+    to: "\t\t\t\t\t\tvoid baseline;" },
+  { id: 'client-i 的状态不传给 routeKey', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['i 键切换整篇图片：折叠偏好下按一次全部出现，再按一次全部消失（依赖数组没漏）'],
+    // 状态**没进** `KeyRoutingCtx`：`ctx.imagesExpanded` 永远是 undefined ⇒ 基线恒等于偏好，
+    // 于是每次按 `i` 都写「!偏好」这同一个值 —— 第一次展开成功、第二次收不起来。
+    // 这一条与「不改会话覆盖」不同：那个是分支里没写，这个是**按键读不到状态**（spec 验收 18）。
+    // ⚠️ 只摘 `imagesExpanded`、**保留** `setImagesExpanded`：若把 setter 也摘掉，按下会抛
+    // `TypeError: ctx.setImagesExpanded is not a function` —— 那是崩溃式假通过（pitfalls §2.7b），
+    // 套件红了却没有任何断言真的观察到「按键与渲染脱钩」。
+    // lib/client.js 实测 OCCURRENCES=1（ctx 字面量里那四行连续）。
+    from: "\t\t\t\t\t\t\thelpOpen,\n\t\t\t\t\t\t\tsetHelpOpen,\n\t\t\t\t\t\t\timagesExpanded,\n\t\t\t\t\t\t\tsetImagesExpanded,",
+    to: "\t\t\t\t\t\t\thelpOpen,\n\t\t\t\t\t\t\tsetHelpOpen,\n\t\t\t\t\t\t\tsetImagesExpanded," },
+  { id: 'client-i 的状态不在依赖数组里', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['i 键切换整篇图片：折叠偏好下按一次全部出现，再按一次全部消失（依赖数组没漏）'],
+    // 把 `imagesExpanded` 从 keydown effect 的依赖数组里拿掉：监听器闭包读到的是**注册那一刻**
+    // 的 `undefined` ⇒ 第二次按 `i` 仍以为基线是偏好（折叠），于是又写一次「展开」，图片收不起来。
+    // 这正是 2026-10-15「拿掉 expanded 后按 o 永远收不起来、当时 402 条测试全绿」的同族事故。
+    // ⚠️ 判据必须是**连按两次**：只按一次时读旧值也得到正确结果，那条用例对它恒绿。
+    // lib/client.js 实测 OCCURRENCES=1（依赖数组尾部那三行）。
+    from: "\t\t\t\t\thelpOpen,\n\t\t\t\t\timagesExpanded,\n\t\t\t\t\texpandedGroups\n\t\t\t\t]);",
+    to: "\t\t\t\t\thelpOpen,\n\t\t\t\t\texpandedGroups\n\t\t\t\t]);" },
+  { id: 'keys-i 写成三元', file: 'lib/keys.js',
+    judges: ['keys.test.mjs'],
+    judgeTests: ["产物字节：lib/keys.js 里存在字面量 return 'toggleImages'（不许写成三元）"],
+    // 把 `case 'i'` 的字面量 return 换成**三元**。这条守的是「反向覆盖正则看不看得见这个动作」：
+    // `tests/keys.test.mjs` 的「帮助表反向覆盖」用 `return\s+'([A-Za-z]+)'` 从产物里抓动作名，
+    // 三元里的返回值抓不到（实测它只抓到 21 个动作，漏掉 pageDown / pageUp / halfPageDown /
+    // halfPageUp 这四个三元里的返回值）⇒ 反向覆盖对它**恒绿**，这是既存判据的漏洞。
+    // 所以本条的判据必须是「断言产物字节里有字面量 `return 'toggleImages'`」（spec 验收 16）。
+    //
+    // ⚠️ 偏离 spec 给出的 `to`（`return view === 'article' ? … : …`）：`view` 在 `keys.ts` 的
+    // 作用域里**不存在**，那样写一按下就是 `ReferenceError: view is not defined` ——
+    // 崩溃式变异是假通过（pitfalls §2.7b）：套件红了，但没有任何断言真的观察到「产物里没有字面量」。
+    // 改用 `key === 'i'` 这个**在作用域内**的条件，语义与原来完全等价（`i` 仍解析成 toggleImages），
+    // 于是唯一变红的就是那条字节断言 —— 这恰好证明它是这条判据唯一的守门人。
+    // lib/keys.js 实测 OCCURRENCES=1（`case 'i': return 'toggleImages';` 只此一处）。
+    from: "        case 'i': return 'toggleImages';",
+    to: "        case 'i': return key === 'i' ? 'toggleImages' : 'none';" },
 ]

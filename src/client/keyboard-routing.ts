@@ -29,6 +29,7 @@ import {
 } from '../list-scroll.js'
 import { isElementNode } from './element-node.js'
 import { nextExpandedOf, type ReaderStore } from './store.js'
+import { EMPTY_IMAGE_GROUPS } from '../image-fold.js'
 
 export interface KeyRoutingCtx {
   /**
@@ -44,6 +45,25 @@ export interface KeyRoutingCtx {
   /** 帮助浮窗是否开着：Esc 的优先级判据（开着时 Esc 只关它）。 */
   readonly helpOpen: boolean
   readonly setHelpOpen: (next: boolean) => void
+  /**
+   * 图片折叠的**篇级覆盖**（R6 04，spec 决策 5 / 14）：本次阅读里 `i` 写的瞬时值，
+   * `undefined` 表示「这一篇还没按过 `i`」⇒ 落回偏好。
+   *
+   * 与 `expanded` / `helpOpen` 同一条通道，理由也一样：`i` 的语义是「翻**基线**」，
+   * 而基线 = `篇级覆盖 ?? 偏好`，所以 `routeKey` 必须**读**它。它必须在 effect 依赖数组里，
+   * 否则监听器闭包读到注册那一刻的值 ⇒ 第二次按 `i` 不生效（`expanded` 的既存事故同族）。
+   */
+  readonly imagesExpanded: boolean | undefined
+  readonly setImagesExpanded: (next: boolean | undefined) => void
+  /**
+   * 组级覆盖（被读者点开的组序号，R6 03 的 state）。
+   *
+   * `i` 要**清空**它（spec 决策 10）：不清的话，读者点过的那一组会逆着 `i` 的方向留在展开态，
+   * `i` 就不再是「整篇一个开关」。它同样要在 effect 依赖数组里 —— `routeKey` 只写不读它，
+   * 但复位 effect 之外没有别的写入路径，依赖它保证监听器与最新 state 同步。
+   */
+  readonly expandedGroups: ReadonlySet<number>
+  readonly setExpandedGroups: (next: ReadonlySet<number>) => void
 }
 
 /**
@@ -250,6 +270,29 @@ export function routeKey(event: KeyboardEvent, ctx: KeyRoutingCtx): void {
       break
     case 'openExternal': run(() => store.openSelected()); break
     case 'openArticle': if (view !== 'list') return; run(() => { void store.openArticle() }); break
+    // i = 展开 / 折叠**当前正文**的全部图片（R6 04，spec 决策 10）。
+    //
+    // 语义是「翻**基线**并清空组覆盖」，基线 = `篇级覆盖 ?? 偏好`：
+    //  - 为什么翻基线而不是翻「当前是否全部展开」：有组覆盖时「部分展开」取反没有定义；
+    //    翻基线让行为与「读者点过几组」无关，确定且可测（spec 决策 10 的理由）。
+    //  - 为什么清空组覆盖：不清的话，读者点过的那组会逆着 `i` 的方向留在展开态，
+    //    `i` 就不再是「整篇一个开关」。
+    //  - 清空必须换成**新对象 / 那个空常量**，不能原地 `clear()`：`foldOf` 对组覆盖取快照，
+    //    React 也靠引用判断变化，原地改会让两边同时失灵（03 的注释已写明）。
+    //  - 结果是折叠时顺带关灯箱（spec 决策 24）：否则「整篇都折叠了，一张图还占满屏」。
+    //    灯箱是 07 的票，它的 state 抬到 `index.tsx` 后在这里加一行 `ctx.setLightboxSrc(undefined)`；
+    //    本票不引入那个字段（07 尚未落地，先加一个没人读的状态只会多一份要维护的语义）。
+    //  - 走 `run()` 而不是裸调用：与其他接管键同族，按键被吃掉（`preventDefault`），
+    //    否则浏览器把 `i` 打进某个隐式焦点里（spec 访谈修订 19）。
+    case 'toggleImages': {
+      if (view !== 'article') return
+      run(() => {
+        const baseline = ctx.imagesExpanded ?? store.get().reading.expandImages
+        ctx.setImagesExpanded(!baseline)
+        ctx.setExpandedGroups(EMPTY_IMAGE_GROUPS)
+      })
+      break
+    }
     // r：刷新未读计数（只重取本地视图，不抓取 —— 规格不变量 1）
     case 'refreshCount': run(() => { void store.refreshCount() }); break
     case 'manageFeeds': run(() => store.toggleFeeds()); break
