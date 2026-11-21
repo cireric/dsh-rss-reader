@@ -5078,3 +5078,305 @@ test('R6 06：占位——图片容器 min-height 120px、图片 width 100% / he
   // 既有的限高不受影响（长截图限高是独立决定，spec 决策 33）
   assert.equal(image.style.maxHeight, '640px', 'maxHeight 640 不许被本票挤掉')
 })
+
+/**
+ * —— 灯箱（R6 07）——
+ *
+ * 判据全部落在 **DOM 上**：灯箱节点的存在 / 消失、`href` 与 `src` 是否同一个值、`scrollTop`
+ * 有没有变、`view` 还是不是 `article`。不看 store 里的布尔值，也不看组件树形状。
+ *
+ * 灯箱节点的定位靠 `data-rss-lightbox`（spec 未规定名字，本票定为这个）—— 与
+ * `data-rss-scroll` / `data-rss-image-state` 同一族：标记写没写进 DOM 本身也是被测行为。
+ *
+ * ⚠️ jsdom **不加载图片、不派发 `load`**（`实测`，`/tmp/r6-notes/ENV.md`），而灯箱只对
+ * `state === 'ok'` 的图开放，所以每条用例都要先手动派发一次 `load` 把图推进 ok 态。
+ * 这一步不是走形式：它就是「灯箱入口判据」的一半（另一半是「载入中的图点不开」）。
+ */
+const LIGHTBOX_ATTR = 'data-rss-lightbox'
+
+/**
+ * 灯箱覆盖层节点（没有则 null）。
+ *
+ * ⚠️ 这个返回值只许拿来做**分支与读取**，不许直接当 `assert.equal` 的实参（`docs/pitfalls.md` §2.8）：
+ * 断言失败时 node 会 inspect 那个 jsdom 元素，而 inspect 一个巨大、循环引用、getter 成堆的节点
+ * 会一路跑到超时被 SIGKILL —— 表现是「文件级翻红、零断言消息」，门槛里看不出是哪条守卫在喊。
+ * 所以判「有没有」一律走下面的 `hasLightbox()`（布尔），`lightboxOf()` 只在断言**通过**之后取节点。
+ */
+function lightboxOf(root) {
+  return root.querySelector('[' + LIGHTBOX_ATTR + ']')
+}
+
+/** 灯箱是否在 DOM 里 —— 布尔形态，专供 `assert.equal`（理由见 lightboxOf 的注释）。 */
+function hasLightbox(root) {
+  return root.querySelector('[' + LIGHTBOX_ATTR + ']') !== null
+}
+
+/** 帮助浮窗是否在 DOM 里 —— 同样是布尔形态（既有用例直接传节点，本组不复制那个写法）。 */
+function hasHelp(root) {
+  return root.querySelector('[data-rss-help]') !== null
+}
+
+/** 点一个元素（真 MouseEvent，冒泡 + 可取消 —— 与既有行点击 / 提示点击同一手法）。 */
+function clickOn(h, element) {
+  element.dispatchEvent(new h.win.MouseEvent('click', { bubbles: true, cancelable: true }))
+}
+
+/**
+ * 把正文里第一张图推进 ok 态并点开灯箱，返回灯箱节点。
+ *
+ * 抽成公共前置的理由与 `openArticle` 相同：「load → settle → click → settle」这四步在
+ * 七八条用例里逐字重复过一次就够了；失败时抛出的是「在哪一步没等到」，不是某条断言的行号。
+ */
+async function openLightbox(h, body) {
+  const image = body.querySelector('img')
+  assert.ok(image !== null, '前置：正文里要有一张图（默认展开态）')
+  image.dispatchEvent(new h.win.Event('load'))
+  await h.settle()
+  assert.equal(imageStates(body)[0].getAttribute(IMAGE_STATE_ATTR), 'ok', '前置：图已载入（灯箱只对 ok 的图开放）')
+
+  clickOn(h, image)
+  await h.settle()
+  assert.equal(hasLightbox(h.win.document), true, '点已加载的图必须打开灯箱')
+  const lightbox = lightboxOf(h.win.document)
+  assert.ok(lightbox !== null, '前置：灯箱节点取得到')
+  return lightbox
+}
+
+test('R6 07：点已加载的图打开灯箱——原尺寸图 + 「原图 ↗」新标签链接，href 等于该图 src', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    article: {
+      itemId: 'a', title: 'ART',
+      blocks: [imgBlock('https://img.example/one.png', { alt: '图一', caption: '说明一' })],
+    },
+  })
+  const body = await openArticle(h)
+  const lightbox = await openLightbox(h, body)
+
+  const zoomed = lightbox.querySelector('img')
+  assert.ok(zoomed !== null, '灯箱里必须渲染一张图 —— 它就是「看大图」这件事本身')
+  assert.equal(zoomed.getAttribute('src'), 'https://img.example/one.png',
+    '灯箱图必须指向读者点的那张图（不是另取一张、不是缩略图地址）')
+  // 原尺寸：限宽 + 限高都写死在覆盖层里（spec 决策 24）。jsdom 没有布局引擎，只能断声明。
+  assert.equal(zoomed.style.maxWidth, '100%', '灯箱图必须 maxWidth: 100%（不许横向溢出正文面）')
+  assert.equal(zoomed.style.maxHeight, '100vh', '灯箱图必须 maxHeight: 100vh（长截图不许撑出屏幕）')
+  // 隐私：与正文 <img> 同一条（spec 决策 29）—— 灯箱是第二处会外泄阅读行为的图片请求。
+  assert.equal(zoomed.getAttribute('referrerpolicy'), 'no-referrer',
+    '灯箱图必须带 referrerpolicy="no-referrer"（否则图床能从 Referer 读到读者正在读哪一篇）')
+
+  const raw = lightbox.querySelector('a')
+  assert.ok(raw !== null, '灯箱里必须有「原图 ↗」链接')
+  assert.equal(raw.getAttribute('href'), 'https://img.example/one.png',
+    '「原图 ↗」的 href 必须等于该图 src（读者要的是原始尺寸，不是重新拼的地址）')
+  assert.equal(raw.getAttribute('target'), '_blank', '「原图 ↗」必须在新标签打开（不把读者带离阅读器）')
+  assert.equal(raw.getAttribute('rel'), 'noreferrer', '新标签链接必须 rel="noreferrer"（spec 决策 24）')
+  assert.ok((raw.textContent ?? '').includes('原图'), '链接文案要说明它做什么（实际：' + (raw.textContent ?? '') + '）')
+})
+
+test('R6 07：载入中的图点不开——灯箱只对 state === "ok" 的图开放', skip, async () => {
+  // 为什么必须单独一条：把 onClick 无条件挂在每张图上，读者会在「还在加载」的占位块上点出一个
+  // 空灯箱（或一张永远不出图的灯箱）。判据是「点了之后没有灯箱节点」，不是「图有没有 onClick」。
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    article: {
+      itemId: 'a', title: 'ART',
+      blocks: [imgBlock('https://img.example/slow.png', { alt: '还在加载' })],
+    },
+  })
+  const body = await openArticle(h)
+
+  const image = body.querySelector('img')
+  assert.ok(image !== null, '前置：载入中的图在 DOM 里')
+  assert.equal(imageStates(body)[0].getAttribute(IMAGE_STATE_ATTR), 'loading', '前置：此刻是载入中')
+
+  clickOn(h, image)
+  await h.settle()
+  assert.equal(hasLightbox(h.win.document), false, '载入中的图点开不许有灯箱（否则读者点出一张永远不出图的空覆盖层）')
+})
+
+test('R6 07：Esc 关灯箱但**不退出正文**（view 仍为 article）', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    article: { itemId: 'a', title: 'ART', blocks: [imgBlock('https://img.example/one.png', { alt: '图一' })] },
+  })
+  const body = await openArticle(h)
+  await openLightbox(h, body)
+
+  assert.equal(h.press('Escape'), true, 'Esc 应当被接管（不是漏给宿主）')
+  await h.settle()
+  assert.equal(hasLightbox(h.win.document), false, 'Esc 必须关掉灯箱')
+  assert.equal(h.store.get().view, 'article', 'Esc 只关灯箱 —— 不许顺手把文章也关了（读者只是想收掉那张大图）')
+
+  // 第二次 Esc 才回到原来的语义（正文 → 列表）：优先级链是逐级下降的，不是一次性清空
+  assert.equal(h.press('Escape'), true, '灯箱关掉后 Esc 仍应被接管')
+  await h.settle()
+  assert.equal(h.store.get().view, 'list', '灯箱已关，第二次 Esc 回到原语义（正文 → 列表）')
+})
+
+test('R6 07：点背景关闭灯箱，点图本身不关闭', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    article: { itemId: 'a', title: 'ART', blocks: [imgBlock('https://img.example/one.png', { alt: '图一' })] },
+  })
+  const body = await openArticle(h)
+  let lightbox = await openLightbox(h, body)
+
+  // ① 点图本身：读者常常点一下大图想「再放大」或只是误触 —— 那不该把灯箱收掉
+  const zoomed = lightbox.querySelector('img')
+  assert.ok(zoomed !== null, '前置：灯箱里有图')
+  clickOn(h, zoomed)
+  await h.settle()
+  assert.equal(hasLightbox(h.win.document), true, '点灯箱里的图不许关闭灯箱（只有背景与 Esc 是关闭出口）')
+
+  // ② 点背景（覆盖层自身）：这才是「点外面关掉」
+  const overlay = lightboxOf(h.win.document)
+  assert.ok(overlay !== null, '前置：灯箱仍在（上一步点图没有关掉它）')
+  clickOn(h, overlay)
+  await h.settle()
+  assert.equal(hasLightbox(h.win.document), false, '点背景必须关掉灯箱')
+  assert.equal(h.store.get().view, 'article', '点背景只关灯箱，不改视图')
+})
+
+test('R6 07：Esc 的优先级是 帮助浮窗 → 灯箱 → 退出正文（一条链逐级下降）', skip, async () => {
+  // 三个出口同住 `back` 动作（spec 决策 26）。为什么顺序不能反：帮助是全局浮窗、视觉上压在
+  // 灯箱之上（z-index 6 > 5），最上层先走；而灯箱关掉之后读者仍在正文里，不该被一路带到列表。
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    article: { itemId: 'a', title: 'ART', blocks: [imgBlock('https://img.example/one.png', { alt: '图一' })] },
+  })
+  const body = await openArticle(h)
+  await openLightbox(h, body)
+
+  assert.equal(h.press('?'), true, '灯箱开着时 ? 仍应被接管（帮助不随灯箱分流）')
+  await h.settle()
+  assert.equal(hasHelp(h.win.document), true, '前置：帮助浮窗已开')
+  assert.equal(hasLightbox(h.win.document), true, '前置：灯箱仍开着（帮助是叠在它上面的）')
+
+  assert.equal(h.press('Escape'), true, '第一级 Esc 应当被接管')
+  await h.settle()
+  assert.equal(hasHelp(h.win.document), false, '第一级：帮助浮窗先关')
+  assert.equal(hasLightbox(h.win.document), true, '第一级：灯箱必须还在（帮助优先于灯箱）')
+  assert.equal(h.store.get().view, 'article', '第一级：视图不变')
+
+  assert.equal(h.press('Escape'), true, '第二级 Esc 应当被接管')
+  await h.settle()
+  assert.equal(hasLightbox(h.win.document), false, '第二级：灯箱关')
+  assert.equal(h.store.get().view, 'article', '第二级：仍不退出正文')
+
+  assert.equal(h.press('Escape'), true, '第三级 Esc 应当被接管')
+  await h.settle()
+  assert.equal(h.store.get().view, 'list', '第三级：这才退出正文回列表')
+})
+
+test('R6 07：灯箱是非模态的——n / p / 空格 / d 仍滚动正文，灯箱一直开着', skip, async () => {
+  // 与帮助浮窗同一条约定（spec 决策 27）：覆盖层不许吞键，否则读者在大图上既不能翻页也不能
+  // 微调位置，只能先关掉它。判据是 `scrollTop` **真的变了**且灯箱仍在 —— 不是「按键没被
+  // preventDefault」（routeKey 自己就会 preventDefault，那个信号对任何实现都恒真）。
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    article: {
+      itemId: 'a', title: 'ART',
+      blocks: [imgBlock('https://img.example/one.png', { alt: '图一' }), { kind: 'p', text: '正文段落。' }],
+    },
+  })
+  const body = await openArticle(h)
+  await openLightbox(h, body)
+
+  const article = h.arm(h.box('article'), { scrollHeight: 3000, clientHeight: 300 })
+
+  for (const [key, label] of [['n', 'n（扫视下一行）'], ['p', 'p（扫视上一行）'], [' ', '空格（整屏）'], ['d', 'd（半屏）']]) {
+    const before = h.scrollTop(article)
+    assert.equal(h.press(key), true, '灯箱开着时 ' + label + ' 仍应被接管')
+    await h.settle()
+    assert.notEqual(h.scrollTop(article), before, '灯箱开着时 ' + label + ' 必须真的滚动正文（非模态，spec 决策 27）')
+    assert.equal(hasLightbox(h.win.document), true, '灯箱开着时 ' + label + ' 不许把灯箱关掉')
+  }
+  assert.equal(h.store.get().view, 'article', '全程留在正文页')
+})
+
+test('R6 07：j / k 是换文章不是滚动——换篇后灯箱自动关闭（复位 effect 覆盖）', skip, async () => {
+  // 源码核对（`src/client/keyboard-routing.ts:180-189`）：`next` / `prev` 在 `view === 'article'`
+  // 时调 `store.stepArticle`，是**换篇**。所以它们不参与「滚动仍生效」那条，而是靠决策 15 的
+  // 复位 effect 让灯箱跟着关 —— 旧文章的 `src` 不该留在一个新文章的浮层里。
+  const articleOf = (itemId) => ({
+    itemId, title: 'ART ' + itemId,
+    blocks: [imgBlock('https://img.example/' + itemId + '.png', { alt: itemId })],
+  })
+  const h = await mountReader({
+    items: [item({ id: 'a' }), item({ id: 'b' })],
+    article: articleOf,
+  })
+  const body = await openArticle(h)
+  const lightbox = await openLightbox(h, body)
+  assert.equal(lightbox.querySelector('img')?.getAttribute('src'), 'https://img.example/a.png', '前置：a 篇的图')
+
+  assert.equal(h.press('j'), true, '灯箱开着时 j 仍应被接管（换篇不是灯箱的私有动作）')
+  await h.settle()
+  assert.equal(h.store.get().article.itemId, 'b', '前置：已切到 b 篇')
+  assert.equal(hasLightbox(h.win.document), false,
+    '换篇后灯箱必须关闭 —— 否则 a 篇的图会占着 b 篇的屏幕（spec 决策 15 的复位 effect 覆盖这条）')
+  assert.equal(h.store.get().view, 'article', '换篇仍在正文页')
+})
+
+test('R6 07：按 i 折叠整篇时一并关掉灯箱（不许出现「全折叠了、一张图还占满屏」）', skip, async () => {
+  // spec 决策 24 的残留态：折叠态下正文里没有 <img>，灯箱却是同一张图的大图 —— 读者会以为
+  // 折叠没生效。判据是「灯箱消失 + 图消失」两条一起。
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    article: { itemId: 'a', title: 'ART', blocks: [imgBlock('https://img.example/one.png', { alt: '图一' })] },
+  })
+  const body = await openArticle(h)
+  await openLightbox(h, body)
+
+  assert.equal(h.press('i'), true, 'i 应当被接管')
+  await h.settle()
+  assert.equal(hasLightbox(h.win.document), false, 'i 折叠整篇时必须一并关掉灯箱（决策 24）')
+  assert.equal(body.querySelectorAll('img').length, 0, '前置：折叠后正文里没有 <img>')
+  assert.equal(foldHints(body).length, 1, '前置：折叠提示出现了')
+})
+
+test('R6 07：覆盖层只盖正文面——inset 0 + z-index 5 挂在 ArticleView 已定位的外层上', skip, async () => {
+  // 挂错地方的两个后果（spec 决策 24）：挂到面板根 ⇒ 连顶栏与左栏一起盖住，读者看不见
+  // 「返回列表」也点不了源；挂进滚动容器 ⇒ 覆盖层跟着内容滚走。
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    article: { itemId: 'a', title: 'ART', blocks: [imgBlock('https://img.example/one.png', { alt: '图一' })] },
+  })
+  const body = await openArticle(h)
+  const lightbox = await openLightbox(h, body)
+
+  // inset 0：铺满那一层（jsdom 把 `inset: 0` 序列化成 `0px`，实测）
+  assert.equal(lightbox.style.inset, '0px', '覆盖层必须 inset: 0（铺满正文面，不是一个小浮窗）')
+  assert.equal(lightbox.style.zIndex, '5', '覆盖层必须 z-index: 5（压在正文之上、帮助浮窗 6 之下）')
+
+  const layer = lightbox.parentElement
+  assert.ok(layer !== null, '前置：覆盖层有父节点')
+  assert.equal(layer.style.position, 'relative', '覆盖层必须挂在 ArticleView 那层 position: relative 上（inset 才有参照）')
+  assert.ok(layer.contains(body), '前置：那层就是正文所在的层（它包着正文列）')
+  assert.equal(body.contains(lightbox), false, '覆盖层不许放进滚动容器 —— 否则它跟着内容滚走')
+  assert.equal(layer === h.win.document.querySelector('[data-dsh-rss-reader]'), false,
+    '覆盖层不许挂在面板根上 —— 那会连顶栏与左栏一起盖住（读者点不到「返回列表」与源）')
+})
+
+test('R6 07：灯箱用 role="region" + aria-label，不许用 role="dialog" / aria-modal', skip, async () => {
+  // 为什么这条是硬判据而不是无障碍洁癖（spec 决策 25）：`isTypingTarget` 会把焦点落在
+  // `[role="dialog"]` / `[aria-modal="true"]` / `<dialog>` 里的按键**全部吞掉，含 Esc** ——
+  // 读者只要用鼠标点过一次灯箱里的图，Esc 就再也关不掉它（帮助浮窗踩过同一个坑，实测）。
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    article: { itemId: 'a', title: 'ART', blocks: [imgBlock('https://img.example/one.png', { alt: '图一' })] },
+  })
+  const body = await openArticle(h)
+  const lightbox = await openLightbox(h, body)
+
+  assert.equal(lightbox.getAttribute('role'), 'region', '覆盖层必须是 role="region"（对话框语义会把 Esc 一起吞掉）')
+  assert.equal(lightbox.getAttribute('aria-modal'), null, '覆盖层不许写 aria-modal（它不是模态）')
+  assert.equal(lightbox.tagName, 'DIV', '覆盖层不许是 <dialog>（同样会触发 isTypingTarget 的弹层守卫）')
+  assert.ok((lightbox.getAttribute('aria-label') ?? '') !== '', 'region 必须带 aria-label（否则读屏器只说「区域」）')
+
+  // 反向验证：把焦点放进灯箱里再按 Esc，仍然关得掉 —— 这正是「不用 dialog 语义」换来的行为
+  lightbox.focus()
+  assert.equal(pressFrom(h, lightbox, 'Escape'), true, '焦点在灯箱里时 Esc 仍应被接管（非模态约定）')
+  await h.settle()
+  assert.equal(hasLightbox(h.win.document), false, '焦点在灯箱里时 Esc 必须关得掉 —— dialog 语义会在这里静默失效')
+})

@@ -1165,8 +1165,10 @@ export const MUTATIONS = [
     judgeTests: ['✕ 关闭；焦点落在浮窗里之后 ? 与 Esc 仍然有效（非模态不许被自己的守卫吃掉）'],
     // lib/client.js:2269，唯一一处。isTypingTarget 会把 [role=dialog] 内的按键全吞掉（含 Esc）——
     // 鼠标点过一次 ✕ 之后，? 与 Esc 双双失效。判据是「✕ 关闭；焦点落在浮窗里之后…」那条用例。
-    from: 'role: "region",',
-    to: 'role: "dialog",' },
+    // ⚠️ 2026-11-21（R6 07）重锚：灯箱也用 `role: "region"`（spec 决策 25 的同一条约定），
+    // 裸锚从此命中 2 次 ⇒ 带上 className 那一行把范围收窄到**帮助浮窗卡片**。
+    from: 'className: "dsh-rss-help-card",\n\t\t\t\t\trole: "region",',
+    to: 'className: "dsh-rss-help-card",\n\t\t\t\t\trole: "dialog",' },
   // ⚠️ 2026-10-15（C1）重锚：依赖数组现在多了 expanded（routeKey 的 o 键要读它），
   // 且 tsdown 把它展开成多行 tab 形态（含 }, [ 前缀）。
   // ⚠️ 2026-11-21（R6 04）再锚：依赖数组尾部又多了 imagesExpanded 与 expandedGroups
@@ -1176,8 +1178,9 @@ export const MUTATIONS = [
     judges: ['overview-scale.test.mjs', 'scroll-dom.test.mjs'],
     // lib/client.js:2534-2538。少了 helpOpen，按键处理器读到的永远是注册那一刻的 false：
     // 浮窗开着按 Esc → 走「关文章」分支，浮窗留在屏幕上（与上面第三条同一个病象、不同根因）。
-    from: '}, [\n\t\t\t\t\troot,\n\t\t\t\t\tstore,\n\t\t\t\t\texpanded,\n\t\t\t\t\thelpOpen,\n\t\t\t\t\timagesExpanded,\n\t\t\t\t\texpandedGroups\n\t\t\t\t]);',
-    to: '}, [\n\t\t\t\t\troot,\n\t\t\t\t\tstore,\n\t\t\t\t\texpanded,\n\t\t\t\t\timagesExpanded,\n\t\t\t\t\texpandedGroups\n\t\t\t\t]);' },
+    // ⚠️ 2026-11-21（R6 07）再锚：依赖数组尾部又多了 lightboxSrc（`back` 要读灯箱态）。
+    from: '}, [\n\t\t\t\t\troot,\n\t\t\t\t\tstore,\n\t\t\t\t\texpanded,\n\t\t\t\t\thelpOpen,\n\t\t\t\t\timagesExpanded,\n\t\t\t\t\texpandedGroups,\n\t\t\t\t\tlightboxSrc\n\t\t\t\t]);',
+    to: '}, [\n\t\t\t\t\troot,\n\t\t\t\t\tstore,\n\t\t\t\t\texpanded,\n\t\t\t\t\timagesExpanded,\n\t\t\t\t\texpandedGroups,\n\t\t\t\t\tlightboxSrc\n\t\t\t\t]);' },
   // ── 自持存储骨架（2026-10-11 大规模存储任务 2）─────────────────────────────────
   // 这三个模块是「下次装载还能不能读到用户数据」的全部承重点，而它们的失效**全都安静**：
   // 版本闸写错 ⇒ 好库被当成坏库拒掉，界面表现是「重启之后订阅全没了」；
@@ -2469,8 +2472,11 @@ export const MUTATIONS = [
     // lib/client.js 实测 OCCURRENCES=1（`fold.shouldRender(group.index)` 只此一处）。
     // ⚠️ R6 06 重锚：块的 key 从裸 `index` 改成复合 `blockKeyOf(index)`（spec 决策 21，换篇复位），
     // 这段产物的第二行跟着变了 ⇒ 旧 from 会报「未应用」（pitfalls §1.4）。判定本身没动。
-    from: "if (fold.shouldRender(group.index)) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ArticleBlockView, { block }, blockKeyOf(index));\n\t\t\t\t\t\t\t\t\tif (group.blockIndexes[0] !== index) return null;",
-    to: "if (true) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ArticleBlockView, { block }, blockKeyOf(index));\n\t\t\t\t\t\t\t\t\tif (group.blockIndexes[0] !== index) return null;" },
+    // ⚠️ 2026-11-21（R6 07）再锚：`ArticleBlockView` 多了 `onOpenImage` 这个 prop（灯箱入口），
+    // tsdown 把 jsx 的第二参数从 `{ block }` 展开成 `{ block, onOpenImage }` 两行 ⇒ 旧 from
+    // 会报「未应用」（pitfalls §1.4）。判定本身没动。
+    from: "if (fold.shouldRender(group.index)) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ArticleBlockView, {\n\t\t\t\t\t\t\t\t\t\tblock,\n\t\t\t\t\t\t\t\t\t\tonOpenImage\n\t\t\t\t\t\t\t\t\t}, blockKeyOf(index));\n\t\t\t\t\t\t\t\t\tif (group.blockIndexes[0] !== index) return null;",
+    to: "if (true) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ArticleBlockView, {\n\t\t\t\t\t\t\t\t\t\tblock,\n\t\t\t\t\t\t\t\t\t\tonOpenImage\n\t\t\t\t\t\t\t\t\t}, blockKeyOf(index));\n\t\t\t\t\t\t\t\t\tif (group.blockIndexes[0] !== index) return null;" },
   { id: 'client-折叠提示可聚焦', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
     judgeTests: ['折叠提示不在 Tab 序里：tabIndex < 0，且不是 BUTTON / SUMMARY / INPUT / SELECT / TEXTAREA、不是带 href 的链接'],
@@ -2507,9 +2513,12 @@ export const MUTATIONS = [
     // `i` 解析出动作、`routeKey` 也进了分支，但**不写**篇级覆盖（把那次写入抹成空操作）。
     // 症状正是本票要修的那件事：按 `i` 毫无反应，DOM 里的 `<img>` 一个都不变（spec 验收 4）。
     // 判据是「按一次 ⇒ 三张图全部出现」，不依赖 store 里的布尔值。
-    // lib/client.js 实测 OCCURRENCES=1（`ctx.setImagesExpanded(!baseline)` 只此一处）。
-    from: "\t\t\t\t\t\tctx.setImagesExpanded(!baseline);",
-    to: "\t\t\t\t\t\tvoid baseline;" },
+    // ⚠️ 2026-11-21（R6 07）重锚：`i` 现在先算 `const next = !(…)`（灯箱要读同一个结果来决定
+    // 关不关），写入点从 `setImagesExpanded(!baseline)` 变成 `setImagesExpanded(next)`。
+    // 语义与判据都没动 —— 这里仍然把那次写入抹成空操作。
+    // lib/client.js 实测 OCCURRENCES=1（`ctx.setImagesExpanded(next)` 只此一处）。
+    from: "\t\t\t\t\t\tctx.setImagesExpanded(next);",
+    to: "\t\t\t\t\t\tvoid next;" },
   { id: 'client-i 的状态不传给 routeKey', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
     judgeTests: ['i 键切换整篇图片：折叠偏好下按一次全部出现，再按一次全部消失（依赖数组没漏）'],
@@ -2530,8 +2539,10 @@ export const MUTATIONS = [
     // 这正是 2026-10-15「拿掉 expanded 后按 o 永远收不起来、当时 402 条测试全绿」的同族事故。
     // ⚠️ 判据必须是**连按两次**：只按一次时读旧值也得到正确结果，那条用例对它恒绿。
     // lib/client.js 实测 OCCURRENCES=1（依赖数组尾部那三行）。
-    from: "\t\t\t\t\thelpOpen,\n\t\t\t\t\timagesExpanded,\n\t\t\t\t\texpandedGroups\n\t\t\t\t]);",
-    to: "\t\t\t\t\thelpOpen,\n\t\t\t\t\texpandedGroups\n\t\t\t\t]);" },
+    // ⚠️ 2026-11-21（R6 07）再锚：依赖数组尾部又多了 lightboxSrc（`back` 要读灯箱态）。
+    // 只摘 `imagesExpanded`、保留 `lightboxSrc` 与 `expandedGroups`：判据仍指向「篇级覆盖被闭包捕获」。
+    from: "\t\t\t\t\thelpOpen,\n\t\t\t\t\timagesExpanded,\n\t\t\t\t\texpandedGroups,\n\t\t\t\t\tlightboxSrc\n\t\t\t\t]);",
+    to: "\t\t\t\t\thelpOpen,\n\t\t\t\t\texpandedGroups,\n\t\t\t\t\tlightboxSrc\n\t\t\t\t]);" },
   { id: 'keys-i 写成三元', file: 'lib/keys.js',
     judges: ['keys.test.mjs'],
     judgeTests: ["产物字节：lib/keys.js 里存在字面量 return 'toggleImages'（不许写成三元）"],
@@ -2602,4 +2613,63 @@ export const MUTATIONS = [
     // lib/client.js 实测 OCCURRENCES=1（整个 useEffect 块只此一处）。
     from: "\t\t\t(0, react.useEffect)(() => {\n\t\t\t\tconst image = imageRef.current;\n\t\t\t\tif (image === null) return;\n\t\t\t\tif (!image.complete) return;\n\t\t\t\tsetState(image.naturalWidth > 0 ? \"ok\" : \"failed\");\n\t\t\t}, [src]);",
     to: "\t\t\t(0, react.useEffect)(() => {\n\t\t\t}, [src]);" },
+  // ── R6 07：灯箱（Esc 优先级 / 入口判据 / 折叠联动 / 依赖数组）──────────────────
+  // 四条守的是四个**互相独立**的环节，一条被抓住不代表另一条被守住：
+  //   ① `back` 的前置规则漏掉灯箱态 ⇒ Esc 直接退出正文（票面点名的 `client-灯箱Esc不关`）；
+  //   ② 入口不判 `ok` ⇒ 载入中的图也能点出一个空灯箱；
+  //   ③ `i` 折叠时不关灯箱 ⇒ 「全折叠了、一张图还占满屏」；
+  //   ④ `lightboxSrc` 不在依赖数组里 ⇒ 监听器闭包读到注册那一刻的 undefined，Esc 跳过灯箱。
+  // ④ 与 ① 症状相同但成因相反（一个是规则没写、一个是规则写了却读到旧值），
+  // 所以必须两条分开 —— 03/04 的实测教训正是「测试全绿而按键与渲染脱钩」。
+  { id: 'client-灯箱Esc不关', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs', 'keyboard-routing.test.mjs'],
+    judgeTests: [
+      'R6 07：Esc 关灯箱但**不退出正文**（view 仍为 article）',
+      'R6 07：Esc 的优先级——帮助关着、灯箱开着时只关灯箱，视图仍是正文',
+      'R6 07：Esc 的优先级是 帮助浮窗 → 灯箱 → 退出正文（一条链逐级下降）',
+    ],
+    // 删掉 `back` 里那两行灯箱前置规则（帮助之后、正文之前）。症状：灯箱开着时按 Esc
+    // **退出了正文** —— 灯箱随视图切换一起消失，看起来像「关掉了」，实际读者的阅读位置与
+    // 滚动位置都被丢掉（spec 决策 26 / 验收 11）。
+    // ⚠️ 判据必须同时看「灯箱消失」与「view 仍是 article」：只看灯箱消失的用例对这条恒绿。
+    // lib/client.js 实测 OCCURRENCES=1（`ctx.lightboxSrc !== void 0` 那一段只此一处）。
+    from: "\t\t\t\t\tif (ctx.lightboxSrc !== void 0) {\n\t\t\t\t\t\trun(() => ctx.setLightboxSrc(void 0));\n\t\t\t\t\t\tbreak;\n\t\t\t\t\t}\n",
+    to: "" },
+  { id: 'client-灯箱入口不判 ok', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['R6 07：载入中的图点不开——灯箱只对 state === "ok" 的图开放'],
+    // 把 `onClick` 无条件挂在每张图上：读者会在「还在加载」的占位块上点出一个空灯箱
+    // （或一张永远不出图的灯箱）。06 把三态写进 DOM 的第二个用处正是这里。
+    // ⚠️ 判据必须是「点了之后没有灯箱节点」，不是「图上有没有 onClick」——
+    // 后者是实现细节，前者才是读者看到的东西。
+    // lib/client.js 实测 OCCURRENCES=1（`state === "ok"` 的 onClick 三元只此一处）。
+    from: "\t\t\t\t\t\tonClick: state === \"ok\" ? () => {\n\t\t\t\t\t\t\tonOpen(src);\n\t\t\t\t\t\t} : void 0,",
+    to: "\t\t\t\t\t\tonClick: () => {\n\t\t\t\t\t\t\tonOpen(src);\n\t\t\t\t\t\t}," },
+  { id: 'client-i 折叠不关灯箱', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs', 'keyboard-routing.test.mjs'],
+    judgeTests: [
+      'R6 07：按 i 折叠整篇时一并关掉灯箱（不许出现「全折叠了、一张图还占满屏」）',
+      'R6 07：i 折叠整篇时顺带关灯箱（决策 24），展开方向上不写灯箱',
+    ],
+    // 去掉「结果是折叠 ⇒ 关灯箱」那一行：折叠态正文里没有 <img>，灯箱却是同一张图的大图，
+    // 读者会以为折叠没生效（spec 决策 24 点名的残留态）。
+    // ⚠️ 判据要两条一起：DOM 层（灯箱消失 + 提示出现）与路由层（折叠方向写灯箱、展开方向不写）。
+    // 只断 DOM 的用例对「无条件关灯箱」的写法也绿，那会把展开方向也一起关掉。
+    // lib/client.js 实测 OCCURRENCES=1（`if (!next)` 只此一处）。
+    from: "\t\t\t\t\t\tif (!next) ctx.setLightboxSrc(void 0);",
+    to: "\t\t\t\t\t\tvoid next;" },
+  { id: 'client-灯箱态不在依赖数组里', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: [
+      'R6 07：Esc 关灯箱但**不退出正文**（view 仍为 article）',
+      'R6 07：Esc 的优先级是 帮助浮窗 → 灯箱 → 退出正文（一条链逐级下降）',
+    ],
+    // 把 `lightboxSrc` 从 keydown effect 的依赖数组里拿掉：监听器闭包读到的是注册那一刻的
+    // `undefined` ⇒ Esc 跳过灯箱规则、直接 `closeArticle`。症状与「规则没写」一模一样，
+    // 但成因相反 —— 这正是 2026-10-15「拿掉 expanded 后按 o 永远收不起来、当时 402 条全绿」的同族。
+    // ⚠️ 必须保留 `expandedGroups`（它也是被读的对象）：只摘 `lightboxSrc`，否则会连带打红
+    // `i` 那一族用例，判据就不再指向「灯箱态闭包捕获」这一个缺陷。
+    // lib/client.js 实测 OCCURRENCES=1（依赖数组尾部那三行）。
+    from: "\t\t\t\t\timagesExpanded,\n\t\t\t\t\texpandedGroups,\n\t\t\t\t\tlightboxSrc\n\t\t\t\t]);",
+    to: "\t\t\t\t\timagesExpanded,\n\t\t\t\t\texpandedGroups\n\t\t\t\t]);" },
 ]
