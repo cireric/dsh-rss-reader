@@ -2317,4 +2317,56 @@ export const MUTATIONS = [
     judgeTests: ['articleCharsOf：表格块不再算成 0 字符（否则大表格不占缓存额度）', '字符统计：SQL 侧算出的 articleChars 含表格，且等于 articleCharsOf（口径一致）'],
     from: "        if (block['kind'] === 'table')\n            return sum + tableToText(block).length;",
     to: "        if (block['kind'] === 'table')\n            return sum;" },
+
+  // ── R5 05：模型正文的表格 / runs，与时长里的表格 ────────────────────────────
+  // 三条都打在**新增分支本身**上，而不是「把它改坏成另一种错误」：去掉分支后，模型读到的正文里
+  // 表格整块消失、链接退化成纯文字、含表格的文章时长偏小 —— 三件事在界面上都没有任何信号
+  // （正文面板画的是 React 元素，时长标着「估算」），只有各自的字面断言能抓到。
+  //
+  // ⚠️ 这三条的失效是**静默**的：不会抛错、不会少一条结果，只是内容变少/数字变小。所以判据必须
+  // 断言**字面输出**（`| 参数 | 标称值 |`、`[官方文档](https://…)`、具体分钟数），
+  // 只断言「有输出」的用例三条全都放走。
+  { id: 'tools-模型正文忽略表格', file: 'lib/tools.js',
+    judges: ['tools.test.mjs'],
+    judgeTests: ['rss_read_article：表格摊成 Markdown 表格，带 runs 的块按 runs 摊平且链接成 [文字](href)'],
+    // 去掉 table 分支：表格块落到末尾的默认分支，`String(block.text ?? '')` 是空串，
+    // 再被 `lines.filter(line => line !== '')` 滤掉 —— 整张表从模型可见正文里消失。
+    // lib/tools.js 实测 OCCURRENCES=1（带上下文锚定，`lines.push(tableToMarkdown(block));` 只此一处）。
+    from: "        if (kind === 'table') {\n            lines.push(tableToMarkdown(block));\n            continue;\n        }",
+    to: "        if (false) {\n            lines.push(tableToMarkdown(block));\n            continue;\n        }" },
+  { id: 'tools-模型正文忽略 runs', file: 'lib/tools.js',
+    judges: ['tools.test.mjs'],
+    judgeTests: ['rss_read_article：表格摊成 Markdown 表格，带 runs 的块按 runs 摊平且链接成 [文字](href)'],
+    // 让 link 不再渲染成 `[文字](href)`：链接文字还在（所以「正文里有没有这个词」的用例放走它），
+    // 丢的是**地址** —— 模型从此拿不到原文链接，而这正是 spec 决策 11 要求补的那条分支。
+    // lib/tools.js 实测 OCCURRENCES=1。
+    from: "        if (run['kind'] === 'link' && typeof href === 'string' && href !== '') {\n            parts.push('[' + text + '](' + href + ')');\n            continue;\n        }",
+    to: "        if (false) {\n            parts.push('[' + text + '](' + href + ')');\n            continue;\n        }" },
+  // 纯文本投影忽略表格：票据 05 字面列的 `blocksToText-忽略表格`。代码是 04 加的（`blockToText`
+  // 的 table 分支），但**判据是 05 补的** —— 04 那轮没有任何用例断言 `blocksToText` 见过表格
+  // （实测 grep 为空），所以这条此前无处可挂。去掉分支后表格块落到 `String(block['text'] ?? '')`
+  // 得空串，搜索/字符统计/时长三处会一起少内容，而只有这一条断言逐字钉住投影形态。
+  // lib/article-text.js 实测 OCCURRENCES=1。
+  { id: 'blocksToText-忽略表格', file: 'lib/article-text.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['纯文本投影：表格块摊成「表头一行 + 每行一行」，不许算成空'],
+    from: "    if (kind === 'table')\n        return tableToText(block);",
+    to: "    if (false)\n        return tableToText(block);" },
+  // 搜索投影忽略表格：票据 05 字面列的 `search-正文投影忽略 runs/table`。同样地，代码是 04 加的、
+  // 判据在 04 的 search.test.mjs（表头词与单元格词各一条命中断言）。这里把它钉进门槛：去掉分支后
+  // 表里的词一条都搜不到，而界面只表现为「搜不出东西」——没有报错、没有空状态差异。
+  // lib/search-worker.js 实测 OCCURRENCES=1。
+  { id: 'search-正文投影忽略 runs/table', file: 'lib/search-worker.js',
+    judges: ['search.test.mjs'],
+    judgeTests: ['搜索：表格里的词能命中（投影不再只看 text / items）'],
+    from: "        if ('kind' in block && block.kind === 'table') {\n            return [tableToText(block)];\n        }",
+    to: "        if (false) {\n            return [tableToText(block)];\n        }" },
+  { id: 'time-时长忽略表格', file: 'lib/shared.js',
+    judges: ['reading.test.mjs'],
+    judgeTests: ['表格块算进时长：只有表格时不为 0，表格 + 段落时两半都算'],
+    // 去掉 table 分支：表格块两个字段都没有 ⇒ 贡献 0 字 0 词。判据是**具体分钟数**：
+    // 只有表格的夹具从 1 变成 0，表格 + 600 字的夹具从 3 变成 2。
+    // lib/shared.js 实测 OCCURRENCES=1。
+    from: "        if (block['kind'] === 'table')\n            texts.push(tableToText(block));",
+    to: "        if (false)\n            texts.push(tableToText(block));" },
 ]
