@@ -24,7 +24,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-slots'
 // 用到的槽位键由这两个包声明进 SlotMap（main 来自 layout，sidebar.* 来自 sidebar）
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
-import { createReaderStore, nextExpandedOf, relativeTime, useReaderStore, VIRTUAL_VIEWS, type Filter, type MarkAllRange, type ReaderStore, type ReaderStoreDeps } from './store.js'
+import { createReaderStore, nextExpandedOf, relativeTime, useReaderStore, VIRTUAL_VIEWS, type Filter, type MarkAllRange, type ReaderState, type ReaderStore, type ReaderStoreDeps } from './store.js'
 import { DISPLAY_WINDOW_OPTIONS, displayWindowNameOf, unreadCountTextOf } from './window-control.js'
 import type { DisplayWindowRange } from '../display-window.js'
 // 导出面是构建产物对外的契约（契约测试直接调它），store 搬家后仍要从入口转出去
@@ -198,6 +198,24 @@ const STYLE = `
   background:color-mix(in srgb, CanvasText 6%, transparent); }
 .dsh-rss-help-sum { min-width:0; }
 .dsh-rss-help-scope { font-size:11px; opacity:.5; white-space:nowrap; }
+/* A 的二次确认（2026-11-21）：模态浮层。刻意用 role="dialog" + aria-modal —— 键盘守卫会把框内
+   按键全部拦下（后台的 j/k 不会动列表），这正是模态要的；代价是 Esc 也被拦，所以 Esc 由卡片的
+   onKeyDown 处理（back 动作里另有同一判据，覆盖「焦点还没进框」的一瞬）。 */
+.dsh-rss-confirm { position:absolute; inset:0; z-index:7; display:flex; justify-content:center;
+  align-items:center; padding:20px; background:color-mix(in srgb, CanvasText 28%, transparent); }
+.dsh-rss-confirm-card { display:flex; flex-direction:column; gap:10px; width:100%; max-width:420px;
+  padding:16px 18px; border-radius:10px; font-size:13px;
+  background:Canvas; color:CanvasText;
+  border:1px solid color-mix(in srgb, CanvasText 20%, transparent);
+  box-shadow:0 14px 40px color-mix(in srgb, CanvasText 24%, transparent); }
+.dsh-rss-confirm-title { font-size:14px; font-weight:600; line-height:1.4; }
+.dsh-rss-confirm-row { display:flex; flex-wrap:wrap; align-items:center; gap:8px 12px; }
+.dsh-rss-confirm-row label { display:flex; align-items:center; gap:6px; }
+.dsh-rss-confirm-row select { font:inherit; padding:2px 4px; border-radius:4px; color:inherit;
+  background:var(--rss-bg); border:1px solid var(--rss-line); }
+.dsh-rss-confirm-note { font-size:12px; color:var(--rss-muted); }
+.dsh-rss-confirm-actions { display:flex; justify-content:flex-end; gap:8px; padding-top:2px; }
+.dsh-rss-btn--primary { border-color:var(--rss-accent); font-weight:600; }
 @media (prefers-reduced-motion: reduce) {
   .dsh-rss-spin, .dsh-rss-bar::after { animation:none; }
   .dsh-rss-btn, [data-dsh-rss-reader] [data-rss-scroll] { transition:none !important; }
@@ -284,6 +302,146 @@ function HelpPanel({ onClose }: { onClose: () => void }): ReactNode {
   )
 }
 
+/**
+ * 原生 select「选完把焦点还回去」的唯一实现（2026-11-21）。
+ *
+ * **病象**：用鼠标改完顶栏的时间范围（旧版还有「A 键范围」）后再按 A / j / k，毫无反应。
+ * **根因**：`<select>` 选完仍持有焦点，而 keyboard-routing.ts 的 isTypingTarget 把来自 SELECT 的
+ * 按键全部当成「用户正在输入」放行给控件 —— 守卫本身没错（不抢输入控件的键），错的是控件用完
+ * 不还焦点。实测：焦点在 [data-rss-window] 上按 shift+a，无撤销条、未读数不变；点一下列表再按就正常。
+ *
+ * 只对**指针**路径归还：键盘选 select 时方向键是多步的（每步都触发 change），中途抢走焦点会让
+ * 一次选择只能走一步。pointerdown 打标记、keydown/blur 清标记，change 时按标记决定。
+ */
+function useSelectFocusReturn(getTarget: () => HTMLElement | null): {
+  pointer: { onPointerDown: () => void; onKeyDown: () => void; onBlur: () => void }
+  commit: () => void
+} {
+  const viaPointer = useRef(false)
+  return {
+    pointer: {
+      onPointerDown: () => { viaPointer.current = true },
+      onKeyDown: () => { viaPointer.current = false },
+      onBlur: () => { viaPointer.current = false },
+    },
+    commit: () => {
+      if (!viaPointer.current) return
+      viaPointer.current = false
+      getTarget()?.focus()
+    },
+  }
+}
+
+/**
+ * 确认框里的作用域摘要：读者要能一眼看出「哪些条目会被标」，不用自己去猜当前过滤与时间窗。
+ *
+ * 与顶栏标题同一套取值来源（navSelection / filter / displayWindow），不另存「上次的摘要」——
+ * 那份副本迟早与真实状态分家。
+ *
+ * ⚠️ 刻意**不**写「已加载 N 条」（ADR-0008）：候选由宿主在库全量上求值，条数可能大于已加载页
+ * （源里 19 条未读、已加载页 0 条就是常态）。把「已加载」摆在「将标记 N 条」旁边，读者会以为
+ * 其中有一个数错了 —— 这正是本轮要消灭的那类口径混乱。
+ */
+function listScopeText(state: ReaderState): string {
+  const selection = state.navSelection
+  const where = selection.kind === 'feed'
+    ? (state.feeds.find((feed) => feed.id === selection.feedId)?.title ?? '该源')
+    : selection.kind === 'folder'
+      ? '文件夹「' + selection.folder + '」'
+      : selection.kind === 'tag'
+        ? '标签「' + (state.tags.find((tag) => tag.id === selection.tagId)?.name ?? selection.tagId) + '」'
+        : '全部文章'
+  const filter = VIRTUAL_VIEWS.find((entry) => entry.key === state.filter)?.label ?? state.filter
+  return where + ' · ' + filter + ' · ' + displayWindowNameOf(state.displayWindow)
+}
+
+/**
+ * A 的二次确认框（2026-11-21 用户拍板）。
+ *
+ * 为什么不是 window.confirm：要在框里改「范围」并实时显示「将标记 N 条」，原生 confirm 做不到；
+ * 而且 jsdom 里 window.confirm 没有实现，整条功能会变得不可测（测试只能断言「没崩」）。
+ *
+ * 为什么用 role="dialog" + aria-modal，而 HelpPanel 刻意用 region：这一层**要**拦键 ——
+ * isTypingTarget 会把框内按键当成输入目标放行给控件，于是后台的 j/k 不会在确认框开着时动列表。
+ * 代价是 Esc 也被拦，所以 Esc 必须由本卡片的 onKeyDown 处理（back 动作里还有一份，覆盖
+ * 「刚按下 A、焦点还没进框」的那一瞬；两处都只做「关掉」这一件事）。
+ *
+ * 条数的唯一判据是 store.markAllPlan —— 与真正标读那份名单同一个函数，框里说几条就标几条。
+ */
+function MarkAllConfirm({ state, store, onCancel, onConfirm }: {
+  state: ReaderState
+  store: ReaderStore
+  onCancel: () => void
+  onConfirm: () => void
+}): ReactNode {
+  const confirmRef = useRef<HTMLButtonElement | null>(null)
+  // 打开即聚焦「标为已读」：Enter 直接确认、Tab 到取消，键盘流不用先摸方向键。
+  useEffect(() => { confirmRef.current?.focus() }, [])
+  /**
+   * 条数由宿主 dry-run 给出（ADR-0008）：客户端只说「范围 × 过滤 × 窗 × 阈值」，
+   * 候选在库全量上求值 —— 再按 `visible()` 数一遍就又会只看见已加载页（19 条未读显示 0）。
+   * 统计期间按钮禁用；换范围 / 换视图时重算。
+   */
+  const [count, setCount] = useState<number | undefined>(undefined)
+  const [countFailed, setCountFailed] = useState(false)
+  useEffect(() => {
+    let alive = true
+    setCount(undefined)
+    setCountFailed(false)
+    void store.countMarkAllCandidates()
+      .then((value) => { if (alive) setCount(value ?? 0) })
+      .catch(() => { if (alive) setCountFailed(true) })
+    return () => { alive = false }
+  }, [store, state.markAllRange, state.navSelection, state.displayWindow, state.filter, state.search, state.items.length])
+  const keptCount = store.visible().filter((item) => item.readAt === undefined && item.keptUnread === true).length
+  const rangeSelect = useSelectFocusReturn(() => confirmRef.current)
+  return (
+    <div className="dsh-rss-confirm" data-rss-markall-confirm="">
+      <div className="dsh-rss-confirm-card" role="dialog" aria-modal="true" aria-labelledby="dsh-rss-markall-title"
+        onKeyDown={(event) => {
+          if (event.key !== 'Escape') return
+          event.preventDefault()
+          event.stopPropagation()
+          onCancel()
+        }}>
+        <div className="dsh-rss-confirm-title" id="dsh-rss-markall-title" data-rss-markall-count={count ?? ''}>
+          {countFailed
+            ? '统计当前范围的未读失败了，请重试'
+            : count === undefined
+              ? '正在统计当前列表的未读…'
+              : count === 0
+                ? '当前范围没有可标记的未读'
+                : '把当前列表里的 ' + String(count) + ' 条未读标为已读？'}
+        </div>
+        <div className="dsh-rss-confirm-row">
+          <label>范围
+            <select data-rss-markall-range="" value={state.markAllRange} {...rangeSelect.pointer}
+              onChange={(event) => {
+                store.setMarkAllRange(event.target.value as MarkAllRange)
+                rangeSelect.commit()
+              }}>
+              <option value="all">全部</option>
+              <option value="day">早于 1 天</option>
+              <option value="week">早于 1 周</option>
+              <option value="month">早于 1 月</option>
+            </select>
+          </label>
+          <span className="dsh-rss-meta">{listScopeText(state)}</span>
+        </div>
+        {keptCount > 0 && (
+          <div className="dsh-rss-confirm-note">另有 {keptCount} 条「保持未读」不受影响</div>
+        )}
+        <div className="dsh-rss-confirm-actions">
+          <button type="button" className="dsh-rss-btn" data-rss-markall-cancel="" onClick={onCancel}>取消</button>
+          <button ref={confirmRef} type="button" className="dsh-rss-btn dsh-rss-btn--primary"
+            data-rss-markall-ok="" disabled={countFailed || count === undefined || count === 0}
+            onClick={onConfirm}>标为已读</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export function createReader(store: ReaderStore): () => ReactNode {
   return function Reader(): ReactNode {
     const state = useReaderStore(store)
@@ -338,6 +496,26 @@ export function createReader(store: ReaderStore): () => ReactNode {
     const [lightboxSrc, setLightboxSrc] = useState<string | undefined>(undefined)
     /** 帮助浮窗开合。它进 keydown effect 的依赖数组（见那条 effect 的收尾注释）。 */
     const [helpOpen, setHelpOpen] = useState(false)
+    /**
+     * A 的二次确认框开合（2026-11-21）。
+     *
+     * 与 helpOpen 同一条通道：进 KeyRoutingCtx（`back` 要判断 Esc 该不该关它）⇒ 进 keydown effect
+     * 的依赖数组 ⇒ 面板卸载即随监听器一起消失。真正的标读不在这里，而在确认按钮的 onClick。
+     */
+    const [markAllConfirm, setMarkAllConfirm] = useState(false)
+    /**
+     * 关确认框并把焦点还给面板根。
+     *
+     * 不还的话焦点会落到 body：Esc / a / j 这些键要么被浏览器自己处理，要么要用户再点一下面板
+     * 才恢复 —— 「关掉弹窗后键盘失灵」是同族事故。与下拉框的 useSelectFocusReturn 同一条理由。
+     */
+    const closeMarkAllConfirm = useCallback((): void => {
+      setMarkAllConfirm(false)
+      root?.focus()
+    }, [root])
+    // 两个顶栏下拉框共用「选完还焦点」这条判据（函数里带 pointer 标记，不共享标记本身）。
+    const windowSelect = useSelectFocusReturn(() => root)
+    const searchReadSelect = useSelectFocusReturn(() => root)
     // 慢加载：只有超过 180ms 还在加载时才把「刷新中」画出来，避免毫秒级请求闪一下
     const [slowLoading, setSlowLoading] = useState(false)
     useEffect(() => {
@@ -476,6 +654,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
           imagesExpanded, setImagesExpanded,
           expandedGroups, setExpandedGroups,
           lightboxSrc, setLightboxSrc,
+          markAllConfirm, setMarkAllConfirm,
         })
       }
       document.addEventListener('keydown', onKeyDown)
@@ -515,7 +694,10 @@ export function createReader(store: ReaderStore): () => ReactNode {
       // `undefined` ⇒ 灯箱开着时按 Esc 直接把文章关了（灯箱随着视图切换一起消失，看起来
       // 「关掉了」，其实是退出了正文）。判据落在 tests/scroll-dom.test.mjs 的
       // 「Esc 关灯箱但不退出正文」与「帮助 → 灯箱 → 正文」两条。
-    }, [root, store, expanded, helpOpen, imagesExpanded, expandedGroups, lightboxSrc])
+      // `markAllConfirm`（2026-11-21）同理：`back` 要**读**它判断「这一下 Esc 是关确认框还是别的东西」。
+      // 漏了它，刚开框的那一瞬按 Esc 会径直去关灯箱 / 退正文 —— 而且焦点还没进框时 document 层
+      // 是唯一能收到 Esc 的地方（框内按键会被 isTypingTarget 拦下，由对话框自己处理）。
+    }, [root, store, expanded, helpOpen, imagesExpanded, expandedGroups, lightboxSrc, markAllConfirm])
 
     const items = store.visible()
     /**
@@ -596,7 +778,13 @@ export function createReader(store: ReaderStore): () => ReactNode {
                   title={state.search !== undefined
                     ? '搜索进行中不可用：搜索有自己的日期筛选，退出搜索后可切换'
                     : '按本地自然日筛选列表与未读计数'}
-                  onChange={(event) => { void store.setWindow(event.target.value as DisplayWindowRange) }}>
+                  {...windowSelect.pointer}
+                  onChange={(event) => {
+                    void store.setWindow(event.target.value as DisplayWindowRange)
+                    // 选完把焦点还给面板：原生 select 会一直持有焦点，而键盘守卫会吞掉随后所有按键
+                    // （2026-11-21 实测：「改完时间范围 → 按 A」毫无反应）。
+                    windowSelect.commit()
+                  }}>
                   {DISPLAY_WINDOW_OPTIONS.map((option) => (
                     <option key={option.value} value={option.value}>{option.label}</option>
                   ))}
@@ -657,16 +845,9 @@ export function createReader(store: ReaderStore): () => ReactNode {
               <label>显示未读计数
                 <input type="checkbox" checked={state.showUnread} onChange={(event) => store.setShowUnread(event.target.checked)} />
               </label>
-              {/* A 的作用范围是**当前列表**（已加载页 + 当前范围 + 当前过滤 + 当前显示窗）。
-                  文案只在这里与 keys.ts 的帮助表出现两次（spec 决策 31），别处不抄第三份。 */}
-              <label>A 键范围（当前列表）
-                <select value={state.markAllRange} onChange={(event) => store.setMarkAllRange(event.target.value as MarkAllRange)}>
-                  <option value="all">全部</option>
-                  <option value="day">早于 1 天</option>
-                  <option value="week">早于 1 周</option>
-                  <option value="month">早于 1 月</option>
-                </select>
-              </label>
+              {/* 「A 键范围」2026-11-21 搬进 A 的确认框（用户拍板）：范围是**这次动作**的一部分，
+                  摆在这里会让读者先改设置、再按 A，而改完下拉框焦点留在控件上、快捷键全被吞掉
+                  （就是本轮那条「按 A 无反应」的现场）。现在它只在确认框里出现，一个控件一处。 */}
               <button type="button" className="dsh-rss-btn" disabled={state.loading}
                 title="删除「已读且未星标」的旧条目（阈值可在 Config.cleanupAfterDays 调，默认 30 天）"
                 onClick={() => {
@@ -706,7 +887,8 @@ export function createReader(store: ReaderStore): () => ReactNode {
             {state.search && <button type="reset" className="dsh-rss-btn" onClick={() => store.submitSearch()}>退出搜索</button>}
             <details>
               <summary>搜索筛选</summary>
-              <label> 已读状态 <select name="read" defaultValue={state.search?.read ?? ''}>
+              <label> 已读状态 <select name="read" defaultValue={state.search?.read ?? ''}
+                {...searchReadSelect.pointer} onChange={() => { searchReadSelect.commit() }}>
                 <option value="">不限</option><option value="unread">未读</option><option value="read">已读</option>
               </select></label>
               <label><input name="starred" type="checkbox" defaultChecked={state.search?.starred} /> 仅星标</label>
@@ -744,7 +926,10 @@ export function createReader(store: ReaderStore): () => ReactNode {
         {state.undo !== undefined && (
           <div style={{ padding: '6px 20px', fontSize: 12, background: 'color-mix(in srgb, currentColor 8%, transparent)' }}>
             已把 {state.undo.ids.length} 条标为已读 ·{' '}
-            <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" onClick={() => { void store.undoMarkAll() }}>撤销</button>
+            {/* 点完撤销把焦点还给面板：撤销条随即消失，焦点会掉到 body —— 之后按 A / j 全都
+                静默失效（与下拉框那条同族，2026-11-21 真机实测：撤销后 activeElement=body）。 */}
+            <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
+              onClick={() => { void store.undoMarkAll(); root?.focus() }}>撤销</button>
           </div>
         )}
         {failing.length > 0 && (
@@ -951,6 +1136,15 @@ export function createReader(store: ReaderStore): () => ReactNode {
         {/* 浮窗挂在面板根内：这样「面板不可见即不响应」与「卸载即清理」两条既有约束自动覆盖它，
             不必为浮窗单开一套生命周期。 */}
         {helpOpen && <HelpPanel onClose={() => setHelpOpen(false)} />}
+        {/* A 的确认框：与帮助浮窗同一处挂载（面板根内）—— 面板不可见即不渲染、卸载即清理。 */}
+        {markAllConfirm && (
+          <MarkAllConfirm
+            state={state}
+            store={store}
+            onCancel={closeMarkAllConfirm}
+            onConfirm={() => { void store.markAllRead(); closeMarkAllConfirm() }}
+          />
+        )}
       </div>
     )
   }

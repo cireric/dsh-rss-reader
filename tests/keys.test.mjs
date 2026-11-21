@@ -30,9 +30,12 @@ test('核心导航与 GR 约定', () => {
   assert.equal(resolveReaderKey('s'), 'star')
   assert.equal(resolveReaderKey('m'), 'toggleRead')
   assert.equal(resolveReaderKey('Escape'), 'back')
-  // GR 里「全部标记已读」就是 shift+a，故只认大写
+  // 2026-11-21 决策变更：a 与 shift+a 都认。「GR 里全部已读就是 shift+a」只决定了 shift 那条
+  // 必须保留，不能推出小写必须不绑 —— 界面与帮助表写的是「a / shift+a」，按 r/R、f/F 的同一处理，
+  // 不写 shift 就不该要求 shift。旧断言 `a === 'none'` 是当轮的刻意约定，用户实测按小写 a
+  // 毫无反应后改派；这是**决策变更**，不是放宽断言（shift+a 那条仍在下面看着）。
   assert.equal(resolveReaderKey('A'), 'markAll')
-  assert.equal(resolveReaderKey('a'), 'none')
+  assert.equal(resolveReaderKey('a'), 'markAll')
 })
 
 test('n/p 是扫视（滚动视野但不改选中），与 j/k 正交', () => {

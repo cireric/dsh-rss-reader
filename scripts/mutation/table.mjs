@@ -180,10 +180,13 @@ export const MUTATIONS = [
     judges: ['keys.test.mjs'],
     judgeTests: ['键位：r 刷新计数；w/W 已空出且不得被偷偷接管（2026-10-08）', '帮助表逐条反查：每一行声明的动作都必须与实现解析出来的完全一致', '帮助表反向覆盖：实现里能返回的动作，都必须出现在帮助表里'],
     from: "return 'refreshCount';", to: "return 'toggleRender';" },
-  { id: 'client-A 的范围阈值过滤', file: 'lib/client.js',
-    judges: ['client-bundle.test.mjs'],
-    judgeTests: ['A 的范围阈值：只标「早于所选范围」的条目（规格 §3.3 的 panic button）'],
-    from: 'recencyOf(item) < before', to: 'true' },
+  // 2026-11-21（ADR-0008）重锚：A 的候选改由宿主在库全量上求值，`before` 的闸门也在宿主里。
+  // 客户端那条 `markAllPlan` 的过滤只剩搜索态 / 单条路径在用，判据换到宿主用例上。
+  { id: 'client-A 的范围阈值过滤', file: 'lib/endpoints.js',
+    judges: ['endpoint-mark-scope.test.mjs'],
+    judgeTests: ['范围标读：all + before 只标早于阈值的条目'],
+    from: 'if (filter.before !== undefined && recencyOf(record) >= filter.before)\n                continue;',
+    to: 'if (false)\n                continue;' },
   // ⚠️ 2026-11-13（M4 01）重锚：判据从 discoverAndValidate 收进 limitsForCandidate 之后，
   // 「options.limits」变成了参数「limits」—— 旧 from 会报**未应用**（比幸存更隐蔽，pitfalls 二、2.7）。
   // 语义不变，仍是「只要可信目标就全都继承」；覆盖面从 addFeed 的首个有效源**扩到**发现列表，
@@ -1179,8 +1182,8 @@ export const MUTATIONS = [
     // lib/client.js:2534-2538。少了 helpOpen，按键处理器读到的永远是注册那一刻的 false：
     // 浮窗开着按 Esc → 走「关文章」分支，浮窗留在屏幕上（与上面第三条同一个病象、不同根因）。
     // ⚠️ 2026-11-21（R6 07）再锚：依赖数组尾部又多了 lightboxSrc（`back` 要读灯箱态）。
-    from: '}, [\n\t\t\t\t\troot,\n\t\t\t\t\tstore,\n\t\t\t\t\texpanded,\n\t\t\t\t\thelpOpen,\n\t\t\t\t\timagesExpanded,\n\t\t\t\t\texpandedGroups,\n\t\t\t\t\tlightboxSrc\n\t\t\t\t]);',
-    to: '}, [\n\t\t\t\t\troot,\n\t\t\t\t\tstore,\n\t\t\t\t\texpanded,\n\t\t\t\t\timagesExpanded,\n\t\t\t\t\texpandedGroups,\n\t\t\t\t\tlightboxSrc\n\t\t\t\t]);' },
+    from: '}, [\n\t\t\t\t\troot,\n\t\t\t\t\tstore,\n\t\t\t\t\texpanded,\n\t\t\t\t\thelpOpen,\n\t\t\t\t\timagesExpanded,\n\t\t\t\t\texpandedGroups,\n\t\t\t\t\tlightboxSrc,\n\t\t\t\t\tmarkAllConfirm\n\t\t\t\t]);',
+    to: '}, [\n\t\t\t\t\troot,\n\t\t\t\t\tstore,\n\t\t\t\t\texpanded,\n\t\t\t\t\timagesExpanded,\n\t\t\t\t\texpandedGroups,\n\t\t\t\t\tlightboxSrc,\n\t\t\t\t\tmarkAllConfirm\n\t\t\t\t]);' },
   // ── 自持存储骨架（2026-10-11 大规模存储任务 2）─────────────────────────────────
   // 这三个模块是「下次装载还能不能读到用户数据」的全部承重点，而它们的失效**全都安静**：
   // 版本闸写错 ⇒ 好库被当成坏库拒掉，界面表现是「重启之后订阅全没了」；
@@ -1835,8 +1838,8 @@ export const MUTATIONS = [
     judges: ['client-bundle.test.mjs'],
     judgeTests: ['C3：toggleStar 成功后账目以宿主回包为准落地（旧实现把回包整个丢掉）'],
     // 2026-11-20 重锚（R1-03 / 评审 P1）：账目落地现在连发请求时的档位一起传（applyAccount(account, window)）。
-    from: 'deps.applyAccount(await deps.callRpc(action.endpoint, payload), request.window);',
-    to: 'void (await deps.callRpc(action.endpoint, payload));' },
+    from: 'deps.applyAccount(reply, request.window);',
+    to: 'void reply;' },
   { id: 'client-撤销失败必须恢复撤销条', file: 'lib/client.js',
     judges: ['client-bundle.test.mjs'],
     judgeTests: ['C3：undoMarkAll 失败恢复撤销条并重新武装 5 秒窗口（只塞回 state 会常驻）'],
@@ -2591,8 +2594,8 @@ export const MUTATIONS = [
     // lib/client.js 实测 OCCURRENCES=1（依赖数组尾部那三行）。
     // ⚠️ 2026-11-21（R6 07）再锚：依赖数组尾部又多了 lightboxSrc（`back` 要读灯箱态）。
     // 只摘 `imagesExpanded`、保留 `lightboxSrc` 与 `expandedGroups`：判据仍指向「篇级覆盖被闭包捕获」。
-    from: "\t\t\t\t\thelpOpen,\n\t\t\t\t\timagesExpanded,\n\t\t\t\t\texpandedGroups,\n\t\t\t\t\tlightboxSrc\n\t\t\t\t]);",
-    to: "\t\t\t\t\thelpOpen,\n\t\t\t\t\texpandedGroups,\n\t\t\t\t\tlightboxSrc\n\t\t\t\t]);" },
+    from: "\t\t\t\t\thelpOpen,\n\t\t\t\t\timagesExpanded,\n\t\t\t\t\texpandedGroups,\n\t\t\t\t\tlightboxSrc,\n\t\t\t\t\tmarkAllConfirm\n\t\t\t\t]);",
+    to: "\t\t\t\t\thelpOpen,\n\t\t\t\t\texpandedGroups,\n\t\t\t\t\tlightboxSrc,\n\t\t\t\t\tmarkAllConfirm\n\t\t\t\t]);" },
   { id: 'keys-i 写成三元', file: 'lib/keys.js',
     judges: ['keys.test.mjs'],
     judgeTests: ["产物字节：lib/keys.js 里存在字面量 return 'toggleImages'（不许写成三元）"],
@@ -2720,6 +2723,72 @@ export const MUTATIONS = [
     // ⚠️ 必须保留 `expandedGroups`（它也是被读的对象）：只摘 `lightboxSrc`，否则会连带打红
     // `i` 那一族用例，判据就不再指向「灯箱态闭包捕获」这一个缺陷。
     // lib/client.js 实测 OCCURRENCES=1（依赖数组尾部那三行）。
-    from: "\t\t\t\t\timagesExpanded,\n\t\t\t\t\texpandedGroups,\n\t\t\t\t\tlightboxSrc\n\t\t\t\t]);",
-    to: "\t\t\t\t\timagesExpanded,\n\t\t\t\t\texpandedGroups\n\t\t\t\t]);" },
+    from: "\t\t\t\t\timagesExpanded,\n\t\t\t\t\texpandedGroups,\n\t\t\t\t\tlightboxSrc,\n\t\t\t\t\tmarkAllConfirm\n\t\t\t\t]);",
+    to: "\t\t\t\t\timagesExpanded,\n\t\t\t\t\texpandedGroups,\n\t\t\t\t\tmarkAllConfirm\n\t\t\t\t]);" },
+  // ── 2026-11-21 A 键二次确认 + 下拉框还焦点 ──
+  // 用户报告的现场是「按 A 什么都不发生」。这三条各守一段：键位解析、确认框、焦点归还。
+  { id: 'keys-A 只认大写（小写 a 失效）', file: 'lib/keys.js',
+    judges: ['keys.test.mjs'],
+    judgeTests: ['核心导航与 GR 约定'],
+    // 拿掉小写那条 case：界面与帮助表写的是「a / shift+a」，按 r/R、f/F 的先例小写必须能用。
+    // 这正是 2026-11-21 之前的状态（用户按 a 毫无反应）。
+    from: "        case 'a':\n        case 'A': return 'markAll';",
+    to: "        case 'A': return 'markAll';" },
+  { id: 'client-A 跳过确认框直接标读', file: 'lib/client.js',
+    judges: ['keyboard-routing.test.mjs', 'scroll-dom.test.mjs'],
+    judgeTests: [
+      'A 键只打开确认框，确认之前不得直接标读',
+      'A 键弹确认框：显示条数与作用域，打开与 Esc 取消都不得改读态',
+    ],
+    // 把「开确认框」换回旧的「直接标读」：路由层与 DOM 层必须同时红 —— 只有一层红说明
+    // 另一层的判据其实没看见这个动作。
+    from: 'run(() => ctx.setMarkAllConfirm(true));',
+    to: 'run(() => { void store.markAllRead(); });' },
+  { id: 'client-下拉框选完不归还焦点', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['改完时间范围后按 a 仍生效（下拉框用指针选完必须归还焦点）'],
+    // 去掉 `getTarget()?.focus()`：焦点留在 select 上，isTypingTarget 会把随后所有按键吞掉
+    // —— 2026-11-21 真机复现的原始症状（改完时间范围按 A 无撤销条、未读数不变）。
+    // lib/client.js 实测 OCCURRENCES=1（commit 里那三行）。
+    from: '\t\t\t\t\tif (!viaPointer.current) return;\n\t\t\t\t\tviaPointer.current = false;\n\t\t\t\t\tgetTarget()?.focus();',
+    to: '\t\t\t\t\tif (!viaPointer.current) return;\n\t\t\t\t\tviaPointer.current = false;' },
+  { id: 'client-确认框条数用了全部条目', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['A 键弹确认框：显示条数与作用域，打开与 Esc 取消都不得改读态'],
+    // 2026-11-21（ADR-0008）重锚：条数由宿主 dry-run 给出。把 dryRun 去掉 ⇒ 打开确认框就真标，
+    // 且回包没有 count ⇒ 按钮恒禁用 —— 「打开不得改读态」与「显示 2 条未读」两条会同时红。
+    from: 'dryRun: true,',
+    to: 'dryRun: false,' },
+  { id: 'client-撤销后不归还焦点', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['A 的确认框：确认后标读并给撤销窗口（只有确认那一刻才标）'],
+    // 去掉撤销按钮 onClick 里的 root.focus()：撤销条卸载后焦点掉到 body，之后按 A / j
+    // 全部静默失效（2026-11-21 真机实测 activeElement=body）。与下拉框那条同族。
+    from: '\t\t\t\t\t\t\t\t\t\t\t\t\tstore.undoMarkAll();\n\t\t\t\t\t\t\t\t\t\t\t\t\troot?.focus();',
+    to: '\t\t\t\t\t\t\t\t\t\t\t\t\tstore.undoMarkAll();' },
+  // ── 2026-11-21 ADR-0008：A 的候选由宿主按范围求值 ──
+  { id: 'endpoint-范围标读忽略源', file: 'lib/endpoints.js',
+    judges: ['endpoint-mark-scope.test.mjs'],
+    judgeTests: ['范围标读：只标该源，回包带被标 id 供撤销'],
+    // 把「按源收窄」抹掉 ⇒ 标一个源等于标全库。判据必须看见别的源毫发无损。
+    from: 'feedIds = [input.feedId];',
+    to: 'feedIds = void 0;' },
+  { id: 'endpoint-dryRun 落库', file: 'lib/endpoints.js',
+    judges: ['endpoint-mark-scope.test.mjs'],
+    judgeTests: ['范围标读：dryRun 只数不写（确认框的 N）'],
+    // 去掉 dryRun 的早退 ⇒ 打开确认框就把条目标了（用户只是点开看看）。
+    from: 'if (input.dryRun === true)\n                    return ok({ count: targets.length });',
+    to: 'if (false)\n                    return ok({ count: targets.length });' },
+  { id: 'endpoint-范围标读不回 ids', file: 'lib/endpoints.js',
+    judges: ['endpoint-mark-scope.test.mjs'],
+    judgeTests: ['范围标读：只标该源，回包带被标 id 供撤销'],
+    // 不回 ids ⇒ 撤销条拿不到被标集合（上千条时客户端不可能自己推）。
+    from: 'return ok(bulk ? { changed, ids: changedIds } : { changed });',
+    to: 'return ok(bulk ? { changed } : { changed });' },
+  { id: 'client-源视图按 A 变成全库', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['A 在源视图里只标该源（范围进宿主，不落成整个库）'],
+    // 把 feed 范围错发成 all ⇒ 在源里按 A 会误标别的源。
+    from: 'if (nav.kind === "feed") return { feedId: nav.feedId };',
+    to: 'if (nav.kind === "feed") return { all: true };' },
 ]

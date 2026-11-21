@@ -155,6 +155,7 @@ function makeCtx(over = {}) {
   if (setup === undefined) return undefined
   const expandedCalls = []
   const helpCalls = []
+  const confirmCalls = []
   const ctx = {
     root: setup.panelRoot,
     store: over.store ?? fakeStore(over.state),
@@ -162,9 +163,12 @@ function makeCtx(over = {}) {
     setExpanded: (next) => expandedCalls.push(next),
     helpOpen: over.helpOpen ?? false,
     setHelpOpen: (next) => helpCalls.push(next),
+    // A 的二次确认（2026-11-21）：routeKey 只负责开/关它，真正的标读在确认按钮上。
+    markAllConfirm: over.markAllConfirm ?? false,
+    setMarkAllConfirm: (next) => confirmCalls.push(next),
     ...over.ctx,
   }
-  return { ctx, store: ctx.store, expandedCalls, helpCalls, setup }
+  return { ctx, store: ctx.store, expandedCalls, helpCalls, confirmCalls, setup }
 }
 
 // 只有 jsdom 缺失才 skip —— 那是**环境能力**（依赖来自 dsh checkout，pitfalls §2.3 的既有处理）。
@@ -524,4 +528,27 @@ test('R6 07：i 折叠整篇时顺带关灯箱（决策 24），展开方向上�
   routeKeyOf('i', unfolded)
   assert.deepEqual(unfolded.imageCalls, [true], '前置：i 把整篇写成展开')
   assert.deepEqual(unfolded.lightboxCalls, [], '展开方向不关灯箱（只在「结果是折叠」时关）')
+})
+
+/**
+ * A 的二次确认（2026-11-21）。
+ *
+ * 为什么这一层必须有一条：用户报告的现场是「按 A 什么都不发生」。若 routeKey 仍直接调
+ * store.markAllRead（跳过确认框），DOM 层只会看到「标读成功了」，而产品要的是「先确认」；
+ * 反过来若 markAll 分支被误删，DOM 层会看不到任何反应 —— 正是事故本身。两种都要当场红。
+ */
+test('A 键只打开确认框，确认之前不得直接标读', { skip }, () => {
+  const { ctx, store, confirmCalls } = makeCtx()
+  routeKey(keyEvent('a'), ctx)
+  assert.deepEqual(confirmCalls, [true], '小写 a 必须打开确认框')
+  routeKey(keyEvent('A', { shiftKey: true }), ctx)
+  assert.deepEqual(confirmCalls, [true, true], 'shift+a 同样打开确认框')
+  assert.equal(store.calls.filter(([name]) => name === 'markAllRead').length, 0, '确认之前不得调用 markAllRead')
+})
+
+test('确认框开着时 Esc 只关它，不连带关灯箱或退出正文', { skip }, () => {
+  const { ctx, store, confirmCalls } = makeCtx({ markAllConfirm: true, state: { view: 'article' } })
+  routeKey(keyEvent('Escape'), ctx)
+  assert.deepEqual(confirmCalls, [false], 'Esc 必须先关确认框')
+  assert.equal(store.calls.filter(([name]) => name === 'closeArticle').length, 0, '确认框开着时 Esc 不得穿透到正文')
 })

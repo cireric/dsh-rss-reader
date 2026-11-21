@@ -266,6 +266,61 @@ function accountFrameOf(
   }
 }
 
+/**
+ * 范围标读的候选 id（ADR-0008）：在**库全量**上按与客户端同一组条件求值。
+ *
+ * 条件：范围（feedId / folder / tagId / 全库）× 显示窗（from/to，只判 publishedAt）
+ * × 过滤（`starred` 时只看星标）× `before`（recency 阈值）× 未读且非「保持未读」。
+ *
+ * 实现走 `listRecent` 500/页遍历到游标用尽：单页上限与浏览端点共用同一条分页协议
+ *（ADR-0004），不在这里另写一套 SQL。库规模到十万级再换成宿主直查 —— 那是性能决定，
+ * 不是语义决定。
+ */
+const SCOPE_MARK_PAGE = 500
+
+function scopeMarkCandidates(
+  ctx: EndpointCtx,
+  input: {
+    readonly feedId?: string | null
+    readonly folder?: string | null
+    readonly tagId?: string | null
+    readonly all?: boolean | null
+  },
+  filter: { readonly before?: string; readonly skipKept: boolean; readonly starred: boolean; readonly window?: DisplayWindowBounds },
+): { ids?: string[]; failure?: RpcResult<never> } {
+  let feedIds: readonly string[] | undefined
+  let tagId: string | undefined
+  if (input.feedId !== undefined && input.feedId !== null && input.feedId !== '') {
+    if (ctx.store.feed(input.feedId) === undefined) return { failure: fail('not-found', '订阅源不存在：' + input.feedId) }
+    feedIds = [input.feedId]
+  } else if (input.folder !== undefined && input.folder !== null && input.folder !== '') {
+    const found = ctx.store.listFolders().find((entry) => entry.name === input.folder)
+    if (found === undefined) return { failure: fail('not-found', '文件夹不存在：' + input.folder) }
+    feedIds = found.feedIds
+  } else if (input.tagId !== undefined && input.tagId !== null && input.tagId !== '') {
+    if (ctx.store.listTags().every((tag) => tag.id !== input.tagId)) {
+      return { failure: fail('not-found', '标签不存在：' + input.tagId) }
+    }
+    tagId = input.tagId
+  }
+  const ids: string[] = []
+  let cursor: Cursor | undefined
+  for (;;) {
+    const rows = ctx.store.listRecent(SCOPE_MARK_PAGE, cursor, feedIds, tagId, filter.window)
+    for (const [itemId, record] of rows) {
+      if (record.readAt !== undefined) continue
+      if (filter.skipKept && record.keptUnread === true) continue
+      if (filter.starred && record.starred !== true) continue
+      if (filter.before !== undefined && recencyOf(record) >= filter.before) continue
+      ids.push(itemId)
+    }
+    if (rows.length < SCOPE_MARK_PAGE) break
+    const last = rows[rows.length - 1]
+    cursor = { recency: recencyOf(last[1]), id: last[0] }
+  }
+  return { ids }
+}
+
 /** 从 overview/refresh 的**已解析**入参里把范围落到库上（形状由 payload 声明判，这里只判存在性）。 */
 function overviewScopeOf(
   ctx: EndpointCtx,
@@ -460,7 +515,7 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
 
   markRead: defineEndpoint({
     payload: markReadPayload,
-    invalidMessage: 'markRead 需要 itemIds 数组，时间窗口必须成对且合法',
+    invalidMessage: 'markRead 需要 itemIds 数组，或恰好一个范围（feedId / folder / tagId / all）；时间窗口必须成对且合法',
     carriesAccount: true,
     accountFrameOf,
     to: async (input, ctx) => {
@@ -475,22 +530,48 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       const before = input.before === undefined || input.before === null || input.before === ''
         ? undefined
         : input.before
+      // 范围路径（ADR-0008）：宿主在库全量上求值，客户端只给「范围 × 过滤 × 窗 × 阈值」。
+      // itemIds 缺席 = 范围/all 标读；`dryRun` 只回条数（确认框的 N），一个字都不写。
+      const bulk = itemIds === undefined || itemIds === null
+      const starred = input.starred === true
+      let targets: string[]
+      if (bulk) {
+        const resolved = scopeMarkCandidates(ctx, input, {
+          ...(before === undefined ? {} : { before }),
+          skipKept,
+          starred,
+          ...(displayWindowOf(input) === undefined ? {} : { window: displayWindowOf(input) }),
+        })
+        if (resolved.failure !== undefined) return resolved.failure
+        targets = resolved.ids ?? []
+        if (input.dryRun === true) return ok({ count: targets.length })
+      } else {
+        targets = itemIds
+      }
       const stamp = new Date().toISOString()
       let changed = 0
-      for (const itemId of itemIds) {
+      const changedIds: string[] = []
+      for (const itemId of targets) {
         const existing = ctx.store.item(itemId)
         if (existing === undefined || existing.readAt !== undefined) continue
-        if (skipKept && existing.keptUnread === true) continue
-        // 判据与排序同源（recency = 发布时间优先、缺则抓取时间），ISO 字符串可直接比大小
-        if (before !== undefined && recencyOf(existing) >= before) continue
+        // 范围路径的筛条件**只在 `scopeMarkCandidates` 里判一次**（ADR-0001：一条判据一个裁决者）。
+        // 这里不再复判：两处都判会让「删掉其中一处」变成等价变异，变异门槛就看不见真正的缺口。
+        // itemIds 路径没有那一段求值，所以它的筛条件必须在这里。
+        if (!bulk) {
+          if (skipKept && existing.keptUnread === true) continue
+          // 判据与排序同源（recency = 发布时间优先、缺则抓取时间），ISO 字符串可直接比大小
+          if (before !== undefined && recencyOf(existing) >= before) continue
+        }
         // 幂等：已读的原时间戳不动。用 rebuildItem 是为了同时把 kept-unread 去掉
         await ctx.store.saveItem(itemId, rebuildItem(existing, { omit: ['keptUnread'], set: { readAt: stamp } }))
         changed += 1
+        changedIds.push(itemId)
       }
       // 回包**必须带 perFeedUnread**：客户端在截断场景下看不见全量条目，只能靠这份整体覆盖
       // （spec §4 不变量 1；任务 9 实测：本地 3 条/宿主 20，外部把本地不可见的源标空 ⇒ 差 3）。
       // 账目由分发核按 carriesAccount 统一合并 —— 这条不变量不再由本 handler 承担。
-      return ok({ changed })
+      // 范围路径回被标 id：撤销条按 id 集合工作，客户端此前并不知道宿主选了哪些（ADR-0008）。
+      return ok(bulk ? { changed, ids: changedIds } : { changed })
     },
   }),
 

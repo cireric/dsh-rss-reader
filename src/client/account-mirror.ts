@@ -85,9 +85,16 @@ export interface AccountMirrorDeps {
   fail: (failure: unknown) => void
 }
 
-export function createAccountMirror(deps: AccountMirrorDeps): { run(action: MirrorAction): Promise<void> } {
+/** 回包的上位形状：账目 + 动作结果（`changed` / 范围标读的 `ids`，ADR-0008）。 */
+type MirrorReply = UnreadAccount & { readonly changed?: number; readonly ids?: readonly string[] }
+
+export function createAccountMirror(deps: AccountMirrorDeps): { run(action: MirrorAction): Promise<MirrorReply | undefined> } {
   return {
-    async run(action: MirrorAction): Promise<void> {
+    /**
+     * @returns 宿主回包（账目 + 动作结果）；失败回 undefined。
+     * 既有调用方全都忽略返回值；A 的范围路径要拿 `ids` 武装撤销条（ADR-0008）。
+     */
+    async run(action: MirrorAction): Promise<MirrorReply | undefined> {
       action.optimistic()
       // 窗随账走（R1-03）：五个带账端点共用同一份窗口字段。全部档位时载荷只有
       // `todayFrom`（R1 04 起，用于回包的未读三联拆分）—— 旧宿主忽略这个未知字段，旧行为不变
@@ -99,12 +106,16 @@ export function createAccountMirror(deps: AccountMirrorDeps): { run(action: Mirr
       const payload = { ...(action.payload ?? {}), ...request.payload }
       try {
         // 成功 = 以宿主回包为准整体覆盖账目（不变量 ①）；动作结果字段不落地（不变量 ④）。
-        deps.applyAccount(await deps.callRpc<UnreadAccount>(action.endpoint, payload), request.window)
+        // 唯一例外是范围标读的 `ids`：它由调用方取走用于撤销条（不写进 state，故不违反 ④）。
+        const reply = await deps.callRpc<MirrorReply>(action.endpoint, payload)
+        deps.applyAccount(reply, request.window)
+        return reply
       } catch (failure) {
         // 失败 = 动作没发生（2026-10-16 拍板）：先回滚，错误再进 error 条 ——
         // 顺序不能反，面板渲染 error 不依赖回滚，但「报错的同时界面还是乐观态」自相矛盾。
         action.rollback()
         deps.fail(failure)
+        return undefined
       }
     },
   }

@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
 import { READER_KEY_HELP } from '../lib/keys.js'
 import { DEFAULT_READING_PREFERENCES } from '../lib/preferences.js'
+import { scopeMarkIdsOf } from './helpers/mark-scope.mjs'
 import { deriveFeedOrder, reorderFeedOrder } from '../lib/feed-order.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -404,7 +405,19 @@ async function mountReader({ items = [], feeds, folders, tags = [], article, hol
       // 账目回包竞争（R1 评审 P1）：用例需要表达「旧档发出的动作回包晚到」——扣住一次回包，
       // 让切档 / 新档第一页先落地，再放行。桩件的账目仍按请求体里的窗口算（守宿主契约）。
       if (markReadGate !== undefined) await markReadGate
-      const ids = Array.isArray(body.payload?.itemIds) ? body.payload.itemIds : []
+      const payload = body.payload ?? {}
+      // 范围标读（ADR-0008）：桩件按与宿主同一条判据在**夹具全量**上求值 —— 只在 state.items
+      // （已加载页）上算会重演「源里 19 条未读显示 0 条」的假绿（helpers/mark-scope.mjs）。
+      const bulk = body.endpoint === 'markRead' && !Array.isArray(payload.itemIds)
+      if (bulk) {
+        const ids = scopeMarkIdsOf(items, (id) => readIds.has(id), payload, {
+          folderFeedIds: (name) => serverFolders.find((folder) => folder.name === name)?.feedIds,
+        })
+        if (payload.dryRun === true) return ok(accountReply({ count: ids.length }, payload))
+        const reply = markReply('markRead', ids, payload)
+        return ok({ ...reply, ids })
+      }
+      const ids = Array.isArray(payload.itemIds) ? payload.itemIds : []
       return ok(markReply(body.endpoint, ids, body.payload))
     }
     // 星标 / 保持未读：账目一格不动，但契约上回包必须带账（五个带账端点同一个信封）。
@@ -2100,6 +2113,139 @@ test('C4-b 迁入：A 的撤销窗口 5 秒后自动撤掉（此前 until 只写
   }
 })
 
+/* ==================== A 的二次确认（2026-11-21） ==================== */
+/* 用户报告的现场：按 A 什么都不发生。三条判据各守一段：
+ *  ① 按 a/shift+a 必须**弹框**（不是直接标读，也不是没反应）；
+ *  ② 只有确认那一刻才标读，且撤销窗口照旧；
+ *  ③ 0 候选也要弹框并说明 —— 静默 no-op 正是「按了没反应」的观感来源。 */
+
+test('A 键弹确认框：显示条数与作用域，打开与 Esc 取消都不得改读态', skip, async () => {
+  const h = await mountReader({ items: [item({ id: 'a' }), item({ id: 'b' }), item({ id: 'c', readAt: '2026-10-01T00:00:00.000Z' })] })
+  await h.store.load('overview')
+  await h.settle()
+  const doc = h.win.document
+  const unread = () => h.store.get().items.filter((entry) => entry.readAt === undefined).length
+  const before = unread()
+
+  h.press('a')
+  await h.settle()
+  const card = doc.querySelector('[data-rss-markall-confirm]')
+  assert.ok(card !== null, '按小写 a 必须弹出确认框（旧实现只认大写的缺陷）')
+  assert.match(card.textContent, /2 条未读/, '条数必须是当前列表里的未读（已读那条不算）')
+  assert.match(card.textContent, /全部文章/, '作用域摘要必须写清当前列表')
+  assert.equal(unread(), before, '打开确认框本身不得改任何条目的读态')
+  // 确认框的条数由宿主 dry-run 给出（ADR-0008）：dry-run 请求允许出现，但**写**不允许。
+  assert.equal(
+    h.requests.filter((entry) => entry.endpoint === 'markRead' && entry.payload?.dryRun !== true).length, 0,
+    '确认之前不得发真正标读的 markRead（dryRun 只数不写）',
+  )
+
+  // shift+a 打开的是同一个框：关掉再用大写按一次，两条绑定都必须通到同一个入口
+  doc.querySelector('[data-rss-markall-confirm] [role="dialog"]')
+    .dispatchEvent(new h.win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+  await h.settle()
+  assert.equal(doc.querySelector('[data-rss-markall-confirm]'), null, 'Esc 必须关掉确认框')
+  assert.equal(unread(), before, '取消不得改读态')
+
+  h.press('A', true)
+  await h.settle()
+  assert.ok(doc.querySelector('[data-rss-markall-confirm]') !== null, 'shift+a 也必须打开确认框')
+})
+
+test('A 在源视图里只标该源（范围进宿主，不落成整个库）', skip, async () => {
+  // ADR-0008：范围作为 scope 发给宿主 —— 客户端若把 feed 当成 all，别的源会被误标。
+  const h = await mountReader({
+    items: [item({ id: 'a1', feedId: 'f1' }), item({ id: 'a2', feedId: 'f1' }), item({ id: 'b1', feedId: 'f2' })],
+  })
+  await h.store.load('overview')
+  await h.settle()
+  h.store.selectNav({ kind: 'feed', feedId: 'f1' })
+  await h.settle()
+  h.press('a')
+  await h.settle()
+  const card = h.win.document.querySelector('[data-rss-markall-confirm]')
+  assert.ok(card !== null, '源视图里按 a 必须弹确认框')
+  assert.match(card.textContent, /2 条未读/, '候选只算该源的 2 条，不是全库 3 条')
+  h.win.document.querySelector('[data-rss-markall-ok]').click()
+  await h.settle()
+  const items = h.store.get().items
+  assert.notEqual(items.find((entry) => entry.id === 'a1').readAt, undefined, '源内条目必须标读')
+  assert.notEqual(items.find((entry) => entry.id === 'a2').readAt, undefined, '源内条目必须标读')
+  assert.equal(items.find((entry) => entry.id === 'b1').readAt, undefined, '别的源的条目不许被标')
+  const write = h.requests.filter((entry) => entry.endpoint === 'markRead' && entry.payload?.dryRun !== true).pop()
+  assert.equal(write.payload.feedId, 'f1', '范围必须作为 feedId 发给宿主')
+})
+
+test('A 的确认框：确认后标读并给撤销窗口（只有确认那一刻才标）', skip, async () => {
+  const h = await mountReader({ items: [item({ id: 'a' }), item({ id: 'b' })] })
+  await h.store.load('overview')
+  await h.settle()
+  h.press('a')
+  await h.settle()
+  const ok = h.win.document.querySelector('[data-rss-markall-ok]')
+  assert.ok(ok !== null, '确认框必须有一个「标为已读」按钮')
+  assert.equal(ok.disabled, false, '2 条候选时按钮必须可用')
+  ok.click()
+  await h.settle()
+  assert.ok(h.store.get().items.every((entry) => entry.readAt !== undefined), '确认后两条都必须标为已读')
+  assert.deepEqual([...(h.store.get().undo?.ids ?? [])].sort(), ['a', 'b'], '撤销条必须记住这一批')
+  assert.ok(h.endpoints.includes('markRead'), '确认后才发 markRead')
+  assert.equal(h.win.document.querySelector('[data-rss-markall-confirm]'), null, '确认后确认框必须关掉')
+
+  // 点撤销后焦点必须回到面板：撤销条随即卸载，焦点会掉到 body —— 之后按 A / j 会静默失效
+  // （2026-11-21 真机实测 activeElement=body）。与下拉框那条同族。
+  const undoButton = [...h.win.document.querySelectorAll('button')].find((button) => button.textContent === '撤销')
+  assert.ok(undoButton !== undefined, '撤销条必须渲染出来')
+  // 真机点鼠标会把焦点给按钮（jsdom 的 .click() 不会），所以这里显式 focus 再点 ——
+  // 否则这条判据对「撤销后不归还焦点」的变异恒绿（2026-11-21 gate 实测：该变异幸存）。
+  undoButton.focus()
+  assert.equal(h.win.document.activeElement, undoButton, '前置条件：撤销按钮持有焦点')
+  undoButton.click()
+  await h.settle()
+  assert.equal(h.win.document.activeElement?.getAttribute('data-dsh-rss-reader'), '', '点完撤销焦点必须回到阅读器根')
+})
+
+test('A 的确认框：0 候选时按钮禁用并说明原因（不再静默 no-op）', skip, async () => {
+  const h = await mountReader({ items: [item({ id: 'a', readAt: '2026-10-01T00:00:00.000Z' })] })
+  await h.store.load('overview')
+  await h.settle()
+  h.press('a')
+  await h.settle()
+  const card = h.win.document.querySelector('[data-rss-markall-confirm]')
+  assert.ok(card !== null, '即使 0 条候选也要弹框 —— 静默无反应正是用户报告的症状')
+  assert.match(card.textContent, /当前范围没有可标记的未读/)
+  const ok = h.win.document.querySelector('[data-rss-markall-ok]')
+  assert.equal(ok.disabled, true, '0 条时确认按钮必须禁用')
+})
+
+test('改完时间范围后按 a 仍生效（下拉框用指针选完必须归还焦点）', skip, async () => {
+  // 回归判据：修复前，焦点留在 [data-rss-window] 上 ⇒ isTypingTarget 把随后所有按键吞掉，
+  // 按 a / shift+a 毫无反应（2026-11-21 真机实测）。这条用例在删掉 useSelectFocusReturn 时必红。
+  const h = await mountReader({ items: [item({ id: 'a' })] })
+  await h.store.load('overview')
+  await h.settle()
+  const doc = h.win.document
+  const select = doc.querySelector('[data-rss-window]')
+  assert.ok(select !== null, '前置条件：顶栏有时间范围控件')
+
+  // 指针路径：pointerdown → change。改完必须把焦点交回面板根。
+  select.focus()
+  select.dispatchEvent(new h.win.Event('pointerdown', { bubbles: true }))
+  setControlValue(h.win, select, 'today')
+  await h.settle()
+  assert.notEqual(doc.activeElement, select, '指针选完范围后焦点必须离开 select，否则下一个快捷键会被吞掉')
+  h.press('a')
+  await h.settle()
+  assert.ok(doc.querySelector('[data-rss-markall-confirm]') !== null, '改完范围后按 a 必须能弹确认框')
+
+  // 键盘路径不抢焦点：方向键多步选择不能被中途打断
+  const selectAgain = doc.querySelector('[data-rss-window]')
+  selectAgain.focus()
+  setControlValue(h.win, selectAgain, 'all')
+  await h.settle()
+  assert.equal(doc.activeElement, selectAgain, '键盘改档不得抢走焦点（否则方向键只能走一步）')
+})
+
 test('C4-b 迁入：o 展开并触发 markRead 端点（副作用不能漏）', skip, async () => {
   const h = await mountReader({ items: [item({ id: 'a' }), item({ id: 'b' })] })
   await h.store.load('overview')
@@ -3472,8 +3618,18 @@ test('R1-03 窗口控件：默认全部、四个档位、与「已加载」同�
   h.press('j')
   assert.notEqual(h.store.get().selectedId, before, '失焦后 j 必须恢复')
 
-  // A 的文案两处（界面 + 帮助表）都写明「当前列表」。
-  assert.match(doc.querySelector('.dsh-rss-settings-panel').textContent, /A 键范围（当前列表）/)
+  // A 的范围控件 2026-11-21 搬进了确认框（「更多」里不再有它）：改完设置焦点留在 select 上，
+  // 随后的 A 会被输入控件守卫吞掉 —— 那正是用户报告的那次「按 A 无反应」。
+  assert.doesNotMatch(doc.querySelector('.dsh-rss-settings-panel').textContent, /A 键范围/,
+    '「更多」里不得再有 A 键范围（它已归确认框）')
+  h.press('a')
+  await h.settle()
+  const confirm = doc.querySelector('[data-rss-markall-confirm]')
+  assert.ok(confirm !== null, '范围控件必须在 A 的确认框里')
+  assert.match(confirm.textContent, /当前列表/)
+  assert.ok(doc.querySelector('[data-rss-markall-range]') !== null, '确认框里必须有范围下拉')
+  doc.querySelector('[data-rss-markall-cancel]').click()
+  await h.settle()
   h.press('?')
   await h.settle()
   assert.match(doc.querySelector('[data-rss-help]').textContent, /当前列表/)

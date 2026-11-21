@@ -20,6 +20,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createFakeChannel } from './helpers/client-channel.mjs'
 import { overviewStub as overviewFixture } from './helpers/overview-fixture.mjs'
+import { scopeMarkIdsOf } from './helpers/mark-scope.mjs'
 import vm from 'node:vm'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -146,6 +147,8 @@ async function driveStore({ items = [], article, hostTruth, failEndpoints = [], 
   // calls 是加法式的：给「请求体本身也要断言」的用例用（例如 markRead 的 skipKept）
   const calls = []
   const host = hostAccount(items, hostTruth)
+  // 夹具自己的读态台账：范围标读（ADR-0008）在**夹具全量**上求值，不能只看已加载页。
+  const readIds = new Set(items.filter((entry) => entry.readAt !== undefined).map((entry) => entry.id))
   // shouldFail = { endpoint, when }：把该端点的请求**挂起**到 when(calls) 为真再回失败信封 ——
   // 交错用例的时序闸门（单线程桩里这是唯一能让「A2 在 U 的 RPC 在飞时挤进来」成立的办法）。
   const held = []
@@ -167,7 +170,16 @@ async function driveStore({ items = [], article, hostTruth, failEndpoints = [], 
       }
       if (endpoint === 'article') return article ?? { itemId: payload.itemId, cached: false, paragraphs: ['正文'] }
       if (endpoint === 'markRead' || endpoint === 'unmarkRead') {
+        const bulk = endpoint === 'markRead' && !Array.isArray(payload?.itemIds)
+        if (bulk) {
+          const ids = scopeMarkIdsOf(items, (id) => readIds.has(id), payload)
+          if (payload.dryRun === true) return { count: ids.length, ...host.snapshot() }
+          for (const id of ids) readIds.add(id)
+          return { ...host.reply('markRead', ids), ids }
+        }
         const ids = Array.isArray(payload?.itemIds) ? payload.itemIds : []
+        if (endpoint === 'markRead') for (const id of ids) readIds.add(id)
+        else for (const id of ids) readIds.delete(id)
         return host.reply(endpoint, ids)
       }
       return { changed: 1, ...host.snapshot() }
@@ -595,8 +607,11 @@ test('A 全部标为已读必须跳过「保持未读」的条目（规格 §3.3
   await store.markAllRead()
   const body = calls.find((call) => call.endpoint === 'markRead')
   assert.ok(body !== undefined, '应当调 markRead')
-  assert.deepEqual(body.payload.itemIds.slice().sort(), ['a', 'c'], '被保持的条目不该进批量名单')
-  assert.equal(body.payload.skipKept, true, '还要让宿主侧再挡一次（客户端列表只是快照）')
+  // 2026-11-21（ADR-0008）：候选由宿主在库全量上求值 —— 客户端给的是「整个库 + skipKept」，
+  // 名单在回包里（`ids`），不再由客户端拼 itemIds。
+  assert.equal(body.payload.all, true, '虚拟视图 = 整个库')
+  assert.equal(body.payload.skipKept, true, '宿主侧必须按 skipKept 挡掉「保持未读」')
+  assert.deepEqual([...(store.get().undo?.ids ?? [])].slice().sort(), ['a', 'c'], '被保持的条目不该进撤销名单')
   const items = store.get().items
   assert.equal(items.find((entry) => entry.id === 'b').readAt, undefined, '被保持的条目在本地也不该被标已读')
   assert.notEqual(items.find((entry) => entry.id === 'a').readAt, undefined, '其余条目照常标记')
@@ -707,11 +722,14 @@ test('C3：撤销在飞时更晚的 A 写下自己的撤销条，U 失败不得�
   await store.markAllRead()               // A1：批 = [a]，撤销条 U1，武装定时器 ①
   const pendingUndo = store.undoMarkAll() // U：乐观清条目、清撤销条，RPC 挂起
   store.setMarkAllRange('all')
-  const pendingA2 = store.markAllRead()   // A2：批 = [a,b]，写下 U2 并武装定时器 ②；随后 U 被放行失败
+  const pendingA2 = store.markAllRead()   // A2：宿主此刻仍认为 a 已读（U 还没落地）⇒ 批 = [b]；写下 U2 并武装 ②
   await pendingUndo
   await pendingA2
 
-  assert.deepEqual(store.get().undo?.ids, ['a', 'b'], '撤销条必须还是 A2 的那批 —— 被 U 的旧 batch 盖掉就是 CAS 失效')
+  // ADR-0008：A2 的批由**宿主执行时刻**的读态决定 —— U 在飞时 a 仍是已读，所以 A2 只改 b。
+  // 判据不变：撤销条必须是 A2 的那批（['b']），被 U 的旧 batch ['a'] 盖掉就是 CAS 失效。
+  // 展开成本 realm 的数组再比：undo.ids 是客户端在 bundle 沙箱里造的数组（跨 realm 的 deepEqual 会失败）。
+  assert.deepEqual([...(store.get().undo?.ids ?? [])], ['b'], '撤销条必须还是 A2 的那批 —— 被 U 的旧 batch 盖掉就是 CAS 失效')
   assert.equal(timers.length, 2, '定时器只由两次 A 各武装一次；U 的失败回滚不得再武装（否则 A2 的窗口被重置）')
   assert.ok(String(store.get().error).includes('injected'), 'U 的失败仍要可见（回滚跳过 ≠ 吞错）')
 })
@@ -736,8 +754,9 @@ test('A 的范围阈值：只标「早于所选范围」的条目（规格 §3.3
   store.setMarkAllRange('day')
   await store.markAllRead()
   const body = calls.find((call) => call.endpoint === 'markRead')
-  assert.deepEqual(body.payload.itemIds, ['old'], '范围阈值必须挡掉尚未「早于」的条目')
-  assert.equal(typeof body.payload.before, 'string', '还要把截止时间交给宿主再挡一次')
+  assert.equal(body.payload.all, true, '虚拟视图 = 整个库（ADR-0008）')
+  assert.equal(typeof body.payload.before, 'string', '截止时间交给宿主，由宿主在库全量上挡')
+  assert.deepEqual([...(store.get().undo?.ids ?? [])], ['old'], '范围阈值必须挡掉尚未「早于」的条目')
   assert.equal(store.get().items.find((entry) => entry.id === 'recent').readAt, undefined, '刚发布的条目不该被标已读')
   assert.notEqual(store.get().items.find((entry) => entry.id === 'old').readAt, undefined, '早于阈值的条目照常标记')
 })
@@ -748,8 +767,9 @@ test('A 的默认范围是全部：不带阈值时行为与以前完全一致', 
   assert.equal(store.get().markAllRange, 'all', '默认必须是全量 —— 否则就是悄悄改了既有行为')
   await store.markAllRead()
   const body = calls.find((call) => call.endpoint === 'markRead')
-  assert.deepEqual(body.payload.itemIds, ['recent'])
+  assert.equal(body.payload.all, true, '虚拟视图 = 整个库（ADR-0008）')
   assert.equal(body.payload.before, undefined, '全量时不传截止时间')
+  assert.deepEqual([...(store.get().undo?.ids ?? [])], ['recent'], '全量时宿主标掉未读的那条')
 })
 
 test('r 刷新未读计数：只重取本地视图，不触发抓取（规格不变量 1）', async () => {

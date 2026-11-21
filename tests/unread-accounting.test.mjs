@@ -23,6 +23,7 @@ import { Config } from '../lib/config.js'
 import { deps } from './helpers/reader-store-memory.mjs'
 import { createMemoryStore } from '../lib/memory-store.js'
 import { createFakeChannel, loadClientModule } from './helpers/client-channel.mjs'
+import { scopeMarkIdsOf } from './helpers/mark-scope.mjs'
 import { overviewStub } from './helpers/overview-fixture.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -270,6 +271,8 @@ function loadStore(overview, hostTruth) {
     unread: hostTruth?.unread ?? overview.unread,
   }
   const feedOf = new Map(overview.items.map((entry) => [entry.id, entry.feedId]))
+  // 夹具的读态台账（ADR-0008）：范围标读在**夹具全量**上求值，不能只看已加载页。
+  const readIds = new Set(overview.items.filter((entry) => entry.readAt !== undefined).map((entry) => entry.id))
   const shiftHost = (ids, delta) => {
     for (const id of ids) {
       const feedId = feedOf.get(id)
@@ -285,7 +288,17 @@ function loadStore(overview, hostTruth) {
         return { ...overview, unread: host.unread, perFeedUnread: { ...host.perFeedUnread } }
       }
       if (endpoint === 'markRead' || endpoint === 'unmarkRead') {
+        const bulk = endpoint === 'markRead' && !Array.isArray(payload?.itemIds)
+        if (bulk) {
+          const ids = scopeMarkIdsOf(overview.items, (id) => readIds.has(id), payload)
+          const account = { unread: host.unread, perFeedUnread: { ...host.perFeedUnread } }
+          if (payload.dryRun === true) return { count: ids.length, ...account }
+          for (const id of ids) readIds.add(id)
+          shiftHost(ids, -1)
+          return { changed: ids.length, ids, unread: host.unread, perFeedUnread: { ...host.perFeedUnread } }
+        }
         const ids = Array.isArray(payload?.itemIds) ? payload.itemIds : []
+        for (const id of ids) { if (endpoint === 'markRead') readIds.add(id); else readIds.delete(id) }
         shiftHost(ids, endpoint === 'markRead' ? -1 : 1)
         // 回包**同时**给 unread 与 perFeedUnread（宿主契约：src/endpoints.ts 的 unreadAccount）。
         // 客户端在截断场景下看不见全量条目，只能靠这一份整体覆盖 —— 桩件少给一个字段就等于
