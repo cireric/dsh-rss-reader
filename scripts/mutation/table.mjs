@@ -2467,8 +2467,10 @@ export const MUTATIONS = [
     // 症状正是本项要修的那件事——DOM 里有 <img> 就有请求、就有 Referer（spec 决策 7）。
     // 判据是「折叠时 DOM 里 <img> 数量为 0」，不依赖 display:none 这类浏览器实现细节。
     // lib/client.js 实测 OCCURRENCES=1（`fold.shouldRender(group.index)` 只此一处）。
-    from: "if (fold.shouldRender(group.index)) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ArticleBlockView, { block }, index);\n\t\t\t\t\t\t\t\t\tif (group.blockIndexes[0] !== index) return null;",
-    to: "if (true) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ArticleBlockView, { block }, index);\n\t\t\t\t\t\t\t\t\tif (group.blockIndexes[0] !== index) return null;" },
+    // ⚠️ R6 06 重锚：块的 key 从裸 `index` 改成复合 `blockKeyOf(index)`（spec 决策 21，换篇复位），
+    // 这段产物的第二行跟着变了 ⇒ 旧 from 会报「未应用」（pitfalls §1.4）。判定本身没动。
+    from: "if (fold.shouldRender(group.index)) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ArticleBlockView, { block }, blockKeyOf(index));\n\t\t\t\t\t\t\t\t\tif (group.blockIndexes[0] !== index) return null;",
+    to: "if (true) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ArticleBlockView, { block }, blockKeyOf(index));\n\t\t\t\t\t\t\t\t\tif (group.blockIndexes[0] !== index) return null;" },
   { id: 'client-折叠提示可聚焦', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
     judgeTests: ['折叠提示不在 Tab 序里：tabIndex < 0，且不是 BUTTON / SUMMARY / INPUT / SELECT / TEXTAREA、不是带 href 的链接'],
@@ -2574,4 +2576,30 @@ export const MUTATIONS = [
     // lib/client.js 实测 OCCURRENCES=1（整个 expandImageGroup 定义体只此一处）。
     from: "\t\t\t\tconst expandImageGroup = (0, react.useCallback)((groupIndex) => {\n\t\t\t\t\tsetExpandedGroups((current) => {\n\t\t\t\t\t\tif (current.has(groupIndex)) return current;\n\t\t\t\t\t\tconst next = new Set(current);\n\t\t\t\t\t\tnext.add(groupIndex);\n\t\t\t\t\t\treturn next;\n\t\t\t\t\t});\n\t\t\t\t}, []);",
     to: "\t\t\t\tconst expandImageGroup = (0, react.useCallback)((groupIndex) => {\n\t\t\t\t\tvoid groupIndex;\n\t\t\t\t\tsetImagesExpanded(true);\n\t\t\t\t}, []);" },
+  // ── R6 06：图片三态（载入中 / ok / 失败）────────────────────────────────────
+  // 这两条守的是**逐图的载入观察**，与 03 那三条（组层折叠）互不重叠：03 保证「折叠时没有 img」，
+  // 这里保证「img 出现之后读者知道它到底加载成功没有」。
+  { id: 'client-失败态不停留在载入中', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: [
+      'R6 06：onError 之后是失败态——文案「图片加载失败」+ alt，且 DOM 里没有 <img>（不留破图）',
+      'R6 06：失败态没有 alt 时只说「图片加载失败」，不编造说明文字',
+    ],
+    // onError 不置 failed ⇒ 图床挂掉 / 站点防盗链时读者永远看着「载入中」那块占位，
+    // 既不知道失败了、也拿不到 alt。判据是「失败态标记 + 文案 + DOM 里没有 <img>」三条一起。
+    // lib/client.js 实测 OCCURRENCES=1（`setState("failed")` 只此一处）。
+    from: "\t\t\t\t\t\tonError: () => {\n\t\t\t\t\t\t\tsetState(\"failed\");\n\t\t\t\t\t\t},",
+    to: "\t\t\t\t\t\tonError: () => {\n\t\t\t\t\t\t}," },
+  { id: 'client-已complete的图不补判', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: [
+      'R6 06：缓存命中的图在挂载前就已 complete（naturalWidth > 0）⇒ 直接是 ok，不停在「载入中」',
+      'R6 06：挂载前已 complete 但 naturalWidth === 0（加载失败后放弃）⇒ 补判成 failed',
+    ],
+    // 去掉挂载后的补判：缓存命中的图（`complete === true`、`load` 事件早已派发完毕）永远停在
+    // 「载入中」—— 这是 spec 决策 22 记的那件事，也是 pitfalls §3.1「事件可能早于监听器」的同族。
+    // 两条判据分别守 ok 与 failed 两半：只补判一半的实现会在另一条上红。
+    // lib/client.js 实测 OCCURRENCES=1（整个 useEffect 块只此一处）。
+    from: "\t\t\t(0, react.useEffect)(() => {\n\t\t\t\tconst image = imageRef.current;\n\t\t\t\tif (image === null) return;\n\t\t\t\tif (!image.complete) return;\n\t\t\t\tsetState(image.naturalWidth > 0 ? \"ok\" : \"failed\");\n\t\t\t}, [src]);",
+    to: "\t\t\t(0, react.useEffect)(() => {\n\t\t\t}, [src]);" },
 ]

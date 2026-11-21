@@ -4843,3 +4843,238 @@ test('组覆盖不落盘：Esc 回列表后重开同一篇，回到偏好决定�
     '重开同一篇要回到偏好决定的形态（折叠）—— 组覆盖不跨阅读会话保留')
   assert.equal(foldHints(reopened).length, 2, '两组提示都回来')
 })
+
+/**
+ * —— 图片三态与占位（R6 06）——
+ *
+ * 判据读 `[data-rss-image-state]` 这个标记属性（值是 `loading` / `ok` / `failed`）：
+ * 「载入中」与「已载入」在 jsdom 里**没有任何别的可观测差别**（没有布局引擎、图片不真的加载，
+ * 见 `docs/pitfalls.md` §2.2），不标出来就无法表达 spec 验收 9 的前半条。
+ * 这个标记同时是 07 灯箱的入口判据（只给 `ok` 的图挂点击），所以它不只是测试脚手架。
+ *
+ * ⚠️ jsdom 里 `<img>` **不加载资源、不派发 `load` / `error`、不经过 `Image` 构造器**（`实测`，
+ * `/tmp/r6-notes/ENV.md`），所以三态用例一律**手动派发事件**；「挂载前已 complete」那条
+ * 用 `Object.defineProperty` 桩在 **`HTMLImageElement.prototype`** 上（一创建就带桩值）。
+ */
+const IMAGE_STATE_ATTR = 'data-rss-image-state'
+
+/** 正文里所有带三态标记的图片容器（按 DOM 顺序）。 */
+function imageStates(root) {
+  return [...root.querySelectorAll('[' + IMAGE_STATE_ATTR + ']')]
+}
+
+test('R6 06：图片三态——挂载后初始是「载入中」，onLoad 之后变成 ok', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    article: {
+      itemId: 'a', title: 'ART',
+      blocks: [imgBlock('https://img.example/one.png', { alt: '替代文本', caption: '说明' })],
+    },
+  })
+  const body = await openArticle(h)
+
+  const frames = imageStates(body)
+  assert.equal(frames.length, 1, '前置：一张图 ⇒ 一个三态容器')
+  assert.equal(frames[0].getAttribute(IMAGE_STATE_ATTR), 'loading',
+    '图片刚上屏时必须是「载入中」——读者要知道它在加载，而不是「本来就没图」')
+
+  const image = body.querySelector('img')
+  assert.ok(image !== null, '前置：载入中的图仍在 DOM 里（占位靠它自己的盒子）')
+  image.dispatchEvent(new h.win.Event('load'))
+  await h.settle()
+
+  assert.equal(imageStates(body)[0].getAttribute(IMAGE_STATE_ATTR), 'ok', 'onLoad 之后进 ok')
+  assert.equal(body.querySelectorAll('img').length, 1, 'ok 态的图照旧在 DOM 里')
+})
+
+test('R6 06：onError 之后是失败态——文案「图片加载失败」+ alt，且 DOM 里没有 <img>（不留破图）', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    article: {
+      itemId: 'a', title: 'ART',
+      blocks: [imgBlock('https://img.example/broken.png', { alt: '图床挂了的那张图', caption: '图注' })],
+    },
+  })
+  const body = await openArticle(h)
+
+  const image = body.querySelector('img')
+  assert.ok(image !== null, '前置：初始是载入中，图在 DOM 里')
+  image.dispatchEvent(new h.win.Event('error'))
+  await h.settle()
+
+  const frames = imageStates(body)
+  assert.equal(frames.length, 1, '前置：三态容器仍在（占位不塌）')
+  assert.equal(frames[0].getAttribute(IMAGE_STATE_ATTR), 'failed', 'onError 之后必须进失败态')
+  // 失败态的核心：文案 + alt，**不显示破图图标** —— 后者靠「DOM 里没有 <img>」表达
+  const text = frames[0].textContent ?? ''
+  assert.ok(text.includes('图片加载失败'), '失败态必须明说「图片加载失败」（实际：' + text + '）')
+  assert.ok(text.includes('图床挂了的那张图'), '有 alt 时一并显示 alt（它是这张图唯一的可读内容）')
+  assert.equal(body.querySelectorAll('img').length, 0,
+    '失败态必须把 <img> 从 DOM 里移除 —— 留着它浏览器就画破图图标（spec 决策 23）')
+})
+
+test('R6 06：失败态没有 alt 时只说「图片加载失败」，不编造说明文字', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    article: {
+      itemId: 'a', title: 'ART',
+      blocks: [imgBlock('https://img.example/no-alt.png')],
+    },
+  })
+  const body = await openArticle(h)
+
+  body.querySelector('img').dispatchEvent(new h.win.Event('error'))
+  await h.settle()
+
+  const frames = imageStates(body)
+  assert.equal(frames[0].getAttribute(IMAGE_STATE_ATTR), 'failed', '前置：已进失败态')
+  assert.equal((frames[0].textContent ?? '').trim(), '图片加载失败', '两个来源都空时不许编造说明文字')
+})
+
+/**
+ * 桩「挂载前就已 complete」的图。
+ *
+ * ⚠️ 桩必须装在 **`HTMLImageElement.prototype`** 上，不能装在某个实例上：React 创建 `<img>` 与
+ * 把它挂进 DOM 是两次独立的提交，测试**拿不到**「节点已创建、effect 还没跑」那个中间时刻，
+ * 所以只能在元素一出生就带桩值（这是 `/tmp/r6-notes/ENV.md` 记的实测结论）。
+ * `arm()` 改实例、`ResizeObserver` 改全局，都是同一族手法（`tests/scroll-dom.test.mjs` 先例）。
+ *
+ * 返回的 `restore()` 必须在用例末尾调：原型是**跨用例共享**的（同一个 JSDOM 实例内），
+ * 留着会让后续用例的图片凭空变成「已载入」。
+ */
+function stubImageMetrics(win, { complete, naturalWidth }) {
+  const proto = win.HTMLImageElement.prototype
+  const saved = {
+    complete: Object.getOwnPropertyDescriptor(proto, 'complete'),
+    naturalWidth: Object.getOwnPropertyDescriptor(proto, 'naturalWidth'),
+  }
+  Object.defineProperty(proto, 'complete', { get: () => complete, configurable: true })
+  Object.defineProperty(proto, 'naturalWidth', { get: () => naturalWidth, configurable: true })
+  return () => {
+    // 还原成 jsdom 自己的访问器（不是删掉：删掉会让属性彻底消失，`img.complete` 变 undefined）
+    if (saved.complete !== undefined) Object.defineProperty(proto, 'complete', saved.complete)
+    if (saved.naturalWidth !== undefined) Object.defineProperty(proto, 'naturalWidth', saved.naturalWidth)
+  }
+}
+
+test('R6 06：缓存命中的图在挂载前就已 complete（naturalWidth > 0）⇒ 直接是 ok，不停在「载入中」', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    article: {
+      itemId: 'a', title: 'ART',
+      blocks: [imgBlock('https://img.example/cached.png', { alt: '缓存里的图' })],
+    },
+  })
+  // 在正文渲染**之前**装桩：图片一出生就 complete 且 naturalWidth > 0，模拟浏览器缓存命中
+  // （那时 `load` 事件早已派发完毕，React 的 onLoad 永远收不到 —— spec 决策 22）。
+  const restore = stubImageMetrics(h.win, { complete: true, naturalWidth: 640 })
+  try {
+    const body = await openArticle(h)
+    await h.settle()
+
+    const frames = imageStates(body)
+    assert.equal(frames.length, 1, '前置：一张图')
+    assert.equal(frames[0].getAttribute(IMAGE_STATE_ATTR), 'ok',
+      '挂载前已 complete 且 naturalWidth > 0 ⇒ 必须补判成 ok；只靠 onLoad 的实现在这里恒停在「载入中」')
+    assert.equal(body.querySelectorAll('img').length, 1, 'ok 态的图照旧在 DOM 里')
+  } finally { restore() }
+})
+
+test('R6 06：挂载前已 complete 但 naturalWidth === 0（加载失败后放弃）⇒ 补判成 failed', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    article: {
+      itemId: 'a', title: 'ART',
+      blocks: [imgBlock('https://img.example/dead.png', { alt: '早已放弃的图' })],
+    },
+  })
+  const restore = stubImageMetrics(h.win, { complete: true, naturalWidth: 0 })
+  try {
+    const body = await openArticle(h)
+    await h.settle()
+
+    const frames = imageStates(body)
+    assert.equal(frames[0].getAttribute(IMAGE_STATE_ATTR), 'failed',
+      'complete 但 naturalWidth 为 0 ⇒ 图其实没解码成功，必须进失败态而不是 ok')
+    assert.ok((frames[0].textContent ?? '').includes('图片加载失败'), '失败态文案要在')
+    assert.equal(body.querySelectorAll('img').length, 0, '失败态不留 <img>（不画破图）')
+  } finally { restore() }
+})
+
+test('R6 06：换篇后三态复位——A 篇图 0 是 ok，切到 B 篇图 0 必须重新从「载入中」开始', skip, async () => {
+  /*
+   * 两篇块数**相同**：spec 决策 21 担心的形态是「裸 index 当 key ⇒ React 复用同一个
+   * <ArticleImage> 实例 ⇒ 沿用 a 的 ok 态」。**这条用例钉的是行为（换篇必须复位），
+   * 不是那个实现差异** —— 实测（2026-11-21，票据 06）：把 key 改回裸 `index`，本用例照样绿。
+   *
+   * 原因在 `loadArticle` 的时序（源码核对 `src/client/list-actions.ts:710`）：换篇先
+   * `set({ article: { loading: true } })`，那一刻 `blocks` 为空 ⇒ 夹具必然先提交一次
+   * **零图片**的渲染，图片组件本来就被卸载过一次，复合 key 与裸下标因此在今天无法区分。
+   * 探针观察到的换篇序列是 `{imgs:0} → {imgs:1, loading}`。
+   *
+   * 复合 key 仍然是正确形态（它不依赖「中间恰好没有图」这个偶然事实），所以实现保留；
+   * 但这句测试的诚实定位是「验收 9 的复位要求」，不是「决策 21 的判据」。
+   * 这条缺口记在 `docs/pitfalls.md` §3.6。
+   */
+  const articleOf = (itemId) => ({
+    itemId, title: 'ART ' + itemId,
+    blocks: [imgBlock('https://img.example/' + itemId + '.png', { alt: itemId })],
+  })
+  const h = await mountReader({
+    items: [item({ id: 'a' }), item({ id: 'b' })],
+    article: articleOf,
+  })
+  const body = await openArticle(h)
+
+  const first = body.querySelector('img')
+  assert.ok(first !== null, '前置：a 篇的图已渲染')
+  assert.equal(first.getAttribute('src'), 'https://img.example/a.png', '前置：a 篇的图')
+  first.dispatchEvent(new h.win.Event('load'))
+  await h.settle()
+  assert.equal(imageStates(body)[0].getAttribute(IMAGE_STATE_ATTR), 'ok', '前置：a 篇的图 0 已是 ok')
+
+  h.press('j')
+  await h.settle()
+  assert.equal(h.store.get().article.itemId, 'b', '前置：切到 b 篇')
+
+  const frames = imageStates(body)
+  assert.equal(frames.length, 1, '前置：b 篇也是一张图（块数与 a 相同）')
+  assert.equal(frames[0].getAttribute(IMAGE_STATE_ATTR), 'loading',
+    '换篇后三态必须复位 —— 裸 index 当 key 会让 React 复用实例、沿用上一篇的 ok 态')
+  const second = body.querySelector('img')
+  assert.ok(second !== null, '复位后的图仍在 DOM 里')
+  assert.equal(second.getAttribute('src'), 'https://img.example/b.png', '前置：确实是 b 篇的图')
+})
+
+/**
+ * 占位（spec 决策 20）：容器 `min-height: 120px` + 图片 `width: 100%; height: auto`。
+ *
+ * ⚠️ 这里**只断言样式声明**，不断言位移量：jsdom 没有布局引擎（`docs/pitfalls.md` §2.2），
+ * 「加载完成时版面跳不跳」只能在真机上量 —— 那是验收 24，本票标「未验」。
+ * 断言 `aspect-ratio` **不出现**同样是声明层面的判据：抽取层只回传 `src`/`alt`/`caption`，
+ * 没有比例可填，写了就是空转（决策 20 明确否掉）。
+ */
+test('R6 06：占位——图片容器 min-height 120px、图片 width 100% / height auto，且不用 aspect-ratio', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    article: {
+      itemId: 'a', title: 'ART',
+      blocks: [imgBlock('https://img.example/one.png', { alt: '一' })],
+    },
+  })
+  const body = await openArticle(h)
+
+  const image = body.querySelector('img')
+  assert.ok(image !== null, '前置：图已渲染')
+  // 容器：图与 figcaption 之间那层（min-height 加在容器上，不是 <img> 上 —— 加在图上会把图拉高）
+  const container = image.parentElement
+  assert.ok(container !== null, '前置：图片必须包在一层容器里（min-height 要有地方放）')
+  assert.equal(container.style.minHeight, '120px', '图片容器必须给 min-height: 120px（占位，决策 20）')
+  assert.equal(image.style.width, '100%', '图片必须 width: 100%')
+  assert.equal(image.style.height, 'auto', '图片必须 height: auto（否则 min-height 会把图拉变形）')
+  // 决策 20 明确否掉 aspect-ratio：抽取层没有比例可填，写了也是空转
+  assert.equal(image.style.aspectRatio, '', '不许用 aspect-ratio（抽取层不提供宽高）')
+  assert.equal(container.style.aspectRatio, '', '容器同样不许用 aspect-ratio')
+  // 既有的限高不受影响（长截图限高是独立决定，spec 决策 33）
+  assert.equal(image.style.maxHeight, '640px', 'maxHeight 640 不许被本票挤掉')
+})
