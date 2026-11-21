@@ -15,7 +15,7 @@ import { createHash } from 'node:crypto'
 import { fetchFeed, type FetchLimits } from './feed/fetch.js'
 import { MIN_CONTENT_CHARS } from './shared.js'
 import { decodeEntities, htmlToText, preToText } from './html-text.js'
-import { blocksToText, collapseWhitespace, safeUrl } from './article-text.js'
+import { blocksToText, collapseWhitespace, runsToText, safeUrl, type InlineRun } from './article-text.js'
 
 /**
  * 纯文本投影住在零 node 依赖的 `article-text.ts`（2026-11-21，R5 01），本文件只做 re-export。
@@ -83,12 +83,12 @@ const MAX_SAME_IMAGE = 2
  * 这是列表」，样式必然变形——图片更是被直接丢弃。
  */
 export type ArticleBlock =
-  | { readonly kind: 'p'; readonly text: string }
-  | { readonly kind: 'h'; readonly level: number; readonly text: string }
+  | { readonly kind: 'p'; readonly text: string; readonly runs?: readonly InlineRun[] }
+  | { readonly kind: 'h'; readonly level: number; readonly text: string; readonly runs?: readonly InlineRun[] }
   | { readonly kind: 'pre'; readonly text: string }
   | { readonly kind: 'img'; readonly src: string; readonly alt?: string; readonly caption?: string }
-  | { readonly kind: 'list'; readonly ordered: boolean; readonly items: readonly string[] }
-  | { readonly kind: 'quote'; readonly text: string }
+  | { readonly kind: 'list'; readonly ordered: boolean; readonly items: readonly string[]; readonly itemRuns?: readonly (readonly InlineRun[])[] }
+  | { readonly kind: 'quote'; readonly text: string; readonly runs?: readonly InlineRun[] }
 
 /** 抽取结果：标题 + 结构化块。 */
 export interface ExtractedArticle {
@@ -610,6 +610,207 @@ export function extractArticle(html: string, baseUrl?: string): ExtractedArticle
 }
 
 /**
+ * —— 内联解析（2026-11-21，R5 02）——
+ *
+ * 把一段 HTML 片段解析成 `InlineRun[]`：普通文字 / 加粗 / 斜体 / 行内代码 / 链接。
+ *
+ * 为什么需要它：技术文章的正文里有一半信息在标记里。抽取层过去把 `<a>`、`<strong>`、`<em>`、
+ * `<code>` 一律当「未知标签只留文本」，读者拿到的是删减过的文章——链接没了、强调丢了、
+ * 行内代码与散文分不开。而客户端刻意没有 HTML 注入面，所以损失无法在渲染侧补回来。
+ *
+ * **为什么不用 `htmlToText` 再切**：它给每个标签塞一个空格（`"详见<a>官方文档</a>。"` ⇒
+ * `"详见 官方文档 。"`），与 runs 拼接天然不等；那条「`text` 由 runs 派生」的不变量就无从成立。
+ * 两条路只能选一条，本项选「runs 是权威，text 由它派生」（见 ADR-0007）。
+ *
+ * **安全边界**：输入是任意网页 HTML，所以这里只产出结构化数据、**绝不拼 HTML 字符串**；
+ * 未知标签一律只留文本；链接必须过 `safeUrl` 白名单（相对地址按 baseUrl 解析）。
+ */
+
+/** 内联标签 → run 语义。`a` 单独处理（要 href）。 */
+const INLINE_STYLE: ReadonlyMap<string, 'strong' | 'em' | 'code'> = new Map([
+  ['strong', 'strong'], ['b', 'strong'],
+  ['em', 'em'], ['i', 'em'],
+  ['code', 'code'], ['kbd', 'code'], ['samp', 'code'], ['tt', 'code'],
+])
+
+/**
+ * 块分隔符：这些位置把片段切成**多个块**，而不是产生 run。
+ *
+ * - `<br>`：既有行为就是切块（`htmlToText` 把它转换行、散文尾部再按行切），必须保持；
+ * - stash 占位符 `\u0000B<n>\u0000`：它是**内部协议**，生命周期止于「重建块顺序」。
+ *   把它当普通字符会让它变成 run 文本（既存缺陷：`<li>文字<pre>code</pre></li>` 的 items 里
+ *   就出现过 `"\u0000B0\u0000"`，实测）。见 `docs/pitfalls.md` §5.7b。
+ */
+const BLOCK_SEPARATORS = /<br\s*\/?>|\u0000B\d+\u0000/gi
+
+/**
+ * 一段内联 HTML → 按「块分隔」切开的 run 流组。
+ *
+ * 返回的是 `InlineRun[][]`：外层每个元素对应一个块（`<br>` 或占位符分隔），内层是该块的 run。
+ * 调用方据此产出多个块、各自派生 `text`——于是「`<p>甲<br>乙</p>` 产出两个段落块」的既有行为
+ * 一字不变，而 `<div>` 版式与 `<p>` 版式都能拿到 runs（不靠给 `p` 加专属 pass）。
+ *
+ * **归一化在切 run 之前**（决策 7 的顺序）：先对整段的可见文本做 `collapseWhitespace`，再切 run。
+ * 顺序反了，run 文本会带原始换行缩进，与归一化过的 `text` 必然不等。
+ *
+ * 但注意：归一化**按块分别做**——块分隔处要切开再各自归一化，否则 `<p>甲<br>乙</p>` 会被
+ * 归一化成 `"甲 乙"` 一个块（换行被空格吃掉），切块行为就变了。
+ */
+function parseInlineRuns(fragment: string, baseUrl: string | undefined): InlineRun[][] {
+  // 先按块分隔切段：分隔符本身不产出任何文字，只切
+  const segments = fragment.split(BLOCK_SEPARATORS)
+  const groups: InlineRun[][] = []
+  for (const segment of segments) {
+    // 段内先解析出「带原始空白的 run」，再在**归一化后的文本**上重建 run 边界
+    const raw = parseSegment(segment, baseUrl)
+    const normalized = normalizeRuns(raw)
+    if (normalized.length > 0) groups.push(normalized)
+  }
+  return groups
+}
+
+/**
+ * 把一段没有块分隔符的片段解析成 run 流（空白保持原样）。
+ *
+ * 用一个标签栈维护「当前处于哪种内联语义里」：`<strong><em>x</em></strong>` 取**最外层**语义
+ * （栈里第一个非 text 的语义），内层样式丢失——不假装支持嵌套，写进验收。
+ *
+ * 未知标签：只丢标签本身，文本照留（`<mark>`、`<span class=…>` 都是这样）。
+ * 这是本项安全边界的一部分：不认识的标签绝不影响产出形状。
+ */
+function parseSegment(segment: string, baseUrl: string | undefined): InlineRun[] {
+  const runs: InlineRun[] = []
+  /** 内联语义栈：空 = 普通文字。只用于取「最外层」，不做嵌套样式。 */
+  const styleStack: Array<'strong' | 'em' | 'code'> = []
+  /** 链接栈：`<a>` 可以包住别的内联标签，取最外层链接的 href。 */
+  const linkStack: string[] = []
+  let cursor = 0
+
+  /** 当前应当产出的 run 种类：链接优先于样式（链接是可点的，样式只是视觉）。 */
+  const pushText = (raw: string): void => {
+    if (raw === '') return
+    const text = decodeEntities(raw)
+    if (text === '') return
+    const href = linkStack.length > 0 ? linkStack[linkStack.length - 1] : undefined
+    if (href !== undefined) {
+      runs.push({ kind: 'link', text, href })
+      return
+    }
+    const style = styleStack.length > 0 ? styleStack[0] : undefined
+    if (style === undefined) runs.push({ kind: 'text', text })
+    else runs.push({ kind: style, text })
+  }
+
+  for (const hit of eachTag(segment)) {
+    pushText(segment.slice(cursor, hit.start))
+    cursor = hit.end
+    if (hit.name === 'a') {
+      if (hit.closing) {
+        if (linkStack.length > 0) linkStack.pop()
+        continue
+      }
+      // 链接白名单在**抽取时**就过一遍：非法协议退化成普通文字（不产生 link run），
+      // 相对地址按 baseUrl 解析成绝对地址。渲染期还会再过一次 `httpUrlOrEmpty`（纵深防御）。
+      const href = safeUrl(attrOf(segment.slice(hit.start, hit.end), 'href'), baseUrl)
+      if (href !== undefined) linkStack.push(href)
+      continue
+    }
+    const style = INLINE_STYLE.get(hit.name)
+    if (style === undefined) continue
+    if (hit.closing) {
+      // 只弹出与当前栈顶同名的语义；不匹配的闭合标签忽略（畸形 HTML 不该错位后面的文本）
+      if (styleStack.length > 0 && styleStack[styleStack.length - 1] === style) styleStack.pop()
+      continue
+    }
+    // 自闭合写法（`<b/>`）在 HTML 里罕见但存在；没有闭合标签的 `<b>` 会一直生效到段尾，
+    // 这与浏览器把未闭合内联标签延续到父元素结束的行为一致。
+    styleStack.push(style)
+  }
+  pushText(segment.slice(cursor))
+  return runs
+}
+
+/**
+ * 在**归一化后的文本**上重建 run 边界，并合并相邻同类 run。
+ *
+ * 为什么必须重建而不是「先归一化再解析」：归一化会删掉跨标签的连续空白（`"foo <b> bar"` 两侧
+ * 的空格要收敛成一个），若先归一化再解析，标签位置就与文本对不上了。所以这里反过来：
+ * 用原始 run 的文本做归一化，再按「哪些字符被保留了」把边界映射回 run 上。
+ *
+ * 合并相邻同类 run 是**结构判据的一部分**：`<b>a</b><b>b</b>` 若产出两个 strong run，
+ * 一段被编辑器切碎的 HTML（`<b>甲</b><b>乙</b>…`）就会让 run 数等于标签数，
+ * 「run 数 ≤ 标签数 + 1」那条上限形同虚设，序列化体积也会无谓翻倍。
+ */
+function normalizeRuns(raw: readonly InlineRun[]): InlineRun[] {
+  // 拼接出整段原文，同时记下每个字符属于哪个 run
+  const owners: number[] = []
+  let joined = ''
+  for (const [index, run] of raw.entries()) {
+    for (const _char of run.text) owners.push(index)
+    joined += run.text
+  }
+  // 归一化：把连续空白收敛成单空格、去首尾空白。逐字符走一遍，记下「保留 / 丢弃」。
+  const kept: Array<{ char: string; owner: number }> = []
+  let pendingSpace = false
+  for (const [index, char] of [...joined].entries()) {
+    if (/\s/.test(char)) { pendingSpace = true; continue }
+    if (pendingSpace && kept.length > 0) kept.push({ char: ' ', owner: owners[index] })
+    pendingSpace = false
+    kept.push({ char, owner: owners[index] })
+  }
+  // 按 owner 归并回去，再合并相邻同类
+  const out: InlineRun[] = []
+  for (const { char, owner } of kept) {
+    const source = raw[owner]
+    const last = out.length > 0 ? out[out.length - 1] : undefined
+    if (last !== undefined && sameRunKind(last, source)) {
+      out[out.length - 1] = { ...last, text: last.text + char }
+      continue
+    }
+    out.push({ ...source, text: char })
+  }
+  return out
+}
+
+/** 两个 run 是否可以合并（同 kind；link 还要求 href 相同——不同目标不许并成一个链接）。 */
+function sameRunKind(a: InlineRun, b: InlineRun): boolean {
+  if (a.kind !== b.kind) return false
+  if (a.kind === 'link' && b.kind === 'link') return a.href === b.href
+  return true
+}
+
+/**
+ * 一个「单块」片段（标题 / 引用 / 列表项）的文本与可选 runs。
+ *
+ * 为什么这类块与散文路径不同：它们是**单个语义块**，片段里的换行只该收敛成空格（标题与引用
+ * 不该因为源 HTML 折行就变成两块），而散文路径的换行是块边界。所以这里把整段解析成一组 run 后
+ * 合并成一段——`parseInlineRuns` 的块分隔（`<br>` / 占位符）在这里也生效，取**第一组**以外的
+ * 组用空格接回去，保持「一个标题就是一个块」的既有行为。
+ */
+function inlineTextOf(fragment: string, baseUrl: string | undefined): { text: string; runs?: readonly InlineRun[] } {
+  const groups = parseInlineRuns(fragment, baseUrl)
+  if (groups.length === 0) return { text: '' }
+  // 多组（源里含 <br>）时用空格接回一段：标题/引用/列表项的既有行为是单块，不切成多块。
+  const merged: InlineRun[] = []
+  for (const [index, group] of groups.entries()) {
+    if (index > 0) merged.push({ kind: 'text', text: ' ' })
+    merged.push(...group)
+  }
+  const runs = normalizeRuns(merged)
+  return { text: runsToText(runs), ...runsFieldOf(runs) }
+}
+
+/**
+ * run 流的「要不要写进块」判定：**纯文本块不产出 runs**。
+ *
+ * 为什么：`runs` 的语义是「这段有内联语义」。给每个纯文本段落塞一个 text run 会让序列化体积
+ * 从 ×3.2 抬到 ×6.6（实测），而额度闸门数的是可见字符、看不见这个膨胀。缺席即「没有内联语义」。
+ */
+function runsFieldOf(runs: readonly InlineRun[]): { runs?: readonly InlineRun[] } {
+  return runs.some((run) => run.kind !== 'text') ? { runs } : {}
+}
+
+/**
  * 块抽取本体：段落 / 标题 / 代码 / 图片 / 列表 / 引用。输入是 HTML 片段（整页或某个容器）。
  */
 function collectBlocks(html: string, baseUrl: string | undefined): ArticleBlock[] {
@@ -646,18 +847,27 @@ function collectBlocks(html: string, baseUrl: string | undefined): ArticleBlock[
   })
   body = rewriteTagRegions(body, (name) => name === 'ul' || name === 'ol', (name, inner) => {
     const items: string[] = []
+    const itemRuns: Array<readonly InlineRun[]> = []
     for (const li of allRegions(inner, 'li')) {
-      const text = htmlToText(li).replace(/\n/g, ' ').trim()
-      if (text !== '') items.push(text)
+      // 列表项走内联解析：`<li>详见<a>文档</a></li>` 的链接必须留下来。
+      // 同一个函数也顺手解决了**占位符泄漏**：`<li>文字<pre>code</pre></li>` 里 pre 已被换成
+      // `\u0000B0\u0000`，而 `parseInlineRuns` 把它当块分隔丢弃 —— 否则它会被当成普通文字
+      // 进 items（既存缺陷，实测过）。
+      const { text, runs } = inlineTextOf(li, baseUrl)
+      if (text === '') continue
+      items.push(text)
+      itemRuns.push(runs ?? [{ kind: 'text', text }])
     }
     // 只有一个短项的「列表」多半是导航残留，丢掉
     if (items.length === 0 || (items.length === 1 && items[0].length < MIN_CONTENT_CHARS)) return ' '
-    return stash({ kind: 'list', ordered: name === 'ol', items })
+    // 与 items 等长同序；全部都是纯文本时整体缺席（runs 的语义是「有内联语义」）
+    const anyInline = itemRuns.some((runs) => runs.some((run) => run.kind !== 'text'))
+    return stash({ kind: 'list', ordered: name === 'ol', items, ...(anyInline ? { itemRuns } : {}) })
   })
   body = rewriteTagRegions(body, (name) => name === 'blockquote', (_name, inner) => {
-    const text = htmlToText(inner).replace(/\n+/g, ' ').trim()
+    const { text, runs } = inlineTextOf(inner, baseUrl)
     // 引用**不套散文长度门槛**：blockquote 标签本身就是语义信号，短引用（一句被引的话）也是引用
-    return text === '' ? ' ' : stash({ kind: 'quote', text })
+    return text === '' ? ' ' : stash({ kind: 'quote', text, ...(runs === undefined ? {} : { runs }) })
   })
   body = rewriteVoidTags(body, 'img', (tag) => {
     const src = pickImageUrl(tag, baseUrl)
@@ -665,8 +875,8 @@ function collectBlocks(html: string, baseUrl: string | undefined): ArticleBlock[
     return stash({ kind: 'img', src, alt: attrOf(tag, 'alt') })
   })
   body = rewriteTagRegions(body, (name) => /^h[1-6]$/.test(name), (name, inner) => {
-    const text = htmlToText(inner).replace(/\n/g, ' ').trim()
-    return text === '' ? ' ' : stash({ kind: 'h', level: Number(name.slice(1)), text })
+    const { text, runs } = inlineTextOf(inner, baseUrl)
+    return text === '' ? ' ' : stash({ kind: 'h', level: Number(name.slice(1)), text, ...(runs === undefined ? {} : { runs }) })
   })
 
   // ④ 按边界切分剩余散文，并**在同一遍里按文档顺序重建块**
@@ -683,18 +893,31 @@ function collectBlocks(html: string, baseUrl: string | undefined): ArticleBlock[
       continue
     }
     // 一个 piece 里可能含多行（被换行切开的相邻块）：逐行判断，避免把两段并成一段
-    for (const line of htmlToText(piece).split('\n')) {
-      // 归一化走 article-text.ts 的那一份：runs 化之后「先归一化再切 run」用的必须是同一个函数，
-      // 否则 run 文本与 text 会各按一套空白规则收敛，严格相等那条不变量就失去意义。
-      const text = collapseWhitespace(line)
-      if (text.length >= MIN_CONTENT_CHARS) blocks.push({ kind: 'p', text })
+    for (const line of piece.split('\n')) {
+      // 散文路径本身产出 run 流（2026-11-21，R5 02）：`<p>` 与 `<div>` 一视同仁，
+      // 不像别的块类型那样靠「给某个标签加保护 pass」——那样 div 版式的站点会拿不到 runs，
+      // 变成「有的文章有链接、有的没有」。
+      for (const runs of parseInlineRuns(line, baseUrl)) {
+        // 门槛判**归一化后的可见字符数**，不是 `htmlToText` 那种带标签间隙的假长度：
+        // 38 个汉字嵌 6 个 <b> 的段落在旧实现里数出 50 字（保留），实际只有 38 字可读（应丢弃）。
+        const text = runsToText(runs)
+        if (text.length >= MIN_CONTENT_CHARS) blocks.push({ kind: 'p', text, ...runsFieldOf(runs) })
+      }
     }
   }
 
   // ⑤ 兜底：一个块都没有时按行取全文（会带导航噪声，故只作最后手段）
+  //
+  // ⚠️ 这条兜底**也必须走 run 流**（2026-11-21，R5 02 实测踩到）：它原先是
+  // `htmlToText(body).split('\n')` + 判 `line.length`，而 `htmlToText` 给每个标签塞一个空格
+  // ⇒ 38 个汉字嵌 6 个 `<b>` 的段落会被数成 50 字、从兜底路径**重新放回**正文，把第 ④ 步
+  // 刚刚按可见字符数丢弃的结果又捡回来。两条路径的口径必须是同一个，否则门槛判据形同虚设。
   if (blocks.length === 0) {
-    for (const line of htmlToText(body).split('\n')) {
-      if (line.length >= MIN_CONTENT_CHARS) blocks.push({ kind: 'p', text: line })
+    for (const line of body.split('\n')) {
+      for (const runs of parseInlineRuns(line, baseUrl)) {
+        const text = runsToText(runs)
+        if (text.length >= MIN_CONTENT_CHARS) blocks.push({ kind: 'p', text, ...runsFieldOf(runs) })
+      }
     }
   }
   return blocks
