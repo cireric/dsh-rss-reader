@@ -1138,7 +1138,7 @@ test('正文页阅读偏好：时长标「估算」、字号/栏宽落到正文�
   const saved = h.requests.filter((entry) => entry.endpoint === 'saveViewPreferences').at(-1)
   assert.ok(saved !== undefined, '改字号必须落盘（否则重开插件就白改了）')
   const prefs = saved.payload.preferences
-  assert.deepEqual(prefs.reading, { fontSize: 20, lineWidth: 760, theme: 'auto' })
+  assert.deepEqual(prefs.reading, { fontSize: 20, lineWidth: 760, theme: 'auto', expandImages: true })
   // 写侧是整份覆盖：只发 reading 的话这三项会缺席，宿主就会把它们回落默认
   assert.deepEqual(prefs.navSelection, { kind: 'virtual' }, '写盘必须带上导航选中')
   assert.equal(prefs.filter, 'all', '写盘必须带上 filter')

@@ -788,10 +788,10 @@ test('saveViewPreferences 写前校验并落 config.json，且不碰订阅映射
     assert.deepEqual(Object.keys(onDisk.feeds), ['https://a.example/feed.xml'], '写偏好不许动订阅映射')
 
     // 排版（M5 01）在**真实 config.json** 上过一次往返：归一化函数绿不等于落盘读回也绿
-    const withReading = await store.saveViewPreferences({ navSelection: { kind: 'virtual' }, filter: 'all', navVisible: true, reading: { fontSize: 18, lineWidth: 640, theme: 'dark' } })
-    assert.deepEqual(withReading.reading, { fontSize: 18, lineWidth: 640, theme: 'dark' })
-    assert.deepEqual(JSON.parse(readFileSync(configPath, 'utf8')).viewPreferences.reading, { fontSize: 18, lineWidth: 640, theme: 'dark' }, '落盘的 reading 必须是选中的档位，不是默认值')
-    assert.deepEqual(store.viewPreferences().reading, { fontSize: 18, lineWidth: 640, theme: 'dark' }, '读回来仍是同一份')
+    const withReading = await store.saveViewPreferences({ navSelection: { kind: 'virtual' }, filter: 'all', navVisible: true, reading: { fontSize: 18, lineWidth: 640, theme: 'dark', expandImages: true } })
+    assert.deepEqual(withReading.reading, { fontSize: 18, lineWidth: 640, theme: 'dark', expandImages: true })
+    assert.deepEqual(JSON.parse(readFileSync(configPath, 'utf8')).viewPreferences.reading, { fontSize: 18, lineWidth: 640, theme: 'dark', expandImages: true }, '落盘的 reading 必须是选中的档位，不是默认值')
+    assert.deepEqual(store.viewPreferences().reading, { fontSize: 18, lineWidth: 640, theme: 'dark', expandImages: true }, '读回来仍是同一份')
 
     // 指向已退订的源：归一成虚拟视图，而不是把无效选中写进媒介
     const again = await store.saveViewPreferences({ navSelection: { kind: 'feed', feedId: 'https://gone.example/feed.xml' }, filter: 'all', navVisible: true })

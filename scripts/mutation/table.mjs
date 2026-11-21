@@ -2423,4 +2423,32 @@ export const MUTATIONS = [
     judgeTests: ['R6 01：产物里正文图片的 props 带 referrerPolicy: "no-referrer"'],
     from: "\t\t\t\t\t\tloading: \"lazy\",\n\t\t\t\t\t\tdecoding: \"async\",\n\t\t\t\t\t\treferrerPolicy: \"no-referrer\",",
     to: "\t\t\t\t\t\tloading: \"lazy\",\n\t\t\t\t\t\tdecoding: \"async\"," },
+  // ── R6 02：图片折叠的决策层（分组纯函数 + expandImages 偏好） ───────────────
+  // 这三条守的是**决策层**，不是渲染层：折叠/展开的 DOM 判据要等 03 才存在。
+  // 因此 `client-默认值写成折叠` 这条在当前轮**还不能**由渲染用例抓住 —— 它只能由
+  // 「偏好值本身」的判据抓（见该条注释）。这是本票已知的判据缺口，03 会补上真正的
+  // 「默认展开 ⇒ DOM 里有 <img>」用例，那时这条变异才守到它字面上的那个行为。
+  { id: 'client-默认值写成折叠', file: 'lib/preferences.js',
+    judges: ['nav-persistence.test.mjs', 'store-sqlite.test.mjs'],
+    // 把默认值翻成折叠。所有「reading 里必须带 expandImages: true」的断言会一起红：
+    // 归一化后的 reading 与 DEFAULT_READING_PREFERENCES 都会变成 false。
+    // lib/preferences.js 实测 OCCURRENCES=1（`expandImages: true,`）。
+    from: '    expandImages: true,',
+    to: '    expandImages: false,' },
+  { id: 'prefs-图片偏好不校验类型', file: 'lib/preferences.js',
+    judges: ['nav-persistence.test.mjs'],
+    judgeTests: ['sanitizeViewPreferences：图片折叠偏好只判布尔，非布尔回落 true 且不带走同份记忆'],
+    // 去掉 `typeof === 'boolean'` 那道闸：字符串 / 数字被原样采用（`"yes"` 会变成一个
+    // 字符串真值、`0` 会悄悄关掉图片）。判据是**归一化后的确切值**，不是「有没有值」。
+    // lib/preferences.js 实测 OCCURRENCES=1（带上下文锚定，`expandImages:` 只此一处）。
+    from: "        expandImages: typeof readingSource['expandImages'] === 'boolean'\n            ? readingSource['expandImages']\n            : DEFAULT_READING_PREFERENCES.expandImages,",
+    to: "        expandImages: readingSource['expandImages'] ?? DEFAULT_READING_PREFERENCES.expandImages," },
+  { id: 'client-分组只认单张', file: 'lib/image-fold.js',
+    judges: ['image-fold.test.mjs'],
+    judgeTests: ['分组：连续三张图合成一组（一次展开三张，不是三组）'],
+    // 分组函数恒返回单元素组：相邻的三张图变成三组。症状是「点一次提示只放出一张」，
+    // 而提示文案「图片 3 张」与 DOM 里的图数对不上。判据在纯函数层（组数 + blockIndexes）。
+    // lib/image-fold.js 实测 OCCURRENCES=1（带上下文锚定，`continue;` + `flush();` 只此一处）。
+    from: "        if (isImageBlock(block)) {\n            indexes.push(at);\n            members.push(block);\n            continue;\n        }\n        // 任何非 img 块都是边界 —— 包括空 p。\n        flush();",
+    to: "        if (isImageBlock(block)) {\n            indexes.push(at);\n            members.push(block);\n            flush();\n            continue;\n        }\n        // 任何非 img 块都是边界 —— 包括空 p。\n        flush();" },
 ]

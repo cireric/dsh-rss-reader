@@ -67,6 +67,15 @@ export interface ReadingPreferences {
   lineWidth: number
   /** auto = 完全继承宿主主题；light/dark 只覆盖正文面那一块 */
   theme: 'auto' | 'light' | 'dark'
+  /**
+   * 正文图片默认是否展开（R6 02）。`true` = 打开文章直接渲染图片。
+   *
+   * **必填字段 + 有默认值**，与上面三项同形（不是 `ViewPreferences` 那种可选字段）：
+   * 旧配置的 `reading` 里没有这个键 ⇒ 归一化时补默认值，不许因为缺字段就回落整份记忆。
+   * 默认 `true` 是 2026-11-21 拍板的结果：本插件定位是键盘优先的阅读流，默认折叠意味着
+   * 每篇有图的文章都要先做一次展开动作；而隐私这个真正的默认责任已由 `referrerPolicy` 承担。
+   */
+  expandImages: boolean
 }
 
 /** 字号档位（px）。界面与归一化读同一份常量。 */
@@ -76,8 +85,13 @@ export const READING_FONT_SIZES: ReadonlyArray<number> = [14, 16, 18, 20]
 export const READING_LINE_WIDTHS: ReadonlyArray<number> = [640, 760, 900, 1080, 1280]
 const READING_THEMES: ReadonlyArray<ReadingPreferences['theme']> = ['auto', 'light', 'dark']
 
-/** 首版默认：沿用改动前的固定排版（16px / 760px），主题跟随宿主。 */
-export const DEFAULT_READING_PREFERENCES: ReadingPreferences = { fontSize: 16, lineWidth: 760, theme: 'auto' }
+/** 首版默认：沿用改动前的固定排版（16px / 760px），主题跟随宿主。图片默认展开（R6 02）。 */
+export const DEFAULT_READING_PREFERENCES: ReadingPreferences = {
+  fontSize: 16,
+  lineWidth: 760,
+  theme: 'auto',
+  expandImages: true,
+}
 
 /** 没有任何记忆时的值。同时是存储域 global 槽的 initial（首次 set 才落盘）。 */
 export const DEFAULT_VIEW_PREFERENCES: ViewPreferences = {
@@ -162,7 +176,7 @@ export function sanitizeViewPreferences(
   const readingSource = typeof readingRaw === 'object' && readingRaw !== null && !Array.isArray(readingRaw)
     ? (readingRaw as Record<string, unknown>)
     : {}
-  // 三个字段各自回落 —— 与上面三项同一条规则：一次坏值只该抹掉它自己。
+  // 四个字段各自回落 —— 与上面三项同一条规则：一次坏值只该抹掉它自己。
   // 档位之外的值（含 18.5、'18'、null）一律回落默认，不做四舍五入也不做夹取：编造一个用户没选过的字号，
   // 比回到默认更让人困惑。
   const reading: ReadingPreferences = {
@@ -175,6 +189,11 @@ export function sanitizeViewPreferences(
     theme: READING_THEMES.includes(readingSource['theme'] as ReadingPreferences['theme'])
       ? readingSource['theme'] as ReadingPreferences['theme']
       : DEFAULT_READING_PREFERENCES.theme,
+    // 只判布尔：`"yes"` / `1` / `null` 这些「看起来像」的值一律回落 true，不做真值转换 ——
+    // 把 `"no"` 当 false 会让一个字符串悄悄关掉图片，读者无从理解。
+    expandImages: typeof readingSource['expandImages'] === 'boolean'
+      ? readingSource['expandImages']
+      : DEFAULT_READING_PREFERENCES.expandImages,
   }
 
   // 阅读位置（R2-01）：只接受非空字符串；认不出就当「没有」，返回对象里不出现这个键。
