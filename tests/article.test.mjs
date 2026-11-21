@@ -273,8 +273,14 @@ test('容器识别不得吃掉标题：标题仍从全页取（og:title 在 head
  */
 test('抽取版本：常量必须由 article.ts 导出，且 endpoints 不得再写死数字', () => {
   assert.equal(typeof EXTRACTOR_REVISION, 'number')
-  assert.ok(EXTRACTOR_REVISION >= 4, '正文 base 用落点这一版至少是 4，实际 ' + EXTRACTOR_REVISION)
-  // 为什么是 >= 4：P1-1 改了「相对图片按哪个 URL 解析」，旧缓存里的错图 URL 只有靠版本号
+  // ⚠️ 这里是**等值断言**，不是 `>= 4`（2026-11-21 审查实测抓到的缺口）：改成 `>= 4` 之后，
+  // 把 EXTRACTOR_REVISION 退回 4（= 不抬版本，R5 的旧缓存永远不重抓）853 条测试仍然全绿。
+  // 为什么必须恰好是 5：R5 改了块形状（runs / table），旧缓存里没有这些字段；不抬版本，
+  // 读者会长期看到「有的文章有链接、有的没有」，而分界线是「你什么时候打开的它」。
+  // 这个数字**故意写死**：抬版本是一次性的、有代价的决定（旧文章重抓 + 进度重置），
+  // 不该让任何重构顺手改掉它而不被发现。真要再抬，先改这条断言并更新 CHANGELOG。
+  assert.equal(EXTRACTOR_REVISION, 5, 'R5（runs / table）必须对应修订号 5；改这里之前先想清楚旧缓存怎么办')
+  // 为什么是 >= 4 的由来：P1-1 改了「相对图片按哪个 URL 解析」，旧缓存里的错图 URL 只有靠版本号
   // 落后才会被重抓（endpoints 的缓存命中判据是 revision === EXTRACTOR_REVISION）。
   const endpoints = readFileSync(join(here, '..', 'src', 'endpoints.ts'), 'utf8')
   assert.match(endpoints, /ARTICLE_REVISION = EXTRACTOR_REVISION/, 'endpoints 必须引用抽取器导出的版本，而不是写字面量')

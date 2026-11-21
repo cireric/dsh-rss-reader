@@ -51,6 +51,24 @@ export const MUTATIONS = [
     judgeTests: ['article 端点：旧修订号的缓存被判过期 —— 回 cached:false 并重抓（不许静默给旧块）'],
     from: 'existing.article.revision === ARTICLE_REVISION',
     to: 'existing.article.revision !== ARTICLE_REVISION' },
+  // 列表项链接没进模型正文：段落能带地址、列表只剩文字（审查实测抓到的缺口）。
+  { id: 'tools-列表项链接丢失', file: 'lib/tools.js',
+    judges: ['tools.test.mjs'],
+    judgeTests: ['rss_read_article：列表项里的链接也摊成 [文字](地址)（不只是段落）'],
+    from: "const itemGroups = markdownItemRunsOf(block['itemRuns'], listItems.length);",
+    to: 'const itemGroups = undefined;' },
+  // 列表 itemRuns 长度不校验：会把一组 run 硬套到第一项上（与客户端判据分家）。
+  { id: 'tools-列表项 run 长度不校验', file: 'lib/tools.js',
+    judges: ['tools.test.mjs'],
+    judgeTests: ['rss_read_article：itemRuns 与 items 长度对不上时整份退回纯文本'],
+    from: 'if (!Array.isArray(value) || value.length !== expectedLength)',
+    to: 'if (!Array.isArray(value))' },
+  // 抽取器版本退回 4（= 不抬版本）：旧缓存永远不重抓，R5 的核心承诺落空。
+  { id: 'extract-版本不抬', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['抽取版本：常量必须由 article.ts 导出，且 endpoints 不得再写死数字'],
+    from: 'const EXTRACTOR_REVISION = 5;',
+    to: 'const EXTRACTOR_REVISION = 4;' },
   // 收敛出来的空格归「后一个 run」而不是空白自身所属的 run：链接的可点区域会比看起来宽
   // 判据见「标签外的空格不并入链接」与「标签内的空格属于链接」两条（真实站点上两种写法都存在）。
   { id: 'inline-空格并进链接', file: 'lib/article.js',

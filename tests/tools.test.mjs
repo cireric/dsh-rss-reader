@@ -569,3 +569,57 @@ test('rss_read_article：表格摊成 Markdown 表格，带 runs 的块按 runs 
   assert.ok(page.text.includes('纯文本段落'), 'strong run 的文字必须保留（模型读不了加粗，但文字不能丢）')
   assert.ok(!page.text.includes('{'), '正文里不许出现 JSON 形状的 runs 残留')
 })
+
+test('rss_read_article：列表项里的链接也摊成 [文字](地址)（不只是段落）', async () => {
+  // 审查实测抓到的缺口：段落走 runs 摊平能带地址，而列表分支只读 items（纯文本投影，不含 href），
+  // 于是同一个模型读到的段落有地址、列表没地址。列表项的链接在 itemRuns 里。
+  const { store } = freshStore('tools-list-link')
+  await store.saveFeed('https://feed.example/rss', { url: 'https://feed.example/rss', title: '探针源' })
+  const base = { feedId: 'https://feed.example/rss', title: '标题', link: 'https://feed.example/post/1', fetchedAt: '2026-11-01T00:00:00.000Z', starred: false }
+  const long = '列表项文字足够长以便通过四十字符门槛的判断，这里再加一些文字凑够长度。'
+  await store.saveItem('listlink', {
+    ...base,
+    article: {
+      fetchedAt: '2026-11-01T00:00:00.000Z',
+      revision: EXTRACTOR_REVISION,
+      blocks: [{
+        kind: 'list',
+        ordered: false,
+        items: ['详见文档。' + long],
+        itemRuns: [[
+          { kind: 'text', text: '详见' },
+          { kind: 'link', text: '文档', href: 'https://ex.test/doc' },
+          { kind: 'text', text: '。' + long },
+        ]],
+      }],
+    },
+  })
+  const read = mount({ ready: () => store, searchItems: searchStub().run }).get('rss_read_article')
+  const page = await read.execute({ itemId: 'listlink' }, exec)
+  assert.ok(page.text.includes('[文档](https://ex.test/doc)'),
+    '列表项的链接地址必须进模型正文，实际：' + page.text)
+})
+
+test('rss_read_article：itemRuns 与 items 长度对不上时整份退回纯文本', async () => {
+  // 与客户端同一条判据（要么都缺席、要么等长同序）：对不上就整份退回，不许「能对上的就渲染」，
+  // 那会让同一列表里有的行带地址、有的不带，而模型无从知道为什么。
+  const { store } = freshStore('tools-list-mismatch')
+  await store.saveFeed('https://feed.example/rss', { url: 'https://feed.example/rss', title: '探针源' })
+  const base = { feedId: 'https://feed.example/rss', title: '标题', link: 'https://feed.example/post/1', fetchedAt: '2026-11-01T00:00:00.000Z', starred: false }
+  const long = '列表项文字足够长以便通过四十字符门槛的判断，这里再加一些文字凑够长度。'
+  await store.saveItem('badlist', {
+    ...base,
+    article: {
+      fetchedAt: '2026-11-01T00:00:00.000Z',
+      revision: EXTRACTOR_REVISION,
+      blocks: [{
+        kind: 'list', ordered: false, items: ['甲' + long, '乙' + long],
+        itemRuns: [[{ kind: 'link', text: '甲', href: 'https://ex.test/a' }]],
+      }],
+    },
+  })
+  const read = mount({ ready: () => store, searchItems: searchStub().run }).get('rss_read_article')
+  const page = await read.execute({ itemId: 'badlist' }, exec)
+  assert.ok(!page.text.includes('https://ex.test/a'), '长度对不上时不许把那一组硬套到第一项上')
+  assert.match(page.text, /甲/, '内容本身仍在（退回纯文本）')
+})

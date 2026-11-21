@@ -27,7 +27,13 @@ import { blocksToText, collapseWhitespace, runsToText, safeUrl, type InlineRun }
  * re-export 而不是让调用点改 import：`endpoints.ts` 与 `tests/article.test.mjs` 都在用
  * `import { blocksToText } from './article.js'`，这一票是**行为零变化**的预重构。
  */
-export { blocksToText, collapseWhitespace, safeUrl, blockToText, tableToText, runsToText } from './article-text.js'
+// 只 re-export **真有调用点**的那一个（2026-11-21 审查清理）：`endpoints.ts` 的日志与
+// `tests/article.test.mjs` 都在用 `import { blocksToText } from './article.js'`。
+// 其余五个符号（runsToText / tableToText / blockToText / collapseWhitespace / safeUrl）曾一并
+// re-export，但**没有任何外部消费者**——本文件内部直接用 import 进来的那份，而外部消费者
+// 一律从 `article-text.js` 取。多导一份只是让「这个模块的公开面」比事实更宽，
+// 下一个人会以为它是 API 而不敢动。
+export { blocksToText } from './article-text.js'
 export type { InlineRun } from './article-text.js'
 
 /**

@@ -160,6 +160,24 @@ function markdownRunsOf(value: unknown): string | undefined {
 }
 
 /**
+ * 列表的 `itemRuns`（wire 形状）→ 每个条目的 Markdown 摊平结果；认不出或长度对不上就返回 undefined。
+ *
+ * 长度判据与客户端 `itemRunGroupsOf` 同一条：**要么都缺席、要么与 `items` 等长同序**。
+ * 对不上时整份退回纯文本条目——混排会让模型看到「同一列表里有的行带地址、有的不带」，
+ * 而它无从知道为什么。
+ */
+function markdownItemRunsOf(value: unknown, expectedLength: number): string[] | undefined {
+  if (!Array.isArray(value) || value.length !== expectedLength) return undefined
+  const parts: string[] = []
+  for (const entry of value) {
+    const rendered = markdownRunsOf(entry)
+    if (rendered === undefined) return undefined
+    parts.push(rendered)
+  }
+  return parts
+}
+
+/**
  * 表格块 → **Markdown 表格**（`| a | b |` + 分隔行）。
  *
  * 为什么不能像纯文本投影那样只按行拼空格：模型读 Markdown，行列关系是这张表存在的全部意义 ——
@@ -221,7 +239,14 @@ function blocksToMarkdown(
     const kind = block.kind
     if (kind === 'list') {
       const listItems = Array.isArray(block.items) ? block.items.map(item => String(item)) : []
-      lines.push(listItems.map((item, index) => (block.ordered === true ? index + 1 + '. ' : '- ') + item).join('\n'))
+      // 列表项的链接在 `itemRuns` 里，不在 `items` 里（`items` 是纯文本投影，按 ADR-0007 不含 href）。
+      // 段落走 textOf 能把链接摊成 `[文字](href)`，列表若不看 itemRuns 就只剩文字——同一个模型
+      // 读到的段落有地址、列表没地址，没有道理。长度对不上时整份退回 items（与客户端同一判据）。
+      const itemGroups = markdownItemRunsOf(block['itemRuns'], listItems.length)
+      lines.push(listItems.map((item, index) => {
+        const body = itemGroups?.[index] === undefined ? item : itemGroups[index]
+        return (block.ordered === true ? index + 1 + '. ' : '- ') + body
+      }).join('\n'))
       continue
     }
     if (kind === 'img') {
