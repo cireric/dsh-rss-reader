@@ -325,3 +325,218 @@ test('正文 base 用重定向落点 finalUrl：相对图片按落点解析，�
   assert.equal(image.src, 'https://final.example/new/img/a.png',
     '相对 img src 必须按 finalUrl 解析：按请求 URL 会指向 origin.example/old/img/a.png（裂图）')
 })
+
+/**
+ * —— 内联语义（R5 02）——
+ *
+ * 为什么这一族值得单独一组：抽取层过去把 `<a>` / `<strong>` / `<em>` / `<code>` 一律当
+ * 「未知标签只留文本」，读者拿到的是删减过的文章。而 `text` 由 `runs` 派生之后，
+ * 「显示有链接、搜不到那个词」这类不一致从结构上就躲不掉了 —— 下面第 6、7 条就是钉这件事的。
+ */
+
+/**
+ * 够长到能过 40 字门槛的填充，避免每条夹具都要自己凑长度。
+ *
+ * ⚠️ 长度必须**明显**超过 40：夹具前缀（如「详见」+「官方文档」+「。」= 7 字）会加上去，
+ * 31 字的填充配 7 字前缀恰好 38 字，会把整条用例推进「段落被门槛丢掉」的分支里。
+ */
+const PAD = '这是一段足够长的正文内容，用来让段落跨过四十个字符的门槛判断，再多写一点。'
+/** 抽出正文里第一个段落块（夹具都只有一个正文段）。 */
+const firstP = (html, base = BASE) => extractArticle(html, base).blocks.find((block) => block.kind === 'p')
+
+test('内联：链接两侧是汉字时 text 无标签间隙，且 link run 带绝对地址', () => {
+  const block = firstP('<article><p>详见<a href="https://ex.test/doc">官方文档</a>。' + PAD + '</p></article>')
+  assert.ok(block !== undefined, '段落块必须抽出来')
+  // 这条正是 htmlToText 会插空格的形态（"详见 官方文档 。"）；runs 派生之后必须无空格。
+  assert.equal(block.text, '详见官方文档。' + PAD, 'text 不许有标签间隙')
+  const link = block.runs.find((run) => run.kind === 'link')
+  assert.ok(link !== undefined, '链接必须成为 link run')
+  assert.equal(link.text, '官方文档')
+  assert.equal(link.href, 'https://ex.test/doc', '绝对地址原样保留')
+})
+
+test('内联：相对链接按 baseUrl 解析成绝对地址', () => {
+  const block = firstP('<article><p>详见<a href="/doc/x">文档</a>。' + PAD + '</p></article>', 'https://ex.test/post/a')
+  const link = block.runs.find((run) => run.kind === 'link')
+  assert.ok(link !== undefined)
+  assert.equal(link.href, 'https://ex.test/doc/x', '/doc/x 是站点根相对，按 baseUrl 解析')
+})
+
+test('内联：javascript: / data: / mailto: 退化成纯文本，不产生可点链接', () => {
+  // ⚠️ data: 的样本里不许出现裸 `<`：标签扫描器按「第一个 >」闭合，`data:text/html,<b>` 会把
+  // 标签提前切断（既有限制，与本项无关）。用不含尖括号的 data URI 验同一条判据。
+  for (const href of ['javascript:alert(1)', 'data:image/gif;base64,R0lGODlhAQABAAAAACw=', 'mailto:a@b.c']) {
+    const block = firstP('<article><p>详见<a href="' + href + '">文档</a>。' + PAD + '</p></article>')
+    assert.equal(block.runs, undefined, href + ' 不该产生任何 link run（整段没有内联语义）')
+    assert.equal(block.text, '详见文档。' + PAD, href + ' 的链接文字必须留下（只丢可点性）')
+  }
+})
+
+test('内联：加粗 / 斜体 / 行内代码各成对应 run', () => {
+  const block = firstP('<article><p>这是<b>加粗</b>与<i>斜体</i>与<code>npm i</code>。' + PAD + '</p></article>')
+  const kinds = block.runs.map((run) => run.kind)
+  assert.deepEqual(kinds, ['text', 'strong', 'text', 'em', 'text', 'code', 'text'])
+  assert.equal(block.runs[1].text, '加粗')
+  assert.equal(block.runs[3].text, '斜体')
+  assert.equal(block.runs[5].text, 'npm i')
+})
+
+test('内联：嵌套 <strong><em>x</em></strong> 取最外层语义，只有一个 run', () => {
+  const block = firstP('<article><p>这是<strong><em>x</em></strong>。' + PAD + '</p></article>')
+  const inner = block.runs.filter((run) => run.kind !== 'text')
+  assert.equal(inner.length, 1, '嵌套只产出一个语义 run，不假装支持两层')
+  assert.equal(inner[0].kind, 'strong', '取最外层（strong），内层 em 丢失')
+  assert.equal(inner[0].text, 'x')
+  assert.equal(block.text, '这是x。' + PAD)
+})
+
+test('内联：未知标签只留文本，不产生新 run 类型', () => {
+  const block = firstP('<article><p>这是<mark>高亮</mark>与<span class="x">span</span>。' + PAD + '</p></article>')
+  assert.equal(block.runs, undefined, 'mark / span 不产生任何语义 run')
+  assert.equal(block.text, '这是高亮与span。' + PAD, '文本一字不少')
+})
+
+test('内联：相邻同类 run 合并（否则 run 数等于标签数，结构上限形同虚设）', () => {
+  const block = firstP('<article><p>这是<b>甲</b><b>乙</b>。' + PAD + '</p></article>')
+  const strong = block.runs.filter((run) => run.kind === 'strong')
+  assert.equal(strong.length, 1, '<b>甲</b><b>乙</b> 必须合并成一个 strong run')
+  assert.equal(strong[0].text, '甲乙')
+})
+
+test('不变量：runs 拼接严格等于 text（含行内标签两侧是汉字的形态）', () => {
+  const fixtures = [
+    '<p>详见<a href="https://ex.test/d">官方文档</a>。' + PAD + '</p>',
+    '<p>这是<b>加粗</b>与<i>斜体</i>与<code>码</code>。' + PAD + '</p>',
+    '<p>  前后都有空白  <b> 中间也是  </b>  收尾  ' + PAD + '</p>',
+    '<p><b>a</b><b>b</b>与<a href="/x">链接</a>' + PAD + '</p>',
+  ]
+  for (const html of fixtures) {
+    const block = firstP('<article>' + html + '</article>')
+    assert.ok(block !== undefined)
+    if (block.runs === undefined) continue
+    assert.equal(
+      block.runs.map((run) => run.text).join(''),
+      block.text,
+      '严格相等（不是「归一化后相等」）：' + html.slice(0, 40),
+    )
+  }
+})
+
+test('归一化先于切 run：text 必须无换行、无连续空白（严格相等是自证的，这条才钉得住顺序）', () => {
+  // ⚠️ 为什么需要这条：`runs.map(r=>r.text).join('') === text` 在「text 由 runs 派生」之后是
+  // **自证**的——只要 text 是从 runs 算出来的，它永远成立，抓不到「归一化放错位置」。
+  // 真正钉住顺序的是**字面期望值**：源 HTML 里的缩进与连续空白必须已经被收敛。
+  const long = '这是一段足够长的正文内容用来确认这一段不会被四十字符门槛丢掉再多写一点点。'
+  const block = firstP('<article><p>  前置空白  <b> 中间  </b>  收尾  ' + long + '</p></article>')
+  assert.ok(block !== undefined)
+  assert.equal(
+    block.text,
+    '前置空白 中间 收尾 ' + long,
+    '连续空白收敛成单空格、首尾 trim；若归一化放到切 run 之后，这里会留着原始缩进',
+  )
+  assert.ok(!/\s{2}/.test(block.text), 'text 里不许有连续空白')
+  assert.ok(!/\n/.test(block.text), 'text 里不许有换行（块内折行是块边界，不是文本内容）')
+  // run 文本也必须是归一化后的形态（不能只有 text 干净、runs 脏）
+  for (const run of block.runs ?? []) {
+    assert.equal(run.text, run.text.replace(/\s+/g, ' ').trim() === '' ? run.text : run.text)
+    assert.ok(!/\s{2}/.test(run.text), 'run 文本里不许有连续空白：' + JSON.stringify(run.text))
+  }
+})
+
+test('不变量：纯文本段落不产出 runs（否则磁盘占用平白翻倍）', () => {
+  const block = firstP('<article><p>' + PAD + PAD + '</p></article>')
+  assert.ok(block !== undefined, '前提：段落必须过 40 字门槛')
+  assert.equal(block.runs, undefined, '没有内联语义的段落不许塞一个 text run')
+})
+
+test('内联：run 数不超过块级内联标签数 + 1（每字符一个 <b> 也不许爆炸）', () => {
+  // 极端夹具：38 个汉字，每个字各包一个 <b> —— 若实现不合并，会得到 38 个 run
+  const chars = '一二三四五六七八九十甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥甲乙丙丁戊己'
+  const html = '<article><p>' + [...chars].map((char) => '<b>' + char + '</b>').join('') + PAD + '</p></article>'
+  const block = firstP(html)
+  assert.ok(block.runs !== undefined)
+  assert.equal(block.runs.filter((run) => run.kind === 'strong').length, 1, '相邻同类 run 必须合并成一个')
+  assert.ok(block.runs.length <= 3, 'run 数必须远小于标签数，实际 ' + block.runs.length)
+})
+
+test('内联：<br> 仍切块（两个段落块），<br> 本身不产生 run', () => {
+  const first = '第一段文字内容足够长以便通过四十字符门槛的判断与观察验证。'.repeat(2)
+  const second = '第二段文字内容同样足够长以便通过门槛的判断与观察验证确认。'.repeat(2)
+  const blocks = extractArticle('<article><p>' + first + '<br>' + second + '</p></article>', BASE).blocks
+  assert.equal(blocks.length, 2, '<br> 是块分隔，不是 run')
+  assert.deepEqual(blocks.map((block) => block.text), [first, second])
+})
+
+test('内联：p 内部的裸换行也切块（与 <br> 同一行为，保持既有语义）', () => {
+  const first = '第一段文字内容足够长以便通过四十字符门槛的判断与观察验证。'.repeat(2)
+  const blocks = extractArticle('<article><p>' + first + '\n' + first + '</p></article>', BASE).blocks
+  assert.equal(blocks.length, 2, '源 HTML 折行仍是块边界（既有行为，不许被归一化吃掉）')
+})
+
+test('内联：占位符不许进 items / itemRuns（<li> 里嵌 <pre>）', () => {
+  const long = '列表项文字足够长以便通过四十字符门槛的判断，这里再加一些文字凑够长度。'
+  const blocks = extractArticle(
+    '<article><ul><li>' + long + '<pre>code()</pre></li><li>' + long + '</li></ul><p>' + PAD.repeat(3) + '</p></article>',
+    BASE,
+  ).blocks
+  const list = blocks.find((block) => block.kind === 'list')
+  assert.ok(list !== undefined, '列表块必须保留')
+  for (const item of list.items) assert.ok(!item.includes('\u0000'), 'items 里不许出现内部占位符：' + JSON.stringify(item))
+  for (const runs of list.itemRuns ?? []) {
+    for (const run of runs) assert.ok(!run.text.includes('\u0000'), 'run 文本里不许出现内部占位符')
+  }
+})
+
+test('内联：列表项里的链接进 itemRuns，且与 items 等长同序', () => {
+  const long = '列表项文字足够长以便通过四十字符门槛的判断，这里再加一些文字凑够长度。'
+  const blocks = extractArticle(
+    '<article><ul><li>详见<a href="/d">文档</a>。' + long + '</li><li>' + long + '</li></ul><p>' + PAD.repeat(3) + '</p></article>',
+    BASE,
+  ).blocks
+  const list = blocks.find((block) => block.kind === 'list')
+  assert.ok(list !== undefined)
+  assert.ok(list.itemRuns !== undefined, '有链接的列表必须产出 itemRuns')
+  assert.equal(list.itemRuns.length, list.items.length, 'itemRuns 与 items 等长')
+  assert.equal(list.itemRuns[0].map((run) => run.text).join(''), list.items[0], '逐项严格相等')
+  assert.equal(list.itemRuns[1].map((run) => run.text).join(''), list.items[1], '逐项严格相等（纯文本项也一样）')
+  const link = list.itemRuns[0].find((run) => run.kind === 'link')
+  assert.ok(link !== undefined)
+  assert.equal(link.href, 'https://ex.test/d')
+})
+
+test('内联：标题与引用也带 runs', () => {
+  const heading = extractArticle('<article><h2>这是<b>标题</b>里的加粗</h2><p>' + PAD.repeat(2) + '</p></article>', BASE)
+    .blocks.find((block) => block.kind === 'h')
+  assert.ok(heading !== undefined)
+  assert.equal(heading.text, '这是标题里的加粗')
+  assert.equal(heading.runs.find((run) => run.kind === 'strong')?.text, '标题')
+
+  const quote = extractArticle('<article><blockquote>引用里的<a href="/q">链接</a></blockquote><p>' + PAD.repeat(2) + '</p></article>', BASE)
+    .blocks.find((block) => block.kind === 'quote')
+  assert.ok(quote !== undefined)
+  assert.equal(quote.text, '引用里的链接')
+  assert.equal(quote.runs.find((run) => run.kind === 'link')?.href, 'https://ex.test/q')
+})
+
+test('门槛判可见字符数：38 个汉字 + 6 个 <b> 的段落被丢弃，再加 3 个字被保留', () => {
+  const base = '一二三四五六七八九十甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥甲乙丙丁戊己'
+  assert.equal(base.length, 38, '夹具前提：38 个汉字')
+  // 每 6 个字插一对 <b>，共 6 对 —— 旧实现 htmlToText 会数出 50 字（保留），实际只有 38 字可读
+  const marked = (chars) => {
+    const pairs = [0, 6, 12, 18, 24, 30]
+    let html = ''
+    for (const at of pairs) html += chars.slice(at, at + 3) + '<b>' + chars.slice(at + 3, at + 6) + '</b>'
+    return html + chars.slice(36)
+  }
+  const dropped = extractArticle('<article><p>' + marked(base) + '</p></article>', BASE).blocks
+  assert.equal(dropped.length, 0, '38 个可见字符低于 40 字门槛，必须丢弃（不许用插了空格的假长度凑数）')
+  const kept = extractArticle('<article><p>' + marked(base + '甲乙丙') + '</p></article>', BASE).blocks
+  assert.equal(kept.length, 1, '41 个可见字符应当保留')
+  assert.equal(kept[0].text.length, 41)
+})
+
+test('搜索顺带修好：句子边界的词从搜不到变成搜得到', () => {
+  // 旧实现把 "详见<a>官方文档</a>。" 变成 "详见 官方文档 。"，于是「详见官方文档」这个连续串搜不到。
+  const block = firstP('<article><p>详见<a href="https://ex.test/d">官方文档</a>。' + PAD + '</p></article>')
+  assert.ok(block.text.includes('详见官方文档'), '连续串必须可被搜索命中（旧实现是 "详见 官方文档 。"）')
+})

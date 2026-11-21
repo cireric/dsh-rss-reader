@@ -17,6 +17,47 @@ export const MUTATIONS = [
     judgeTests: ['条目链接只放行 http/https：javascript: / data: / file: / mailto: 归一成空串，相对与合法链接不变'],
     from: "return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : '';",
     to: "return url.toString();" },
+  // —— 内联语义（R5 02）——
+  // 链接白名单在**抽取期**失效：javascript: 会变成可点的 link run（渲染期还有第二道，但抽取期
+  // 这道是「不产生可点数据」的源头）。锚在 article-text.js：safeUrl 已从 article.ts 搬走。
+  { id: 'inline-链接不走白名单', file: 'lib/article-text.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['内联：javascript: / data: / mailto: 退化成纯文本，不产生可点链接'],
+    from: "return resolved.protocol === 'http:' || resolved.protocol === 'https:' ? resolved.toString() : undefined;",
+    to: "return resolved.toString();" },
+  // text 仍走 htmlToText：带 runs 的块会出现「显示有链接、搜不到那个词」。这是本项最重要的
+  // 那条变异——它守护的正是「text 由 runs 派生」这条决定（ADR-0007）。
+  { id: 'inline-text 仍走 htmlToText', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['不变量：runs 拼接严格等于 text（含行内标签两侧是汉字的形态）'],
+    from: '实际只有 38 字可读（应丢弃）。\n                const text = runsToText(runs);',
+    to: '实际只有 38 字可读（应丢弃）。\n                const text = htmlToText(line);' },
+  // 相邻同类 run 不合并：run 数会等于标签数，结构上限与体积守卫一起失效。
+  { id: 'inline-相邻同类 run 不合并', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['内联：相邻同类 run 合并（否则 run 数等于标签数，结构上限形同虚设）'],
+    from: 'if (last !== undefined && sameRunKind(last, source)) {',
+    to: 'if (false) {' },
+  // 占位符当普通文本：<li> 里嵌 <pre> 时内部占位符会进 items（既存缺陷回归）。
+  { id: 'inline-占位符当普通文本', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['内联：占位符不许进 items / itemRuns（<li> 里嵌 <pre>）'],
+    from: 'const BLOCK_SEPARATORS = /<br\\s*\\/?>|\\u0000B\\d+\\u0000/gi;',
+    to: 'const BLOCK_SEPARATORS = /<br\\s*\\/?>/gi;' },
+  // 门槛用假长度：38 个汉字嵌 6 个 <b> 的段落会被 htmlToText 数成 50 字而保留。
+  { id: 'extract-门槛用假长度', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['门槛判可见字符数：38 个汉字 + 6 个 <b> 的段落被丢弃，再加 3 个字被保留'],
+    from: '实际只有 38 字可读（应丢弃）。\n                const text = runsToText(runs);\n                if (text.length >= MIN_CONTENT_CHARS)',
+    to: '实际只有 38 字可读（应丢弃）。\n                const text = htmlToText(line);\n                if (collapseWhitespace(htmlToText(line)).length >= MIN_CONTENT_CHARS)' },
+  // 归一化放到切 run 之后：run 文本带原始换行缩进，严格相等当场破。
+  { id: 'inline-归一化放到切 run 之后', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    // 判据必须是**字面期望值**那条：`runs.join === text` 在「text 由 runs 派生」之后是自证的，
+    // 抓不到归一化放错位置（实测：只挂那条时本变异幸存）。
+    judgeTests: ['归一化先于切 run：text 必须无换行、无连续空白（严格相等是自证的，这条才钉得住顺序）'],
+    from: 'const normalized = normalizeRuns(raw);',
+    to: 'const normalized = raw;' },
   // 正文 base 回落到请求 URL：301 换路径后相对图片会解析到旧地址（P1-1 的病象）。
   { id: 'article-正文base回落到请求URL', file: 'lib/article.js',
     judges: ['article.test.mjs'],
