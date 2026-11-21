@@ -12,7 +12,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { groupImageBlocks, shouldRenderImage, foldOf } from '../lib/image-fold.js'
+import { groupImageBlocks, shouldRenderImage, foldOf, baselineExpandedOf } from '../lib/image-fold.js'
 
 /** 造一个 img 块（wire 形状：`kind` + `src`，与抽取层产出的块同形）。 */
 const img = (src) => ({ kind: 'img', src, alt: src.toUpperCase() })
@@ -133,6 +133,40 @@ for (const [preference, articleOverride, groupOverrides, groupIndex, expected, w
 test('折叠判定：组覆盖为空集合与「没有覆盖」等价（默认参数不该改变语义）', () => {
   assert.equal(shouldRenderImage(false, undefined, new Set(), 0), false)
   assert.equal(shouldRenderImage(true, undefined, new Set(), 0), true)
+})
+
+// ── 基线只有一个裁决者（ADR-0001） ─────────────────────────────────────────
+
+/**
+ * 「基线 = 篇级覆盖 ?? 偏好」这半条判据此前有**两份**实现：本文件的 `shouldRenderImage`
+ * 与 `src/client/keyboard-routing.ts` 的 `i` 键（它要翻基线）。两份实现当下算得一样，
+ * 所以没有任何用例会红 —— 直到将来加一层覆盖（例如「按源记忆」），两处静默分家，
+ * 症状是「按 i 翻的方向和渲染读到的基线不一样」。
+ *
+ * `docs/adr/0001-criterion-has-one-judge.md` 的裁决是：一条判断只该有一个裁决者。
+ * 所以把它抽成导出纯函数 `baselineExpandedOf`，`shouldRenderImage` 与 `i` 键都调它。
+ * 这条用例直接钉住它的语义（期望值写死，不由公式推）。
+ */
+test('基线：篇级覆盖 ?? 偏好（undefined 才落到偏好，false 是真值不回落）', () => {
+  assert.equal(baselineExpandedOf(true, undefined), true, '没有篇级覆盖 ⇒ 用偏好（展开）')
+  assert.equal(baselineExpandedOf(false, undefined), false, '没有篇级覆盖 ⇒ 用偏好（折叠）')
+  assert.equal(baselineExpandedOf(false, true), true, '篇级覆盖 true 压过折叠偏好')
+  assert.equal(baselineExpandedOf(true, false), false, '篇级覆盖 false 压过展开偏好 —— false 是真值，不许当「没设」回落')
+})
+
+test('基线：shouldRenderImage 的「组未命中」分支就是 baselineExpandedOf（一处实现）', () => {
+  // 这条守「一处实现」本身：把基线重算一遍（而不是调同一个函数）时，两份会在
+  // 未来加层的那一刻分家，而上面那条真值表只会绿 —— 它测的是同一个算式的两种写法。
+  for (const [preference, articleOverride, groupOverrides, groupIndex, expected] of TRUTH_TABLE) {
+    // 只有「组覆盖没命中」的那些格子才该等于基线；命中的由组级优先接管。
+    if (groupOverrides.has(groupIndex)) continue
+    assert.equal(
+      shouldRenderImage(preference, articleOverride, groupOverrides, groupIndex),
+      baselineExpandedOf(preference, articleOverride),
+      '组未命中时 shouldRenderImage 必须等于 baselineExpandedOf：偏好=' + preference
+        + ' 篇=' + String(articleOverride) + '（期望 ' + expected + '）',
+    )
+  }
 })
 
 // ── 唯一裁决点（spec 决策 6：foldOf 与 shouldRenderImage 是同一处裁决者） ─────

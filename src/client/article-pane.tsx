@@ -998,9 +998,13 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
              * `reading.expandImages === true`，否则「提示说折叠、DOM 里有 img」迟早发生。
              */
             const group = groupOfBlock.get(index)
-            if (group === undefined) return <ArticleBlockView key={blockKeyOf(index)} block={block} onOpenImage={onOpenImage} />
-            const renderImage = fold.shouldRender(group.index)
-            if (renderImage) return <ArticleBlockView key={blockKeyOf(index)} block={block} onOpenImage={onOpenImage} />
+            // 「不是图片块」与「这一组该渲染」画出**同一样东西**，所以合并成一个分支：
+            // 分开写时两处 JSX 必须逐字同步，将来给 ArticleBlockView 加一个 prop 只改一处，
+            // 症状是「有的块带 onOpenImage、有的不带」——灯箱入口时灵时不灵，极难看出来。
+            // 语义没变：组覆盖 / 篇覆盖 / 偏好的裁决仍然只在 `fold.shouldRender` 那一处（决策 5）。
+            if (group === undefined || fold.shouldRender(group.index)) {
+              return <ArticleBlockView key={blockKeyOf(index)} block={block} onOpenImage={onOpenImage} />
+            }
             // 折叠：只在组首块画提示，其余成员整块不渲染（组是原子的）
             if (group.blockIndexes[0] !== index) return null
             return <ImageFoldHint key={blockKeyOf(index)} group={group} onExpand={onExpandImageGroup} />

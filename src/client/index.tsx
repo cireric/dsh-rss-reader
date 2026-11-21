@@ -495,9 +495,20 @@ export function createReader(store: ReaderStore): () => ReactNode {
       // `imagesExpanded ?? 偏好`，`routeKey` 要读它。漏了它，第二次按 `i` 仍读到注册那一刻的
       // `undefined` ⇒ 又写一次「展开」，图片收不起来 —— 正是「同一行连按两次 o」的同族事故。
       // 判据落在 tests/scroll-dom.test.mjs 的「i 键切换整篇图片…（依赖数组没漏）」。
-      // `expandedGroups` 也要在：它只被写、不被读，但它是 `i` 清空的对象 —— 依赖它保证
-      // 监听器手里那份 state 与最新一次渲染同步（复位 effect 改它之后不重新注册，
-      // 就会出现「按 i 用的是上一轮的空集」这种看着无碍、实则难查的偏差）。
+      //
+      // `expandedGroups` 是唯一一个**只写不读**的依赖（`routeKey` 里 `grep ctx.expandedGroups`
+      // 零命中：`i` 只调 `ctx.setExpandedGroups`，从不读它），所以它严格来说不必在数组里。
+      // 保留它是个**取舍**，理由如实写在这里，免得下一个人以为是漏看：
+      //   · 拿掉它实测全绿（scroll-dom 147 + keyboard-routing 24 条），行为确实不变 ——
+      //     因为写入路径是 `setExpandedGroups(EMPTY_IMAGE_GROUPS)`（常量，不依赖旧值）。
+      //   · 但它是**本 effect 依赖数组尾部**那三行变异（`client-helpOpen 不进依赖数组` /
+      //     `client-i 的状态不在依赖数组里` / `client-灯箱态不在依赖数组里`）的锚点上下文。
+      //     拿掉它要给三条变异一起重锚，而这些变异守的是别人的判据（helpOpen / imagesExpanded
+      //     / lightboxSrc），与 `expandedGroups` 无关 —— 为一次零收益的重构去动三条门槛条目，
+      //     风险大于收益。
+      //   · 将来若真有一处要**读** `expandedGroups`（例如「按 i 后回到上一次点开的组」），
+      //     它已经在数组里，不会重演「闭包捕获旧值」那一族事故（pitfalls §3.1）。
+      // 换句话说：留着是**有意的保守**，不是忘了删。真要删，请把上面三条变异的重锚一起做。
       //
       // `lightboxSrc`（R6 07）**必须**在依赖里，而且理由与 `expanded` 完全同源：`back` 要**读**
       // 它判断「这一下 Esc 是关灯箱还是关文章」。漏了它，`Esc` 读到的永远是注册那一刻的

@@ -398,14 +398,28 @@ function makeImageCtx({ view = 'article', imagesExpanded, expandedGroups = new S
 }
 
 test('R6 04：正文页按 i 写篇级覆盖并清空组覆盖（翻基线 ⇒ 全篇统一）', { skip }, () => {
-  // 偏好是展开、没有篇级覆盖 ⇒ 基线 = true ⇒ 写成 false（折叠整篇）
-  const h = makeImageCtx({ imagesExpanded: undefined, expandImages: true })
+  // 偏好是展开、没有篇级覆盖 ⇒ 基线 = true ⇒ 写成 false（折叠整篇）。
+  //
+  // 组覆盖给一个**非空**集合：只有非空才区分得开「换成新对象」与「原地 clear()」——
+  // 空集合被原地 clear() 之后仍然是空集合，两种实现看不出差别（本条第一版就是这样，
+  // 断言 `notEqual(groupCalls[0], undefined)` 恒真，钉不到任何东西）。
+  const opened = new Set([0, 1])
+  const h = makeImageCtx({ imagesExpanded: undefined, expandImages: true, expandedGroups: opened })
   routeKeyOf('i', h)
   assert.deepEqual(h.imageCalls, [false], '基线（偏好 true）取反 ⇒ 写 false')
   assert.deepEqual(h.groupCalls, [new Set()], '同时清空组覆盖，否则读者点过的那组会逆着 i 留在展开态')
-  // 必须是新对象（或同一个空常量），不能原地 clear()：原地改会让 foldOf 的快照与 React 的
-  // 相等判断同时失灵（03 的注释已写明）。
-  assert.notEqual(h.groupCalls[0], undefined)
+
+  // 判据：**不原地 clear**。`foldOf` 对组覆盖取快照，React 也靠引用判断变化 ——
+  // 原地改会让两边同时失灵：快照里仍留着点开的组，而 React 认为 state 没变、不重渲染。
+  // 所以要求两件事同时成立：
+  //  ① 传出去的新值与旧值**不是同一个引用**；
+  //  ② 旧那个 Set **没被改动**（size 与成员都还在）。
+  // ⚠️ 不能写成「新值必须是新对象」：`EMPTY_IMAGE_GROUPS` 是模块级常量，`i` 直接把那个常量
+  // 传出去是**正确**实现（它本来就是空的、且不可变）—— 那样写会把正确实现判成不合格。
+  const cleared = h.groupCalls[0]
+  assert.notEqual(cleared, opened, '清空组覆盖必须换一个新值，不许原地 clear() 同一个 Set')
+  assert.ok(cleared instanceof Set && cleared.size === 0, '清空组覆盖：结果必须是空集')
+  assert.deepEqual([...opened], [0, 1], '旧的 Set 必须原封不动（原地 clear() 会让 foldOf 的快照与 React 的相等判断同时失灵）')
 })
 
 test('R6 04：i 翻的是基线（篇级覆盖 ?? 偏好），不是「当前是否全部展开」', { skip }, () => {

@@ -48,6 +48,34 @@ host 侧 `lib/*.js` 没有这种守护，旧产物会静默通过）。
 **为什么比幸存更隐蔽**：幸存至少说明这条变异跑了，未应用等于**这条根本没跑**。
 **修法**：先 `grep` 产物的真实形状，再写 `from`。本次实测踩到两条。
 
+### 1.4b 客户端 bundle **内联**了一份 `src/preferences.ts`（不是 import）
+
+**病象**（`实测`，2026-11-21 R6 评审修复轮）：给 `client-默认值写成折叠`（`file: 'lib/preferences.js'`）
+补上 `scroll-dom.test.mjs` 当 judge，期望「把默认值翻成折叠 ⇒ 验收 1 的 DOM 用例翻红」。
+结果门槛报 **survived**，而单独把 `lib/client.js` 里那份改成 false，同一条 DOM 用例**当场红**。
+
+**根因**：两层叠加。
+1. `lib/client.js` 是 tsdown 的单文件产物，它把 `src/preferences.ts` **整份内联**了
+   （`//#region src/preferences.ts`，默认值在 `const DEFAULT_READING_PREFERENCES` 里）。
+   `lib/preferences.js` 是 tsc 的另一份产物，**客户端根本不 import 它** ⇒ 改它碰不到 DOM 用例
+   跑的代码。同一个源码默认值因此有**两个产物副本、两套字节**（tsc 用 4 空格 + 尾逗号
+   `    expandImages: true,`；tsdown 用 3 个 tab + **无尾逗号** `\t\t\texpandImages: true\n`）。
+2. `judgeTests` 的 pattern 会作用到**所有** judge 文件（`suite.mjs` 把 patterns 拼进同一条
+   `node --test` 命令）⇒ 给这条加了只存在于 scroll-dom 的测试名之后，nav-persistence /
+   store-sqlite 里一条都匹配不上（详见 §2.14），host 侧反而**失去守门人**。
+   实测：加进去之后套件从 5 条红变成 0 条红，变异直接幸存 —— **修判据缺口的动作把判据删了**。
+
+**修法**：一个源码默认值 = 两条变异，各守自己那份产物，`judges` / `judgeTests` **不许混**：
+- `client-默认值写成折叠` → `lib/preferences.js`，judges 只留 host 侧的
+  `nav-persistence.test.mjs` / `store-sqlite.test.mjs`；
+- `client-默认值写成折叠（bundle 副本）` → `lib/client.js`，judges 只留 `scroll-dom.test.mjs`，
+  judgeTests 指向验收 1 那条用例。
+
+**一般规则**：凡 `src/` 里被**客户端**消费的模块（`preferences.ts` / `image-fold.ts` /
+`list-scroll.ts` / `shared.ts` …），`lib/<name>.js` 与 `lib/client.js` 里各有一份产物。
+变异要打在**跑判据的那一份**上：DOM / bundle 判据读 `lib/client.js`，host 判据读 `lib/*.js`。
+写变异前先问一句「这条判据跑的是哪份产物」，再看那份的字节形状。
+
 ### 1.5 改文件前必须用 read 读过它
 
 批量改写要用**锚点唯一**的替换，别用会跨段吞噬的惰性正则 ——
