@@ -165,22 +165,78 @@ test('sanitizeViewPreferences：正文排版逐字段归一，档位外的值一
     for (const lineWidth of READING_LINE_WIDTHS) {
       assert.deepEqual(
         sanitizeViewPreferences({ reading: { fontSize, lineWidth, theme: 'dark' } }).reading,
-        { fontSize, lineWidth, theme: 'dark' },
+        { fontSize, lineWidth, theme: 'dark', expandImages: true },
         '档位必须原样通过：' + fontSize + 'px / ' + lineWidth + 'px')
     }
   }
   // 一个字段坏掉只带走它自己 —— 与上面三项同一条规则
   const cases = [
-    [{ fontSize: 18.5, lineWidth: 640, theme: 'light' }, { fontSize: 16, lineWidth: 640, theme: 'light' }],
-    [{ fontSize: '18', lineWidth: 640, theme: 'light' }, { fontSize: 16, lineWidth: 640, theme: 'light' }],
-    [{ fontSize: 18, lineWidth: 100, theme: 'light' }, { fontSize: 18, lineWidth: 760, theme: 'light' }],
-    [{ fontSize: 18, lineWidth: 640, theme: 'sepia' }, { fontSize: 18, lineWidth: 640, theme: 'auto' }],
+    [{ fontSize: 18.5, lineWidth: 640, theme: 'light' }, { fontSize: 16, lineWidth: 640, theme: 'light', expandImages: true }],
+    [{ fontSize: '18', lineWidth: 640, theme: 'light' }, { fontSize: 16, lineWidth: 640, theme: 'light', expandImages: true }],
+    [{ fontSize: 18, lineWidth: 100, theme: 'light' }, { fontSize: 18, lineWidth: 760, theme: 'light', expandImages: true }],
+    [{ fontSize: 18, lineWidth: 640, theme: 'sepia' }, { fontSize: 18, lineWidth: 640, theme: 'auto', expandImages: true }],
     [null, DEFAULT_READING_PREFERENCES],
     [{}, DEFAULT_READING_PREFERENCES],
   ]
   for (const [raw, expected] of cases) {
     assert.deepEqual(sanitizeViewPreferences({ reading: raw }).reading, expected, 'raw = ' + JSON.stringify(raw))
   }
+})
+
+test('sanitizeViewPreferences：图片折叠偏好只判布尔，非布尔回落 true 且不带走同份记忆', () => {
+  // R6 02 / spec 验收 13。`expandImages` 的语义是「默认是否展开图片」，默认 true。
+  // 判据刻意是**只判布尔**：`"yes"` / `1` / `null` 这些「看起来像」的值一律回落 true，
+  // 不做真值转换 —— 把 `"no"` 当 false 会让一个字符串悄悄关掉图片，读者完全无从理解。
+  const bad = ['yes', 'no', '', 0, 1, null, undefined, [], {}, NaN]
+  for (const value of bad) {
+    assert.deepEqual(
+      sanitizeViewPreferences({ reading: { expandImages: value } }).reading.expandImages,
+      true,
+      '非布尔必须回落 true：' + JSON.stringify(value),
+    )
+  }
+  // 合法布尔原样通过（两个方向都要测：只测 false 会让「恒返回 true」的实现假绿）
+  assert.equal(sanitizeViewPreferences({ reading: { expandImages: false } }).reading.expandImages, false)
+  assert.equal(sanitizeViewPreferences({ reading: { expandImages: true } }).reading.expandImages, true)
+
+  // 关键：坏值只带走它自己。同份记忆里的另外四项必须原样保住 ——
+  // 否则一次坏值会表现为「我设的图片折叠没了，字号和上次读到哪儿也一起丢了」。
+  const kept = sanitizeViewPreferences({
+    navSelection: { kind: 'feed', feedId: 'A' }, filter: 'starred', navVisible: false,
+    reading: { fontSize: 20, lineWidth: 1080, theme: 'dark', expandImages: 'yes' },
+    lastItemId: 'b1', lastListScrollTop: 420,
+  })
+  assert.equal(kept.reading.expandImages, true, '坏值回落 true')
+  assert.equal(kept.reading.fontSize, 20, '字号不许被图片偏好的坏值带走')
+  assert.equal(kept.reading.lineWidth, 1080, '栏宽不许被带走')
+  assert.equal(kept.reading.theme, 'dark', '主题不许被带走')
+  assert.equal(kept.lastItemId, 'b1', '阅读位置不许被带走')
+  assert.equal(kept.lastListScrollTop, 420, '列表滚动位置不许被带走')
+  assert.equal(kept.filter, 'starred')
+  assert.equal(kept.navVisible, false)
+})
+
+test('图片折叠偏好走端点往返：存下 false 读回 false，存回 true 读回 true', async () => {
+  // R6 02 / spec 验收 12 的**偏好层**那一半（Seam 4）。
+  // ⚠️ 验收 12 的「设回展开后直接渲染」需要 UI 开关与折叠渲染，那是 03 的票 ——
+  // 本票只能测到「值存得下、读得回」。渲染层的那一半在 03 的 scroll-dom 用例里。
+  const store = memoryStore()
+  store.feeds.set('A', { url: 'A', title: 'A' })
+  const reading = { fontSize: 16, lineWidth: 760, theme: 'auto' }
+
+  const folded = await callEndpoint(store, 'saveViewPreferences', {
+    preferences: { navSelection: { kind: 'virtual' }, filter: 'all', navVisible: true, reading: { ...reading, expandImages: false } },
+  })
+  assert.equal(folded.preferences.reading.expandImages, false, '回带宿主实际存下的值必须是折叠')
+
+  const readBack = await callEndpoint(store, 'viewPreferences', {})
+  assert.equal(readBack.preferences.reading.expandImages, false, '重开面板读到的仍是折叠')
+
+  const expanded = await callEndpoint(store, 'saveViewPreferences', {
+    preferences: { navSelection: { kind: 'virtual' }, filter: 'all', navVisible: true, reading: { ...reading, expandImages: true } },
+  })
+  assert.equal(expanded.preferences.reading.expandImages, true, '设回展开后必须存下展开')
+  assert.equal((await callEndpoint(store, 'viewPreferences', {})).preferences.reading.expandImages, true, '再读回仍是展开')
 })
 
 test('sanitizeViewPreferences：文件夹选中按目录判据恢复，未知文件夹回落虚拟视图', () => {
@@ -386,7 +442,7 @@ test('端点：saveViewPreferences 存下偏好，viewPreferences 原样读回',
   // reading 刻意用非默认档位：默认值原样往返是测不出「字段有没有真的过端点」的
   const preferences = {
     navSelection: { kind: 'feed', feedId: 'A' }, filter: 'starred', navVisible: false,
-    reading: { fontSize: 20, lineWidth: 640, theme: 'dark' },
+    reading: { fontSize: 20, lineWidth: 640, theme: 'dark', expandImages: true },
   }
 
   const saved = await callEndpoint(store, 'saveViewPreferences', { preferences })
@@ -569,17 +625,17 @@ test('改字号只动排版：导航、过滤与左栏显隐一项都不许被�
   await flush()
   assert.deepEqual(prefs.value, {
     navSelection: { kind: 'feed', feedId: 'B' }, filter: 'unread', navVisible: false,
-    reading: { fontSize: 20, lineWidth: 760, theme: 'auto' }, lastItemId: 'b1',
+    reading: { fontSize: 20, lineWidth: 760, theme: 'auto', expandImages: true }, lastItemId: 'b1',
   }, '写盘落的必须是整份 state：只发 reading 会让另外三项回落默认')
 
   first.setReading({ theme: 'dark' })
   await flush()
-  assert.deepEqual(prefs.value.reading, { fontSize: 20, lineWidth: 760, theme: 'dark' },
+  assert.deepEqual(prefs.value.reading, { fontSize: 20, lineWidth: 760, theme: 'dark', expandImages: true },
     '同一份排版里改另一个字段时，前一次的选择必须留着（合并而不是覆盖）')
 
   const second = await openPanel({ items: twoFeeds(), prefs })
   // 展开一层再断言：store 对象活在 vm 沙箱的 realm 里，原型不同会让 deepEqual 形同虚设地红
-  assert.deepEqual({ ...second.get().reading }, { fontSize: 20, lineWidth: 760, theme: 'dark' }, '重开面板后字号与主题必须恢复')
+  assert.deepEqual({ ...second.get().reading }, { fontSize: 20, lineWidth: 760, theme: 'dark', expandImages: true }, '重开面板后字号与主题必须恢复')
   assert.equal(second.get().navSelection.feedId, 'B', '重开后选中的源仍然是 B')
   assert.equal(second.get().filter, 'unread', '重开后 filter 仍然是 unread')
   assert.equal(second.get().navVisible, false, '重开后左栏仍然收着')
@@ -617,7 +673,7 @@ test('持久化值不可信时（未知 feedId / 非法 shape）回落默认值�
     items: twoFeeds(),
     prefs: { value: { navSelection: { kind: 'feed', feedId: 'B' }, filter: 'unread', navVisible: false, reading: { fontSize: 999, theme: 'neon' } }, writes: [] },
   })
-  assert.deepEqual({ ...badReading.get().reading }, { fontSize: 16, lineWidth: 760, theme: 'auto' }, '档位外的排版值回落默认')
+  assert.deepEqual({ ...badReading.get().reading }, { fontSize: 16, lineWidth: 760, theme: 'auto', expandImages: true }, '档位外的排版值回落默认')
   assert.equal(badReading.get().navSelection.feedId, 'B', '排版坏了不该带走导航记忆')
   assert.equal(badReading.get().filter, 'unread', '排版坏了不该带走 filter')
 
@@ -807,7 +863,7 @@ test('阅读位置：旧配置没有 lastItemId 时正常读入，其他偏好�
   const prefs = {
     value: {
       navSelection: { kind: 'feed', feedId: 'B' }, filter: 'unread', navVisible: false,
-      reading: { fontSize: 20, lineWidth: 900, theme: 'dark' },
+      reading: { fontSize: 20, lineWidth: 900, theme: 'dark', expandImages: true },
     },
     writes: [],
   }
@@ -815,7 +871,7 @@ test('阅读位置：旧配置没有 lastItemId 时正常读入，其他偏好�
   assert.equal(store.get().navSelection.kind, 'feed', '旧配置的源选中必须保住')
   assert.equal(store.get().filter, 'unread')
   assert.equal(store.get().navVisible, false)
-  assert.deepEqual({ ...store.get().reading }, { fontSize: 20, lineWidth: 900, theme: 'dark' })
+  assert.deepEqual({ ...store.get().reading }, { fontSize: 20, lineWidth: 900, theme: 'dark', expandImages: true })
   assert.equal(store.get().selectedId, 'b1', '没有阅读位置时按既有规则落在作用域第一条')
   assert.equal(prefs.writes.length, 0, '旧配置被读一次也不产生写')
 })
