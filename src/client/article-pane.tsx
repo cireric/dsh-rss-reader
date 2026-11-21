@@ -22,6 +22,114 @@ import { paragraphsOf } from '../html-text.js'
 import { READING_FONT_SIZES, READING_LINE_WIDTHS } from '../preferences.js'
 import type { ReadingPreferences } from '../preferences.js'
 import type { ArticleState } from './store.js'
+// InlineRun 从 article-text.js 取，**不从 article.js**：后者 import 了 node:crypto 与 feed/fetch.js，
+// 而 client bundle 不许出现任何 node: 说明符（tsdown 不会因此报错，失败被推迟到浏览器运行期）。
+// 见 docs/pitfalls.md §1.7b。
+import type { InlineRun } from '../article-text.js'
+
+/**
+ * 行内代码的样式。
+ *
+ * 字号用 `em` 而不是 `px`：正文字号可调（M5 01），写死像素会让「放大字号」之后代码反而比
+ * 周围散文更小。与 `pre` 块同一族写法（见下面 pre 分支），等宽字体栈也照抄一份 ——
+ * 两处都写死同一串是刻意的：它们必须看起来是同一套字体。
+ */
+const INLINE_CODE_STYLE = {
+  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+  fontSize: '0.9em',
+  padding: '0.1em 0.3em',
+  borderRadius: 4,
+  background: 'color-mix(in srgb, currentColor 8%, transparent)',
+} as const
+
+/** 把一个「大概是对象」的值读成对象；认不出返回 undefined（`block` 是 wire 形状，处处要校验）。 */
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+}
+
+/**
+ * 块里的 `runs`（wire 形状）→ 可信的 `InlineRun[]`；认不出就返回 undefined。
+ *
+ * 为什么必须逐字段校验：`block` 是 `Record<string, unknown>`（端点回包 / 缓存里读回来的 JSON），
+ * 本仓库禁 `as any`，也不许把「大概是那个形状」当成类型。旧缓存里根本没有这个字段，
+ * 所以 undefined 是**常态**而不是边角。
+ *
+ * 为什么任何一条 run 认不出就**整块**退回纯文本（而不是跳过那一条）：`text` 是 `runs` 的派生
+ * 投影（ADR-0007），退回纯文本是无损的；跳过一条会静默吞掉那段文字，那才是真正的内容损失。
+ * 空数组与缺席同义（投影上等价，见 spec 的等价性提醒）。
+ */
+function inlineRunsOf(value: unknown): InlineRun[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined
+  const runs: InlineRun[] = []
+  for (const entry of value) {
+    const run = recordOf(entry)
+    if (run === undefined) return undefined
+    const text = run['text']
+    if (typeof text !== 'string') return undefined
+    const kind = run['kind']
+    if (kind === 'link') {
+      const href = run['href']
+      if (typeof href !== 'string') return undefined
+      runs.push({ kind: 'link', text, href })
+      continue
+    }
+    if (kind === 'text' || kind === 'strong' || kind === 'em' || kind === 'code') {
+      runs.push({ kind, text })
+      continue
+    }
+    return undefined
+  }
+  return runs
+}
+
+/**
+ * 列表的 `itemRuns`（wire 形状）→ 每个条目一组 run；认不出就返回 undefined。
+ *
+ * 判据是 spec 决策 1 那条不变量：**要么都缺席、要么与 `items` 等长同序**。长度对不上时
+ * 整份退回 `items`（纯文本），而不是「能对上的就渲染」—— 那会让同一条列表里有的行是富文本、
+ * 有的行是纯文本，而读者无从知道为什么。
+ */
+function itemRunGroupsOf(value: unknown, expectedLength: number): InlineRun[][] | undefined {
+  if (!Array.isArray(value) || value.length !== expectedLength) return undefined
+  const groups: InlineRun[][] = []
+  for (const entry of value) {
+    const runs = inlineRunsOf(entry)
+    if (runs === undefined) return undefined
+    groups.push(runs)
+  }
+  return groups
+}
+
+/**
+ * 一段内联语义 → React 元素。
+ *
+ * 为什么按 run 渲染而不是把 runs 拼回一个字符串：链接可点、加粗/斜体/行内代码各有元素，
+ * 正是读者要「一眼分出这是命令、那是散文」的东西；拼回去等于把抽取层保住的语义再丢一次。
+ * 仍然**只产出 React 元素**：正文来自任意网页，React 的 innerHTML 注入口在这里必须是零
+ * （验收 18 靠全仓 grep 那个标识符守住，所以注释里也不写它的字面量）。
+ */
+function InlineRunsView({ runs }: { runs: readonly InlineRun[] }): ReactNode {
+  return runs.map((run, index) => {
+    if (run.kind === 'link') {
+      // 纵深防御（spec 决策 14）：抽取期已过 safeUrl，渲染期再过一次唯一白名单 httpUrlOrEmpty。
+      // 认不出（历史脏数据 / javascript: / data:）⇒ 退化成纯文本，绝不产生可点的 <a>。
+      const href = httpUrlOrEmpty(run.href)
+      if (href === '') return <span key={index}>{run.text}</span>
+      return (
+        <a key={index} href={href} target="_blank" rel="noreferrer noopener"
+          // 点击不冒泡到整行：列表行是 role=button（选中 + 标读），正文里的链接虽然不在行内，
+          // 但同一条规矩留在这里，免得日后把富文本铺进列表时踩回「点链接顺手标了已读」。
+          onClick={(event) => { event.stopPropagation() }}>{run.text}</a>
+      )
+    }
+    if (run.kind === 'strong') return <strong key={index}>{run.text}</strong>
+    if (run.kind === 'em') return <em key={index}>{run.text}</em>
+    if (run.kind === 'code') return <code key={index} style={INLINE_CODE_STYLE}>{run.text}</code>
+    return <span key={index}>{run.text}</span>
+  })
+}
 
 /**
  * 单个正文块的渲染。
@@ -29,10 +137,17 @@ import type { ArticleState } from './store.js'
  * 之所以要分类型：用户反馈「图片不显示、样式变形」——根因是抽取层过去只回传纯文本段落，
  * 图片被整块丢弃、标题/列表/引用的语义也没了，客户端只能一律当段落排版。
  * 这里按块类型给语义化样式（图片限宽、列表留符号、引用加左边线、标题分级字号）。
+ *
+ * **`runs` 缺席时逐字照旧渲染 `text`**（R5 03）：纯文本段落本来就不产出 runs（`runsFieldOf`
+ * 只在存在非 text run 时才写字段），所以「没有 runs」是常态路径，不是兼容分支 —— 旧缓存、
+ * 纯文本段落、R4 的回退摘要（`paragraphBlocks` 造的 p 块）全都走这里。
  */
 function ArticleBlockView({ block }: { block: Record<string, unknown> }): ReactNode {
   const kind = typeof block['kind'] === 'string' ? block['kind'] : 'p'
   const text = typeof block['text'] === 'string' ? block['text'] : ''
+  const runs = inlineRunsOf(block['runs'])
+  /** 带内联语义就按 run 画，否则原样画 `text`（两条路的内容相同，只是前者有元素语义）。 */
+  const inline = (fallback: string): ReactNode => runs === undefined ? fallback : <InlineRunsView runs={runs} />
 
   if (kind === 'img') {
     const src = typeof block['src'] === 'string' ? block['src'] : ''
@@ -77,17 +192,26 @@ function ArticleBlockView({ block }: { block: Record<string, unknown> }): ReactN
     // 比 h4 还大 —— 标题必须跟着正文一起缩放，否则「放大字号」反而把层级弄反了
     const size = level <= 1 ? '1.375em' : level === 2 ? '1.1875em' : level === 3 ? '1.0625em' : '1em'
     return (
-      <div style={{ fontSize: size, fontWeight: 600, lineHeight: 1.4, margin: '1.4em 0 0.5em' }}>{text}</div>
+      <div style={{ fontSize: size, fontWeight: 600, lineHeight: 1.4, margin: '1.4em 0 0.5em' }}>{inline(text)}</div>
     )
   }
 
   if (kind === 'list') {
     const ordered = block['ordered'] === true
     const items = Array.isArray(block['items']) ? block['items'] : []
+    // itemRuns 与 items 等长同序才用（判据见 itemRunGroupsOf）；否则整份退回纯文本。
+    const itemRuns = itemRunGroupsOf(block['itemRuns'], items.length)
     const ListTag = ordered ? 'ol' : 'ul'
     return (
       <ListTag style={{ margin: '0 0 1.1em', paddingLeft: '1.5em' }}>
-        {items.map((entry, index) => <li key={index} style={{ marginBottom: '0.3em' }}>{String(entry)}</li>)}
+        {items.map((entry, index) => {
+          const group = itemRuns === undefined ? undefined : itemRuns[index]
+          return (
+            <li key={index} style={{ marginBottom: '0.3em' }}>
+              {group === undefined ? String(entry) : <InlineRunsView runs={group} />}
+            </li>
+          )
+        })}
       </ListTag>
     )
   }
@@ -98,11 +222,11 @@ function ArticleBlockView({ block }: { block: Record<string, unknown> }): ReactN
         margin: '0 0 1.1em', padding: '0.2em 0 0.2em 1em',
         borderLeft: '3px solid color-mix(in srgb, currentColor 25%, transparent)',
         opacity: 0.9,
-      }}>{text}</blockquote>
+      }}>{inline(text)}</blockquote>
     )
   }
 
-  return <p style={{ margin: '0 0 1.05em' }}>{text}</p>
+  return <p style={{ margin: '0 0 1.05em' }}>{inline(text)}</p>
 }
 
 /**
