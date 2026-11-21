@@ -1,6 +1,6 @@
 # 功能状态
 
-> 版本 **0.1.0** · 更新 2026-11-18 · **已推送 main**（阶段 9 收尾 `9ce1a9e`）· 未打 tag、无 npm publish
+> 版本 **0.1.0**（工作树已含 R1–R4，尚未发版）· 更新 2026-11-21 · **已推送 main**（R1 收尾 `bb89995`）· 未打 tag、无 npm publish
 >
 > 状态词只有五个，按「证据离真机有多远」排：
 > **已落地**（代码在 `src/`、门槛绿）→ **隔离 smoke**（测试或合成夹具通过）→ **真机确认**（活体宿主装载过）→
@@ -22,6 +22,10 @@
 | 阅读偏好与预计时长（F07） | 已落地 · **真机确认** | `src/preferences.ts` 的 `ReadingPreferences`、`src/shared.ts` 的 `estimateReadingMinutes`、`src/client/article-pane.tsx` | `tests/reading.test.mjs`、`nav-persistence.test.mjs`、`scroll-dom.test.mjs`；M5 01 轮真机 |
 | 已缓存正文阅读进度（F07） | 已落地 · **真机确认** | `src/article.ts` 的 `contentVersionOf`、`reading_progress` 表、端点 `saveReadingProgress` | `tests/reading-progress.test.mjs`；M5 02 轮真机（真实库已写入 1 条进度） |
 | 跨源重复提示（F08） | 已落地 · **真机确认** | `src/duplicates.ts`、`items.link_key` 派生列、端点 `duplicateHints` | `tests/duplicates.test.mjs`；M5 03 轮真机（真实库 link_key 无空值） |
+| 时间范围筛选与未读拆分（R1） | 已落地 · **真机确认** | `src/display-window.ts`（日界唯一裁决者）、`src/client/window-control.ts`（唯一窗口载荷构造器）、`src/unread.ts` 的 `accountOf` / `unreadSplitSql` / `countUnreadSplit`、`src/store-sqlite.ts` 的 `WINDOW_FILTER`、`src/item-page.ts` 的 `fenceKeyOf` | `tests/display-window.test.mjs` 8 条（含 `TZ=America/New_York` 的 23/25 小时日）、`time-window-endpoints.test.mjs` 15 条、`unread-accounting.test.mjs` 17 条、`scroll-dom.test.mjs` 的 `R1-03`/`R1-04` 用例；`tests/perf/overview-scale.test.mjs`（10 万行索引计划与耗时预算）；真机三步 2026-11-21 复核通过（装载 / 日志 / 路由；行为面见下「没覆盖到的」） |
+| 阅读位置恢复（R2） | 已落地 · **真机确认** | `src/preferences.ts` 的 `ViewPreferences.lastItemId` / `lastListScrollTop`、`src/client/store.ts` 的 `applyRestoredView` / `takeListScrollTop` / `flushViewMemory`、`src/client/nav-actions.ts` 的 `leaveArticleForScope` | `tests/nav-persistence.test.mjs` 38 条、`list-scroll.test.mjs` 16 条、`scroll-dom.test.mjs` 的 `R2-01` / `R2-02` 与「切作用域回列表」用例；真机三步 2026-11-21 复核通过（装载 / 日志 / 路由；行为面见下「没覆盖到的」） |
+| 订阅源排序（R3） | 已落地 · **真机确认** | `src/feed-order.ts`（`deriveFeedOrder` / `reorderFeedOrder` / `withoutFeedOrder` / `orderedFeedEntries`）、端点 `reorderFeeds`、`config.json` 的可选 `feedOrder` | `tests/feed-order.test.mjs` 17 条、`feed-order-client.test.mjs` 5 条、`scroll-dom.test.mjs` 的订阅管理页 ↑↓ 5 条；真机三步 2026-11-21 复核通过（装载 / 日志 / 路由；行为面见下「没覆盖到的」） |
+| 正文抓取失败回退（R4） | 已落地 · **真机确认** | `src/client/article-pane.tsx` 的 `bodyState` 判别式与 `paragraphBlocks`、`src/html-text.ts` 的 `paragraphsOf`、`src/shared.ts` 的 `hasBodyText` / `MIN_CONTENT_CHARS` | `tests/scroll-dom.test.mjs` 的「正文失败回退」7 条（够门槛 / 不到门槛 / 缺失 / 空串 / 重试打对条目 / 空 blocks / 偏好与空格滚动）、`article.test.mjs` 的 `paragraphsOf` 与 `hasBodyText` 边界；真机三步 2026-11-21 复核通过（装载 / 日志 / 路由；行为面见下「没覆盖到的」） |
 | 本地备份与恢复（F09） | 已落地 · **隔离 smoke（待真机）** | `docs/ops/backup-restore.md`、`scripts/verify-backup.mjs` | `tests/backup-verify.test.mjs` 9 条；真库副本演练（M5 04 轮）；**真灾难恢复未演练** |
 | 可复现构建（F09） | 已落地 · 隔离 smoke | `scripts/build.sh`、`dsh-version.json`、`scripts/gate.sh` | `docs/ops/build-reproducibility.md` 的干净目录退出码表 |
 | CI 分层（F09） | **待拍板** | `docs/ops/build-reproducibility.md` §7.2 | 未接入任何 CI 服务；L1 已由 `scripts/gate.sh` 覆盖 |
@@ -35,12 +39,16 @@
   M2–M5 的新功能**没有重跑**那批源。新功能里的「跨源重复」在真库上也没有命中样本（582 条里跨源同链接的数量未统计）。
 - **浏览器观感**：主题对比度、窄窗口折行、长文 + 懒加载图片时的进度恢复跳动 —— 只有结构保证，没有真人验收。
 - **大库**：10 万条量级的搜索、分页、`VACUUM INTO`、`link_key IN (…)` 时延，本机只有 ≤ 600 条的真实数据和合成夹具。
+  R1 的显示窗索引计划与耗时预算是在**合成 10 万行**上钉的（`tests/perf/overview-scale.test.mjs`），真实大库未验。
+- **R1–R4 的真机验收口径**：三步（reload / 日志 / 401）证明**插件装载与路由活着**，不等于每条行为都在真人手里走过一遍。
+  R2 的列表滚动恢复、R1 的窄面板控件紧凑度仍只有 jsdom 结构保证（`docs/pitfalls.md` §2.2）。
 
-## 发布前要做的事（2026-11-18 状态）
+## 发布前要做的事（2026-11-21 状态）
 
-- [x] 1. `bash scripts/gate.sh`（L1：build → build:client → typecheck → test）全绿（2026-11-18 实测：4/4，664/664）；
-- [x] 2. `npm run mutation -- --workers 1` 全量跑完（2026-11-18 实测：246/246、0 幸存）；
-- [x] 3. 真机三步：`dev_reload_package` 前后 `[active]` → 当天日志 0 条「装载失败」→ 路由 401（2026-11-18 实测）；
+- [x] 1. `bash scripts/gate.sh`（L1：build → build:client → typecheck → test）全绿 —— R1 05 票终检实测（L1 全过、`npm test` 806/806、`npm run test:perf` 11/11）；2026-11-21 复跑 `npm test` **806/806**（本轮只跑测试，未重跑 build / typecheck）；
+- [x] 2. `npm run mutation -- --workers 1` 全量跑完 —— R1 05 票终检实测：应用 **272/272**、0 幸存、恢复后基线仍绿（本轮未复跑）；
+- [x] 3. 真机三步：`dev_reload_package` 前后 `[active]` → 当天日志 0 条「装载失败」→ 路由 401（2026-11-21 复核：日志 `reader-2026-11-20.log` 的「装载失败」计数 0、`POST /rss-reader-api` 返回 401、插件条目 `[active]`）；
 - [ ] 4. 备份演练：按 `docs/ops/backup-restore.md` §3/§4 取一份快照并校验（**升级前必做**；P1，未执行）；
-- [x] 5. 版本号与 `CHANGELOG.md` 一致（当前 `0.1.0`）；
-- [ ] 6. **发布动作（打 tag / npm publish）另行授权** —— 已推送 `main`（阶段 9 收尾 `9ce1a9e`），未打 tag、无 npm publish。
+- [ ] 5. 版本号与 `CHANGELOG.md` 一致 —— `package.json` 仍是 `0.1.0`，而 R1–R4 已合入但**未发版**：
+      发版时要抬版本号并在 `CHANGELOG.md` 补对应小节（当前那条记为「未发布」）；
+- [ ] 6. **发布动作（打 tag / npm publish）另行授权** —— 已推送 `main`（R1 收尾 `bb89995`），未打 tag、无 npm publish。

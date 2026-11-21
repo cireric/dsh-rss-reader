@@ -75,6 +75,30 @@ package.json」的硬断言，让悬空链接在构建期就失败。
 
 除 `tsdown.config.ts` 的 `neverBundle` 之外的东西都会被真打进 bundle，需要什么就自带实现。
 
+### 1.7b 客户端 bundle 也不许引 node 内建 —— `article.ts` 不是 node-free
+
+**病象**：把「client 与 host 共用」的纯函数放进 `src/article.ts`，`npm run typecheck` 与 `npm run build:client`
+**都成功**，而 `lib/client.js` 里多出 `require("node:crypto")` —— 浏览器里一调用就炸。
+
+**根因**：`article.ts` 顶部 import 了 `node:crypto`（`contentVersionOf` 的 sha256）与 `feed/fetch.js`
+（后者 import `node:dns/promises` 做 SSRF 检查）。它看起来是「块模型的家」，实际是 host-only 模块。
+`tsdown` 的 `platform: 'browser'` **不会**因此失败：它把 node 内建原样留成 `require("node:crypto")`
+（`实测`，同形最小载荷）。失败被推迟到运行期。
+
+**为什么最终仍会被抓到**：`tests/client-bundle.test.mjs` 的 `require` 桩是 **deny-all 白名单**
+（只认 `react` / `react/jsx-runtime`，其余一律 `throw new Error('未预期的外部依赖：' + specifier)`），
+所以 `node:crypto` 会在 `factory(require)` 那一刻抛错（`实测`，同形载荷得到
+`未预期的外部依赖：node:crypto`）。**这条守护是隐式的**——它没有专门断言「不许引 node 内建」，
+而是靠白名单的副作用；错误信息也指向「外部依赖」而不是「node 内建」，排障时容易看错方向。
+
+**修法**：任何 client 也要用的纯函数放零 node 依赖的模块（`article-text.ts` / `html-text.ts` / `shared.ts` /
+`preferences.ts` / `retention.ts` / `cursor.ts` 都是），`article.ts` 对它们 re-export 保持既有 import 不破。
+`src/client/article-pane.tsx` 只 import `shared.js` / `html-text.js` / `list-scroll.js` / `preferences.js`。
+
+**判据**：现有 `client-bundle` 的 deny-all 桩已经兜住（隐式），**不必再加一条同义的显式断言**
+（按「等价变异不入门槛」，重复守护不增加信息）。手工核对：
+`grep -o "node:[a-z/]*" lib/client.js | sort -u` 应无输出。
+
 ### 1.8 验证按「轮」跑，不按每次编辑跑
 
 **病象**：一轮 10 次编辑，每次改完都跑一遍完整门槛 ⇒ 约 76 分钟花在同一次测量的重复求值上。
@@ -713,6 +737,26 @@ fast-xml-parser 默认不解数字字符引用，`&#8217;` 会原样留在正文
 ### 5.7 块顺序按文档位置重建
 
 各类块是分批处理的，边处理边入列会得到"处理顺序"（实测段落被挤到末尾、图片跑到最前）。
+
+### 5.7b 保护 pass 的占位符会漏进别的块的文本
+
+**病象**（2026-11-21 R5 排查 `实测`）：`<li>文字<pre>code</pre></li>` 抽出来的 `list.items[0]`
+是 `"文字\u0000B0\u0000"` —— 一个 NUL 包裹的内部占位符，直接进了用户可见文本（也因此进了搜索索引
+与字符统计）。
+
+**根因**：`collectBlocks` 的保护 pass 按「越具体越先」的顺序跑（`figure` → `pre` → `ul/ol` →
+`blockquote` → `img` → `h1-6`），每个 pass 把整块内容换成 `'\u0000B<id>\u0000'` 存进 `stashed`。
+`pre` 先于 `ul` 跑，所以 li 的文本里已经带着那个占位符；`ul` 的 pass 再把 li 文本交给 `htmlToText`
+时，占位符被当成普通文字留下。
+
+**修法**：任何「从别的块的文本里取内容」的 pass，都必须把 `\u0000B\d+\u0000` 当**硬边界**（分隔 + 丢弃），
+不能当普通字符。R5 把这条写进了内联解析（占位符与 `<br>` 同一处理）。
+
+**判据**：`tests/article.test.mjs` 断言「嵌套了 `pre` / `figure` 的列表项，其 `items` 与 `itemRuns`
+里都不出现 `\u0000`」；变异 `inline-占位符当普通文本` 守护它。
+
+**教训**：占位符是**内部协议**，它的生命周期必须止于「重建块顺序」这一步。任何把它交给
+文本处理函数（`htmlToText` / 内联解析 / 字符统计）的路径，都是泄漏点。
 
 ---
 
