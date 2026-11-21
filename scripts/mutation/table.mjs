@@ -58,6 +58,14 @@ export const MUTATIONS = [
     judgeTests: ['归一化先于切 run：text 必须无换行、无连续空白（严格相等是自证的，这条才钉得住顺序）'],
     from: 'const normalized = normalizeRuns(raw);',
     to: 'const normalized = raw;' },
+  // 渲染期白名单（R5 03）：抽取期已过 safeUrl，但历史脏数据可能带着 javascript: 落进缓存，
+  // 所以渲染 link run 前必须再过一次 httpUrlOrEmpty。去掉它之后，脏链接会变成可点的 <a>
+  // —— 判据是 tests/scroll-dom.test.mjs 的「非法链接退化成纯文本」（真 React + jsdom 的 DOM 断言）。
+  { id: 'client-非法链接仍渲染 a', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['正文内联：非法链接退化成纯文本，不产生 <a>（渲染期白名单）'],
+    from: 'const href = httpUrlOrEmpty(run.href);',
+    to: 'const href = run.href;' },
   // 正文 base 回落到请求 URL：301 换路径后相对图片会解析到旧地址（P1-1 的病象）。
   { id: 'article-正文base回落到请求URL', file: 'lib/article.js',
     judges: ['article.test.mjs'],
