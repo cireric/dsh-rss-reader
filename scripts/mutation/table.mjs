@@ -2441,4 +2441,38 @@ export const MUTATIONS = [
     // lib/image-fold.js 实测 OCCURRENCES=1（带上下文锚定，`continue;` + `flush();` 只此一处）。
     from: "        if (isImageBlock(block)) {\n            indexes.push(at);\n            members.push(block);\n            continue;\n        }\n        // 任何非 img 块都是边界 —— 包括空 p。\n        flush();",
     to: "        if (isImageBlock(block)) {\n            indexes.push(at);\n            members.push(block);\n            flush();\n            continue;\n        }\n        // 任何非 img 块都是边界 —— 包括空 p。\n        flush();" },
+  // ── R6 03：折叠渲染 + Aa 面板开关（渲染层的三条核心判定） ─────────────────────
+  // 这三条守的是**渲染层**，与上面 02 的决策层变异互补：02 那三条即使全被抓住，也仍可能
+  // 「判定说折叠、DOM 里却有 <img>」—— 那是本票验收 2 唯一的判据，只能在这里守。
+  { id: 'client-折叠仍渲染 img', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: [
+      '折叠偏好：单图带 caption ⇒ DOM 里没有 <img>，提示是「▸ 图片：<caption>」',
+      '折叠偏好：连续三张图合成一组，提示是「▸ 图片 3 张」（不是三条单图提示）',
+    ],
+    // 折叠分支改成照样渲染 <img>（`fold.shouldRender` 恒真）：提示没了、图片照旧出现。
+    // 症状正是本项要修的那件事——DOM 里有 <img> 就有请求、就有 Referer（spec 决策 7）。
+    // 判据是「折叠时 DOM 里 <img> 数量为 0」，不依赖 display:none 这类浏览器实现细节。
+    // lib/client.js 实测 OCCURRENCES=1（`fold.shouldRender(group.index)` 只此一处）。
+    from: "if (fold.shouldRender(group.index)) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ArticleBlockView, { block }, index);\n\t\t\t\t\t\t\t\t\tif (group.blockIndexes[0] !== index) return null;",
+    to: "if (true) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ArticleBlockView, { block }, index);\n\t\t\t\t\t\t\t\t\tif (group.blockIndexes[0] !== index) return null;" },
+  { id: 'client-折叠提示可聚焦', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['折叠提示不在 Tab 序里：tabIndex < 0，且不是 BUTTON / SUMMARY / INPUT / SELECT / TEXTAREA、不是带 href 的链接'],
+    // 提示改成 `<button>`：Tab 能选中它、且自带空格激活语义。
+    // ⚠️ 这条**只可能**被验收 6（结构判据）抓住 —— jsdom 里普通 button 收到空格既不
+    // preventDefault 也不 click（实测），所以「空格翻页」那条对它恒绿。两条形态各守一面。
+    // lib/client.js 实测 OCCURRENCES=1（ImageFoldHint 的 jsx 元素名只此一处）。
+    from: "function ImageFoldHint({ group, onExpand }) {\n\t\t\treturn /* @__PURE__ */ (0, react_jsx_runtime.jsx)(\"div\", {",
+    to: "function ImageFoldHint({ group, onExpand }) {\n\t\t\treturn /* @__PURE__ */ (0, react_jsx_runtime.jsx)(\"button\", {" },
+  { id: 'client-折叠提示吞空格', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['折叠提示不抢空格：向提示元素本身派发 keydown，正文仍按一屏翻页且图片仍折叠'],
+    // 提示加 onKeyDown 里 preventDefault（照抄 Aa 面板 summary 那条先例）：
+    // routeKey 的 `event.defaultPrevented` 守卫会提前 return ⇒ 翻页静默失效。
+    // ⚠️ 这条**只可能**被验收 5 抓住，而验收 5 必须把事件派发到提示元素**本身**：
+    // 夹具的 press() 派发到 document，抓不到这个缺陷（spec 验收 5 的实测记录）。
+    // lib/client.js 实测 OCCURRENCES=1（ImageFoldHint 的 onClick 只此一处）。
+    from: "onClick: () => {\n\t\t\t\t\tonExpand(group.index);\n\t\t\t\t},\n\t\t\t\tstyle: {\n\t\t\t\t\tmargin: \"0 0 1.1em\",\n\t\t\t\t\tpadding: \"6px 10px\",",
+    to: "onClick: () => {\n\t\t\t\t\tonExpand(group.index);\n\t\t\t\t},\n\t\t\t\tonKeyDown: (event) => {\n\t\t\t\t\tif (event.key === \" \") event.preventDefault();\n\t\t\t\t},\n\t\t\t\tstyle: {\n\t\t\t\t\tmargin: \"0 0 1.1em\",\n\t\t\t\t\tpadding: \"6px 10px\"," },
 ]
