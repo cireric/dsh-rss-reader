@@ -2547,4 +2547,31 @@ export const MUTATIONS = [
     // lib/keys.js 实测 OCCURRENCES=1（`case 'i': return 'toggleImages';` 只此一处）。
     from: "        case 'i': return 'toggleImages';",
     to: "        case 'i': return key === 'i' ? 'toggleImages' : 'none';" },
+  // ── R6 05：组级覆盖（点提示只展开那一组）─────────────────────────────────────
+  // spec 已批的 14 条变异里**没有**组级覆盖的专属条目（spec「覆盖缺口（已知，未补）」），
+  // 于是本票的核心判据「第二组仍折叠」在门槛里没有守门人：`client-i 键不改会话覆盖` 等四条
+  // 守的都是**篇级**覆盖那一路，点提示这一路无论写成什么形态都不会被它们看见。
+  //
+  // 缺陷形态：点提示时写**篇级**覆盖而不是组覆盖 —— 读者指着第一组说「我要看这一组」，
+  // 结果整篇的图都放出来了。这正是「鼠标路径与 `i` 各有语义」这条决定要防的那件事：
+  // 两者若都写篇级覆盖，`i` 清空组覆盖就没有对象可清，两条路径的语义也就塌成一条。
+  { id: 'client-点提示切整篇', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: [
+      '点提示只展开那一组：组内 <img> 出现且 src 与原块一致，另一组仍折叠',
+      '组覆盖优先于篇级覆盖：按 i 把整篇写成折叠后，点过的那一组仍然展开',
+      '组覆盖不落盘：Esc 回列表后重开同一篇，回到偏好决定的初始形态',
+    ],
+    // 把 `expandImageGroup` 的函数式累加换成一次篇级覆盖写入（`setImagesExpanded(true)`）。
+    // 保留 `useCallback` 的包装与空依赖数组：回调的身份语义不变，唯一变的是**它写了哪个状态**。
+    // ⚠️ `setImagesExpanded` 必须真的在该作用域内可达（不是换一个「等价但不崩溃」的写法就完事）：
+    // 它由同一个组件函数里更早的 `useState` 解构而来（产物 5793 行的
+    // `const [imagesExpanded, setImagesExpanded] = useState(void 0)`，早于 5871 行的本函数），
+    // 所以 `const` 的 TDZ 不成立，按下提示不会抛 `ReferenceError` —— 这是「语义等价于缺陷」
+    // 而不是「崩溃式假通过」的前提（pitfalls §2.7b）。
+    // 判据必须看**第二组仍折叠**：单组夹具对「展开这一组」与「展开整篇」恒绿，
+    // 所以上面三条 judgeTests 用的都是两组夹具（1 张 + 2 张，中间夹一段文字）。
+    // lib/client.js 实测 OCCURRENCES=1（整个 expandImageGroup 定义体只此一处）。
+    from: "\t\t\t\tconst expandImageGroup = (0, react.useCallback)((groupIndex) => {\n\t\t\t\t\tsetExpandedGroups((current) => {\n\t\t\t\t\t\tif (current.has(groupIndex)) return current;\n\t\t\t\t\t\tconst next = new Set(current);\n\t\t\t\t\t\tnext.add(groupIndex);\n\t\t\t\t\t\treturn next;\n\t\t\t\t\t});\n\t\t\t\t}, []);",
+    to: "\t\t\t\tconst expandImageGroup = (0, react.useCallback)((groupIndex) => {\n\t\t\t\t\tvoid groupIndex;\n\t\t\t\t\tsetImagesExpanded(true);\n\t\t\t\t}, []);" },
 ]
