@@ -3920,6 +3920,60 @@ async function openArticle(h) {
   return body
 }
 
+/**
+ * —— 表格渲染（R5 04）——
+ *
+ * ⚠️ jsdom **没有布局能力**（`docs/pitfalls.md` §2.2），所以这里只断言**结构**：有没有
+ * `overflowX: auto` 的容器、`<table>` 是不是它的子节点、字号单位是不是 `em`。
+ * **不断言宽度或溢出** —— 那种断言在 jsdom 里要么恒真、要么与真实排版无关。
+ * 窄栏真机验收（≈320px 下 5 列横向滚动）留给票据 06，未验之前标「未验」。
+ */
+test('正文表格：真正的 table 元素 + 横向滚动容器 + 表头加粗 + align 映射到 textAlign', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    article: {
+      itemId: 'a', title: 'ART',
+      blocks: [
+        { kind: 'p', text: '正文段落。' },
+        {
+          kind: 'table',
+          header: ['参数', '值', '备注'],
+          rows: [['电压', '220V', '正常'], ['电流', '10A', '']],
+          align: ['left', 'right', undefined],
+        },
+      ],
+    },
+  })
+  const body = await openArticle(h)
+
+  const table = body.querySelector('table')
+  assert.ok(table !== null, '表格必须渲染成真正的 <table>（不是段落流水）')
+
+  // 横向滚动容器：表格的父节点，且 overflowX 是 auto（窄栏下横向滚动，不压成一堆换行）
+  const scroller = table.parentElement
+  assert.ok(scroller !== null, '表格必须有外层容器')
+  assert.equal(scroller.style.overflowX, 'auto', '外层容器必须 overflowX: auto（窄栏横向滚动）')
+  assert.equal(scroller.style.fontSize.endsWith('em'), true,
+    '字号单位必须是 em（跟随正文字号），实际：' + scroller.style.fontSize)
+
+  // 表头：thead > tr > th，且加粗
+  const thead = table.querySelector('thead')
+  assert.ok(thead !== null, '有 header 时必须渲染 <thead>')
+  const ths = [...thead.querySelectorAll('th')]
+  assert.deepEqual(ths.map((th) => th.textContent), ['参数', '值', '备注'], '表头文字要按列')
+  for (const th of ths) assert.equal(th.style.fontWeight, '600', '表头必须加粗（fontWeight 600）')
+
+  // 表体：tbody > tr > td，行列数对得上
+  const rows = [...table.querySelectorAll('tbody tr')]
+  assert.equal(rows.length, 2, '表体行数必须与 blocks.rows 一致')
+  assert.deepEqual(rows.map((tr) => [...tr.querySelectorAll('td')].map((td) => td.textContent)),
+    [['电压', '220V', '正常'], ['电流', '10A', '']], '单元格文字与行列必须一一对应')
+
+  // align 映射到 textAlign（按列；undefined 的列不设 textAlign）
+  assert.deepEqual(rows.map((tr) => [...tr.querySelectorAll('td')].map((td) => td.style.textAlign || '')),
+    [['left', 'right', ''], ['left', 'right', '']], 'align 必须按列映射到 textAlign')
+})
+
 test('正文内联：链接渲染成 <a>，带 target=_blank 与 rel（含 noopener / noreferrer）', skip, async () => {
   // 夹具的 text 与 runs 严格一致（抽取层保证的那条不变量），这样「渲染的是 runs 而不是 text」
   // 不会因为内容不同而被误判成「两种都行」。

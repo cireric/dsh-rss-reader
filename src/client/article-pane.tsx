@@ -226,7 +226,79 @@ function ArticleBlockView({ block }: { block: Record<string, unknown> }): ReactN
     )
   }
 
+  if (kind === 'table') return <TableBlockView block={block} />
+
   return <p style={{ margin: '0 0 1.05em' }}>{inline(text)}</p>
+}
+
+/**
+ * 表格块 → 真正的 `<table>`（R5 04）。
+ *
+ * **为什么不能沿用「按 text 渲染」那条路**：`table` 块两个字段都没有（既没有 `text` 也没有
+ * `items`），落到默认分支只会渲染出一个空 `<p>` —— 表格整块消失。而把行列摊成流水文字则
+ * 丢掉全部行列关系，那正是本项要修的观感。
+ *
+ * 横向滚动：外层容器 `overflowX: auto`。窄栏下 5 列的表格必然比正文栏宽，不给它自己的滚动
+ * 上下文就只能压成一堆换行或撑破正文栏。⚠️ 这条的**真实观感**只能在真机上看（jsdom 没有布局
+ * 能力，见 `docs/pitfalls.md` §2.2），用例只断言结构与样式属性。
+ *
+ * 字号用 `em` 而不是 `px`：与 `pre` 同一理由 —— 正文字号可调（M5 01），写死 px 会让表格在
+ * 20px 正文下显得很小。`0.9375em` 比正文略小：表格信息密度高，与正文同号会显得笨重。
+ */
+function TableBlockView({ block }: { block: Record<string, unknown> }): ReactNode {
+  /** 单元格只认字符串（wire 形状宽松，认不出就当空串 —— 不编造内容）。 */
+  const cellText = (value: unknown): string => (typeof value === 'string' ? value : '')
+  const rowCells = (row: unknown): string[] => (Array.isArray(row) ? row.map(cellText) : [])
+  const header = Array.isArray(block['header']) ? block['header'].map(cellText) : undefined
+  const rows = Array.isArray(block['rows']) ? block['rows'].map(rowCells) : []
+  const align = Array.isArray(block['align']) ? block['align'] : []
+  /** 列对齐：只认 left / center / right，其余（含缺席）返回 undefined ⇒ 不设 textAlign。 */
+  const alignOf = (column: number): 'left' | 'center' | 'right' | undefined => {
+    const value = align[column]
+    return value === 'left' || value === 'center' || value === 'right' ? value : undefined
+  }
+  const cellStyle = (column: number): { textAlign?: 'left' | 'center' | 'right' } => {
+    const textAlign = alignOf(column)
+    return textAlign === undefined ? {} : { textAlign }
+  }
+  // 没有 header 也没有数据行时什么都不画（空表格没有可读内容，画个空壳只会误导）
+  if (header === undefined && rows.length === 0) return null
+  return (
+    <div style={{ margin: '0 0 1.1em', overflowX: 'auto', fontSize: '0.9375em' }}>
+      <table style={{
+        borderCollapse: 'collapse', lineHeight: 1.6,
+        // 不让表格被压成极窄的多行：内容不够时按内容排，超宽时由外层容器横向滚动
+        minWidth: '100%',
+      }}>
+        {header !== undefined && (
+          <thead>
+            <tr>
+              {header.map((cell, column) => (
+                <th key={column} style={{
+                  fontWeight: 600, textAlign: alignOf(column), padding: '0.35em 0.6em',
+                  borderBottom: '1px solid color-mix(in srgb, currentColor 25%, transparent)',
+                  whiteSpace: 'nowrap',
+                }}>{cell}</th>
+              ))}
+            </tr>
+          </thead>
+        )}
+        <tbody>
+          {rows.map((row, rowIndex) => (
+            <tr key={rowIndex}>
+              {row.map((cell, column) => (
+                <td key={column} style={{
+                  ...cellStyle(column), padding: '0.35em 0.6em',
+                  borderBottom: '1px solid color-mix(in srgb, currentColor 12%, transparent)',
+                  verticalAlign: 'top',
+                }}>{cell}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
 }
 
 /**

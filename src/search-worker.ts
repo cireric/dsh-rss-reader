@@ -2,6 +2,9 @@ import { DatabaseSync } from 'node:sqlite'
 import { parentPort, workerData } from 'node:worker_threads'
 import { type ItemView, type SearchPage, type SearchQuery } from './shared.js'
 import { decodeCursor, encodeCursor, recencyOf } from './cursor.js'
+// 表格的行列摊平：与 articleCharsOf / SQL 侧字符统计共用一份实现（article-text.ts 零 node 依赖，
+// 在 worker 线程里 import 安全）
+import { tableToText } from './article-text.js'
 
 const db = new DatabaseSync(workerData, { readOnly: true })
 const port = parentPort
@@ -23,6 +26,12 @@ db.function('rss_search_text', { deterministic: true }, (body) => {
         const text = (block as Record<string, unknown>)[field]
         return typeof text === 'string' ? [text] : []
       })
+    }
+    // 表格没有 text / items：不认它，表里的词就搜不到（新块类型一进来就丢能力，且没有界面信号）。
+    // 行列摊平复用 article-text.ts 的 tableToText —— 与字符统计 / 日志同一条实现，不在这里写
+    // 第二份遍历。import 它安全：那个模块零 node 依赖。
+    if ('kind' in block && block.kind === 'table') {
+      return [tableToText(block as Record<string, unknown>)]
     }
     if ('items' in block && Array.isArray(block.items)) return block.items.filter((item) => typeof item === 'string')
     return 'text' in block && typeof block.text === 'string' ? [block.text] : []
