@@ -767,3 +767,27 @@ test('表格：<figure> 里的表格不被吞（三种形态都要救回来）',
   assert.deepEqual(decorative.map((block) => block.kind), ['p'], '无 img / table / pre 的 figure 仍整块丢弃')
   assert.ok(!JSON.stringify(decorative).includes('只是图注'), '被丢弃的 figure 内容不许泄漏进正文')
 })
+
+test('内联：标签外的空格不并入链接（真机实测踩到：链接可点区域比看起来宽）', () => {
+  // 真实形态（sspai 实测）：空格写在 <a> **外面**。若归一化把收敛出来的空格按「归前一个 / 归后一个」
+  // 这种邻接规则分配，链接的可点区域会变成 " Vaultwarden" 或 "Vaultwarden "。
+  // 判据：空白字符属于哪个 run，收敛后的那个空格就归哪个 run。
+  const html = '<article><p>' + PAD + '自托管一个 <a href="/x">Vaultwarden</a> 自然而然提上了日程。</p></article>'
+  const block = firstP(html)
+  assert.ok(block !== undefined)
+  const link = block.runs.find((run) => run.kind === 'link')
+  assert.ok(link !== undefined)
+  assert.equal(link.text, 'Vaultwarden', '标签外的空格不许并进链接文本')
+  assert.equal(block.runs.map((run) => run.text).join(''), block.text, '不变量仍成立')
+})
+
+test('内联：标签内的空格属于链接（按空白自身归属，不是一刀切）', () => {
+  // 与上一条是同一个判据的两面：空格在标签**内**时，它就属于那段链接文本（作者把它写进了 <a>）。
+  // 一刀切「链接永远 trim」会让这种写法与源不一致，也会让 join===text 破掉。
+  const html = '<article><p>' + PAD + '自托管一个<a href="/x"> Vaultwarden </a>自然而然提上了日程。</p></article>'
+  const block = firstP(html)
+  const link = block.runs.find((run) => run.kind === 'link')
+  assert.ok(link !== undefined)
+  assert.equal(link.text, ' Vaultwarden ', '标签内的空格保留在链接里（源里就在 <a> 之内）')
+  assert.equal(block.runs.map((run) => run.text).join(''), block.text, '不变量仍成立')
+})

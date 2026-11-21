@@ -32,6 +32,13 @@ export const MUTATIONS = [
     judgeTests: ['不变量：runs 拼接严格等于 text（含行内标签两侧是汉字的形态）'],
     from: '实际只有 38 字可读（应丢弃）。\n                const text = runsToText(runs);',
     to: '实际只有 38 字可读（应丢弃）。\n                const text = htmlToText(line);' },
+  // 收敛出来的空格归「后一个 run」而不是空白自身所属的 run：链接的可点区域会比看起来宽
+  // （真机实测踩到：sspai 那篇 10 个 link run 里多个带前导空格）。判据见「标签外的空格不并入链接」。
+  { id: 'inline-空格并进链接', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['内联：标签外的空格不并入链接（真机实测踩到：链接可点区域比看起来宽）'],
+    from: 'kept.push({ char: \' \', owner: pendingSpaceOwner });',
+    to: 'kept.push({ char: \' \', owner: owners[index] });' },
   // 相邻同类 run 不合并：run 数会等于标签数，结构上限与体积守卫一起失效。
   { id: 'inline-相邻同类 run 不合并', file: 'lib/article.js',
     judges: ['article.test.mjs'],

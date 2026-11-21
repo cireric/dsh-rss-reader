@@ -751,12 +751,22 @@ function normalizeRuns(raw: readonly InlineRun[]): InlineRun[] {
     joined += run.text
   }
   // 归一化：把连续空白收敛成单空格、去首尾空白。逐字符走一遍，记下「保留 / 丢弃」。
+  //
+  // ⚠️ 收敛出来的那个空格归**它自己原来所属的 run**（2026-11-21 真机实测踩到）：
+  // 源 HTML 里 `<a>` 两侧的空格通常写在标签**外面**（`自托管一个 <a>Vaultwarden</a> 自然而然`），
+  // 而空白字符在哪个 run 里，就说明它属于哪段文本。若按「归前一个 / 归后一个」这种邻接规则分配，
+  // 链接的可点区域会变成 `" Vaultwarden"` 或 `"Vaultwarden "`（真实站点实测：sspai 那篇 10 个
+  // link run 里多个带多余空格，点起来比看起来宽）。按空白自身的归属分配，链接边界就与作者写的一致。
   const kept: Array<{ char: string; owner: number }> = []
-  let pendingSpace = false
+  let pendingSpaceOwner = -1
   for (const [index, char] of [...joined].entries()) {
-    if (/\s/.test(char)) { pendingSpace = true; continue }
-    if (pendingSpace && kept.length > 0) kept.push({ char: ' ', owner: owners[index] })
-    pendingSpace = false
+    if (/\s/.test(char)) {
+      // 只记**第一个**空白字符的归属：连续空白收敛成一个空格，它属于这一串空白的起点。
+      if (pendingSpaceOwner === -1) pendingSpaceOwner = owners[index]
+      continue
+    }
+    if (pendingSpaceOwner !== -1 && kept.length > 0) kept.push({ char: ' ', owner: pendingSpaceOwner })
+    pendingSpaceOwner = -1
     kept.push({ char, owner: owners[index] })
   }
   // 按 owner 归并回去，再合并相邻同类
