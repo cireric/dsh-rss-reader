@@ -324,6 +324,18 @@ export function createReader(store: ReaderStore): () => ReactNode {
      * 不落盘 —— 与组覆盖同级，是**本次阅读的瞬时状态**（spec 决策 9）。
      */
     const [imagesExpanded, setImagesExpanded] = useState<boolean | undefined>(undefined)
+    /**
+     * 灯箱正在显示的那张图的 `src`（R6 07，spec 决策 14 / 26）：`undefined` = 关着。
+     *
+     * 与 `imagesExpanded` / `expandedGroups` / `expanded` / `helpOpen` 走**同一条通道**：
+     * `useState` 在本组件 → 进 `KeyRoutingCtx` → 进 `routeKey` 调用 → **进依赖数组** →
+     * 作为 prop 传给 `ArticleView`。一个都不能少。
+     *
+     * **必须抬上来，不是可选**：`Esc` 的优先级（帮助 → 灯箱 → 退出正文）实现在 `routeKey` 的
+     * `back` 动作里，而 `back` 读的是 `ctx`。状态留在 `ArticleView` 里，`Esc` 永远读不到它
+     * （spec 决策 14 明写这一条是「必须」）。不落盘 —— 与另外两个图片覆盖同级，是本次阅读的瞬时状态。
+     */
+    const [lightboxSrc, setLightboxSrc] = useState<string | undefined>(undefined)
     /** 帮助浮窗开合。它进 keydown effect 的依赖数组（见那条 effect 的收尾注释）。 */
     const [helpOpen, setHelpOpen] = useState(false)
     // 慢加载：只有超过 180ms 还在加载时才把「刷新中」画出来，避免毫秒级请求闪一下
@@ -436,13 +448,17 @@ export function createReader(store: ReaderStore): () => ReactNode {
      * 读者按过 `i` 展开整篇、Esc 出去再点回同一篇，会带着上次的篇级覆盖回来（偏好失去意义）。
      * 初值与复位值共用同一个 `EMPTY_IMAGE_GROUPS` 引用 ⇒ 首屏那次复位是 no-op（React 相等即跳过）。
      *
-     * 07 的灯箱态将来也在这条 effect 里清（spec 决策 15 的代码形状：一条 effect 清三个状态）——
+     * 07 的灯箱态也在这条 effect 里清（spec 决策 15 的代码形状：一条 effect 清三个状态）——
      * 换篇时旧文章的 `src` 不该留在一个新文章的浮层里。
      */
     const articleItemId = state.article?.itemId
     useEffect(() => {
       setImagesExpanded(undefined)
       setExpandedGroups(EMPTY_IMAGE_GROUPS)
+      // 灯箱一起清（R6 07，spec 决策 15）：`j` / `k` 换篇时灯箱必须关，否则旧文章的图占着新文章的屏。
+      // 放这条 effect 而不是 `back` 里，是因为它同时覆盖「Esc 回列表后重开同一篇」那条路径
+      // （`closeArticle` 只改 view、刻意保留 article ⇒ 那一刻 articleItemId 不变）。
+      setLightboxSrc(undefined)
     }, [articleItemId, state.view])
 
     // 键盘流：挂在 document 上 + 输入框守卫（24 个 action 的判据与路由都在 keyboard-routing.ts）。
@@ -459,6 +475,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
           helpOpen, setHelpOpen,
           imagesExpanded, setImagesExpanded,
           expandedGroups, setExpandedGroups,
+          lightboxSrc, setLightboxSrc,
         })
       }
       document.addEventListener('keydown', onKeyDown)
@@ -481,7 +498,13 @@ export function createReader(store: ReaderStore): () => ReactNode {
       // `expandedGroups` 也要在：它只被写、不被读，但它是 `i` 清空的对象 —— 依赖它保证
       // 监听器手里那份 state 与最新一次渲染同步（复位 effect 改它之后不重新注册，
       // 就会出现「按 i 用的是上一轮的空集」这种看着无碍、实则难查的偏差）。
-    }, [root, store, expanded, helpOpen, imagesExpanded, expandedGroups])
+      //
+      // `lightboxSrc`（R6 07）**必须**在依赖里，而且理由与 `expanded` 完全同源：`back` 要**读**
+      // 它判断「这一下 Esc 是关灯箱还是关文章」。漏了它，`Esc` 读到的永远是注册那一刻的
+      // `undefined` ⇒ 灯箱开着时按 Esc 直接把文章关了（灯箱随着视图切换一起消失，看起来
+      // 「关掉了」，其实是退出了正文）。判据落在 tests/scroll-dom.test.mjs 的
+      // 「Esc 关灯箱但不退出正文」与「帮助 → 灯箱 → 正文」两条。
+    }, [root, store, expanded, helpOpen, imagesExpanded, expandedGroups, lightboxSrc])
 
     const items = store.visible()
     /**
@@ -768,6 +791,10 @@ export function createReader(store: ReaderStore): () => ReactNode {
             expandedGroups={expandedGroups}
             onExpandImageGroup={expandImageGroup}
             imagesExpanded={imagesExpanded}
+            // 灯箱（R6 07）：状态在本组件（`routeKey` 的 `back` 要读它），这里只传值与两个写入回调。
+            lightboxSrc={lightboxSrc}
+            onOpenImage={setLightboxSrc}
+            onCloseLightbox={() => setLightboxSrc(undefined)}
             canPrev={store.canStepArticle(-1)}
             canNext={store.canStepArticle(1)}
             onPrev={() => { store.stepArticle(-1) }}

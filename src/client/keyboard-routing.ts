@@ -64,6 +64,18 @@ export interface KeyRoutingCtx {
    */
   readonly expandedGroups: ReadonlySet<number>
   readonly setExpandedGroups: (next: ReadonlySet<number>) => void
+  /**
+   * 灯箱正在显示的那张图的 `src`（R6 07，spec 决策 14 / 26）：`undefined` = 关着。
+   *
+   * 与 `expanded` / `helpOpen` / `imagesExpanded` 同一条通道，理由完全同源：`Esc` 的优先级
+   * （帮助 → 灯箱 → 退出正文）实现在本文件的 `back` 动作里，而 `back` 读的是 `ctx`。
+   * 状态留在 `ArticleView` 里，`Esc` 就永远读不到它（spec 决策 14 明写「必须抬上来，不是可选」）。
+   * 它只被 `back` 与 `toggleImages` **读**（判断该不该关），写入路径是图上的 `onClick`。
+   * 同样要在 effect 依赖数组里 —— 否则监听器闭包读到注册那一刻的 `undefined`，
+   * `Esc` 会径直跳过灯箱去关文章（`expanded` 的既存事故同族，pitfalls §3.1）。
+   */
+  readonly lightboxSrc: string | undefined
+  readonly setLightboxSrc: (next: string | undefined) => void
 }
 
 /**
@@ -280,27 +292,33 @@ export function routeKey(event: KeyboardEvent, ctx: KeyRoutingCtx): void {
     //  - 清空必须换成**新对象 / 那个空常量**，不能原地 `clear()`：`foldOf` 对组覆盖取快照，
     //    React 也靠引用判断变化，原地改会让两边同时失灵（03 的注释已写明）。
     //  - 结果是折叠时顺带关灯箱（spec 决策 24）：否则「整篇都折叠了，一张图还占满屏」。
-    //    灯箱是 07 的票，它的 state 抬到 `index.tsx` 后在这里加一行 `ctx.setLightboxSrc(undefined)`；
-    //    本票不引入那个字段（07 尚未落地，先加一个没人读的状态只会多一份要维护的语义）。
     //  - 走 `run()` 而不是裸调用：与其他接管键同族，按键被吃掉（`preventDefault`），
     //    否则浏览器把 `i` 打进某个隐式焦点里（spec 访谈修订 19）。
     case 'toggleImages': {
       if (view !== 'article') return
       run(() => {
         const baseline = ctx.imagesExpanded ?? store.get().reading.expandImages
-        ctx.setImagesExpanded(!baseline)
+        const next = !baseline
+        ctx.setImagesExpanded(next)
         ctx.setExpandedGroups(EMPTY_IMAGE_GROUPS)
+        // 折叠了就关灯箱（决策 24）：折叠态正文里没有 <img>，灯箱却是同一张图的大图 ——
+        // 读者会以为折叠没生效。只在「结果是折叠」时关：展开方向没有可关的东西。
+        if (!next) ctx.setLightboxSrc(undefined)
       })
       break
     }
     // r：刷新未读计数（只重取本地视图，不抓取 —— 规格不变量 1）
     case 'refreshCount': run(() => { void store.refreshCount() }); break
     case 'manageFeeds': run(() => store.toggleFeeds()); break
-    // Esc：正文 → 列表；订阅管理 → 列表。列表态不拦截（不抢弹层的 Esc）
+    // Esc：帮助浮窗 → 灯箱 → 正文 → 订阅管理 → 列表。列表态不拦截（不抢弹层的 Esc）
     case 'back':
       // 帮助浮窗优先：开着帮助时 Esc **只**关帮助 —— 否则在正文页按 Esc 会「浮窗与文章一起
       // 消失」，而读者只是想收掉那张挡住视线的卡片（用户拍板的三个关闭出口之一）。
       if (ctx.helpOpen) { run(() => ctx.setHelpOpen(false)); break }
+      // 灯箱次之（R6 07，spec 决策 26）：帮助的遮罩是 pointer-events:none，所以「浮窗开着 +
+      // 点正文里的图」是可达状态；而帮助是全局浮窗、视觉上压在灯箱之上（z-index 6 > 5），
+      // 最上层先走。灯箱关掉之后读者**仍在正文里** —— 不该被一路带回列表。
+      if (ctx.lightboxSrc !== undefined) { run(() => ctx.setLightboxSrc(undefined)); break }
       if (view === 'article') { event.preventDefault(); store.closeArticle(); break }
       if (view === 'feeds') { event.preventDefault(); store.toggleFeeds(); break }
       return

@@ -368,10 +368,18 @@ test('列表按 / 聚焦本地搜索输入框', { skip }, () => {
  * 翻基线让行为与「读者点过几组」无关，确定且可测。
  */
 
-/** 造 `i` 需要的 ctx 扩展：篇级覆盖 + 它的 setter + 组覆盖。 */
-function makeImageCtx({ view = 'article', imagesExpanded, expandedGroups = new Set(), expandImages = true } = {}) {
+/**
+ * 造 `i` 需要的 ctx 扩展：篇级覆盖 + 它的 setter + 组覆盖 + 灯箱态。
+ *
+ * `lightboxSrc` / `setLightboxSrc` 是 R6 07 加的：`i` 在「结果是折叠」时会顺带关灯箱
+ * （spec 决策 24），缺了这两个字段 `toggleImages` 会抛 `TypeError` —— 那是**夹具缺口**，
+ * 不是实现缺陷（本用例第一版就在这里红过）。给默认值 `undefined`（灯箱关着）保持原判据不变：
+ * 本文件这几条测的是篇级覆盖的语义，灯箱联动另有 R6 07 那几条专门守。
+ */
+function makeImageCtx({ view = 'article', imagesExpanded, expandedGroups = new Set(), expandImages = true, lightboxSrc } = {}) {
   const imageCalls = []
   const groupCalls = []
+  const lightboxCalls = []
   const h = makeCtx({
     state: { view },
     ctx: {
@@ -379,12 +387,14 @@ function makeImageCtx({ view = 'article', imagesExpanded, expandedGroups = new S
       setImagesExpanded: (next) => imageCalls.push(next),
       expandedGroups,
       setExpandedGroups: (next) => groupCalls.push(next),
+      lightboxSrc,
+      setLightboxSrc: (next) => lightboxCalls.push(next),
     },
   })
   // 偏好（expandImages）住在 store.get().reading 里：routeKey 读基线时要用它。
   const base = h.store.get
   h.store.get = () => ({ ...base(), reading: { expandImages } })
-  return { ...h, imageCalls, groupCalls }
+  return { ...h, imageCalls, groupCalls, lightboxCalls }
 }
 
 test('R6 04：正文页按 i 写篇级覆盖并清空组覆盖（翻基线 ⇒ 全篇统一）', { skip }, () => {
@@ -417,4 +427,87 @@ test('R6 04：列表页 / 订阅管理页按 i 不改变任何状态（守卫在
     assert.deepEqual(h.groupCalls, [], view + ' 页按 i 不许改组覆盖')
     assert.deepEqual(h.store.calls, [], view + ' 页按 i 不许动 store')
   }
+})
+
+/**
+ * —— R6 07：灯箱（spec 决策 24–26，验收 10–11）——
+ *
+ * 这一层验的是 `Esc` 的**优先级链**与 `i` 的「折叠即关灯箱」：`back` 动作按 `ctx` 里的
+ * `helpOpen` / `lightboxSrc` 决定这一次 Esc 关谁，`toggleImages` 在折叠方向上顺带清灯箱。
+ * 「灯箱节点有没有真的消失」必须靠 tests/scroll-dom.test.mjs（本层不渲染 React）。
+ *
+ * ⚠️ 三条状态互不替代：只有 `helpOpen` 与 `lightboxSrc` 都在 `ctx` 里，链才成立。任一漏掉
+ * 都会表现为「Esc 直接退出正文」——而灯箱随视图切换一起消失，看起来像关掉了。
+ */
+
+/** 造 `back` / `toggleImages` 需要的 ctx 扩展：帮助 + 灯箱 + 两个图片覆盖。 */
+function makeLightboxCtx({ view = 'article', helpOpen = false, lightboxSrc, imagesExpanded, expandImages = true } = {}) {
+  const lightboxCalls = []
+  const imageCalls = []
+  const h = makeCtx({
+    state: { view },
+    helpOpen,
+    ctx: {
+      lightboxSrc,
+      setLightboxSrc: (next) => lightboxCalls.push(next),
+      imagesExpanded,
+      setImagesExpanded: (next) => imageCalls.push(next),
+      expandedGroups: new Set(),
+      setExpandedGroups: () => {},
+    },
+  })
+  const base = h.store.get
+  h.store.get = () => ({ ...base(), reading: { expandImages } })
+  // `helpCalls` 直接用 makeCtx 那一份（它已经接在 `setHelpOpen` 上）—— 自己再造一个空数组
+  // 会让「帮助优先」那条断言恒绿：数组永远是空的，判据就失效了（本用例第一版踩到）。
+  return { ...h, lightboxCalls, imageCalls }
+}
+
+test('R6 07：Esc 的优先级——帮助浮窗开着时先关帮助，灯箱与视图都不动', { skip }, () => {
+  const h = makeLightboxCtx({ helpOpen: true, lightboxSrc: 'https://img.example/one.png' })
+  routeKeyOf('Escape', h)
+  assert.deepEqual(h.helpCalls, [false], '第一级：关帮助')
+  assert.deepEqual(h.lightboxCalls, [], '第一级：灯箱不许跟着关（帮助在它之上，最上层先走）')
+  assert.deepEqual(h.store.calls, [], '第一级：视图不许变（读者只是想收掉那张挡住视线的卡片）')
+})
+
+test('R6 07：Esc 的优先级——帮助关着、灯箱开着时只关灯箱，视图仍是正文', { skip }, () => {
+  // 这一条就是变异 `client-灯箱Esc不关` 的判据：删掉 `back` 里那两行前置规则，`lightboxCalls`
+  // 会是空数组、而 `closeArticle` 被调 —— 灯箱看起来「关掉了」（随视图切换一起消失），
+  // 实际是退出了正文，读者的阅读位置与滚动都被丢掉。
+  const h = makeLightboxCtx({ lightboxSrc: 'https://img.example/one.png' })
+  routeKeyOf('Escape', h)
+  assert.deepEqual(h.lightboxCalls, [undefined], '灯箱开着时 Esc 只清灯箱')
+  assert.deepEqual(h.store.calls, [], 'Esc 只关灯箱，不许调 closeArticle（否则读者被带回列表）')
+})
+
+test('R6 07：Esc 的优先级——帮助与灯箱都关着时才是「正文 → 列表」', { skip }, () => {
+  const h = makeLightboxCtx()
+  routeKeyOf('Escape', h)
+  assert.deepEqual(h.lightboxCalls, [], '没有灯箱可关，不许写它')
+  assert.deepEqual(h.store.calls, [['closeArticle']], '两级都空时 Esc 回到原语义')
+})
+
+test('R6 07：Esc 在列表页且灯箱开着时仍只关灯箱（灯箱是正文面的浮层，但不该把 Esc 让出去）', { skip }, () => {
+  // 可达性说明：灯箱只在正文页能打开，`view` 变列表时复位 effect 会清它 —— 所以这是防御性的
+  // 一致性判据：`back` 的灯箱规则**排在视图分流之前**，不依赖「灯箱只可能出现在正文页」这个
+  // 今天成立、明天可能变的事实。它同时钉住「规则顺序」，而不是某个具体视图。
+  const h = makeLightboxCtx({ view: 'list', lightboxSrc: 'https://img.example/one.png' })
+  routeKeyOf('Escape', h)
+  assert.deepEqual(h.lightboxCalls, [undefined], '灯箱规则在视图分流之前，与 view 无关')
+  assert.deepEqual(h.store.calls, [], '列表页本来就不拦 Esc，但也不该顺手做别的动作')
+})
+
+test('R6 07：i 折叠整篇时顺带关灯箱（决策 24），展开方向上不写灯箱', { skip }, () => {
+  // 折叠方向：偏好展开 ⇒ 基线 true ⇒ 写成 false ⇒ 关灯箱
+  const folded = makeLightboxCtx({ imagesExpanded: undefined, expandImages: true, lightboxSrc: 'https://img.example/one.png' })
+  routeKeyOf('i', folded)
+  assert.deepEqual(folded.imageCalls, [false], '前置：i 把整篇写成折叠')
+  assert.deepEqual(folded.lightboxCalls, [undefined], '结果是折叠 ⇒ 一并关灯箱（否则「全折叠了、一张图还占满屏」）')
+
+  // 展开方向：偏好折叠 ⇒ 基线 false ⇒ 写成 true ⇒ 没有可关的东西，不许写
+  const unfolded = makeLightboxCtx({ imagesExpanded: undefined, expandImages: false, lightboxSrc: 'https://img.example/one.png' })
+  routeKeyOf('i', unfolded)
+  assert.deepEqual(unfolded.imageCalls, [true], '前置：i 把整篇写成展开')
+  assert.deepEqual(unfolded.lightboxCalls, [], '展开方向不关灯箱（只在「结果是折叠」时关）')
 })
