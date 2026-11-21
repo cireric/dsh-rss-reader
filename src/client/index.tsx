@@ -74,6 +74,16 @@ const ROOT_ATTR = 'data-dsh-rss-reader'
  *  不靠序号或文案定位（改文案不该让测试红，改语义才该）。 */
 const HELP_ATTR = 'data-rss-help'
 
+/**
+ * 「没有被点开过的图片组」—— 模块级常量而不是每次 `new Set()`。
+ *
+ * 两处用途：① `useState` 的初值；② 换篇 / 换视图时的复位值。同一个引用让「空组覆盖」在
+ * 多次复位之间保持稳定，也让依赖数组里那个值不会因为「又造了一个空 Set」而白跑一遍 effect。
+ * `ReadonlySet` 是刻意的：写入一律换新对象（`new Set(previous).add(n)`），不原地改 ——
+ * 原地改会让 `foldOf` 的快照与 React 的相等判断同时失灵。
+ */
+const EMPTY_IMAGE_GROUPS: ReadonlySet<number> = new Set<number>()
+
 
 /**
  * 加载指示的消抖阈值：刷新常常在毫秒级返回，立刻显示「刷新中」会闪一下。
@@ -297,6 +307,17 @@ export function createReader(store: ReaderStore): () => ReactNode {
      */
     const listBox = useRef<HTMLDivElement | null>(null)
     const [expanded, setExpanded] = useState<string | undefined>(undefined)
+    /**
+     * 被点开的**图片组**序号（R6 03，spec 决策 5 / 14 的「组级覆盖」）。
+     *
+     * 为什么抬到本组件而不是留在 `ArticleView`：04 的 `i` 键要在 `routeKey` 里读它、并清空它
+     * （「按 `i` ⇒ 全篇统一到同一个形态」）。`routeKey` 与 `ArticleView` 是两个组件，状态留在
+     * 正文组件里，`i` 就永远读不到它 —— 这与 `expanded` / `helpOpen` 被抬上来的理由完全同源。
+     *
+     * 本票只接「点提示」这一条写入路径；篇级覆盖（`imagesExpanded`）留给 04，避免两票各造一份
+     * 语义重叠的 state。两个状态都不落盘：它们是**本次阅读的瞬时状态**（spec 决策 9）。
+     */
+    const [expandedGroups, setExpandedGroups] = useState<ReadonlySet<number>>(EMPTY_IMAGE_GROUPS)
     /** 帮助浮窗开合。它进 keydown effect 的依赖数组（见那条 effect 的收尾注释）。 */
     const [helpOpen, setHelpOpen] = useState(false)
     // 慢加载：只有超过 180ms 还在加载时才把「刷新中」画出来，避免毫秒级请求闪一下
@@ -381,6 +402,37 @@ export function createReader(store: ReaderStore): () => ReactNode {
       store.activate(itemId)
       setExpanded((current) => nextExpandedOf(current, itemId))
     }, [store])
+
+    /**
+     * 点折叠提示 ⇒ 只展开那一组（R6 03，spec 验收 7）。
+     *
+     * 函数式更新而不是读 `expandedGroups`：读者可能连点两组，两次都基于**上一次的结果**累加，
+     * 不会出现「第二次点击把第一组又收回去」。`ReadonlySet` 要求换新对象，所以这里造一份副本。
+     */
+    const expandImageGroup = useCallback((groupIndex: number): void => {
+      setExpandedGroups((current) => {
+        if (current.has(groupIndex)) return current
+        const next = new Set(current)
+        next.add(groupIndex)
+        return next
+      })
+    }, [])
+
+    /**
+     * 换篇 / 换视图时清空组级覆盖（R6 03；spec 决策 15 的复位规则，本票只承担组级这一半）。
+     *
+     * **两个依赖缺一不可**：
+     *  - `articleItemId` 覆盖 `j` / `k` 换篇 —— 连续换篇时 `view` 一直是 `'article'`，只看 `view` 会漏；
+     *  - `state.view` 覆盖「Esc 回列表后重开**同一篇**」—— `closeArticle` 只 `set({ view: 'list' })`、
+     *    刻意保留 `article`（阅读进度落盘要用它），所以那一刻 `articleItemId` 不变。
+     *
+     * 不这么做的话，读者点开过第 0 组、换到下一篇，新文章的第 0 组会**凭空是展开的**。
+     * 初值与复位值共用同一个 `EMPTY_IMAGE_GROUPS` 引用 ⇒ 首屏那次复位是 no-op（React 相等即跳过）。
+     */
+    const articleItemId = state.article?.itemId
+    useEffect(() => {
+      setExpandedGroups(EMPTY_IMAGE_GROUPS)
+    }, [articleItemId, state.view])
 
     // 键盘流：挂在 document 上 + 输入框守卫（24 个 action 的判据与路由都在 keyboard-routing.ts）。
     // 原实现挂在面板根节点并要求其持有焦点，导致「必须先点一下页面」才响应（用户实测）。
@@ -692,6 +744,8 @@ export function createReader(store: ReaderStore): () => ReactNode {
             reading={state.reading}
             onReading={store.setReading}
             onSaveProgress={store.saveArticleProgress}
+            expandedGroups={expandedGroups}
+            onExpandImageGroup={expandImageGroup}
             canPrev={store.canStepArticle(-1)}
             canNext={store.canStepArticle(1)}
             onPrev={() => { store.stepArticle(-1) }}

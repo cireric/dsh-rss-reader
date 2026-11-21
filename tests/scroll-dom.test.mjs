@@ -4192,6 +4192,122 @@ test('正文内联：点击链接不冒泡到整行（列表行是 role=button�
 })
 
 /**
+ * —— 图片折叠的渲染层（R6 03）——
+ *
+ * 判据全部落在 **DOM 上**（spec 验收 2 的「DOM 里没有 `<img>`」），不看 store 里的布尔值：
+ * `display:none` 的图是否仍被下载属于浏览器实现细节，而「没有元素」就没有请求、也没有 Referer。
+ *
+ * 折叠提示的定位靠 `data-rss-image-fold`（值是组序号）：这是本文件唯一被允许依赖的标记属性，
+ * 与 `data-rss-scroll` / `data-rss-row` 同一族 —— 标记写没写进 DOM 本身也是被测行为。
+ */
+const FOLD_ATTR = 'data-rss-image-fold'
+
+/** 折叠提示元素（按组序号可选）。 */
+function foldHints(root) {
+  return [...root.querySelectorAll('[' + FOLD_ATTR + ']')]
+}
+
+/**
+ * 以「默认折叠图片」为偏好的视图记忆 —— 模拟宿主读回来的那份。
+ *
+ * 刻意走 `viewMemory()` + 展开 `DEFAULT_READING_PREFERENCES`，而不是手写四个字段：
+ * 手写会在 02 加字段时静默漏掉一项，读回来的归一化结果与测试意图悄悄分家。
+ */
+function foldedPrefs() {
+  return {
+    value: viewMemory({ reading: { ...DEFAULT_READING_PREFERENCES, expandImages: false } }),
+    writes: [],
+  }
+}
+
+/** 一张图块。`caption` / `alt` 传 undefined 表示字段缺席（抽取层不写空串）。 */
+function imgBlock(src, { alt, caption } = {}) {
+  return { kind: 'img', src, ...(alt === undefined ? {} : { alt }), ...(caption === undefined ? {} : { caption }) }
+}
+
+test('折叠偏好：单图带 caption ⇒ DOM 里没有 <img>，提示是「▸ 图片：<caption>」', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    prefs: foldedPrefs(),
+    article: {
+      itemId: 'a', title: 'ART',
+      blocks: [
+        { kind: 'p', text: '前一段。' },
+        imgBlock('https://img.example/one.png', { alt: '替代文本', caption: '一张图的说明' }),
+        { kind: 'p', text: '后一段。' },
+      ],
+    },
+  })
+  const body = await openArticle(h)
+
+  assert.equal(body.querySelectorAll('img').length, 0,
+    '折叠时 DOM 里不许有 <img> —— 不是 display:none、不是空 src（spec 决策 7）')
+  const hints = foldHints(body)
+  assert.equal(hints.length, 1, '一组图对应一条提示')
+  // 文案优先 caption（读者看得到的图注），alt 是给读屏器与加载失败时用的
+  assert.equal(hints[0].textContent, '▸ 图片：一张图的说明', '单图提示要带上 caption')
+})
+
+test('折叠偏好：单图既无 caption 也无 alt ⇒ 提示只有「▸ 图片」（不编造内容）', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    prefs: foldedPrefs(),
+    article: {
+      itemId: 'a', title: 'ART',
+      blocks: [imgBlock('https://img.example/plain.png')],
+    },
+  })
+  const body = await openArticle(h)
+
+  assert.equal(body.querySelectorAll('img').length, 0, '折叠时不许渲染 <img>')
+  const hints = foldHints(body)
+  assert.equal(hints.length, 1, '单图自成一组（spec 决策 17）')
+  assert.equal(hints[0].textContent, '▸ 图片', '两个来源都空时不许编造说明文字')
+})
+
+test('折叠偏好：连续三张图合成一组，提示是「▸ 图片 3 张」（不是三条单图提示）', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    prefs: foldedPrefs(),
+    article: {
+      itemId: 'a', title: 'ART',
+      blocks: [
+        { kind: 'p', text: '图集：' },
+        imgBlock('https://img.example/1.png', { alt: '一' }),
+        imgBlock('https://img.example/2.png', { alt: '二' }),
+        imgBlock('https://img.example/3.png', { alt: '三' }),
+      ],
+    },
+  })
+  const body = await openArticle(h)
+
+  assert.equal(body.querySelectorAll('img').length, 0, '折叠时一张都不渲染（组是原子的）')
+  const hints = foldHints(body)
+  assert.equal(hints.length, 1, '相邻三张图是一组，只该有一条提示')
+  assert.equal(hints[0].textContent, '▸ 图片 3 张', '多图组按张数说话，不列各图说明')
+})
+
+test('默认偏好（展开）：<img> 直接渲染、src 与原块一致，DOM 里没有折叠提示', skip, async () => {
+  // 这条是「默认值拍板为 true」的判据（spec 验收 1）：不传 prefs 就是宿主默认那份。
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    article: {
+      itemId: 'a', title: 'ART',
+      blocks: [
+        { kind: 'p', text: '前一段。' },
+        imgBlock('https://img.example/one.png', { alt: '替代文本', caption: '一张图的说明' }),
+      ],
+    },
+  })
+  const body = await openArticle(h)
+
+  const images = [...body.querySelectorAll('img')]
+  assert.equal(images.length, 1, '默认展开时图片直接渲染，不需要任何展开动作')
+  assert.equal(images[0].getAttribute('src'), 'https://img.example/one.png', 'src 必须与原块一致')
+  assert.equal(foldHints(body).length, 0, '展开态不许残留折叠提示')
+})
+
+/**
  * —— R6 01：正文图片不泄漏 Referer ——
  *
  * 判据读 `getAttribute('referrerpolicy')`，**不读** `img.referrerPolicy`：
@@ -4227,4 +4343,291 @@ test('R6 01：正文图片带 referrerpolicy="no-referrer"（默认展开态，�
   // 既有的两个图片属性不许被这条改动挤掉（同一处 props，最容易顺手改坏）
   assert.equal(images[0].getAttribute('loading'), 'lazy')
   assert.equal(images[0].getAttribute('decoding'), 'async')
+})
+
+/**
+ * `Aa` 面板（正文排版偏好那一块）。
+ *
+ * ⚠️ 不能写 `querySelector('details.dsh-rss-settings')`：顶栏「更多」用的是**同一个** class，
+ * 而它先出现在文档里 ⇒ 拿到的会是「更多」面板，断言全在错的节点上（本用例第一版就踩了）。
+ * 按「哪个 details 里有字号选择」定位：这是语义定位（那一块就是排版面板），不是结构定位。
+ */
+function aaPanel(h) {
+  const size = h.win.document.querySelector('select[aria-label="正文字号"]')
+  assert.ok(size !== null, '前置：正文页要有 Aa 面板（字号选择）')
+  const panel = size.closest('details.dsh-rss-settings')
+  assert.ok(panel !== null, '前置：字号选择必须在 Aa 面板里')
+  return panel
+}
+
+test('Aa 面板的「默认折叠图片」开关：勾上当场折叠、取消当场回来，且落盘的是整份偏好', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    article: {
+      itemId: 'a', title: 'ART',
+      blocks: [imgBlock('https://img.example/one.png', { alt: '替代文本' })],
+    },
+  })
+  const body = await openArticle(h)
+  assert.equal(body.querySelectorAll('img').length, 1, '前置：默认展开')
+
+  // 开关与字号 / 栏宽 / 主题同处一个面板：同一块 <details> 里必须能找到它（spec 决策 3）
+  const panel = aaPanel(h)
+  const toggle = panel.querySelector('input[type="checkbox"][aria-label="默认折叠图片"]')
+  assert.ok(toggle !== null, 'Aa 面板里必须有「默认折叠图片」开关')
+  assert.equal(toggle.checked, false, '默认展开 ⇒ 开关未勾选（它表达的是「默认折叠」）')
+
+  // 走真实交互：点复选框本身（不是直调 store.setReading），这样「面板 → onReading → store → 落盘」
+  // 整条接线才真的被钉住 —— 任何一段漏接，图片不会变。
+  toggle.dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
+  await h.settle()
+
+  assert.equal(h.store.get().reading.expandImages, false, '勾上开关 ⇒ 偏好变成折叠')
+  assert.equal(body.querySelectorAll('img').length, 0, '折叠必须当场生效：DOM 里没有 <img>')
+  assert.equal(foldHints(body).length, 1, '折叠后出现一条提示')
+
+  const saved = h.requests.filter((entry) => entry.endpoint === 'saveViewPreferences').at(-1)
+  assert.ok(saved !== undefined, '改偏好必须落盘（否则重开插件就白改了）')
+  assert.deepEqual(saved.payload.preferences.reading,
+    { fontSize: 16, lineWidth: 760, theme: 'auto', expandImages: false },
+    '写盘的是整份 reading：只发 expandImages 的话另外三项会被宿主回落默认')
+
+  // 取消勾选 ⇒ 图片立刻回来（spec 验收 2 的另一半）
+  toggle.dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
+  await h.settle()
+  assert.equal(h.store.get().reading.expandImages, true, '取消勾选 ⇒ 偏好回到展开')
+  assert.equal(body.querySelectorAll('img').length, 1, '取消勾选后图片立刻回来')
+  assert.equal(foldHints(body).length, 0, '展开后提示必须消失')
+})
+
+test('折叠状态随字号 / 栏宽 / 主题切换而保持（排版调整不打断阅读）', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    prefs: foldedPrefs(),
+    article: {
+      itemId: 'a', title: 'ART',
+      blocks: [imgBlock('https://img.example/one.png', { caption: '说明' })],
+    },
+  })
+  const body = await openArticle(h)
+  assert.equal(foldHints(body).length, 1, '前置：已折叠')
+
+  const panel = aaPanel(h)
+  const select = (label) => {
+    const found = panel.querySelector('select[aria-label="' + label + '"]')
+    assert.ok(found !== null, '前置：Aa 面板里有「' + label + '」')
+    return found
+  }
+  // 三项逐一改：每次改完都断言「仍折叠、提示还在」——折叠态若挂在某个被重置的分支上，
+  // 这里会当场红（spec 验收 22）。
+  setControlValue(h.win, select('正文字号'), '20')
+  await h.settle()
+  assert.equal(body.style.fontSize, '20px', '前置：字号真的变了')
+  assert.equal(body.querySelectorAll('img').length, 0, '改字号后仍然折叠')
+  assert.equal(foldHints(body).length, 1, '改字号后提示还在')
+
+  setControlValue(h.win, select('正文栏宽'), '1080')
+  await h.settle()
+  assert.equal(body.style.maxWidth, '1080px', '前置：栏宽真的变了')
+  assert.equal(foldHints(body).length, 1, '改栏宽后提示还在')
+
+  setControlValue(h.win, select('正文主题'), 'dark')
+  await h.settle()
+  assert.equal(h.box('article').getAttribute('data-rss-reading-theme'), 'dark', '前置：主题真的变了')
+  assert.equal(body.querySelectorAll('img').length, 0, '改主题后仍然折叠')
+  assert.equal(foldHints(body).length, 1, '改主题后提示还在')
+})
+
+test('点提示只展开那一组：组内 <img> 出现且 src 与原块一致，另一组仍折叠', skip, async () => {
+  // 两组夹具（1 张 + 2 张，中间夹一段文字）：只有两组才能区分「点提示展开这一组」与
+  // 「点提示展开整篇」—— 单组夹具对这两种实现恒绿（spec 验收 7）。
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    prefs: foldedPrefs(),
+    article: {
+      itemId: 'a', title: 'ART',
+      blocks: [
+        { kind: 'p', text: '第一组之前。' },
+        imgBlock('https://img.example/solo.png', { alt: '独图' }),
+        { kind: 'p', text: '两组之间的段落。' },
+        imgBlock('https://img.example/g2a.png', { alt: '二之一' }),
+        imgBlock('https://img.example/g2b.png', { alt: '二之二' }),
+      ],
+    },
+  })
+  const body = await openArticle(h)
+  const hints = foldHints(body)
+  assert.equal(hints.length, 2, '前置：两段图各一组 ⇒ 两条提示')
+  assert.deepEqual(hints.map((hint) => hint.textContent), ['▸ 图片：独图', '▸ 图片 2 张'],
+    '前置：单组用单图文案、双图组用张数文案')
+
+  hints[0].dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
+  await h.settle()
+
+  const images = [...body.querySelectorAll('img')]
+  assert.equal(images.length, 1, '只展开第一组（1 张），第二组必须仍折叠')
+  assert.equal(images[0].getAttribute('src'), 'https://img.example/solo.png', '展开的图 src 必须与原块一致')
+  const remaining = foldHints(body)
+  assert.equal(remaining.length, 1, '被点开那组的提示消失，另一组的提示还在')
+  assert.equal(remaining[0].getAttribute(FOLD_ATTR), '1', '剩下的提示是第二组（序号 1）')
+})
+
+test('折叠 / 展开前后，段落与图片的相对顺序不变', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    prefs: foldedPrefs(),
+    article: {
+      itemId: 'a', title: 'ART',
+      blocks: [
+        { kind: 'p', text: '段一。' },
+        imgBlock('https://img.example/1.png', { alt: '一' }),
+        { kind: 'p', text: '段二。' },
+        imgBlock('https://img.example/2.png', { alt: '二' }),
+        imgBlock('https://img.example/3.png', { alt: '三' }),
+        { kind: 'p', text: '段三。' },
+      ],
+    },
+  })
+  const body = await openArticle(h)
+  /**
+   * 正文列的「内容骨架」：段落文字与图片**组**按 DOM 顺序排开。
+   *
+   * 折叠态下 `<img>` 不存在，所以提示顶替图片的位置 —— 两者在骨架里都记成 'IMG'；
+   * 连续的 'IMG' 再压成一项，因为一组图在折叠态是一条提示、展开态是 N 张图，
+   * 它们占的是**同一个**位置（组是原子的，spec 决策 19）。不压的话这条判据会变成
+   * 「张数不许变」，那是另一件事（验收 8 管的是分组边界）。
+   */
+  const skeleton = () => {
+    const flat = [...body.querySelectorAll('p, img, [' + FOLD_ATTR + ']')]
+      .map((node) => (node.tagName === 'P' ? node.textContent : 'IMG'))
+    return flat.filter((entry, index) => entry !== 'IMG' || flat[index - 1] !== 'IMG')
+  }
+
+  const folded = skeleton()
+  assert.deepEqual(folded, ['段一。', 'IMG', '段二。', 'IMG', '段三。'],
+    '折叠态：两个图片组各占一个位置（第二组三张图只出一条提示）')
+
+  // 全部展开（点两次提示）：骨架必须与折叠态逐项相同
+  for (const hint of foldHints(body)) {
+    hint.dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
+    await h.settle()
+  }
+  assert.equal(foldHints(body).length, 0, '前置：两组都点开了')
+  assert.deepEqual(skeleton(), folded, '展开不许改变段落与图片的相对顺序（spec 验收 20）')
+})
+
+test('组级覆盖是会话级瞬时状态：换到下一篇时复位（不许凭空展开新文章的同一组）', skip, async () => {
+  // 两篇都有图、且组序号都是 0：若复位漏了，新文章第 0 组会直接是展开态。
+  const articleOf = (itemId) => ({
+    itemId, title: 'ART ' + itemId,
+    blocks: [imgBlock('https://img.example/' + itemId + '.png', { alt: itemId })],
+  })
+  const h = await mountReader({
+    items: [item({ id: 'a' }), item({ id: 'b' })],
+    prefs: foldedPrefs(),
+    article: articleOf,
+  })
+  const body = await openArticle(h)
+  const first = foldHints(body)
+  assert.equal(first.length, 1, '前置：a 篇折叠着')
+  first[0].dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
+  await h.settle()
+  assert.equal(body.querySelectorAll('img').length, 1, '前置：a 篇第 0 组已点开')
+
+  h.press('j')
+  await h.settle()
+  assert.equal(h.store.get().article.itemId, 'b', '前置：切到 b 篇')
+  assert.equal(body.querySelectorAll('img').length, 0, '换篇后新文章必须回到偏好决定的形态（折叠）')
+  assert.equal(foldHints(body).length, 1, '新文章同样有一条提示')
+})
+
+test('折叠提示不抢空格：向提示元素本身派发 keydown，正文仍按一屏翻页且图片仍折叠', skip, async () => {
+  // ⚠️ 这条**不能**用夹具的 press()：它派发到 document，而「提示是可聚焦控件 / 自带 onKeyDown」
+  // 这个缺陷只在**事件目标就是提示**时可见（spec 验收 5 的实测记录）。派发到提示元素上，
+  // 事件照样冒泡到 document 上的 routeKey —— 所以判据是「翻页有没有发生」，不是「有没有 preventDefault」：
+  // routeKey 自己会 preventDefault，真正的问题在它前面的 `event.defaultPrevented` 守卫。
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    prefs: foldedPrefs(),
+    article: {
+      itemId: 'a', title: 'ART',
+      blocks: [imgBlock('https://img.example/one.png', { alt: '说明' }), { kind: 'p', text: '正文。' }],
+    },
+  })
+  const body = await openArticle(h)
+  const hint = foldHints(body)[0]
+  assert.ok(hint !== undefined, '前置：已折叠')
+
+  const box = h.arm(h.box('article'), { scrollHeight: 3000, clientHeight: 300 })
+  const event = new h.win.KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true })
+  hint.dispatchEvent(event)
+  await h.settle()
+
+  assert.equal(h.scrollTop(box), 300, '空格必须照常翻一屏（提示不许吞掉它）')
+  assert.equal(body.querySelectorAll('img').length, 0, '翻页不该顺手展开图片')
+
+  // shift+空格（上半页）同样不能被提示吃掉
+  h.userScroll(box, 300)
+  const up = new h.win.KeyboardEvent('keydown', { key: ' ', shiftKey: true, bubbles: true, cancelable: true })
+  hint.dispatchEvent(up)
+  await h.settle()
+  assert.equal(h.scrollTop(box), 0, 'shift+空格必须照常往上翻一屏')
+})
+
+test('折叠提示不在 Tab 序里：tabIndex < 0，且不是 BUTTON / SUMMARY / INPUT / SELECT / TEXTAREA、不是带 href 的链接', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    prefs: foldedPrefs(),
+    article: {
+      itemId: 'a', title: 'ART',
+      blocks: [imgBlock('https://img.example/one.png', { alt: '说明' }), { kind: 'p', text: '正文。' }],
+    },
+  })
+  const body = await openArticle(h)
+  const hint = foldHints(body)[0]
+  assert.ok(hint !== undefined, '前置：已折叠')
+
+  /**
+   * 判据是**两条一起**（spec 验收 6 的二次更正），缺一不可：
+   *  ① 行为判据 `tabIndex < 0` —— 「Tab 键选不到它」的直接表达；
+   *  ② 结构判据：`tagName` 不在可交互名单、也不是带 `href` 的 `A` —— 兜住
+   *     `<button tabIndex={-1}>`（`tabIndex` 也是 -1，但可聚焦且自带空格激活语义）。
+   *
+   * ⚠️ **别写成** `matches(':any-link, button, summary, input, select, textarea, [tabindex]')`：
+   * 那个选择器会把 `<span tabIndex={-1}>` 一并拒绝，而那个形态空格翻页正常、Tab 也选不到 ——
+   * 判据过严同样会误杀正确实现（实测，见 spec 验收 6）。
+   */
+  const interactive = ['BUTTON', 'SUMMARY', 'INPUT', 'SELECT', 'TEXTAREA']
+  assert.ok(!interactive.includes(hint.tagName), '提示不得用可交互元素（实际 ' + hint.tagName + '）')
+  assert.ok(!(hint.tagName === 'A' && hint.hasAttribute('href')), '提示不得是链接')
+  assert.ok(hint.tabIndex < 0, '提示不得进入 Tab 序（tabIndex=' + hint.tabIndex + '）')
+
+  // 顺带钉住「Tab 序列里真的没有它」：正文列里所有可聚焦元素都不该是提示本身。
+  // 用 tabIndex >= 0 当判据（与上面 ① 同一条性质），不是再列一遍标签名。
+  const tabbable = [...body.querySelectorAll('*')].filter((node) => node.tabIndex >= 0)
+  assert.equal(tabbable.some((node) => node.hasAttribute(FOLD_ATTR)), false,
+    '提示本身不许出现在正文的可聚焦集合里')
+})
+
+test('回退态不受折叠影响：即使偏好是折叠，也没有图片提示（也没有灯箱入口）', skip, async () => {
+  // 回退态的正文来自 `paragraphBlocks(fallbackParagraphs)`，不含 img 块 ⇒ 分组为空 ⇒ 提示不出现。
+  // 这条用例的价值不在「现在是对的」，而在**把这条性质钉住**：日后若有人把分组挪到
+  // readingBlocks 上、或让回退内容走另一条渲染路径，这里会红。
+  // 夹具构造见「正文失败回退」族：failure + 摘要过 40 字门槛（hasBodyText）。
+  const h = await mountReader({
+    items: [item({
+      id: 'a',
+      summary: '<p>订阅源提供的摘要足够长，超过四十个字符的门槛，用于回退展示，再多补几个字凑够门槛。</p>',
+    })],
+    prefs: foldedPrefs(),
+    article: { failure: '403' },
+  })
+  const body = await openArticle(h)
+
+  assert.ok(h.win.document.querySelector('[role="note"]') !== null, '前置：确实进了回退态')
+  assert.equal(foldHints(body).length, 0, '回退内容里没有图片块 ⇒ 不许出现折叠提示')
+  assert.equal(body.querySelectorAll('img').length, 0, '回退内容本来就没有图片')
+  // 灯箱是 07 的票；这里只断言「回退态没有灯箱入口」这个**当前**事实不因本票而变：
+  // 正文里不存在任何 data-rss-lightbox 标记。
+  assert.equal(body.querySelectorAll('[data-rss-lightbox]').length, 0, '回退态没有灯箱入口')
 })

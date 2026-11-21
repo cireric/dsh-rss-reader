@@ -18,6 +18,7 @@ import { edgeTopFor, readingRatioOf, restoreTopFor } from '../list-scroll.js'
  */
 const ARTICLE_IMAGE_MAX_HEIGHT = 640
 import { estimateReadingMinutes, hasBodyText, httpUrlOrEmpty, type ItemView } from '../shared.js'
+import { foldOf, groupImageBlocks, type ImageFold, type ImageGroup } from '../image-fold.js'
 import { paragraphsOf } from '../html-text.js'
 import { READING_FONT_SIZES, READING_LINE_WIDTHS } from '../preferences.js'
 import type { ReadingPreferences } from '../preferences.js'
@@ -315,7 +316,59 @@ function paragraphBlocks(paragraphs: readonly string[]): Array<Record<string, un
   return paragraphs.map((text) => ({ kind: 'p', text }))
 }
 
-export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress }: {
+/** 折叠提示上的标记属性名：值是该组的序号（测试按它定位，spec 未规定名字，本票定为这个）。 */
+const IMAGE_FOLD_ATTR = 'data-rss-image-fold'
+
+/**
+ * 一组图片的折叠提示文案（spec 决策 8）。
+ *
+ * 单图优先 `caption` 再 `alt`：caption 是读者在图上看得见的图注，alt 是给读屏器与加载失败时用的
+ * 备选。两者都空时只说「图片」——**不编造**说明文字（AGENTS.md「不编造数据」）。
+ * 多图组按张数说话：列各图说明会把一条提示撑成一小段，而读者的意图只是「这里有 3 张图」。
+ */
+function foldLabelOf(group: ImageGroup): string {
+  if (group.blocks.length > 1) return '▸ 图片 ' + group.blocks.length + ' 张'
+  const block = group.blocks[0]
+  const caption = typeof block['caption'] === 'string' ? block['caption'] : ''
+  const alt = typeof block['alt'] === 'string' ? block['alt'] : ''
+  const label = caption !== '' ? caption : alt
+  return label === '' ? '▸ 图片' : '▸ 图片：' + label
+}
+
+/**
+ * 折叠态的一条提示。
+ *
+ * **刻意是普通文本元素 + `onClick`，不是 `<button>` / `<summary>`，也不给 `tabIndex`**（spec 决策 11）：
+ *  - 正文视图里**空格 = 翻页**。可聚焦控件（`<button>`）会带着自己的空格激活语义，而
+ *    `keyboard-routing.ts` 的 `isTypingTarget` 对 `<button>` 返回 `false` ⇒ 守卫不挡，
+ *    翻页静默失效；
+ *  - 提示进 Tab 序还会让键盘用户在长文里 Tab 过几十条提示。
+ * 键盘路径一律走 `i` 键（04 的票），鼠标路径走这里的 `onClick`——符合本插件「鼠标可选、键盘完备」的分工。
+ *
+ * 为什么是 `<div>` 而不是 `<span>`：它是块级的一条「占位提示」，夹在段落之间；行内 `<span>`
+ * 会让上下段落的间距塌成一行（视觉上分不清「这里有一张图被折叠了」）。
+ * `tabIndex` 在 `<div>` 上天然是 -1（`实测` jsdom：`<div>` / `<span>` 的 `tabIndex` 都是 -1），
+ * 所以不写它 —— 写了也只是让验收 6 的 `[tabindex]` 类判据有歧义。
+ * 也不加 `role="button"`：读屏器把它念成一段文字正是我们要的（它不是键盘可达的控件）。
+ */
+function ImageFoldHint({ group, onExpand }: {
+  group: ImageGroup
+  onExpand: (groupIndex: number) => void
+}): ReactNode {
+  return (
+    <div
+      {...{ [IMAGE_FOLD_ATTR]: String(group.index) }}
+      onClick={() => { onExpand(group.index) }}
+      style={{
+        margin: '0 0 1.1em', padding: '6px 10px', borderRadius: 6,
+        border: '1px dashed color-mix(in srgb, currentColor 25%, transparent)',
+        cursor: 'pointer', opacity: 0.85,
+      }}
+    >{foldLabelOf(group)}</div>
+  )
+}
+
+export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress, expandedGroups, onExpandImageGroup }: {
   article: ArticleState | undefined
   item: ItemView | undefined
   onBack: () => void
@@ -330,6 +383,16 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
   /** 正文排版偏好（M5 01）：值归 store 所有，本组件只负责照着画、把用户的改动交回去 */
   reading: ReadingPreferences
   onReading: (patch: Partial<ReadingPreferences>) => void
+  /**
+   * 被点开的图片组序号（R6 03 的**组级覆盖**，spec 决策 5 / 14）。
+   *
+   * 状态住在 `index.tsx` 而不是本组件：`i` 键（04 的票）要在 `routeKey` 里读到它并清空它，
+   * 而 `routeKey` 与 `ArticleView` 是两个组件。本票只有「点提示」这一条写入路径，但它与 `i`
+   * 必须共享**同一个** state，否则 04 会再造一份、两份判定分家。
+   */
+  expandedGroups: ReadonlySet<number>
+  /** 点某组的折叠提示 ⇒ 只展开那一组（组是原子的，spec 决策 19）。 */
+  onExpandImageGroup: (groupIndex: number) => void
   /** 容器标记属性名：按键处理按它现取容器（取值集中在 list-scroll.ts 的 scrollSelectorFor） */
   scrollAttr: string
   /** 上/下一条是否可切（与键盘共用同一判定，见 canStepArticle） */
@@ -383,6 +446,27 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
   const displayBlocks: Array<Record<string, unknown>> = bodyState === 'fallback'
     ? paragraphBlocks(fallbackParagraphs)
     : readingBlocks
+  /**
+   * 图片组（spec 决策 16）：按 `displayBlocks` 的块顺序切，组序号就是这里的下标。
+   *
+   * 在**同一份** `displayBlocks` 上分组（不是 `readingBlocks`）：回退态画的是摘要段落，
+   * 两者不是同一个数组；拿错数组会让「回退态没有图片提示」这条自动成立的性质变成巧合。
+   * 回退段落不含 `img` 块 ⇒ 分组天然为空 ⇒ 提示不出现（spec 验收 23）。
+   */
+  const imageGroups = groupImageBlocks(displayBlocks)
+  /**
+   * 折叠判定体（spec 决策 6）：**每次渲染现造**，绝不进 `useMemo`。
+   *
+   * `foldOf` 在构造时对组覆盖 `Set` 取快照（见 `image-fold.ts` 的注释），所以把它缓存下来
+   * 再指望它跟着新 `Set` 变，症状是「点了提示没反应」或「`i` 按了不生效」。
+   * 偏好取 `reading.expandImages`；篇级覆盖本票不引入（留给 04 的 `i`）。
+   */
+  const fold: ImageFold = foldOf(reading.expandImages, undefined, expandedGroups)
+  /** 块下标 → 该块所属的组；非图片块不在表里。 */
+  const groupOfBlock = new Map<number, ImageGroup>()
+  for (const group of imageGroups) {
+    for (const blockIndex of group.blockIndexes) groupOfBlock.set(blockIndex, group)
+  }
   const title = article?.title || item?.title
   const publishedAt = item?.publishedAt
   // 历史行可能带脏 link（修复前落库的 javascript:）：渲染前过 shared.ts 的唯一白名单。
@@ -599,6 +683,21 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
                     <option value="dark">深色</option>
                   </select>
                 </label>
+                {/*
+                  * 「默认折叠图片」（R6 03）：与字号 / 栏宽 / 主题同处，值同样走 onReading 交回 store
+                  * 并落盘 —— 面板不持有状态，否则重开插件就恢复不了（spec 决策 3）。
+                  *
+                  * 为什么是复选框而不是 <select>：它是布尔值，两个 <option> 的「是/否」下拉要多一次
+                  * 点击才看得出当前状态；复选框的勾选态本身就是答案。
+                  * ⚠️ 它与折叠提示是两种元素：这里是真正的表单控件（在 `Aa` 面板里，Tab 得到、空格有意义），
+                  * 而正文里的提示不许进 Tab 序（spec 决策 11）—— 别把这条规矩套到面板上。
+                  */}
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <input type="checkbox" checked={reading.expandImages === false}
+                    aria-label="默认折叠图片"
+                    onChange={(event) => onReading({ expandImages: !event.target.checked })} />
+                  默认折叠图片
+                </label>
               </div>
             </details>
           </div>
@@ -663,7 +762,22 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
                 {link ? '可以返回列表，或打开原站阅读。' : '可以按 Esc 返回列表。'}
               </div>
             </div>
-          ) : displayBlocks.map((block, index) => <ArticleBlockView key={index} block={block} />)}
+          ) : displayBlocks.map((block, index) => {
+            /*
+             * 折叠在**组层**判定（spec 决策 5 / 6 / 19），所以这一层先问判定体、再决定画什么。
+             * 组内任一成员被折叠 ⇒ 整组换成一条提示，且提示落在**组首块**的位置上：
+             * 这样段落与图片的相对顺序不变（spec 验收 20），提示也不会跑到组中间去。
+             * 判定只走 `fold.shouldRender(group.index)` 这一处 —— 不在 JSX 里另写
+             * `reading.expandImages === true`，否则「提示说折叠、DOM 里有 img」迟早发生。
+             */
+            const group = groupOfBlock.get(index)
+            if (group === undefined) return <ArticleBlockView key={index} block={block} />
+            const renderImage = fold.shouldRender(group.index)
+            if (renderImage) return <ArticleBlockView key={index} block={block} />
+            // 折叠：只在组首块画提示，其余成员整块不渲染（组是原子的）
+            if (group.blockIndexes[0] !== index) return null
+            return <ImageFoldHint key={index} group={group} onExpand={onExpandImageGroup} />
+          })}
         </article>
       </div>
 
