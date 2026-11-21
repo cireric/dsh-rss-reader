@@ -1014,3 +1014,33 @@ test('R6 01：产物里正文图片的 props 带 referrerPolicy: "no-referrer"',
   assert.ok(articleSite.includes('loading: "lazy"'), 'loading="lazy" 不许被这条改动挤掉')
   assert.ok(articleSite.includes('decoding: "async"'), 'decoding="async" 不许被这条改动挤掉')
 })
+
+test('R6 01：产物里**灯箱图**的 props 也带 referrerPolicy: "no-referrer"（spec 验收 14 的另一半）', () => {
+  // spec 验收 14 的字面要求是「正文 `<img>` **与灯箱图**的 referrerPolicy 为 no-referrer」，
+  // 而 bundle 断言此前只锚正文那处（ARTICLE_IMAGE_MAX_HEIGHT）。灯箱图当时只有 DOM 断言 ——
+  // DOM 用例断的是 React 的受控 prop 落到 DOM 上的结果，断不到「产物里这一处写的是哪个属性名」：
+  // 把 `referrerPolicy` 拼成 `referrer_policy` 时 DOM 用例会红，但把它挪到 `<a>` 上、
+  // 或灯箱图那一处漏写而正文那处还在时，只看正文那一处是发现不了的。
+  //
+  // 定位方式与上一条同族：灯箱图那处的稳定标记是 `maxHeight: "100vh"`
+  // （spec 决策 24 的「长截图不许撑出屏幕」，只有灯箱图有这个限高；正文那处是 640px 常量）。
+  const source = readFileSync(BUNDLE, 'utf8')
+  const sites = []
+  for (let at = source.indexOf('("img", '); at !== -1; at = source.indexOf('("img", ', at + 1)) {
+    sites.push(jsxPropsObjectAt(source, at))
+  }
+  assert.ok(sites.length > 0, '产物里找不到任何 ("img", { ... }) 渲染点 —— 先确认构建产物是新的')
+
+  const lightboxSite = sites.find((props) => props !== undefined && props.includes('maxHeight: "100vh"'))
+  assert.ok(lightboxSite !== undefined,
+    '产物里找不到灯箱图渲染点（maxHeight: "100vh"）—— 定位标记失效了，先修这条断言（灯箱图若改用别的限高，请同步改这里）')
+
+  assert.ok(
+    /referrerPolicy:\s*"no-referrer"/.test(lightboxSite),
+    '灯箱图没有 referrerPolicy: "no-referrer" —— 灯箱是第二处会外泄阅读行为的图片请求（读者点开的那张图，图床照样能从 Referer 读到他在读哪一篇）',
+  )
+  // 两处必须是**不同的**渲染点：万一将来正文那处也用了 100vh，这条会退化成重复断言，
+  // 而「灯箱漏写」就又没人守了 —— 用「正文标记不在这处」把两处钉开。
+  assert.ok(!lightboxSite.includes('ARTICLE_IMAGE_MAX_HEIGHT'),
+    '灯箱图那处不该带正文的限高常量 —— 两处定位标记混在一起时，「灯箱漏写 referrerPolicy」会没有守门人')
+})

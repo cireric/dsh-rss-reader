@@ -2430,10 +2430,22 @@ export const MUTATIONS = [
     from: "\t\t\t\t\t\tloading: \"lazy\",\n\t\t\t\t\t\tdecoding: \"async\",\n\t\t\t\t\t\treferrerPolicy: \"no-referrer\",",
     to: "\t\t\t\t\t\tloading: \"lazy\",\n\t\t\t\t\t\tdecoding: \"async\"," },
   // ── R6 02：图片折叠的决策层（分组纯函数 + expandImages 偏好） ───────────────
-  // 这三条守的是**决策层**，不是渲染层：折叠/展开的 DOM 判据要等 03 才存在。
-  // 因此 `client-默认值写成折叠` 这条在当前轮**还不能**由渲染用例抓住 —— 它只能由
-  // 「偏好值本身」的判据抓（见该条注释）。这是本票已知的判据缺口，03 会补上真正的
-  // 「默认展开 ⇒ DOM 里有 <img>」用例，那时这条变异才守到它字面上的那个行为。
+  // 02 轮时这条只能由**偏好值本身**的判据抓，因为「折叠/展开的 DOM 判据」要等 03 才存在。
+  // 03 把那条 DOM 判据补上了（`tests/scroll-dom.test.mjs` 的「默认偏好（展开）」），
+  // 但**不能**简单地把 scroll-dom 塞进同一条的 judges —— 实测（2026-11-21 评审修复轮）：
+  //   · `lib/preferences.js` 是 tsc 产物，**客户端 bundle 不 import 它**：`lib/client.js`
+  //     把 `src/preferences.ts` 整份内联了（`//#region src/preferences.ts`，默认值在
+  //     lib/client.js 的 `const DEFAULT_READING_PREFERENCES` 里）。改 `lib/preferences.js`
+  //     的那份**碰不到 DOM 用例跑的代码** ⇒ 验收 1 恒绿，加进去也守不到它。
+  //   · 更糟的是 `judgeTests` 的 pattern 会作用到**所有** judge 文件上（suite.mjs 把
+  //     patterns 拼进同一条 `node --test` 命令）⇒ 加了验收 1 的 pattern 之后，
+  //     nav-persistence / store-sqlite 里一条用例都匹配不上，host 侧反而**失去守门人**
+  //     （实测：套件从 5 条红变成 0 条红，变异直接幸存）。
+  // 所以拆成**两条变异**，各守自己那一份产物，judges 与 judgeTests 都不混：
+  //   · 本条：host 侧 `lib/preferences.js`（tsc 产物），守偏好层；
+  //   · `client-默认值写成折叠（bundle 副本）`：bundle 内联的那一份，守 spec 验收 1。
+  // 两份默认值是同一个源码（`src/preferences.ts:93`）的两个产物 —— 这正是「改一处要改两处
+  // 锚点」的由来，漏掉任何一份都会让「默认值被翻成折叠」这件事有一半没人守。
   { id: 'client-默认值写成折叠', file: 'lib/preferences.js',
     judges: ['nav-persistence.test.mjs', 'store-sqlite.test.mjs'],
     // 把默认值翻成折叠。所有「reading 里必须带 expandImages: true」的断言会一起红：
@@ -2441,6 +2453,20 @@ export const MUTATIONS = [
     // lib/preferences.js 实测 OCCURRENCES=1（`expandImages: true,`）。
     from: '    expandImages: true,',
     to: '    expandImages: false,' },
+  { id: 'client-默认值写成折叠（bundle 副本）', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    // 验收 1 的守门人（spec「测试决策」变异 2 字面要求的那条：「改为 false → 验收 1 翻红」）。
+    // 判据就是「默认偏好打开一篇含图文章 ⇒ `<img>` 直接渲染、DOM 里没有折叠提示」。
+    // ⚠️ judgeTests 写**完整测试名**：它是子串匹配（suite.mjs 转义后交给 --test-name-pattern），
+    // 前缀式会连带匹配到别的用例、也更容易在改名时静默失配；judgeSpec 会先校验名字字面量
+    // 还在不在，找不到就退回整文件并点名，不会静默跳过。
+    judgeTests: ['默认偏好（展开）：<img> 直接渲染、src 与原块一致，DOM 里没有折叠提示'],
+    // 定位：bundle 里内联的那份 `DEFAULT_READING_PREFERENCES`。缩进与 tsc 产物**不同**
+    // （tsdown 用 tab，`lib/preferences.js` 用 4 空格 —— docs/pitfalls.md §1.4 记的就是这个坑）。
+    // lib/client.js 实测 OCCURRENCES=1（`\t\t\texpandImages: true\n`，注意**没有尾逗号**：
+    // 它在对象字面量的最后一项，与 tsc 产物那份 `expandImages: true,` 不是同一串字节）。
+    from: '\t\t\texpandImages: true\n',
+    to: '\t\t\texpandImages: false\n' },
   { id: 'prefs-图片偏好不校验类型', file: 'lib/preferences.js',
     judges: ['nav-persistence.test.mjs'],
     judgeTests: ['sanitizeViewPreferences：图片折叠偏好只判布尔，非布尔回落 true 且不带走同份记忆'],
@@ -2475,8 +2501,16 @@ export const MUTATIONS = [
     // ⚠️ 2026-11-21（R6 07）再锚：`ArticleBlockView` 多了 `onOpenImage` 这个 prop（灯箱入口），
     // tsdown 把 jsx 的第二参数从 `{ block }` 展开成 `{ block, onOpenImage }` 两行 ⇒ 旧 from
     // 会报「未应用」（pitfalls §1.4）。判定本身没动。
-    from: "if (fold.shouldRender(group.index)) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ArticleBlockView, {\n\t\t\t\t\t\t\t\t\t\tblock,\n\t\t\t\t\t\t\t\t\t\tonOpenImage\n\t\t\t\t\t\t\t\t\t}, blockKeyOf(index));\n\t\t\t\t\t\t\t\t\tif (group.blockIndexes[0] !== index) return null;",
-    to: "if (true) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ArticleBlockView, {\n\t\t\t\t\t\t\t\t\t\tblock,\n\t\t\t\t\t\t\t\t\t\tonOpenImage\n\t\t\t\t\t\t\t\t\t}, blockKeyOf(index));\n\t\t\t\t\t\t\t\t\tif (group.blockIndexes[0] !== index) return null;" },
+    // ⚠️ 2026-11-21（R6 评审修复轮）再锚：`article-pane.tsx` 里「不是图片块」与「该渲染」
+    // 两个逐字相同的 `ArticleBlockView` 分支合并成 `group === void 0 || fold.shouldRender(...)`
+    // ⇒ 产物首行从 `if (fold.shouldRender(group.index)) return …` 变成带 `||` 的形态，
+    // 旧 from 命中 0 次（pitfalls §1.4）。判定本身没动：把 `fold.shouldRender(...)` 这一项
+    // 换成恒真的 `true` 之后，折叠分支永远进不去 ⇒ 折叠偏好下照样渲染 <img>。
+    // 注意 to 里**必须保留** `group === void 0 ||` 这一项：整个条件换成 `if (true)` 会让
+    // 所有块都走 ArticleBlockView、折叠提示一条都不出现，症状虽然也是红，但变异落点从
+    // 「折叠判定失效」漂成「分组逻辑被删」—— 判据证明的就不是这条变异要证明的事了。
+    from: "if (group === void 0 || fold.shouldRender(group.index)) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ArticleBlockView, {\n\t\t\t\t\t\t\t\t\t\tblock,\n\t\t\t\t\t\t\t\t\t\tonOpenImage\n\t\t\t\t\t\t\t\t\t}, blockKeyOf(index));\n\t\t\t\t\t\t\t\t\tif (group.blockIndexes[0] !== index) return null;",
+    to: "if (group === void 0 || true) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ArticleBlockView, {\n\t\t\t\t\t\t\t\t\t\tblock,\n\t\t\t\t\t\t\t\t\t\tonOpenImage\n\t\t\t\t\t\t\t\t\t}, blockKeyOf(index));\n\t\t\t\t\t\t\t\t\tif (group.blockIndexes[0] !== index) return null;" },
   { id: 'client-折叠提示可聚焦', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
     judgeTests: ['折叠提示不在 Tab 序里：tabIndex < 0，且不是 BUTTON / SUMMARY / INPUT / SELECT / TEXTAREA、不是带 href 的链接'],

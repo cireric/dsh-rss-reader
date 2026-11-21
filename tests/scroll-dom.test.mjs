@@ -4438,6 +4438,69 @@ test('折叠状态随字号 / 栏宽 / 主题切换而保持（排版调整不�
   assert.equal(foldHints(body).length, 1, '改主题后提示还在')
 })
 
+test('改完字号 / 栏宽 / 主题后灯箱仍然可用：点图能开、Esc 能关（spec 验收 22 的后半句）', skip, async () => {
+  // spec 验收 22 的字面要求是两件事：「折叠状态**与灯箱可用性**不受影响」。
+  // 上一条只断了前半句（折叠态保持）—— 它证明偏好没被排版调整冲掉，却证明不了
+  // 灯箱还活着。而「改完排版灯箱点不开」是个真实可达的失效形态：图片的三态（loading/ok）
+  // 住在 `ArticleImage` 的组件 state 里，若排版调整让正文块**重新挂载**（块 key 里混进了
+  // 排版偏好），三态就回到 loading，而灯箱只对 `state === 'ok'` 的图开放 ⇒ 点图没反应。
+  // 上一条断的是「折叠态还在」，那种实现对它恒绿。
+  //
+  // 判据按灯箱的入口写：`[data-rss-image-state="ok"] img`（图要先手动派发 load 才变 ok，
+  // jsdom 不加载资源 —— 见 `docs/pitfalls.md` §2.2）。
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    article: {
+      itemId: 'a', title: 'ART',
+      blocks: [imgBlock('https://img.example/one.png', { alt: '图一', caption: '说明' })],
+    },
+  })
+  const body = await openArticle(h)
+  assert.equal(body.querySelectorAll('img').length, 1, '前置：默认展开，图在正文里')
+
+  // 先把图推进 ok 态（jsdom 不加载资源、不派发 load —— `docs/pitfalls.md` §2.2）。
+  // **只派发这一次**：之后每改一项排版都断言它仍是 ok。若排版调整让正文块重新挂载，
+  // 新的 `<img>` 没有收到过 load ⇒ 三态回到 loading，读者点图就没反应了（正是本条的判据）。
+  const firstImage = body.querySelector('img')
+  firstImage.dispatchEvent(new h.win.Event('load'))
+  await h.settle()
+  assert.equal(imageStates(body)[0].getAttribute(IMAGE_STATE_ATTR), 'ok', '前置：图已载入')
+
+  const panel = aaPanel(h)
+  const select = (label) => {
+    const found = panel.querySelector('select[aria-label="' + label + '"]')
+    assert.ok(found !== null, '前置：Aa 面板里有「' + label + '」')
+    return found
+  }
+  // 三项逐一改（与上一条同样的顺序）：每次改完都要求灯箱**当场仍可用**。
+  // 逐项而不是只在最后验一次：哪一项把灯箱弄坏了，失败消息要能点名是哪一项。
+  for (const [label, value, expect] of [
+    ['正文字号', '20', () => assert.equal(body.style.fontSize, '20px', '前置：字号真的变了')],
+    ['正文栏宽', '1080', () => assert.equal(body.style.maxWidth, '1080px', '前置：栏宽真的变了')],
+    ['正文主题', 'dark', () => assert.equal(h.box('article').getAttribute('data-rss-reading-theme'), 'dark', '前置：主题真的变了')],
+  ]) {
+    setControlValue(h.win, select(label), value)
+    await h.settle()
+    expect()
+
+    // 入口：三态容器 + 里面的 <img>。图必须已经 ok —— jsdom 不加载资源，手动派发 load。
+    const frame = body.querySelector('[' + IMAGE_STATE_ATTR + '="ok"]')
+    assert.ok(frame !== null, '改完「' + label + '」后图片必须还在 ok 态（灯箱只对 ok 的图开放）——'
+      + ' 若排版调整让正文块重新挂载，三态会回到 loading，读者点图就没反应了')
+    const image = frame.querySelector('img')
+    assert.ok(image !== null, '改完「' + label + '」后三态容器里必须还有 <img>')
+
+    clickOn(h, image)
+    await h.settle()
+    assert.equal(hasLightbox(h.win.document), true, '改完「' + label + '」后点图必须仍能打开灯箱')
+
+    assert.equal(h.press('Escape'), true, '改完「' + label + '」后 Esc 必须被接管（灯箱是它该关的东西）')
+    await h.settle()
+    assert.equal(hasLightbox(h.win.document), false, '改完「' + label + '」后 Esc 必须仍能关掉灯箱')
+    assert.equal(h.store.get().view, 'article', 'Esc 只关灯箱，不许把文章也关了')
+  }
+})
+
 test('点提示只展开那一组：组内 <img> 出现且 src 与原块一致，另一组仍折叠', skip, async () => {
   // 两组夹具（1 张 + 2 张，中间夹一段文字）：只有两组才能区分「点提示展开这一组」与
   // 「点提示展开整篇」—— 单组夹具对这两种实现恒绿（spec 验收 7）。
@@ -4748,6 +4811,47 @@ test('i 的篇级覆盖是会话级：j/k 换篇复位（复位 effect 的第一
   await h.settle()
   assert.equal(h.store.get().article.itemId, 'b', '前置：切到 b 篇')
   assert.equal(body.querySelectorAll('img').length, 0, '换篇后新文章回到偏好决定的形态（折叠）')
+})
+
+test('换篇后 i 作用于新那篇：复位之后新篇自己能被 i 展开（spec 验收 4 的后半句）', skip, async () => {
+  // spec 验收 4 的字面要求是两件事：「切到另一篇后，`i` 作用于新那篇」。
+  // 上一条只断了前半句（换篇复位 ⇒ 新篇折叠）—— 它证明复位发生了，却证明不了
+  // **复位之后 `i` 还能作用在新篇上**。缺了后半句，一个「换篇时把篇级覆盖锁死/忽略按键」
+  // 的实现照样全绿：新篇永远折叠，看起来完全正常。
+  //
+  // 这条同时钉住两件事，缺一不可：
+  //  ① 换篇复位（新篇回到偏好决定的形态，不带 a 篇的展开态）；
+  //  ② 复位之后在新篇按 `i` ⇒ 新篇展开（篇级覆盖对新篇真的可写、且写在 b 篇上）。
+  const h = await mountReader({
+    items: [item({ id: 'a' }), item({ id: 'b' })],
+    prefs: foldedPrefs(),
+    article: (itemId) => twoGroupArticle(itemId),
+  })
+  const body = await openArticle(h)
+
+  assert.equal(h.press('i'), true, '前置：a 篇按 i 被接管')
+  await h.settle()
+  assert.equal(body.querySelectorAll('img').length, 3, '前置：a 篇被 i 展开（两组共三张）')
+
+  assert.equal(h.press('j'), true, '前置：j 换到 b 篇')
+  await h.settle()
+  assert.equal(h.store.get().article.itemId, 'b', '前置：确实换到了 b 篇')
+  // ① 复位：a 篇的展开态不许跟过来
+  assert.equal(body.querySelectorAll('img').length, 0, '换篇后 b 篇回到偏好决定的形态（折叠）—— a 篇的覆盖不跨篇')
+  assert.equal(foldHints(body).length, 2, '复位后 b 篇两组提示都在')
+
+  // ② 作用于新那篇：复位不是「锁死」，`i` 在 b 篇照样能翻基线
+  assert.equal(h.press('i'), true, 'b 篇按 i 同样必须被接管')
+  await h.settle()
+  assert.equal(h.store.get().article.itemId, 'b', '按 i 不许把文章换掉（它只动图片）')
+  assert.equal(body.querySelectorAll('img').length, 3, '在新篇按 i ⇒ 新篇展开（i 作用于当前这一篇）')
+  assert.equal(foldHints(body).length, 0, '展开后 b 篇不该留下提示')
+
+  // 再按一次：仍然是 b 篇自己的基线在翻（回到折叠），不是把 a 篇的旧覆盖捞回来
+  assert.equal(h.press('i'), true, '第三次按 i 也必须被接管')
+  await h.settle()
+  assert.equal(body.querySelectorAll('img').length, 0, '再按 i ⇒ b 篇折叠（翻的是 b 篇自己的基线）')
+  assert.equal(foldHints(body).length, 2, '折叠回来时 b 篇两组提示都回来')
 })
 
 test('i 在列表页不改变任何状态（图片开关只在正文页生效）', skip, async () => {

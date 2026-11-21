@@ -29,7 +29,7 @@ import {
 } from '../list-scroll.js'
 import { isElementNode } from './element-node.js'
 import { nextExpandedOf, type ReaderStore } from './store.js'
-import { EMPTY_IMAGE_GROUPS } from '../image-fold.js'
+import { EMPTY_IMAGE_GROUPS, baselineExpandedOf } from '../image-fold.js'
 
 export interface KeyRoutingCtx {
   /**
@@ -59,8 +59,12 @@ export interface KeyRoutingCtx {
    * 组级覆盖（被读者点开的组序号，R6 03 的 state）。
    *
    * `i` 要**清空**它（spec 决策 10）：不清的话，读者点过的那一组会逆着 `i` 的方向留在展开态，
-   * `i` 就不再是「整篇一个开关」。它同样要在 effect 依赖数组里 —— `routeKey` 只写不读它，
-   * 但复位 effect 之外没有别的写入路径，依赖它保证监听器与最新 state 同步。
+   * `i` 就不再是「整篇一个开关」。
+   *
+   * ⚠️ 本文件**只写不读**它（`grep ctx.expandedGroups` 在本文件零命中，唯一用法是
+   * `ctx.setExpandedGroups(EMPTY_IMAGE_GROUPS)`）。它留在 `KeyRoutingCtx` 里是因为
+   * 与 `imagesExpanded` / `lightboxSrc` 走同一条通道、同一个 effect 依赖数组 ——
+   * 那里保留它的理由与代价写在 `index.tsx` 依赖数组的注释里（取舍，不是漏删）。
    */
   readonly expandedGroups: ReadonlySet<number>
   readonly setExpandedGroups: (next: ReadonlySet<number>) => void
@@ -297,7 +301,13 @@ export function routeKey(event: KeyboardEvent, ctx: KeyRoutingCtx): void {
     case 'toggleImages': {
       if (view !== 'article') return
       run(() => {
-        const baseline = ctx.imagesExpanded ?? store.get().reading.expandImages
+        // 基线 = `篇级覆盖 ?? 偏好`，**必须**调 `image-fold.ts` 的 `baselineExpandedOf`，
+        // 不在这里自己写一遍这个表达式（ADR-0001：判据只有一个裁决者）。
+        // 这里曾写成 `ctx.imagesExpanded ?? store.get().reading.expandImages` —— 与
+        // `shouldRenderImage` 里的那半条判据是两份实现。两份当下算得一样，所以没有任何用例
+        // 会红；但将来加一层覆盖（例如按源记忆）时两处会静默分家：`i` 翻的方向与渲染读到的
+        // 基线不一致，症状是「按 i 偶尔没反应」，极难定位。现在一处实现、两个调用点。
+        const baseline = baselineExpandedOf(store.get().reading.expandImages, ctx.imagesExpanded)
         const next = !baseline
         ctx.setImagesExpanded(next)
         ctx.setExpandedGroups(EMPTY_IMAGE_GROUPS)

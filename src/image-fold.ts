@@ -129,11 +129,36 @@ export function foldOf(
 }
 
 /**
+ * 基线：`篇级覆盖 ?? 偏好`（spec 决策 5 的后半条，也是决策 10「`i` 翻基线」里的那个基线）。
+ *
+ * **为什么单独导出**（ADR-0001：判据只有一个裁决者，`docs/adr/0001-criterion-has-one-judge.md`）：
+ * 这半条判据有两个真实消费方 —— 渲染侧的 `shouldRenderImage`（组覆盖没命中时用它）与
+ * `src/client/keyboard-routing.ts` 的 `i` 键（它要把基线取反）。此前 `i` 那边自己写了一遍
+ * `ctx.imagesExpanded ?? store.get().reading.expandImages`，两份实现当下算得一样，所以**没有任何
+ * 用例会红**；将来若加一层覆盖（例如「按源记忆」），两处会静默分家，症状是「按 `i` 翻的方向
+ * 与渲染读到的基线不一致」，而这种偏差看起来像「按键偶尔没反应」，极难定位。
+ *
+ * 抽成纯函数后：一处实现、两个调用点。谁要再动「基线是什么」，只有这一个地方可改。
+ *
+ * ⚠️ 参数顺序刻意是「偏好在前、篇级覆盖在后」：与 `shouldRenderImage` 的
+ * `(preference, articleOverride, …)` 同序，读调用点时不用在脑子里换位。
+ *
+ * @param preference - 偏好层的值（`ReadingPreferences.expandImages`）。
+ * @param articleOverride - 篇级覆盖；`undefined` 表示「这一篇还没按过 `i`」⇒ 落回偏好。
+ *   注意 `false` 是**真值**，不是「没设」—— 写成 `articleOverride || preference` 就会
+ *   把「按 `i` 折叠过」这一篇在展开偏好下重新展开。
+ */
+export function baselineExpandedOf(preference: boolean, articleOverride: boolean | undefined): boolean {
+  return articleOverride ?? preference
+}
+
+/**
  * 单点判定：第 `groupIndex` 组现在该不该渲染 `<img>`（spec 决策 5 的签名）。
  *
  * 判定顺序就是 `组覆盖 ?? 篇覆盖 ?? 偏好`：
  *  1. 组覆盖命中 ⇒ 渲染（读者明确点过这一组）；
- *  2. 否则 `篇覆盖 ?? 偏好` —— `篇覆盖` 是 `boolean | undefined`，`undefined` 才落到偏好。
+ *  2. 否则 `篇覆盖 ?? 偏好` —— 交给 `baselineExpandedOf`，**不在这里重算一遍**
+ *     （ADR-0001；`i` 键读的也是它，两处必须是同一个函数）。
  *
  * 折叠时**不渲染 `<img>` 元素**（不是 `display:none`、不是空 `src`）：DOM 里没有元素，
  * 浏览器就不会发请求，也不会带 `Referer`（spec 决策 7）。
@@ -145,5 +170,5 @@ export function shouldRenderImage(
   groupIndex: number,
 ): boolean {
   if (groupOverrides.has(groupIndex)) return true
-  return articleOverride ?? preference
+  return baselineExpandedOf(preference, articleOverride)
 }
