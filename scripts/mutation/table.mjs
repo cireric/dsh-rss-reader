@@ -2419,16 +2419,32 @@ export const MUTATIONS = [
     // lib/shared.js 实测 OCCURRENCES=1。
     from: "        if (block['kind'] === 'table')\n            texts.push(tableToText(block));",
     to: "        if (false)\n            texts.push(tableToText(block));" },
-  // R6 01：正文图片不再外泄 Referer。删掉 referrerPolicy ⇒ 图片请求重新带上当前页 URL，
-  // 第三方图床/CDN/跟踪像素就能读到「读者正在读哪一篇」。这条**独立于折叠/灯箱**：
-  // 判据是产物里正文图片那处 props（client-bundle.test.mjs 按 ARTICLE_IMAGE_MAX_HEIGHT 定位，
-  // 不认行号），所以并行票新增的 `<img>` 不会让它失效，也不会替它兜底。
-  // lib/client.js 实测 OCCURRENCES=1（锚在 loading/decoding 两行的上下文上，单锚 referrerPolicy 也会命中）。
+  // R6 01：正文图片的 referrer 策略被删掉 ⇒ 回落到浏览器默认。
+  //
+  // ⚠️ 2026-11-21 真机回归后**改写过这条**。原本守的是「必须是 no-referrer（隐私）」，
+  // 而真机实测证明那个判据**守错了方向**：no-referrer 让 Referer 变空，`cdnfile.sspai.com`
+  // （本机缓存 52.7% 的图）空 Referer 一律 403 ⇒ 所有图「加载失败」。
+  // 现在的判据是「必须是 strict-origin-when-cross-origin（能通过图床）」，理由见
+  // tests/scroll-dom.test.mjs 里那条用例头部的病象→根因→修法。
+  //
+  // 这条**独立于折叠/灯箱**：判据是产物里正文图片那处 props（client-bundle.test.mjs 按
+  // ARTICLE_IMAGE_MAX_HEIGHT 定位，不认行号），所以并行票新增的 `<img>` 不会让它失效，
+  // 也不会替它兜底。lib/client.js 实测 OCCURRENCES=1（锚在 loading/decoding 两行的上下文上）。
   { id: 'client-图片无 referrerPolicy', file: 'lib/client.js',
     judges: ['client-bundle.test.mjs'],
-    judgeTests: ['R6 01：产物里正文图片的 props 带 referrerPolicy: "no-referrer"'],
-    from: "\t\t\t\t\t\tloading: \"lazy\",\n\t\t\t\t\t\tdecoding: \"async\",\n\t\t\t\t\t\treferrerPolicy: \"no-referrer\",",
+    judgeTests: ['R6 01：产物里正文图片的 props 用 strict-origin-when-cross-origin 的 referrer 策略'],
+    from: "\t\t\t\t\t\tloading: \"lazy\",\n\t\t\t\t\t\tdecoding: \"async\",\n\t\t\t\t\t\treferrerPolicy: ARTICLE_IMAGE_REFERRER_POLICY,",
     to: "\t\t\t\t\t\tloading: \"lazy\",\n\t\t\t\t\t\tdecoding: \"async\"," },
+  // 回归守门人：把策略常量改回 no-referrer（= 2026-11-21 那次真机事故的形态）⇒ 防盗链判据翻红。
+  // 与上一条互补：上一条守「别把属性删了」，这条守「别把它写回那个会让图床 403 的值」。
+  // 真机证据：空 Referer 对 cdnfile.sspai.com 是 403、非空 200（浏览器 UA，逐域名 curl，三轮一致）。
+  // ⚠️ 策略已抽成唯一来源常量，所以这条改的是**常量定义**（一处改动同时影响正文图与灯箱图，
+  // 正是「不许各写一份」的好处）。lib/client.js 实测 OCCURRENCES=1。
+  { id: 'client-referrer 写回 no-referrer', file: 'lib/client.js',
+    judges: ['client-bundle.test.mjs'],
+    judgeTests: ['R6 01：产物里正文图片的 props 用 strict-origin-when-cross-origin 的 referrer 策略'],
+    from: 'const ARTICLE_IMAGE_REFERRER_POLICY = "strict-origin-when-cross-origin";',
+    to: 'const ARTICLE_IMAGE_REFERRER_POLICY = "no-referrer";' },
   // ── R6 02：图片折叠的决策层（分组纯函数 + expandImages 偏好） ───────────────
   // 02 轮时这条只能由**偏好值本身**的判据抓，因为「折叠/展开的 DOM 判据」要等 03 才存在。
   // 03 把那条 DOM 判据补上了（`tests/scroll-dom.test.mjs` 的「默认偏好（展开）」），

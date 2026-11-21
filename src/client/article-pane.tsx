@@ -144,6 +144,24 @@ const IMAGE_STATE_ATTR = 'data-rss-image-state'
 /** 图片容器的最小高度（px，spec 决策 20）：加载完成时把位移从「整张图」压到「高度差」。 */
 const ARTICLE_IMAGE_MIN_HEIGHT = 120
 
+/**
+ * 正文图与灯箱图共用的 referrer 策略（**唯一来源**，两处都读它，不许各写一份）。
+ *
+ * 为什么是 `strict-origin-when-cross-origin` 而不是 `no-referrer`：
+ * 2026-11-21 真机事故 —— `no-referrer` 让 Referer 变空，而 `cdnfile.sspai.com`（实测占本机缓存
+ * 52.7% 的图）**空 Referer 一律 403**，于是所有图都显示「图片加载失败」。
+ * 三态对照（浏览器 UA，逐域名 curl，三轮一致）：R6 前坏图 30.5% → no-referrer 78.9% → 本策略 30.5%。
+ *
+ * 而且那个隐私收益本就不存在：本插件是 SPA（`grep pushState|location|URLSearchParams src/client/`
+ * 零命中），没有按文章区分的 URL，Referer 里从来只有宿主 origin、不携带「正在读哪一篇」。
+ * 本策略跨源只发 origin、不发路径，既让图床通过，也仍然不暴露路径。
+ *
+ * ⚠️ 已知的**既有**问题（不是本属性造成，改它也不会好）：`icon.solidot.org`(26.3%) 要自家域名
+ * Referer、`icon.zhiding.cn`(4.2%) 要非空 Referer，两者在 R6 之前就 403。要修得按域名决定策略，
+ * 那是另一件事，别在这里顺手加白名单。
+ */
+const ARTICLE_IMAGE_REFERRER_POLICY = 'strict-origin-when-cross-origin'
+
 /** 一张图的载入观察值。 */
 type ImageState = 'loading' | 'ok' | 'failed'
 
@@ -220,9 +238,18 @@ function ArticleImage({ src, alt, caption, onOpen }: {
       {/*
        * loading=lazy：长文里的图片很多，一次性加载会拖慢首屏。
        * decoding=async 让解码不阻塞滚动。
-       * referrerPolicy=no-referrer：默认的 Referer 会把「读者正在读哪一篇」的 URL 交给图片所在的
-       * 第三方域名（图床、CDN、跟踪像素）。这是正文里唯一一处会主动外泄阅读行为的请求，所以在这里
-       * 逐图关掉；`rel=noreferrer` 只作用于 `<a>`，管不到 `<img>`。
+       * referrerPolicy=strict-origin-when-cross-origin：**浏览器默认值，显式写出来是为了钉住它**。
+       *
+       * ⚠️ 2026-11-21 真机回归（病象 → 根因 → 修法）：这里原本写的是 `no-referrer`（R6 01 的隐私改动），
+       * 结果**所有图都显示「图片加载失败」**。根因（`实测`，浏览器 UA 逐域名 curl）：空 Referer 会让
+       * `cdnfile.sspai.com`（本机缓存里 52.7% 的图）返回 403，非空才 200；三态对照是
+       * R6 前坏图 30.5% → R6 后 78.9% → 本策略 30.5%。也就是说那条隐私改动用「真实功能损坏」
+       * 换了一个**并不存在**的收益：本插件是 SPA（`grep pushState|location|URLSearchParams src/client/`
+       * 零命中），没有按文章区分的 URL，所以 Referer 里从来只有宿主 origin，不携带「正在读哪一篇」。
+       * 本策略跨源只发 origin、不发路径，既让图床通过，也仍然不暴露路径。
+       *
+       * 另注：`icon.solidot.org`(26.3%) 与 `icon.zhiding.cn`(4.2%) 在 R6 之前就 403 —— 那是**既有的**
+       * 防盗链问题（前者要自家域名 Referer，后者要非空），不是本次回归，也不由本属性决定。
        * maxHeight 与 objectFit：正文里混着长截图与原图，只限宽的话一张 1×3000 的图会把版面撑出
        * 几十屏。限高之后超长图缩成可辨认的尺寸（点开原站看大图），版面保持连续。
        * minHeight 在外层容器上、不在 <img> 上（spec 决策 20）：占位要的是「容器先占住 120px」，
@@ -239,7 +266,7 @@ function ArticleImage({ src, alt, caption, onOpen }: {
          * `cursor: zoom-in` 只在可点时给：它是「这张图能点」的唯一视觉线索，而不可点的图上
          * 摆一个放大镜手势就是撒谎。
          */}
-        <img ref={imageRef} src={src} alt={alt} loading="lazy" decoding="async" referrerPolicy="no-referrer"
+        <img ref={imageRef} src={src} alt={alt} loading="lazy" decoding="async" referrerPolicy={ARTICLE_IMAGE_REFERRER_POLICY}
           onLoad={() => { setState('ok') }}
           onError={() => { setState('failed') }}
           onClick={state === 'ok' ? () => { onOpen(src) } : undefined}
@@ -532,7 +559,9 @@ function Lightbox({ src, onClose }: {
       <img
         src={src}
         alt=""
-        referrerPolicy="no-referrer"
+        // 与正文图同一条策略（2026-11-21 防盗链回归）：见正文图那段注释。
+        // 两处必须一致 —— 各写一个会出现「正文能显示、点开却失败」。
+        referrerPolicy={ARTICLE_IMAGE_REFERRER_POLICY}
         // 点图本身不关闭：冒泡到外层就会触发 onClose，所以必须在这里截断。
         onClick={(event) => { event.stopPropagation() }}
         style={{
@@ -546,8 +575,8 @@ function Lightbox({ src, onClose }: {
         href={src}
         target="_blank"
         rel="noreferrer"
-        // 与正文图同一条隐私约定（spec 决策 29）：新标签打开也算一次图片/页面请求。
-        referrerPolicy="no-referrer"
+        // 与正文图同一条策略：新标签打开也是一次请求，策略不一致会让「正文能看、点原图打不开」。
+        referrerPolicy={ARTICLE_IMAGE_REFERRER_POLICY}
         // 链接的点击同样不许冒泡到背景（否则「点原图」会先把灯箱关掉再开新标签）
         onClick={(event) => { event.stopPropagation() }}
         style={{ fontSize: 13, color: 'var(--rss-accent)' }}

@@ -603,6 +603,53 @@ assert.ok(hint.tabIndex < 0)                                                    
 也不 click**，所以「提示是 button」这件事在 document 派发路径上完全不可见 —— 老写法恒绿。
 同理别断 `defaultPrevented`（`routeKey` 自己会 prevent）：要断的是**业务后果**（`scrollTop` 有没有变）。
 
+### 3.8 「隐私加固」把功能改坏：`no-referrer` 让图床 403，而测试看不见
+
+**病象**（2026-11-21 真机，R6 交付后）：装上带 `referrerPolicy="no-referrer"` 的版本，打开**任何**一篇
+带图文章，**所有图片都显示「图片加载失败」**。而当时 935 条测试全绿、变异门槛 316/316 全抓。
+
+**根因**（`实测`，浏览器 UA 逐域名 `curl`，三轮一致）：
+
+| 域名 | 占本机缓存 | 空 Referer | 仅 origin | R6 之前 |
+|---|---|---|---|---|
+| `cdnfile.sspai.com` | **52.7%** | **403** | 200 | 200 |
+| `icon.solidot.org` | 26.3% | 403 | 403 | **403**（既有） |
+| `s3.ifanr.com` | 15.6% | 200 | 200 | 200 |
+| `icon.zhiding.cn` | 4.2% | 200 | 403 | **403**（既有） |
+| 其余 | 1.2% | 200 | 200 | 200 |
+| **坏图占比** | | **78.9%** | **30.5%** | 30.5% |
+
+`no-referrer` 把 Referer 变成空，而 sspai 的图床**空 Referer 一律 403**。坏图率从 30.5% 涨到 78.9%。
+
+**两层教训**：
+
+① **测试看不见，是因为 jsdom 里 `<img>` 不发请求**。三态用例是手动派发 `load`/`error`、
+补判用例是桩 `HTMLImageElement.prototype` —— 真实浏览器的 403 会触发 `onError`，而 jsdom 里
+**根本没有这个事件可派发**。这与 spec 验收 3「请求计数在 jsdom 里不可观测」是同一类盲区，
+但那次结论是「判据并入 DOM 断言」，这次的盲区**掩盖的是真实缺陷**。
+⇒ **凡改图片/网络策略，判据必须有一条钉「策略值本身属于已知可通过图床的白名单」**，
+不能只钉「DOM 里有没有 `<img>`」。
+
+② **隐私收益要先证明它存在**。spec 决策 29 的理由是「Referer 把『我正在读哪一篇』告诉第三方」，
+但本插件是 SPA（`grep pushState|location|URLSearchParams src/client/` **零命中**），
+**没有按文章区分的 URL** —— Referer 里从来只有宿主 origin，不携带文章身份。
+用「52.7% 的图挂掉」去换一个**并不存在**的隐私收益，是净损失。
+
+**修法**：`referrerPolicy` 用 **`strict-origin-when-cross-origin`**（= 浏览器默认值）——
+跨源只发 origin、不发路径，sspai 恢复 200，坏图率精确回到 R6 前的 30.5%。
+抽成唯一来源常量 `ARTICLE_IMAGE_REFERRER_POLICY`，正文图 / 灯箱图 / 灯箱「原图」链接都读它。
+
+**⚠️ 顺带纠正一个容易误判的地方**：`icon.solidot.org`(26.3%) 与 `icon.zhiding.cn`(4.2%)
+**在 R6 之前就 403** —— 前者要**自家域名** Referer（`https://www.solidot.org/` 才 200，
+裸 `https://solidot.org/` 仍 403），后者要**非空** Referer。那是**既有的**防盗链问题，
+不是本次回归，改 `referrerPolicy` 也不会好。要修得按域名决定策略 —— 那是另一件事，
+别在修 referrer 时顺手加白名单（本仓库「不为未经实测的样本扩规则」）。
+
+**判据在哪**：`tests/scroll-dom.test.mjs` 的「正文图片的 referrer 策略是 strict-origin-when-cross-origin」
+（DOM 层）+ `tests/client-bundle.test.mjs` 的两条产物断言（策略常量值 + 正文/灯箱都引用它）。
+变异 `client-referrer 写回 no-referrer` 守「别改回那个会让图床 403 的值」，
+`client-图片无 referrerPolicy` 守「别把属性整个删了」。
+
 ---
 
 ## 四、宿主 / 平台约束

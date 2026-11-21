@@ -994,7 +994,7 @@ function jsxPropsObjectAt(source, callIndex) {
   return undefined
 }
 
-test('R6 01：产物里正文图片的 props 带 referrerPolicy: "no-referrer"', () => {
+test('R6 01：产物里正文图片的 props 用 strict-origin-when-cross-origin 的 referrer 策略', () => {
   const source = readFileSync(BUNDLE, 'utf8')
   const sites = []
   for (let at = source.indexOf('("img", '); at !== -1; at = source.indexOf('("img", ', at + 1)) {
@@ -1006,16 +1006,25 @@ test('R6 01：产物里正文图片的 props 带 referrerPolicy: "no-referrer"',
   const articleSite = sites.find((props) => props !== undefined && props.includes('ARTICLE_IMAGE_MAX_HEIGHT'))
   assert.ok(articleSite !== undefined, '产物里找不到正文图片渲染点（ARTICLE_IMAGE_MAX_HEIGHT）—— 定位标记失效了，先修这条断言')
 
+  // 策略被抽成唯一来源 `ARTICLE_IMAGE_REFERRER_POLICY`（正文图与灯箱图都读它），所以 props 里
+  // 看到的是**变量引用**，字面量只出现在常量定义那一处。断言分两半：
+  //  ① 这处 props 引用了那个常量（= 没有各写一份字面量，改一处就能两处同时生效）；
+  //  ② 产物里那个常量的值确实是 strict-origin-when-cross-origin（= 没有被改回 no-referrer）。
   assert.ok(
-    /referrerPolicy:\s*"no-referrer"/.test(articleSite),
-    '正文 <img> 的 props 里没有 referrerPolicy: "no-referrer" —— 图片请求会带上 Referer，第三方图床因此知道读者在读哪一篇',
+    /referrerPolicy:\s*ARTICLE_IMAGE_REFERRER_POLICY/.test(articleSite),
+    '正文 <img> 的 props 必须引用 ARTICLE_IMAGE_REFERRER_POLICY —— 各写一份字面量会让正文与灯箱各说各话',
+  )
+  assert.ok(
+    /const ARTICLE_IMAGE_REFERRER_POLICY = "strict-origin-when-cross-origin";/.test(source),
+    '策略常量的值必须是 strict-origin-when-cross-origin —— ' +
+      '写成 no-referrer 会让「空 Referer 就 403」的图床（实测 cdnfile.sspai.com 占本机缓存 52.7%）全部加载失败',
   )
   // 既有属性不许被挤掉：同一处 props，加一条最容易顺手改坏另一条
   assert.ok(articleSite.includes('loading: "lazy"'), 'loading="lazy" 不许被这条改动挤掉')
   assert.ok(articleSite.includes('decoding: "async"'), 'decoding="async" 不许被这条改动挤掉')
 })
 
-test('R6 01：产物里**灯箱图**的 props 也带 referrerPolicy: "no-referrer"（spec 验收 14 的另一半）', () => {
+test('R6 01：产物里**灯箱图**的 props 也带同一个 referrer 策略（spec 验收 14 的另一半）', () => {
   // spec 验收 14 的字面要求是「正文 `<img>` **与灯箱图**的 referrerPolicy 为 no-referrer」，
   // 而 bundle 断言此前只锚正文那处（ARTICLE_IMAGE_MAX_HEIGHT）。灯箱图当时只有 DOM 断言 ——
   // DOM 用例断的是 React 的受控 prop 落到 DOM 上的结果，断不到「产物里这一处写的是哪个属性名」：
@@ -1036,8 +1045,8 @@ test('R6 01：产物里**灯箱图**的 props 也带 referrerPolicy: "no-referre
     '产物里找不到灯箱图渲染点（maxHeight: "100vh"）—— 定位标记失效了，先修这条断言（灯箱图若改用别的限高，请同步改这里）')
 
   assert.ok(
-    /referrerPolicy:\s*"no-referrer"/.test(lightboxSite),
-    '灯箱图没有 referrerPolicy: "no-referrer" —— 灯箱是第二处会外泄阅读行为的图片请求（读者点开的那张图，图床照样能从 Referer 读到他在读哪一篇）',
+    /referrerPolicy:\s*ARTICLE_IMAGE_REFERRER_POLICY/.test(lightboxSite),
+    '灯箱图的 referrerPolicy 必须与正文图读同一个常量 —— 各写一个会出现「正文能显示、点开却失败」',
   )
   // 两处必须是**不同的**渲染点：万一将来正文那处也用了 100vh，这条会退化成重复断言，
   // 而「灯箱漏写」就又没人守了 —— 用「正文标记不在这处」把两处钉开。

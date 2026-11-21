@@ -4308,16 +4308,31 @@ test('默认偏好（展开）：<img> 直接渲染、src 与原块一致，DOM 
 })
 
 /**
- * —— R6 01：正文图片不泄漏 Referer ——
+ * —— R6 01 / 防盗链回归：正文图片的 referrer 策略 ——
  *
  * 判据读 `getAttribute('referrerpolicy')`，**不读** `img.referrerPolicy`：
  * jsdom 里 `'referrerPolicy' in img === false`（`实测`，spec「补充说明」第 357 行），
  * 读属性恒 `undefined`，会让这条用例对任何实现都恒红；而 React 18 会把 `referrerPolicy`
  * 这个 prop 写成 DOM 的 `referrerpolicy` **属性**，那才是浏览器真正拿去发请求的东西。
  *
- * 这条**不设任何偏好**：默认态就是展开的，隐私不该要读者先做一次动作。
+ * 这条**不设任何偏好**：默认态就是展开的。
+ *
+ * ⚠️ **2026-11-21 真机回归后改判据（病象 → 根因 → 修法）**
+ *
+ * 病象：装上 R6 后打开任何一篇带图文章，**所有图都显示「图片加载失败」**。
+ * 根因（`实测`，浏览器 UA 逐域名 curl）：`referrerPolicy="no-referrer"` 把 Referer 变成空，
+ * 而 `cdnfile.sspai.com`（本机缓存里 52.7% 的图）**空 Referer 一律 403**，非空才 200。
+ * 三态对照：R6 前坏图 30.5% → R6 后 78.9% → `strict-origin-when-cross-origin` 30.5%。
+ * 修法：改回 `strict-origin-when-cross-origin`（**正是浏览器默认值**）—— 跨源只发 origin、
+ * 不发路径，sspai 恢复 200。
+ *
+ * 顺带纠正 spec 决策 29 的一个前提：本插件是 SPA（`grep pushState|location|URLSearchParams src/client/`
+ * 零命中），**没有按文章区分的 URL**，所以 R6 之前外泄的 Referer 只是宿主 origin，
+ * **不携带「正在读哪一篇」**。用「真实功能损坏」换这个并不存在的隐私收益是错的。
+ *
+ * 判据因此从「必须是 no-referrer」改成「必须是能通过图床的那个策略」，见下面两条用例。
  */
-test('R6 01：正文图片带 referrerpolicy="no-referrer"（默认展开态，无需任何设置）', skip, async () => {
+test('R6 01：正文图片的 referrer 策略是 strict-origin-when-cross-origin（防盗链回归）', skip, async () => {
   const h = await mountReader({
     items: [item({ id: 'a' })],
     article: {
@@ -4336,8 +4351,9 @@ test('R6 01：正文图片带 referrerpolicy="no-referrer"（默认展开态，�
   for (const image of images) {
     assert.equal(
       image.getAttribute('referrerpolicy'),
-      'no-referrer',
-      '图片 ' + image.getAttribute('src') + ' 必须带 referrerpolicy="no-referrer" —— 否则第三方图床能从 Referer 读到读者正在读哪一篇',
+      'strict-origin-when-cross-origin',
+      '图片 ' + image.getAttribute('src') + ' 的 referrerpolicy 必须是 strict-origin-when-cross-origin —— ' +
+      '写成 no-referrer 会让「空 Referer 就 403」的图床（如 cdnfile.sspai.com，实测占本机缓存 52.7%）全部加载失败',
     )
   }
   // 既有的两个图片属性不许被这条改动挤掉（同一处 props，最容易顺手改坏）
@@ -5265,8 +5281,11 @@ test('R6 07：点已加载的图打开灯箱——原尺寸图 + 「原图 ↗�
   assert.equal(zoomed.style.maxWidth, '100%', '灯箱图必须 maxWidth: 100%（不许横向溢出正文面）')
   assert.equal(zoomed.style.maxHeight, '100vh', '灯箱图必须 maxHeight: 100vh（长截图不许撑出屏幕）')
   // 隐私：与正文 <img> 同一条（spec 决策 29）—— 灯箱是第二处会外泄阅读行为的图片请求。
-  assert.equal(zoomed.getAttribute('referrerpolicy'), 'no-referrer',
-    '灯箱图必须带 referrerpolicy="no-referrer"（否则图床能从 Referer 读到读者正在读哪一篇）')
+  // 与正文图同一条策略（2026-11-21 防盗链回归）：no-referrer 会让空 Referer 就 403 的图床挂掉，
+  // 而 strict-origin-when-cross-origin 是浏览器默认值、跨源只发 origin。灯箱图与正文图必须一致 ——
+  // 两处若各写一个，读者会看到「正文能显示、点开却失败」这种自相矛盾的形态。
+  assert.equal(zoomed.getAttribute('referrerpolicy'), 'strict-origin-when-cross-origin',
+    '灯箱图的 referrerpolicy 必须与正文图一致（strict-origin-when-cross-origin）')
 
   const raw = lightbox.querySelector('a')
   assert.ok(raw !== null, '灯箱里必须有「原图 ↗」链接')
