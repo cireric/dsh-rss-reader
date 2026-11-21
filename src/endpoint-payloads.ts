@@ -87,12 +87,50 @@ const itemIdsShape = { itemIds: z.array(z.string().min(1)).min(1) }
 /** 批量条目端点：`unmarkRead`。空数组是坏入参，不是「什么都不做」；带账 → 窗口片段。 */
 export const unmarkReadPayload = withWindow(itemIdsShape)
 
-/** `markRead`：A 键会带 skipKept 与时间范围；单条打开只带 itemIds。带账 → 窗口片段。 */
+/**
+ * `markRead`：两代语义并存（ADR-0008）。
+ *
+ * - **itemIds**：单条打开 / 搜索态快照（行为逐字不变）；
+ * - **范围**（`feedId` / `folder` / `tagId`）或 `all: true`：A 的宿主求值路径 —— 宿主按
+ *   「范围 × 过滤 × 显示窗 × before × 未读且非保持未读」在**库全量**上选 id，客户端不再拼 id。
+ *
+ * `itemIds` / 范围 / `all` **恰好一个**：三者都给就等于「用哪个集合」有两个答案。
+ * `dryRun` 只服务确认框的条数（只数不写），只能与范围/all 同用 —— itemIds 的条数客户端自己知道。
+ */
+const markScopeShape = {
+  feedId: z.string().min(1).nullish(),
+  folder: z.string().min(1).nullish(),
+  tagId: z.string().min(1).nullish(),
+  all: z.boolean().nullish(),
+}
+
 export const markReadPayload = withWindow({
-  ...itemIdsShape,
+  // 范围路径下 itemIds 缺席；null 与缺席同义（浏览器通道把缺省序列化成 null）。
+  itemIds: z.array(z.string().min(1)).min(1).nullish(),
   skipKept: z.boolean().nullish(),
   // 空串仍是「没有范围」（旧行为）；只判类型，别让 '' 变成「一条都不标」。
   before: z.string().nullish(),
+  ...markScopeShape,
+  /** 过滤=星标时 true：只标星标的未读条目（与客户端 `visible()` 的过滤同一判据）。 */
+  starred: z.boolean().nullish(),
+  /** 只数不写：确认框的 N。 */
+  dryRun: z.boolean().nullish(),
+}).superRefine((value, ctx) => {
+  const hasIds = value.itemIds !== undefined && value.itemIds !== null
+  const scopes = [value.feedId, value.folder, value.tagId]
+    .filter((entry) => entry !== undefined && entry !== null && entry !== '')
+  const hasAll = value.all === true
+  if (scopes.length > 1) {
+    ctx.addIssue({ code: 'custom', path: ['folder'], message: '范围三选一（feedId / folder / tagId）' })
+    return
+  }
+  if ((hasIds ? 1 : 0) + (scopes.length > 0 ? 1 : 0) + (hasAll ? 1 : 0) !== 1) {
+    ctx.addIssue({ code: 'custom', path: ['itemIds'], message: 'itemIds / 范围 / all 必须恰好给一个' })
+    return
+  }
+  if (hasIds && value.dryRun === true) {
+    ctx.addIssue({ code: 'custom', path: ['dryRun'], message: 'dryRun 只能与范围或 all 同用' })
+  }
 })
 
 /** `duplicateHints`：可选批次，空数组/缺省/null 都表示「没有可提示的条目」，不是错误。 */

@@ -80,6 +80,16 @@ export interface KeyRoutingCtx {
    */
   readonly lightboxSrc: string | undefined
   readonly setLightboxSrc: (next: string | undefined) => void
+  /**
+   * A 的二次确认框是否开着（2026-11-21）。
+   *
+   * 为什么要进 ctx：它是模态，Esc 必须能关掉它。焦点落在框内时 document 层的 routeKey 会被
+   * `isTypingTarget` 挡住（`role="dialog"` 分支），那条路由由对话框自己处理；但焦点还在框外
+   * （刚按下 A、React 尚未把焦点移进按钮）时，Esc 只能靠这里。两处都写是**同一判据的两个入口**，
+   * 不是两份实现：都只做「关掉」。
+   */
+  readonly markAllConfirm: boolean
+  readonly setMarkAllConfirm: (next: boolean) => void
 }
 
 /**
@@ -328,6 +338,8 @@ export function routeKey(event: KeyboardEvent, ctx: KeyRoutingCtx): void {
       // 灯箱次之（R6 07，spec 决策 26）：帮助的遮罩是 pointer-events:none，所以「浮窗开着 +
       // 点正文里的图」是可达状态；而帮助是全局浮窗、视觉上压在灯箱之上（z-index 6 > 5），
       // 最上层先走。灯箱关掉之后读者**仍在正文里** —— 不该被一路带回列表。
+      // A 的确认框是最上层的模态：它开着时 Esc 只关它，不连带关灯箱 / 退出正文。
+      if (ctx.markAllConfirm) { run(() => ctx.setMarkAllConfirm(false)); break }
       if (ctx.lightboxSrc !== undefined) { run(() => ctx.setLightboxSrc(undefined)); break }
       if (view === 'article') { event.preventDefault(); store.closeArticle(); break }
       if (view === 'feeds') { event.preventDefault(); store.toggleFeeds(); break }
@@ -337,7 +349,9 @@ export function routeKey(event: KeyboardEvent, ctx: KeyRoutingCtx): void {
     case 'listView': if (view === 'list') store.setLayout('list'); break
     case 'star': run(() => { void store.toggleStar() }); break
     case 'toggleRead': run(() => { void store.toggleRead() }); break
-    case 'markAll': run(() => { void store.markAllRead() }); break
+    // A：**先开确认框**，不直接标读（2026-11-21）。确认框里的范围选择、实时条数与「0 条时禁用」
+    // 都归组件；这里只负责「该不该开」。真正的标读仍在 store.markAllRead（确认按钮的 onClick）。
+    case 'markAll': run(() => ctx.setMarkAllConfirm(true)); break
     default: return
   }
 }

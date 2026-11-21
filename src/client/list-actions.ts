@@ -429,17 +429,118 @@ export function createListActions(host: ListActionHost) {
     })
   }
 
-  /** A：把**当前过滤下**的未读全部标为已读，留一个短时撤销窗口。 */
-  const markAllRead = async (): Promise<void> => {
-    // **保持未读的条目要活下来**（规格 §3.3）——这正是 kept-unread 的存在理由。本地乐观更新与请求
-    // 两处都要跳过；宿主侧也会按 skipKept 再挡一次（客户端列表只是快照）。
-    const days = RANGE_DAYS[get().markAllRange]
-    const before = days === undefined ? undefined : new Date(now() - days * 24 * 3600 * 1000).toISOString()
+  /**
+   * A 的候选名单与范围阈值 —— **唯一判据**（2026-11-21）。
+   *
+   * 为什么必须抽出来：确认框要显示「将标记 N 条」，markAllRead 要发同一批 id。两处各写一遍
+   * 筛选条件，等下一次改语义（比如 keptUnread 或范围口径）就会静默分家：确认框说 12 条、
+   * 实际标 9 条，而没有任何用例能同时看见两处（ADR-0001：判据只有一个裁决者）。
+   *
+   * **保持未读的条目要活下来**（规格 §3.3）——这正是 kept-unread 的存在理由。本地乐观更新与请求
+   * 两处都要跳过；宿主侧也会按 skipKept 再挡一次（客户端列表只是快照）。
+   */
+  /** A 的范围阈值（早于 X）：`markAllPlan` 与范围标读共用这一条推导。 */
+  const beforeOf = (range: MarkAllRange): string | undefined => {
+    const days = RANGE_DAYS[range]
+    return days === undefined ? undefined : new Date(now() - days * 24 * 3600 * 1000).toISOString()
+  }
+
+  const markAllPlan = (range: MarkAllRange = get().markAllRange): { ids: string[]; before: string | undefined } => {
+    const before = beforeOf(range)
     const ids = visible()
       .filter((item) => item.readAt === undefined && item.keptUnread !== true)
       // 范围阈值同样判两次：这里决定乐观更新与名单，宿主那边再按 before 挡一次
       .filter((item) => before === undefined || recencyOf(item) < before)
       .map((item) => item.id)
+    return { ids, before }
+  }
+
+  /**
+   * A 的范围（ADR-0008）。`undefined` = 搜索态 —— 搜索结果由查询决定，不是库的一个范围，
+   * 只能按已加载的 itemIds 快照标（行为与本轮之前逐字相同）。
+   * 虚拟视图（全部/未读/星标）用 `all: true`：整个库按显示窗与过滤求值。
+   */
+  const markAllScopeOf = (state: ReaderState):
+    | { feedId: string } | { folder: string } | { tagId: string } | { all: true } | undefined => {
+    if (state.search !== undefined) return undefined
+    const nav = state.navSelection
+    if (nav.kind === 'feed') return { feedId: nav.feedId }
+    if (nav.kind === 'folder') return { folder: nav.folder }
+    if (nav.kind === 'tag') return { tagId: nav.tagId }
+    return { all: true }
+  }
+
+  /**
+   * 确认框的条数（ADR-0008）：范围路径问宿主（`dryRun`，只数不写），搜索态用本地快照。
+   *
+   * 为什么不复用 `markAllPlan().ids.length`：那份快照只看得见已加载页 —— 正是「源里 19 条未读
+   * 却显示 0 条」的由来。条数必须与宿主真正要标的集合同源，否则确认框会说谎。
+   */
+  const countMarkAllCandidates = async (): Promise<number | undefined> => {
+    const state = get()
+    const scope = markAllScopeOf(state)
+    if (scope === undefined) return markAllPlan(state.markAllRange).ids.length
+    const before = beforeOf(state.markAllRange)
+    const request = displayWindowRequestOf(state.displayWindow, new Date(now()))
+    const reply = await rpc<{ count?: number }>('markRead', {
+      ...scope,
+      skipKept: true,
+      ...(state.filter === 'starred' ? { starred: true } : {}),
+      ...(before === undefined ? {} : { before }),
+      dryRun: true,
+      ...request.payload,
+    })
+    return reply?.count
+  }
+
+  /** A：把**当前列表**的未读全部标为已读，留一个短时撤销窗口。 */
+  const markAllRead = async (): Promise<void> => {
+    const state = get()
+    const scope = markAllScopeOf(state)
+    const before = beforeOf(state.markAllRange)
+    const starred = state.filter === 'starred'
+
+    if (scope !== undefined) {
+      // 范围路径（ADR-0008）：候选由宿主在库全量上求值，客户端只给条件。
+      // 乐观更新只覆盖**已加载**的可见条目（读者眼前的那批），其余由宿主处理；
+      // 撤销条的 id 集合等回包 —— 只有宿主知道它到底改了哪些（可能上千条）。
+      const beforeItems = get().items
+      const beforeUnread = get().unread
+      const beforePerFeed = get().perFeedUnread
+      const stamp = new Date(now()).toISOString()
+      const optimisticIds = visible()
+        .filter((item) => item.readAt === undefined && item.keptUnread !== true)
+        .filter((item) => before === undefined || recencyOf(item) < before)
+        .map((item) => item.id)
+      const reply = await mirror.run({
+        endpoint: 'markRead',
+        payload: {
+          ...scope,
+          skipKept: true,
+          ...(starred ? { starred: true } : {}),
+          ...(before === undefined ? {} : { before }),
+        },
+        optimistic: () => {
+          if (optimisticIds.length === 0) return
+          // 乐观更新只覆盖**已加载**的可见条目：读者眼前先变，未加载的由宿主处理。
+          // 账目也按这一批当场减 —— 左栏角标要跟手；回包随后按宿主全量整体覆盖（不变量 ①）。
+          set({
+            items: get().items.map((item) => (optimisticIds.includes(item.id) ? { ...item, readAt: stamp } : item)),
+            unread: Math.max(0, get().unread - optimisticIds.length),
+            perFeedUnread: shiftPerFeedUnread(optimisticIds, -1),
+          })
+        },
+        rollback: () => { set({ items: beforeItems, unread: beforeUnread, perFeedUnread: beforePerFeed }) },
+      })
+      if (reply === undefined) return
+      const ids = reply.ids ?? []
+      if (ids.length === 0) { set({ undo: undefined }); clearUndoExpiry(); return }
+      set({ undo: { ids: [...ids] } })
+      armUndoExpiry()
+      return
+    }
+
+    const { ids } = markAllPlan(state.markAllRange)
     if (ids.length === 0) return
     const stamp = new Date(now()).toISOString()
     const beforeUnread = get().unread
@@ -858,7 +959,7 @@ export function createListActions(host: ListActionHost) {
     /** 挂在 ReaderStore 公开面上的动作（与搬走前同名同签名）。 */
     actions: {
       visible, setFilter, setWindow, setLayout, setMarkAllRange, setShowUnread, select, selectRelative,
-      markRead, activate, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllRead, undoMarkAll,
+      markRead, activate, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllPlan, countMarkAllCandidates, markAllRead, undoMarkAll,
       load, loadMore, cleanup, openArticle, retryArticle, closeArticle, stepArticle, canStepArticle, saveArticleProgress,
     },
     /** 跨域入口：选中重落。nav-actions 与视图恢复共用，刻意不上 ReaderStore 的公开面。 */

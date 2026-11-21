@@ -106,13 +106,26 @@ const CONTRACTS = {
   },
   markRead: {
     valid: { itemIds: ['a'], skipKept: true, before: '2026-01-01T00:00:00.000Z' },
-    alsoValid: [withWindow({ itemIds: ['a'] })],
+    alsoValid: [
+      withWindow({ itemIds: ['a'] }),
+      // ADR-0008：范围标读 / 全库标读 / dryRun 只数
+      { feedId: 'https://a.example/feed', skipKept: true },
+      { folder: 'news', dryRun: true },
+      { tagId: 'tag-1', starred: true },
+      { all: true, before: '2026-01-01T00:00:00.000Z' },
+    ],
     invalid: [
       {},
       { itemIds: [] },
       { itemIds: 'a' },
       { itemIds: ['a'], skipKept: 'yes' },
       { itemIds: ['a'], before: 5 },
+      // 选择器必须恰好一个：两个范围 / 范围+all / itemIds+范围 / itemIds+dryRun 都是坏入参
+      { feedId: 'a', folder: 'b' },
+      { feedId: 'a', all: true },
+      { itemIds: ['a'], all: true },
+      { itemIds: ['a'], dryRun: true },
+      { skipKept: true },
       ...windowBadSamples({ itemIds: ['a'] }),
     ],
   },
@@ -260,8 +273,9 @@ test('入参声明：每条坏样本都被拒，并给出字段路径', () => {
     }
   }
   // 116 = R1 01 时的 81 + R1 02 给五个带账端点各补的 7 条窗口负例。
+  // 121 = 116 + ADR-0008 给 markRead 补的 5 条选择器负例（两个范围 / 范围+all / ids+all / ids+dryRun / 空选择器）。
   // 删样本、或新增端点忘了配负例，都必须在这里显形。
-  assert.equal(checked, 116, '坏样本条数变了（当前 ' + checked + '）—— 检查契约表是否漏了必填字段')
+  assert.equal(checked, 121, '坏样本条数变了（当前 ' + checked + '）—— 检查契约表是否漏了必填字段')
 })
 
 test('坏入参：每个接 payload 的端点，第一条坏样本都经 dispatch 回 bad-request', async () => {
