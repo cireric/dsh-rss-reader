@@ -5,7 +5,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { resolveReaderKey, READER_KEY_HELP } from '../lib/keys.js'
+import { resolveReaderKey, READER_KEY_HELP, READER_HELP_SCOPE_LABEL } from '../lib/keys.js'
 
 test('键位：r 刷新计数；w/W 已空出且不得被偷偷接管（2026-10-08）', () => {
   // 2026-10-08 改键：r 归还给「刷新未读计数」（规格 §5 不变量 8），视图切换移到 w/W。
@@ -173,4 +173,42 @@ test('帮助表反向覆盖：实现里能返回的动作，都必须出现在�
   const covered = new Set(READER_KEY_HELP.flatMap((s) => s.entries.flatMap((e) => e.bindings.map((b) => b.action))))
   const missing = [...returned].filter((action) => !covered.has(action))
   assert.deepEqual(missing, [], '这些动作在实现里可达，却没写进帮助表：' + missing.join('、'))
+})
+
+/**
+ * `i` = 展开 / 折叠正文图片（R6 04；spec 决策 10 / 12 / 13）。
+ *
+ * 这一组钉两件事：① 键位与帮助表互锁；② 产物里必须是**字面量** `return 'toggleImages'`。
+ * ② 不能省成「测试绿了就算」：既有的反向覆盖测试用正则 `return\s+'([A-Za-z]+)'` 从
+ * `lib/keys.js` 抓动作名，**三元里的返回值抓不到**（`实测`：它只抓到 21 个动作，漏掉
+ * `pageDown` / `pageUp` / `halfPageDown` / `halfPageUp`）。若把 `case 'i'` 写成
+ * `return view === 'article' ? 'toggleImages' : 'none'`，反向覆盖照样绿而判据完全失效 ——
+ * 所以这里直接断言产物字节（spec 验收 16）。
+ */
+test("i 键解析为 toggleImages（正文图片开关；spec 验收 15）", () => {
+  assert.equal(resolveReaderKey('i'), 'toggleImages')
+  // 大写 I 不绑：`i` 是「整篇图片」，与 r/R、f/F 那种「界面写大写、实现两种都认」不同，
+  // 帮助表里写的就是小写 i，实现也只认小写 —— 免得「按 shift+i 也生效」成为没写进帮助的暗行为。
+  assert.equal(resolveReaderKey('I'), 'none')
+})
+
+test("帮助表里 i 那一行的 scope 是 article（仅正文），标签已补（spec 验收 15 / 决策 12）", () => {
+  const rows = READER_KEY_HELP.flatMap((section) => section.entries)
+  const row = rows.find((entry) => entry.bindings.some((binding) => binding.action === 'toggleImages'))
+  assert.ok(row !== undefined, '帮助表里必须有 toggleImages 那一行（浮窗不许漏掉真实可用的键）')
+  // scope 必须是新增的 article 档：标成 listArticle 就是让帮助浮窗在列表页撒谎 ——
+  // 而 `i` 在列表页什么都不做（守卫在 routeKey 的 view 判断里）。
+  assert.equal(row.scope, 'article', 'i 只在正文页生效，scope 必须是 article')
+  assert.ok(row.label.includes('i'), '帮助行要写出它的绑定键')
+  // READER_HELP_SCOPE_LABEL 是穷尽的 Record：扩枚举后 tsc 会强制补标签，这里钉住标签文案。
+  assert.equal(READER_HELP_SCOPE_LABEL['article'], '仅正文')
+})
+
+test("产物字节：lib/keys.js 里存在字面量 return 'toggleImages'（不许写成三元）", () => {
+  const source = readFileSync(new URL('../lib/keys.js', import.meta.url), 'utf8')
+  assert.ok(
+    source.includes("return 'toggleImages'"),
+    "lib/keys.js 里没有字面量 return 'toggleImages' —— 写成三元时反向覆盖正则看不见它，" +
+    '验收 16 会给出假绿（spec 决策 13 的实测记录）',
+  )
 })

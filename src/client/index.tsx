@@ -41,6 +41,10 @@ import { FeedsView } from './feeds-view.js'
 import { FeedNav } from './feed-nav.js'
 import { TagEditor } from './tag-editor.js'
 import { ArticleView } from './article-pane.js'
+// 空组覆盖住 `image-fold.ts`（R6 04 从本文件搬去）：`i` 键在 keyboard-routing.ts 里也要写它，
+// 两处各造一个 `new Set()` 会得到值相等但引用不同的两份「空组覆盖」，而 React 的相等判断与
+// `foldOf` 的快照语义都靠**同一个引用**才不多跑一次渲染。理由见那边的常量注释。
+import { EMPTY_IMAGE_GROUPS } from '../image-fold.js'
 import { hasBodyText, httpUrlOrEmpty, ROUTE_PATH, type ArticlePayload, type CleanupResult, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult } from '../shared.js'
 import { recencyOf } from '../cursor.js'
 import { paragraphsOf } from '../html-text.js'
@@ -73,17 +77,6 @@ const ROOT_ATTR = 'data-dsh-rss-reader'
 /** 帮助浮窗的标记：与 data-rss-row / data-rss-scroll 同一约定 —— 测试按标记属性现取节点，
  *  不靠序号或文案定位（改文案不该让测试红，改语义才该）。 */
 const HELP_ATTR = 'data-rss-help'
-
-/**
- * 「没有被点开过的图片组」—— 模块级常量而不是每次 `new Set()`。
- *
- * 两处用途：① `useState` 的初值；② 换篇 / 换视图时的复位值。同一个引用让「空组覆盖」在
- * 多次复位之间保持稳定，也让依赖数组里那个值不会因为「又造了一个空 Set」而白跑一遍 effect。
- * `ReadonlySet` 是刻意的：写入一律换新对象（`new Set(previous).add(n)`），不原地改 ——
- * 原地改会让 `foldOf` 的快照与 React 的相等判断同时失灵。
- */
-const EMPTY_IMAGE_GROUPS: ReadonlySet<number> = new Set<number>()
-
 
 /**
  * 加载指示的消抖阈值：刷新常常在毫秒级返回，立刻显示「刷新中」会闪一下。
@@ -318,6 +311,19 @@ export function createReader(store: ReaderStore): () => ReactNode {
      * 语义重叠的 state。两个状态都不落盘：它们是**本次阅读的瞬时状态**（spec 决策 9）。
      */
     const [expandedGroups, setExpandedGroups] = useState<ReadonlySet<number>>(EMPTY_IMAGE_GROUPS)
+    /**
+     * 图片折叠的**篇级覆盖**（R6 04，spec 决策 5 / 14）：`undefined` = 这一篇还没按过 `i`。
+     *
+     * 为什么必须是三态而不是布尔：`i` 的语义是「翻**基线**」（基线 = `篇级覆盖 ?? 偏好`），
+     * 而「读者还没表过态」与「读者明确选了展开」是两件事 —— 后者在偏好是折叠时也必须保持展开。
+     * 用布尔初值 `false` 会让偏好从展开改成折叠时，旧文章莫名其妙停在折叠（反过来也一样）。
+     *
+     * 与 `expandedGroups` / `expanded` / `helpOpen` 同一条通道：`useState` 在本组件 →
+     * 进 `KeyRoutingCtx` → 进 `routeKey` 调用 → **进依赖数组** → 作为 prop 传给 `ArticleView`。
+     * 一个都不能少：漏了最后一步按键与渲染脱钩（按 `i` 界面不动），漏了依赖数组则第二次按不生效。
+     * 不落盘 —— 与组覆盖同级，是**本次阅读的瞬时状态**（spec 决策 9）。
+     */
+    const [imagesExpanded, setImagesExpanded] = useState<boolean | undefined>(undefined)
     /** 帮助浮窗开合。它进 keydown effect 的依赖数组（见那条 effect 的收尾注释）。 */
     const [helpOpen, setHelpOpen] = useState(false)
     // 慢加载：只有超过 180ms 还在加载时才把「刷新中」画出来，避免毫秒级请求闪一下
@@ -419,18 +425,23 @@ export function createReader(store: ReaderStore): () => ReactNode {
     }, [])
 
     /**
-     * 换篇 / 换视图时清空组级覆盖（R6 03；spec 决策 15 的复位规则，本票只承担组级这一半）。
+     * 换篇 / 换视图时清空**两个**图片覆盖（R6 03 的组级 + 04 的篇级；spec 决策 15）。
      *
      * **两个依赖缺一不可**：
      *  - `articleItemId` 覆盖 `j` / `k` 换篇 —— 连续换篇时 `view` 一直是 `'article'`，只看 `view` 会漏；
      *  - `state.view` 覆盖「Esc 回列表后重开**同一篇**」—— `closeArticle` 只 `set({ view: 'list' })`、
      *    刻意保留 `article`（阅读进度落盘要用它），所以那一刻 `articleItemId` 不变。
      *
-     * 不这么做的话，读者点开过第 0 组、换到下一篇，新文章的第 0 组会**凭空是展开的**。
+     * 不这么做的话：读者点开过第 0 组、换到下一篇，新文章的第 0 组会**凭空是展开的**；
+     * 读者按过 `i` 展开整篇、Esc 出去再点回同一篇，会带着上次的篇级覆盖回来（偏好失去意义）。
      * 初值与复位值共用同一个 `EMPTY_IMAGE_GROUPS` 引用 ⇒ 首屏那次复位是 no-op（React 相等即跳过）。
+     *
+     * 07 的灯箱态将来也在这条 effect 里清（spec 决策 15 的代码形状：一条 effect 清三个状态）——
+     * 换篇时旧文章的 `src` 不该留在一个新文章的浮层里。
      */
     const articleItemId = state.article?.itemId
     useEffect(() => {
+      setImagesExpanded(undefined)
       setExpandedGroups(EMPTY_IMAGE_GROUPS)
     }, [articleItemId, state.view])
 
@@ -446,6 +457,8 @@ export function createReader(store: ReaderStore): () => ReactNode {
           root, store,
           expanded, setExpanded,
           helpOpen, setHelpOpen,
+          imagesExpanded, setImagesExpanded,
+          expandedGroups, setExpandedGroups,
         })
       }
       document.addEventListener('keydown', onKeyDown)
@@ -460,7 +473,15 @@ export function createReader(store: ReaderStore): () => ReactNode {
       //
       // 两个 setter **不进**依赖：它们的调用点全是函数式更新（setExpanded((current) => …)），
       // setter 身份跨渲染稳定，放进去只是让 effect 白跑。
-    }, [root, store, expanded, helpOpen])
+      //
+      // `imagesExpanded`（R6 04）同理**必须**在依赖里：`i` 的语义是「翻基线」，而基线 =
+      // `imagesExpanded ?? 偏好`，`routeKey` 要读它。漏了它，第二次按 `i` 仍读到注册那一刻的
+      // `undefined` ⇒ 又写一次「展开」，图片收不起来 —— 正是「同一行连按两次 o」的同族事故。
+      // 判据落在 tests/scroll-dom.test.mjs 的「i 键切换整篇图片…（依赖数组没漏）」。
+      // `expandedGroups` 也要在：它只被写、不被读，但它是 `i` 清空的对象 —— 依赖它保证
+      // 监听器手里那份 state 与最新一次渲染同步（复位 effect 改它之后不重新注册，
+      // 就会出现「按 i 用的是上一轮的空集」这种看着无碍、实则难查的偏差）。
+    }, [root, store, expanded, helpOpen, imagesExpanded, expandedGroups])
 
     const items = store.visible()
     /**
@@ -746,6 +767,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
             onSaveProgress={store.saveArticleProgress}
             expandedGroups={expandedGroups}
             onExpandImageGroup={expandImageGroup}
+            imagesExpanded={imagesExpanded}
             canPrev={store.canStepArticle(-1)}
             canNext={store.canStepArticle(1)}
             onPrev={() => { store.stepArticle(-1) }}

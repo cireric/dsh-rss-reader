@@ -27,6 +27,21 @@ export interface ImageGroup {
 }
 
 /**
+ * 「没有被点开过的图片组」—— 模块级常量而不是每次 `new Set()`。
+ *
+ * **住在这里而不是 `src/client/index.tsx`**（R6 04 从那里搬来）：写它的有两处，`index.tsx` 的
+ * `useState` 初值 / 复位，与 `keyboard-routing.ts` 的 `i` 键（`i` 要清空组覆盖）。两个文件
+ * 都得 import 它，若各自 `new Set()` 就会造出两份「空组覆盖」——它们值相等但不是同一个引用，
+ * 而 React 的相等判断与 `foldOf` 的快照语义都靠**同一个引用**才不多跑一次渲染。
+ * 放这里是因为本文件已经是「图片折叠的唯一决策层」：空集合是这个决策层的值域里的常量，
+ * 不是某个组件的私有物。host 也能编译（本文件刻意无 node 依赖，见文件头）。
+ *
+ * `ReadonlySet` 是刻意的：写入一律换新对象（`new Set(previous).add(n)`），不原地改 ——
+ * 原地改会让 `foldOf` 的快照与 React 的相等判断同时失灵。
+ */
+export const EMPTY_IMAGE_GROUPS: ReadonlySet<number> = new Set<number>()
+
+/**
  * 块是不是图片块。
  *
  * `kind` 的取法沿用 `src/client/article-pane.tsx` 的 `ArticleBlockView`：

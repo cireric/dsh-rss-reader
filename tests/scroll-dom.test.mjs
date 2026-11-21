@@ -4633,6 +4633,144 @@ test('回退态不受折叠影响：即使偏好是折叠，也没有图片提�
 })
 
 /**
+ * —— `i` 键切换整篇图片（R6 04）——
+ *
+ * 判据全在 DOM 上（与 03 同一口径）：按一次 `i` 后**所有组的 `<img>` 都不在 DOM 里**
+ * （不是 `display:none`），再按一次全部出现。
+ *
+ * 这里同时是「依赖数组没漏」的判据（spec 验收 19）：`imagesExpanded` 若没进 keydown effect
+ * 的依赖数组，监听器闭包读到的是**注册那一刻**的值 ⇒ 第二次按 `i` 不生效（`expanded`
+ * 那条 2026-10-15 实测事故的同族：拿掉依赖后按 `o` 永远收不起来，当时 402 条测试全绿）。
+ */
+
+/** 两组图片的正文夹具（1 张 + 2 张，中间夹一段文字）：单组夹具区分不了「整篇」与「这一组」。 */
+function twoGroupArticle(itemId = 'a') {
+  return {
+    itemId, title: 'ART ' + itemId,
+    blocks: [
+      { kind: 'p', text: '第一组之前。' },
+      imgBlock('https://img.example/solo.png', { alt: '独图' }),
+      { kind: 'p', text: '两组之间的段落。' },
+      imgBlock('https://img.example/g2a.png', { alt: '二之一' }),
+      imgBlock('https://img.example/g2b.png', { alt: '二之二' }),
+    ],
+  }
+}
+
+test('i 键切换整篇图片：折叠偏好下按一次全部出现，再按一次全部消失（依赖数组没漏）', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    prefs: foldedPrefs(),
+    article: twoGroupArticle(),
+  })
+  const body = await openArticle(h)
+  assert.equal(body.querySelectorAll('img').length, 0, '前置：偏好是折叠')
+  assert.equal(foldHints(body).length, 2, '前置：两组各一条提示')
+
+  assert.equal(h.press('i'), true, '正文页的 i 必须被接管（与其他接管键同族，走 run() 的 preventDefault）')
+  await h.settle()
+  assert.equal(body.querySelectorAll('img').length, 3, '按一次 i ⇒ 两组共三张图全部出现（全篇统一）')
+  assert.equal(foldHints(body).length, 0, '全篇展开后不许留下任何提示')
+
+  // ⚠️ 第二次按 i 是「依赖数组没漏」的判据：监听器读到旧值时，它仍以为基线是折叠，
+  // 于是再写一次「展开」—— 图片不会收起，这条当场红。
+  assert.equal(h.press('i'), true, '第二次按 i 也必须被接管')
+  await h.settle()
+  assert.equal(body.querySelectorAll('img').length, 0, '再按一次 i ⇒ 全部消失（DOM 里没有，不是隐藏）')
+  assert.equal(foldHints(body).length, 2, '折叠回来时两组提示都回来')
+})
+
+test('i 清空组覆盖：先点开某一组再按 i，全篇统一到同一形态（不是「部分展开取反」）', skip, async () => {
+  // spec 决策 10 的核心：`i` 翻的是**基线**（篇级覆盖 ?? 偏好）并清空组覆盖，
+  // 所以结果与「读者点过几组」无关。这里读者点开了第 0 组，基线仍是偏好（折叠）⇒
+  // 按 i 应得到「全篇展开」，而不是「把已展开那组收起、其余保持折叠」这类局部结果。
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    prefs: foldedPrefs(),
+    article: twoGroupArticle(),
+  })
+  const body = await openArticle(h)
+  foldHints(body)[0].dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
+  await h.settle()
+  assert.equal(body.querySelectorAll('img').length, 1, '前置：只点开了第 0 组（1 张）')
+
+  h.press('i')
+  await h.settle()
+  assert.equal(body.querySelectorAll('img').length, 3, '按 i ⇒ 全篇统一到展开（组覆盖被清空）')
+  assert.equal(foldHints(body).length, 0, '清空组覆盖后不该再有任何提示')
+
+  // 再按一次：基线此时是篇级覆盖 true ⇒ 全篇折叠。若组覆盖没被清空，第 0 组会逆着 i 留着。
+  h.press('i')
+  await h.settle()
+  assert.equal(body.querySelectorAll('img').length, 0, '再按 i ⇒ 全篇折叠，点开过的那组也必须收起')
+})
+
+test('i 的篇级覆盖是会话级：Esc 回列表后重开同一篇复位（复位 effect 的第二个依赖）', skip, async () => {
+  // 这条守 spec 决策 15 的**第二个**依赖 `state.view`：`closeArticle` 只 `set({ view: 'list' })`、
+  // 刻意保留 `article`（阅读进度落盘要用它），所以那一刻 `articleItemId` **不变** ——
+  // 只依赖 `articleItemId` 时，重开同一篇会带着上次的篇级覆盖回来。
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    prefs: foldedPrefs(),
+    article: twoGroupArticle(),
+  })
+  const body = await openArticle(h)
+  h.press('i')
+  await h.settle()
+  assert.equal(body.querySelectorAll('img').length, 3, '前置：按 i 展开了整篇')
+
+  h.press('Escape')
+  await h.settle()
+  assert.equal(h.store.get().view, 'list', '前置：Esc 回列表')
+
+  h.press('V', true)
+  await h.waitFor(() => h.store.get().view === 'article', { timeout: 900, label: '重新进入正文页' })
+  await h.settle()
+  const reopened = h.win.document.querySelector('article.dsh-rss-article-column')
+  assert.ok(reopened !== null, '正文列必须存在')
+  assert.equal(reopened.querySelectorAll('img').length, 0,
+    '重开同一篇要回到偏好决定的形态（折叠）—— 篇级覆盖不跨阅读会话保留')
+})
+
+test('i 的篇级覆盖是会话级：j/k 换篇复位（复位 effect 的第一个依赖）', skip, async () => {
+  // 第一个依赖 `articleItemId`：连续换篇时 `view` 一直是 'article'，只看 `view` 会漏。
+  const h = await mountReader({
+    items: [item({ id: 'a' }), item({ id: 'b' })],
+    prefs: foldedPrefs(),
+    article: (itemId) => twoGroupArticle(itemId),
+  })
+  const body = await openArticle(h)
+  h.press('i')
+  await h.settle()
+  assert.equal(body.querySelectorAll('img').length, 3, '前置：a 篇按 i 展开')
+
+  h.press('j')
+  await h.settle()
+  assert.equal(h.store.get().article.itemId, 'b', '前置：切到 b 篇')
+  assert.equal(body.querySelectorAll('img').length, 0, '换篇后新文章回到偏好决定的形态（折叠）')
+})
+
+test('i 在列表页不改变任何状态（图片开关只在正文页生效）', skip, async () => {
+  // 守卫住在 routeKey 的 view 判断里（spec 验收 17）。列表页按 i 之后进正文，
+  // 图片仍应是偏好决定的形态 —— 若列表页那次按键写了篇级覆盖，这里会红。
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    prefs: foldedPrefs(),
+    article: twoGroupArticle(),
+  })
+  await h.store.load('overview')
+  await h.settle()
+  assert.equal(h.store.get().view, 'list', '前置：在列表页')
+  h.press('i')
+  await h.settle()
+  assert.equal(h.store.get().view, 'list', '列表页按 i 不该切视图')
+  assert.deepEqual(h.prefs.writes, [], '列表页按 i 不该写任何偏好')
+
+  const body = await openArticle(h)
+  assert.equal(body.querySelectorAll('img').length, 0, '列表页那次 i 不许留下篇级覆盖')
+})
+
+/**
  * —— 图片三态与占位（R6 06）——
  *
  * 判据读 `[data-rss-image-state]` 这个标记属性（值是 `loading` / `ok` / `failed`）：

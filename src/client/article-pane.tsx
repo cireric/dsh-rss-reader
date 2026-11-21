@@ -459,7 +459,7 @@ function ImageFoldHint({ group, onExpand }: {
   )
 }
 
-export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress, expandedGroups, onExpandImageGroup }: {
+export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress, expandedGroups, onExpandImageGroup, imagesExpanded }: {
   article: ArticleState | undefined
   item: ItemView | undefined
   onBack: () => void
@@ -484,6 +484,14 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
   expandedGroups: ReadonlySet<number>
   /** 点某组的折叠提示 ⇒ 只展开那一组（组是原子的，spec 决策 19）。 */
   onExpandImageGroup: (groupIndex: number) => void
+  /**
+   * 图片折叠的**篇级覆盖**（R6 04，spec 决策 5 / 14）：`undefined` = 这一篇还没按过 `i`。
+   *
+   * 状态住在 `index.tsx`（与 `expandedGroups` 同一条通道），本组件只照着画：`i` 键在
+   * `routeKey` 里写它，若状态留在本组件里，按键与渲染就会脱钩（spec 验收 18）。
+   * 它与组覆盖是两层：`组覆盖 ?? 篇覆盖 ?? 偏好`（`foldOf` 是唯一裁决点）。
+   */
+  imagesExpanded: boolean | undefined
   /** 容器标记属性名：按键处理按它现取容器（取值集中在 list-scroll.ts 的 scrollSelectorFor） */
   scrollAttr: string
   /** 上/下一条是否可切（与键盘共用同一判定，见 canStepArticle） */
@@ -550,9 +558,10 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
    *
    * `foldOf` 在构造时对组覆盖 `Set` 取快照（见 `image-fold.ts` 的注释），所以把它缓存下来
    * 再指望它跟着新 `Set` 变，症状是「点了提示没反应」或「`i` 按了不生效」。
-   * 偏好取 `reading.expandImages`；篇级覆盖本票不引入（留给 04 的 `i`）。
+   * 三层输入齐了：偏好 `reading.expandImages`、篇级覆盖 `imagesExpanded`（04 的 `i` 写的）、
+   * 组级覆盖 `expandedGroups`（03 的点提示写的）。判定顺序 `组 ?? 篇 ?? 偏好` 只在 `foldOf` 里算。
    */
-  const fold: ImageFold = foldOf(reading.expandImages, undefined, expandedGroups)
+  const fold: ImageFold = foldOf(reading.expandImages, imagesExpanded, expandedGroups)
   /** 块下标 → 该块所属的组；非图片块不在表里。 */
   const groupOfBlock = new Map<number, ImageGroup>()
   for (const group of imageGroups) {
