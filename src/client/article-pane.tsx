@@ -6,7 +6,7 @@
  * 页面上下文里跑，是当初加沙箱要挡的事。取舍结论：**正文只走抽取视图**，想看原样就用
  * 「打开原站 ↗」在新标签页看——那是浏览器自己的上下文，没有沙箱折衷。
  */
-import { useCallback, useEffect, useRef, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { edgeTopFor, readingRatioOf, restoreTopFor } from '../list-scroll.js'
 
 /**
@@ -133,6 +133,116 @@ function InlineRunsView({ runs }: { runs: readonly InlineRun[] }): ReactNode {
 }
 
 /**
+ * 图片三态的标记属性名：值是 `loading` / `ok` / `failed`。
+ *
+ * 为什么要把内部状态写进 DOM：三态在 jsdom 里**没有任何别的可观测差别**（没有布局引擎、
+ * 图片不真的加载，见 `docs/pitfalls.md` §2.2），不标出来验收 9 的前半条就无法表达。
+ * 它同时是 07 灯箱的入口判据（只有 `ok` 的图可点），所以不是测试脚手架。
+ */
+const IMAGE_STATE_ATTR = 'data-rss-image-state'
+
+/** 图片容器的最小高度（px，spec 决策 20）：加载完成时把位移从「整张图」压到「高度差」。 */
+const ARTICLE_IMAGE_MIN_HEIGHT = 120
+
+/** 一张图的载入观察值。 */
+type ImageState = 'loading' | 'ok' | 'failed'
+
+/**
+ * 正文里的一张图 —— 三态（`loading` / `ok` / `failed`）+ 占位。
+ *
+ * **为什么是独立子组件**（spec 决策 21）：`ArticleView` 那条「不放 `useState`」的约定管的是
+ * 折叠态（它必须被 `routeKey` 读到，所以住在 `index.tsx`）。逐图的载入观察值没有任何按键要读，
+ * 放进 `ArticleView` 会让每次图片载入都重渲染整篇正文。
+ *
+ * **为什么 `key` 必须是 `itemId + ':' + index`**（调用方负责）：换文章时若块数相同，React 会
+ * 复用同一个实例 ⇒ 沿用上一篇的 `ok` 态，而新图根本没加载过。复合 key 让 React 语义化地重挂，
+ * 换篇即复位，不需要 `useEffect` 去重置。
+ *
+ * **为什么挂载后还要补判 `complete`**（spec 决策 22）：缓存命中的图可能在 React 挂上
+ * `onLoad` 监听器**之前**就已经 `complete` 了 —— 那一刻 `load` 事件早已派发完毕，只靠
+ * `onLoad` 的图会永远停在「载入中」。这与 `docs/pitfalls.md` §3.1（长驻监听器不许捕获会变的值）
+ * 是同一族：**事件可能早于监听器**。用 `ref` + 挂载后跑一次的 effect 补判是正确的形态
+ * （`useEffect` 在 DOM 就位后跑，读到的 `complete` 是当下的值）。
+ */
+function ArticleImage({ src, alt, caption }: {
+  src: string
+  alt: string
+  caption: string
+}): ReactNode {
+  const [state, setState] = useState<ImageState>('loading')
+  const imageRef = useRef<HTMLImageElement | null>(null)
+
+  /**
+   * 补判「挂载前就已 complete」。
+   *
+   * 依赖数组只放 `src`：换图（同实例换 src）时要重新判一次，而 `setState` 是稳定的。
+   * `naturalWidth > 0` 才是「真的解码成功」——`complete === true` 也覆盖「加载失败后放弃」
+   * 那种情况（此时 `naturalWidth` 是 0），所以必须两个条件一起看（spec 决策 22）。
+   */
+  useEffect(() => {
+    const image = imageRef.current
+    if (image === null) return
+    if (!image.complete) return
+    setState(image.naturalWidth > 0 ? 'ok' : 'failed')
+  }, [src])
+
+  if (state === 'failed') {
+    /*
+     * 失败态**不渲染 `<img>`**（spec 决策 23）：留着它浏览器会画一个破图图标，
+     * 而我们要的是「图片加载失败」这行字 + alt。把图换成文案，同时也让
+     * 「失败态 DOM 里没有 img」成立 —— 注意与折叠态区分：折叠是根本没有 img，
+     * 失败态是 img 被替换成文案。
+     */
+    return (
+      <figure {...{ [IMAGE_STATE_ATTR]: state }} style={{ margin: '0 0 1.3em' }}>
+        <div style={{
+          minHeight: ARTICLE_IMAGE_MIN_HEIGHT, display: 'flex', flexDirection: 'column',
+          alignItems: 'center', justifyContent: 'center', gap: 4, padding: '12px 16px',
+          borderRadius: 6, textAlign: 'center',
+          border: '1px dashed color-mix(in srgb, currentColor 25%, transparent)',
+          background: 'color-mix(in srgb, currentColor 4%, transparent)',
+        }}>
+          <span>图片加载失败</span>
+          {/* 有 alt 就一并显示：它是这张图唯一的可读内容，丢掉等于什么都不剩 */}
+          {alt !== '' && <span className="dsh-rss-meta">{alt}</span>}
+        </div>
+        {caption !== '' && (
+          <figcaption className="dsh-rss-meta" style={{ marginTop: 8, textAlign: 'center' }}>{caption}</figcaption>
+        )}
+      </figure>
+    )
+  }
+
+  return (
+    <figure {...{ [IMAGE_STATE_ATTR]: state }} style={{ margin: '0 0 1.3em' }}>
+      {/*
+       * loading=lazy：长文里的图片很多，一次性加载会拖慢首屏。
+       * decoding=async 让解码不阻塞滚动。
+       * referrerPolicy=no-referrer：默认的 Referer 会把「读者正在读哪一篇」的 URL 交给图片所在的
+       * 第三方域名（图床、CDN、跟踪像素）。这是正文里唯一一处会主动外泄阅读行为的请求，所以在这里
+       * 逐图关掉；`rel=noreferrer` 只作用于 `<a>`，管不到 `<img>`。
+       * maxHeight 与 objectFit：正文里混着长截图与原图，只限宽的话一张 1×3000 的图会把版面撑出
+       * 几十屏。限高之后超长图缩成可辨认的尺寸（点开原站看大图），版面保持连续。
+       * minHeight 在外层容器上、不在 <img> 上（spec 决策 20）：占位要的是「容器先占住 120px」，
+       * 加在图上会把图本身拉高。
+       */}
+      <div style={{ minHeight: ARTICLE_IMAGE_MIN_HEIGHT }}>
+        <img ref={imageRef} src={src} alt={alt} loading="lazy" decoding="async" referrerPolicy="no-referrer"
+          onLoad={() => { setState('ok') }}
+          onError={() => { setState('failed') }}
+          style={{
+            display: 'block', margin: '0 auto', width: '100%', height: 'auto',
+            maxHeight: ARTICLE_IMAGE_MAX_HEIGHT, objectFit: 'contain', borderRadius: 6,
+          }} />
+      </div>
+      {caption !== '' && (
+        <figcaption className="dsh-rss-meta" style={{ marginTop: 8, textAlign: 'center' }}>{caption}</figcaption>
+      )}
+    </figure>
+  )
+}
+
+/**
  * 单个正文块的渲染。
  *
  * 之所以要分类型：用户反馈「图片不显示、样式变形」——根因是抽取层过去只回传纯文本段落，
@@ -155,27 +265,8 @@ function ArticleBlockView({ block }: { block: Record<string, unknown> }): ReactN
     if (src === '') return null
     const alt = typeof block['alt'] === 'string' ? block['alt'] : ''
     const caption = typeof block['caption'] === 'string' ? block['caption'] : ''
-    return (
-      <figure style={{ margin: '0 0 1.3em' }}>
-        {/*
-         * loading=lazy：长文里的图片很多，一次性加载会拖慢首屏。
-         * decoding=async 让解码不阻塞滚动。
-         * referrerPolicy=no-referrer：默认的 Referer 会把「读者正在读哪一篇」的 URL 交给图片所在的
-         * 第三方域名（图床、CDN、跟踪像素）。这是正文里唯一一处会主动外泄阅读行为的请求，所以在这里
-         * 逐图关掉；`rel=noreferrer` 只作用于 `<a>`，管不到 `<img>`。
-         * maxHeight 与 objectFit：正文里混着长截图与原图，只限宽的话一张 1×3000 的图会把版面撑出
-         * 几十屏。限高之后超长图缩成可辨认的尺寸（点开原站看大图），版面保持连续。
-         */}
-        <img src={src} alt={alt} loading="lazy" decoding="async" referrerPolicy="no-referrer"
-          style={{
-            display: 'block', margin: '0 auto', maxWidth: '100%', height: 'auto',
-            maxHeight: ARTICLE_IMAGE_MAX_HEIGHT, objectFit: 'contain', borderRadius: 6,
-          }} />
-        {caption !== '' && (
-          <figcaption className="dsh-rss-meta" style={{ marginTop: 8, textAlign: 'center' }}>{caption}</figcaption>
-        )}
-      </figure>
-    )
+    // 三态与占位全在子组件里（spec 决策 21）：本组件保持无 state。
+    return <ArticleImage src={src} alt={alt} caption={caption} />
   }
 
   if (kind === 'pre') {
@@ -467,6 +558,22 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
   for (const group of imageGroups) {
     for (const blockIndex of group.blockIndexes) groupOfBlock.set(blockIndex, group)
   }
+  /**
+   * 本篇的条目 id：复合 key 的前半截（spec 决策 21）。
+   * 取 `article.itemId` 而不是 `item.id`：正文页的唯一真相是 article.itemId（见 list-actions.ts
+   * 的 loadArticle）—— item 可能已经被列表侧的选中变化换到别的条目，那时 key 会跟着错。
+   */
+  const articleItemId = article?.itemId ?? ''
+  /**
+   * 正文块的 React key：**`itemId + ':' + index`**，不是裸 `index`（spec 决策 21）。
+   *
+   * 裸下标在换文章时若块数相同，React 会复用同一个 `ArticleBlockView` 实例 ——
+   * 里面的 `<ArticleImage>` 于是沿用上一篇的 `ok` 态，而新图根本没加载过（读者看到一张
+   * 从没加载成功的图被当成「已载入」）。复合 key 让 React 语义化地重挂，换篇即复位，
+   * 不需要 `useEffect` 去重置状态。折叠提示也用同一个 key：它本身无状态，但同一个 map
+   * 里的 key 必须互不冲突。
+   */
+  const blockKeyOf = (at: number): string => articleItemId + ':' + at
   const title = article?.title || item?.title
   const publishedAt = item?.publishedAt
   // 历史行可能带脏 link（修复前落库的 javascript:）：渲染前过 shared.ts 的唯一白名单。
@@ -771,12 +878,12 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
              * `reading.expandImages === true`，否则「提示说折叠、DOM 里有 img」迟早发生。
              */
             const group = groupOfBlock.get(index)
-            if (group === undefined) return <ArticleBlockView key={index} block={block} />
+            if (group === undefined) return <ArticleBlockView key={blockKeyOf(index)} block={block} />
             const renderImage = fold.shouldRender(group.index)
-            if (renderImage) return <ArticleBlockView key={index} block={block} />
+            if (renderImage) return <ArticleBlockView key={blockKeyOf(index)} block={block} />
             // 折叠：只在组首块画提示，其余成员整块不渲染（组是原子的）
             if (group.blockIndexes[0] !== index) return null
-            return <ImageFoldHint key={index} group={group} onExpand={onExpandImageGroup} />
+            return <ImageFoldHint key={blockKeyOf(index)} group={group} onExpand={onExpandImageGroup} />
           })}
         </article>
       </div>
