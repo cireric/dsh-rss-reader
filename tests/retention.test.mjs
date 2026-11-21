@@ -4,7 +4,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { selectPrunable, selectArticleEvictions, selectCleanup } from '../lib/retention.js'
+import { selectPrunable, selectArticleEvictions, selectCleanup, articleCharsOf } from '../lib/retention.js'
 
 const row = (id, recency, { starred = false, kept = false, read = false } = {}) => ({ id, starred, kept, read, recency })
 
@@ -193,4 +193,47 @@ test('全局正文预算：上限是 NaN 时一条都不清（垃圾上限不得
     'undefined 同理（配置没解析时的形状，见 src/index.ts 的 Config 兜底注释）')
   assert.deepEqual(selectArticleEvictions(entries, Infinity), [],
     'Infinity 是有效上限且装得下全部 ⇒ 不清')
+})
+/**
+ * —— 表格的字符统计（R5 04）——
+ *
+ * 为什么值得单独一条：`table` 块两个字段都没有（既没有 `text` 也没有 `items`），只按那两个字段
+ * 读的实现会把整张表算成 **0 字符**。于是「一张大表格不占缓存额度」——`capArticleCache` 的淘汰
+ * 口径直接失真，而这件事在界面上看不出来（用户只会觉得缓存限额不生效）。
+ */
+
+/**
+ * 含表格的夹具。
+ *
+ * 期望值按**手算的字面量**写，不在这里重跑一遍投影（那会变成自证）：
+ * - 段落 `'正文甲乙丙'` = 5 字；
+ * - 表格投影是「表头一行 + 每行单元格空格分隔、行间换行」⇒ `'参数 值\n电压 220V'`：
+ *   参数(2) + 空格(1) + 值(1) + 换行(1) + 电压(2) + 空格(1) + 220V(4) = **12** 字。
+ * 合计 17。分隔符算进去是**有意的**：它们确实是投影出来的字符，搜索与日志看到的也是它们。
+ */
+const TABLE_ARTICLE = {
+  fetchedAt: '2026-10-11T10:00:00.000Z',
+  blocks: [
+    { kind: 'p', text: '正文甲乙丙' },
+    { kind: 'table', header: ['参数', '值'], rows: [['电压', '220V']] },
+  ],
+}
+const TABLE_CHARS = 12
+const PARAGRAPH_CHARS = 5
+
+test('articleCharsOf：表格块不再算成 0 字符（否则大表格不占缓存额度）', () => {
+  assert.equal(articleCharsOf(TABLE_ARTICLE), PARAGRAPH_CHARS + TABLE_CHARS,
+    '表格的表头与单元格都必须计入字符数')
+  assert.ok(articleCharsOf(TABLE_ARTICLE) > PARAGRAPH_CHARS, '只算段落的话表格等于不存在')
+  // 没有表格时行为不变（既有判据）
+  assert.equal(articleCharsOf({ blocks: [{ kind: 'p', text: '正文甲乙丙' }] }), PARAGRAPH_CHARS)
+  assert.equal(articleCharsOf({ blocks: [{ kind: 'list', items: ['一二', '三'] }] }), 3)
+  assert.equal(articleCharsOf(undefined), 0)
+})
+
+test('articleCharsOf：paragraphs 存在时仍只算 paragraphs（二选一，与既有语义一致）', () => {
+  // 这条钉住「二选一」不被表格分支顺手改成「相加」—— 并存形态经 normalizeLegacyArticle 后
+  // 不该出现，但 schema 允许；口径变化会让旧库的字符数当场翻倍。
+  assert.equal(articleCharsOf({ paragraphs: ['一二三'], blocks: [{ kind: 'table', rows: [['甲乙']] }] }), 3,
+    'paragraphs 在场时只算 paragraphs')
 })

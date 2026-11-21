@@ -1047,3 +1047,46 @@ test('P3-3 mergeItems 不丢被并条目的阅读进度（keeper 没有才接住
   await store.mergeItems('keeper2', ['loser2'], record('k2'))
   assert.deepEqual(store.readingProgress('keeper2', '4:abcd'), { ratio: 0.2 }, 'keeper 已有进度时不许被 loser 覆盖')
 })
+
+/**
+ * —— 表格的字符统计（R5 04）——
+ *
+ * 三处口径必须一致：`articleCharsOf`（纯函数）、SQL 侧 `articleCharsFromBody`（生产实现，
+ * 独立解析 `texts.body`）、`memory-store.listArticleCacheEntries`（内存替身）。
+ * `table` 块既没有 `text` 也没有 `items`，只读那两个字段的实现会把它算成 0 —— 于是「一张大表格
+ * 不占缓存额度」，而这条判据在界面上完全看不出来。
+ */
+
+/** 含表格的正文夹具。期望值见 retention.test.mjs 的手算注释：表格投影 12 字、段落 5 字。 */
+const TABLE_BLOCKS = [
+  { kind: 'p', text: '正文甲乙丙' },
+  { kind: 'table', header: ['参数', '值'], rows: [['电压', '220V']] },
+]
+const TABLE_ARTICLE_CHARS = 5 + 12
+
+test('字符统计：SQL 侧算出的 articleChars 含表格，且等于 articleCharsOf（口径一致）', async () => {
+  const { store, db, dir } = freshStore('table-chars')
+  try {
+    const at = '2026-10-11T10:00:00.000Z'
+    await store.saveItem('with-table', item('feed-a', {
+      publishedAt: '2026-01-01T00:00:00.000Z',
+      readAt: at,
+      article: { fetchedAt: at, blocks: TABLE_BLOCKS },
+    }))
+    const candidate = store.listCleanupCandidates('2026-06-01T00:00:00.000Z').find((row) => row.id === 'with-table')
+    assert.ok(candidate !== undefined, '带正文的已读条目必须进候选')
+    // 既有对账判据的延伸：SQL 侧（独立解析 JSON）必须等于 articleCharsOf（吃解析后的记录）
+    assert.equal(candidate.articleChars, articleCharsOf(store.item('with-table').article),
+      'SQL 侧与 articleCharsOf 必须同口径（含表格的夹具上）')
+    assert.equal(candidate.articleChars, TABLE_ARTICLE_CHARS, '表格的 12 个字必须算进去')
+
+    // 清算原料走的是另一条 SQL + 另一个函数，同样要含表格
+    const entry = store.listArticleCacheEntries().find((row) => row.id === 'with-table')
+    assert.ok(entry !== undefined)
+    assert.equal(entry.chars, TABLE_ARTICLE_CHARS, 'listArticleCacheEntries 也要把表格算进去')
+    assert.equal(entry.chars, articleCharsOf(store.item('with-table').article), '与唯一口径对账')
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

@@ -17,6 +17,99 @@ export const MUTATIONS = [
     judgeTests: ['条目链接只放行 http/https：javascript: / data: / file: / mailto: 归一成空串，相对与合法链接不变'],
     from: "return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : '';",
     to: "return url.toString();" },
+  // —— 内联语义（R5 02）——
+  // 链接白名单在**抽取期**失效：javascript: 会变成可点的 link run（渲染期还有第二道，但抽取期
+  // 这道是「不产生可点数据」的源头）。锚在 article-text.js：safeUrl 已从 article.ts 搬走。
+  { id: 'inline-链接不走白名单', file: 'lib/article-text.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['内联：javascript: / data: / mailto: 退化成纯文本，不产生可点链接'],
+    from: "return resolved.protocol === 'http:' || resolved.protocol === 'https:' ? resolved.toString() : undefined;",
+    to: "return resolved.toString();" },
+  // text 仍走 htmlToText：带 runs 的块会出现「显示有链接、搜不到那个词」。这是本项最重要的
+  // 那条变异——它守护的正是「text 由 runs 派生」这条决定（ADR-0007）。
+  { id: 'inline-text 仍走 htmlToText', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['不变量：runs 拼接严格等于 text（含行内标签两侧是汉字的形态）'],
+    from: '实际只有 38 字可读（应丢弃）。\n                const text = runsToText(runs);',
+    to: '实际只有 38 字可读（应丢弃）。\n                const text = htmlToText(line);' },
+  // 嵌套块被吞：列表项 / 引用 / 标题里嵌的 table / pre 会被内联解析当占位符丢弃（评审实测抓到的
+  // 回归）。判据是「嵌在 li 里的表格文字必须还在」。
+  { id: 'inline-嵌套块被占位符吞掉', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['内联：列表项 / 引用 / 标题里嵌的块不许静默消失'],
+    from: 'return list + placeholdersOf(nested);',
+    to: 'return list;' },
+  // 单元格里的占位符没剥掉：读者在表格里看到 `B0`，并污染搜索索引与字符统计。
+  { id: 'table-单元格漏出占位符', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['表格：单元格里嵌的块不许漏出内部占位符'],
+    from: "htmlToText(inner.replace(/\\u0000B\\d+\\u0000/g, ' '))",
+    to: 'htmlToText(inner)' },
+  // 旧修订号的缓存被当命中：读者永远看到升级前的块（spec 验收 13）。
+  { id: 'endpoint-旧修订号缓存当命中', file: 'lib/endpoints.js',
+    judges: ['reading-progress.test.mjs'],
+    judgeTests: ['article 端点：旧修订号的缓存被判过期 —— 回 cached:false 并重抓（不许静默给旧块）'],
+    from: 'existing.article.revision === ARTICLE_REVISION',
+    to: 'existing.article.revision !== ARTICLE_REVISION' },
+  // 列表项链接没进模型正文：段落能带地址、列表只剩文字（审查实测抓到的缺口）。
+  { id: 'tools-列表项链接丢失', file: 'lib/tools.js',
+    judges: ['tools.test.mjs'],
+    judgeTests: ['rss_read_article：列表项里的链接也摊成 [文字](地址)（不只是段落）'],
+    from: "const itemGroups = markdownItemRunsOf(block['itemRuns'], listItems.length);",
+    to: 'const itemGroups = undefined;' },
+  // 列表 itemRuns 长度不校验：会把一组 run 硬套到第一项上（与客户端判据分家）。
+  { id: 'tools-列表项 run 长度不校验', file: 'lib/tools.js',
+    judges: ['tools.test.mjs'],
+    judgeTests: ['rss_read_article：itemRuns 与 items 长度对不上时整份退回纯文本'],
+    from: 'if (!Array.isArray(value) || value.length !== expectedLength)',
+    to: 'if (!Array.isArray(value))' },
+  // 抽取器版本退回 4（= 不抬版本）：旧缓存永远不重抓，R5 的核心承诺落空。
+  { id: 'extract-版本不抬', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['抽取版本：常量必须由 article.ts 导出，且 endpoints 不得再写死数字'],
+    from: 'const EXTRACTOR_REVISION = 5;',
+    to: 'const EXTRACTOR_REVISION = 4;' },
+  // 收敛出来的空格归「后一个 run」而不是空白自身所属的 run：链接的可点区域会比看起来宽
+  // 判据见「标签外的空格不并入链接」与「标签内的空格属于链接」两条（真实站点上两种写法都存在）。
+  { id: 'inline-空格并进链接', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['内联：标签外的空格不并入链接（真机实测踩到：链接可点区域比看起来宽）'],
+    from: 'kept.push({ char: \' \', owner: pendingSpaceOwner });',
+    to: 'kept.push({ char: \' \', owner: owners[index] });' },
+  // 相邻同类 run 不合并：run 数会等于标签数，结构上限与体积守卫一起失效。
+  { id: 'inline-相邻同类 run 不合并', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['内联：相邻同类 run 合并（否则 run 数等于标签数，结构上限形同虚设）'],
+    from: 'if (last !== undefined && sameRunKind(last, source)) {',
+    to: 'if (false) {' },
+  // 占位符当普通文本：<li> 里嵌 <pre> 时内部占位符会进 items（既存缺陷回归）。
+  { id: 'inline-占位符当普通文本', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['内联：占位符不许进 items / itemRuns（<li> 里嵌 <pre>）'],
+    from: 'const BLOCK_SEPARATORS = /<br\\s*\\/?>|\\u0000B\\d+\\u0000/gi;',
+    to: 'const BLOCK_SEPARATORS = /<br\\s*\\/?>/gi;' },
+  // 门槛用假长度：38 个汉字嵌 6 个 <b> 的段落会被 htmlToText 数成 50 字而保留。
+  { id: 'extract-门槛用假长度', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['门槛判可见字符数：38 个汉字 + 6 个 <b> 的段落被丢弃，再加 3 个字被保留'],
+    from: '实际只有 38 字可读（应丢弃）。\n                const text = runsToText(runs);\n                if (text.length >= MIN_CONTENT_CHARS)',
+    to: '实际只有 38 字可读（应丢弃）。\n                const text = htmlToText(line);\n                if (collapseWhitespace(htmlToText(line)).length >= MIN_CONTENT_CHARS)' },
+  // 归一化放到切 run 之后：run 文本带原始换行缩进，严格相等当场破。
+  { id: 'inline-归一化放到切 run 之后', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    // 判据必须是**字面期望值**那条：`runs.join === text` 在「text 由 runs 派生」之后是自证的，
+    // 抓不到归一化放错位置（实测：只挂那条时本变异幸存）。
+    judgeTests: ['归一化先于切 run：text 必须无换行、无连续空白（严格相等是自证的，这条才钉得住顺序）'],
+    from: 'const normalized = normalizeRuns(raw);',
+    to: 'const normalized = raw;' },
+  // 渲染期白名单（R5 03）：抽取期已过 safeUrl，但历史脏数据可能带着 javascript: 落进缓存，
+  // 所以渲染 link run 前必须再过一次 httpUrlOrEmpty。去掉它之后，脏链接会变成可点的 <a>
+  // —— 判据是 tests/scroll-dom.test.mjs 的「非法链接退化成纯文本」（真 React + jsdom 的 DOM 断言）。
+  { id: 'client-非法链接仍渲染 a', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['正文内联：非法链接退化成纯文本，不产生 <a>（渲染期白名单）'],
+    from: 'const href = httpUrlOrEmpty(run.href);',
+    to: 'const href = run.href;' },
   // 正文 base 回落到请求 URL：301 换路径后相对图片会解析到旧地址（P1-1 的病象）。
   { id: 'article-正文base回落到请求URL', file: 'lib/article.js',
     judges: ['article.test.mjs'],
@@ -2218,4 +2311,106 @@ export const MUTATIONS = [
     // 更早 M · 无日期 K」的守恒式当场破掉。不删行、不改参数个数 —— 崩溃式变异是假通过。
     from: "' COALESCE(SUM(CASE WHEN i.published_at IS NULL THEN 1 ELSE 0 END), 0) AS no_date'",
     to: "' COALESCE(SUM(CASE WHEN i.published_at IS NULL THEN 0 ELSE 0 END), 0) AS no_date'" },
+
+  // ── R5 04：表格块（抽取 / 渲染 / 三处字符统计）──
+  // 表头恒为空：headerCells 一律 undefined ⇒ 三种表头形态全部退化成数据行，
+  // 「表头显示两次 + 表头不加粗」当场可见。
+  { id: 'table-表头恒为空', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['表格：<thead> 的行进 header，其余行进 rows；没有 align 属性时字段整体缺席'],
+    from: "    const headerCells = headRows[0] ?? (implicitHeader ? firstBody : undefined);",
+    to: "    const headerCells = undefined;" },
+  // colspan 后不补空串：被跨的列不被占住 ⇒ **同一行里后面的单元格左移**到被跨列上。
+  // ⚠️ 这里踩过两次「等价变异」，锚点必须选对（实测，2026-11-21）：
+  //   ① 锚在 `line.push('')` 上、只删那一行 ⇒ 短行右补空串（pad 到 colCount）把差异补回来，
+  //      `['项目','规格']` 补成 `['项目','规格','']`，与期望完全相同 —— 必然幸存；
+  //   ② 锚在 `column += 1` 上 ⇒ 位置其实由 `line.push` 的**顺序**决定，`column` 只影响
+  //      「被上方 rowspan 占住」那段的推进，本夹具没有 rowspan，于是也等价。
+  // 真正决定「被跨列留空」的是**整个补空循环是否执行**：不跑它，`备注` 会落到第 3 列。
+  // 所以锚点选循环的边界（`offset < cell.colspan` → `offset < 1`）。
+  { id: 'table-合并单元格错位', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['表格：colspan 内容进起始列、被跨列留空；每行等长'],
+    from: "        for (let offset = 1; offset < cell.colspan; offset += 1) {\n            line.push('');\n            declared.push(undefined);\n            column += 1;\n        }",
+    to: "        for (let offset = 1; offset < 1; offset += 1) {\n            line.push('');\n            declared.push(undefined);\n            column += 1;\n        }" },
+  // rowspan 不占位：后续行不知道那一列被占住 ⇒ 该行整体左移一格，与表头错位。
+  // 这是「占位网格」存在的全部理由（spec 决策 17）。
+  { id: 'table-rowspan 不占位', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['表格：rowspan 的后续行被占列留空且位置正确（不左移）'],
+    from: "        for (let offset = 1; offset < span; offset += 1) {\n            for (let width = 0; width < cell.colspan; width += 1) {\n                const at = start + width;\n                while (nextBlocked.length <= at)\n                    nextBlocked.push(0);\n                nextBlocked[at] = Math.max(nextBlocked[at], span - 1);\n            }\n        }",
+    to: "        for (let offset = 1; offset < 1; offset += 1) {\n            for (let width = 0; width < cell.colspan; width += 1) {\n                const at = start + width;\n                while (nextBlocked.length <= at)\n                    nextBlocked.push(0);\n                nextBlocked[at] = Math.max(nextBlocked[at], span - 1);\n            }\n        }" },
+  // figure 吞掉表格：figure pass 只救 img，table / pre 区域原样丢弃 ⇒ 三种形态的内容都不见了。
+  // 这条守护的是票据原文**不够**的那部分（`<figure><img><table>` 也会丢）。
+  { id: 'figure-吞掉表格', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['表格：<figure> 里的表格不被吞（三种形态都要救回来）'],
+    from: "            if (hit.name !== 'table' && hit.name !== 'pre')\n                continue;",
+    to: "            if (true)\n                continue;" },
+  // align 读 style：把 align 的来源换成 style="text-align:…"，于是「style 不被读」这条判据翻红
+  // （spec 决策 19a 明确不解析 CSS）。
+  { id: 'align-读 style', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['表格：align 只认 align 属性，style="text-align" 不读，全列未声明时字段整体缺席'],
+    from: "        const declared = attrOf(tag, 'align');",
+    to: "        const declared = attrOf(tag, 'style')?.replace(/^[^:]*:\\s*/, '').replace(/;.*$/, '');" },
+  // 字符统计忽略表格：table 块既无 text 也无 items ⇒ 整张表算成 0 字符，
+  // 大表格不占缓存额度、淘汰口径失真（而界面完全看不出来）。
+  { id: 'chars-字符统计忽略表格', file: 'lib/retention.js',
+    judges: ['retention.test.mjs', 'store-sqlite.test.mjs'],
+    judgeTests: ['articleCharsOf：表格块不再算成 0 字符（否则大表格不占缓存额度）', '字符统计：SQL 侧算出的 articleChars 含表格，且等于 articleCharsOf（口径一致）'],
+    from: "        if (block['kind'] === 'table')\n            return sum + tableToText(block).length;",
+    to: "        if (block['kind'] === 'table')\n            return sum;" },
+
+  // ── R5 05：模型正文的表格 / runs，与时长里的表格 ────────────────────────────
+  // 三条都打在**新增分支本身**上，而不是「把它改坏成另一种错误」：去掉分支后，模型读到的正文里
+  // 表格整块消失、链接退化成纯文字、含表格的文章时长偏小 —— 三件事在界面上都没有任何信号
+  // （正文面板画的是 React 元素，时长标着「估算」），只有各自的字面断言能抓到。
+  //
+  // ⚠️ 这三条的失效是**静默**的：不会抛错、不会少一条结果，只是内容变少/数字变小。所以判据必须
+  // 断言**字面输出**（`| 参数 | 标称值 |`、`[官方文档](https://…)`、具体分钟数），
+  // 只断言「有输出」的用例三条全都放走。
+  { id: 'tools-模型正文忽略表格', file: 'lib/tools.js',
+    judges: ['tools.test.mjs'],
+    judgeTests: ['rss_read_article：表格摊成 Markdown 表格，带 runs 的块按 runs 摊平且链接成 [文字](href)'],
+    // 去掉 table 分支：表格块落到末尾的默认分支，`String(block.text ?? '')` 是空串，
+    // 再被 `lines.filter(line => line !== '')` 滤掉 —— 整张表从模型可见正文里消失。
+    // lib/tools.js 实测 OCCURRENCES=1（带上下文锚定，`lines.push(tableToMarkdown(block));` 只此一处）。
+    from: "        if (kind === 'table') {\n            lines.push(tableToMarkdown(block));\n            continue;\n        }",
+    to: "        if (false) {\n            lines.push(tableToMarkdown(block));\n            continue;\n        }" },
+  { id: 'tools-模型正文忽略 runs', file: 'lib/tools.js',
+    judges: ['tools.test.mjs'],
+    judgeTests: ['rss_read_article：表格摊成 Markdown 表格，带 runs 的块按 runs 摊平且链接成 [文字](href)'],
+    // 让 link 不再渲染成 `[文字](href)`：链接文字还在（所以「正文里有没有这个词」的用例放走它），
+    // 丢的是**地址** —— 模型从此拿不到原文链接，而这正是 spec 决策 11 要求补的那条分支。
+    // lib/tools.js 实测 OCCURRENCES=1。
+    from: "        if (run['kind'] === 'link' && typeof href === 'string' && href !== '') {\n            parts.push('[' + text + '](' + href + ')');\n            continue;\n        }",
+    to: "        if (false) {\n            parts.push('[' + text + '](' + href + ')');\n            continue;\n        }" },
+  // 纯文本投影忽略表格：票据 05 字面列的 `blocksToText-忽略表格`。代码是 04 加的（`blockToText`
+  // 的 table 分支），但**判据是 05 补的** —— 04 那轮没有任何用例断言 `blocksToText` 见过表格
+  // （实测 grep 为空），所以这条此前无处可挂。去掉分支后表格块落到 `String(block['text'] ?? '')`
+  // 得空串，搜索/字符统计/时长三处会一起少内容，而只有这一条断言逐字钉住投影形态。
+  // lib/article-text.js 实测 OCCURRENCES=1。
+  { id: 'blocksToText-忽略表格', file: 'lib/article-text.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['纯文本投影：表格块摊成「表头一行 + 每行一行」，不许算成空'],
+    from: "    if (kind === 'table')\n        return tableToText(block);",
+    to: "    if (false)\n        return tableToText(block);" },
+  // 搜索投影忽略表格：票据 05 字面列的 `search-正文投影忽略 runs/table`。同样地，代码是 04 加的、
+  // 判据在 04 的 search.test.mjs（表头词与单元格词各一条命中断言）。这里把它钉进门槛：去掉分支后
+  // 表里的词一条都搜不到，而界面只表现为「搜不出东西」——没有报错、没有空状态差异。
+  // lib/search-worker.js 实测 OCCURRENCES=1。
+  { id: 'search-正文投影忽略 runs/table', file: 'lib/search-worker.js',
+    judges: ['search.test.mjs'],
+    judgeTests: ['搜索：表格里的词能命中（投影不再只看 text / items）'],
+    from: "        if ('kind' in block && block.kind === 'table') {\n            return [tableToText(block)];\n        }",
+    to: "        if (false) {\n            return [tableToText(block)];\n        }" },
+  { id: 'time-时长忽略表格', file: 'lib/shared.js',
+    judges: ['reading.test.mjs'],
+    judgeTests: ['表格块算进时长：只有表格时不为 0，表格 + 段落时两半都算'],
+    // 去掉 table 分支：表格块两个字段都没有 ⇒ 贡献 0 字 0 词。判据是**具体分钟数**：
+    // 只有表格的夹具从 1 变成 0，表格 + 600 字的夹具从 3 变成 2。
+    // lib/shared.js 实测 OCCURRENCES=1。
+    from: "        if (block['kind'] === 'table')\n            texts.push(tableToText(block));",
+    to: "        if (false)\n            texts.push(tableToText(block));" },
 ]

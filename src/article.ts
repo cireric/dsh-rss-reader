@@ -15,6 +15,26 @@ import { createHash } from 'node:crypto'
 import { fetchFeed, type FetchLimits } from './feed/fetch.js'
 import { MIN_CONTENT_CHARS } from './shared.js'
 import { decodeEntities, htmlToText, preToText } from './html-text.js'
+import { blocksToText, collapseWhitespace, runsToText, safeUrl, type InlineRun } from './article-text.js'
+
+/**
+ * 纯文本投影住在零 node 依赖的 `article-text.ts`（2026-11-21，R5 01），本文件只做 re-export。
+ *
+ * 为什么必须搬走：本文件 import 了 `node:crypto` 与 `feed/fetch.js`，是 host-only 的；而投影的
+ * 消费者里 `shared.ts` 的 `estimateReadingMinutes` 会打进客户端 bundle。投影留在这里，client 侧
+ * 一 import 就把 node 内建拉进浏览器包，而构建不会失败（失败推迟到运行期）。见 `docs/pitfalls.md` §1.7b。
+ *
+ * re-export 而不是让调用点改 import：`endpoints.ts` 与 `tests/article.test.mjs` 都在用
+ * `import { blocksToText } from './article.js'`，这一票是**行为零变化**的预重构。
+ */
+// 只 re-export **真有调用点**的那一个（2026-11-21 审查清理）：`endpoints.ts` 的日志与
+// `tests/article.test.mjs` 都在用 `import { blocksToText } from './article.js'`。
+// 其余五个符号（runsToText / tableToText / blockToText / collapseWhitespace / safeUrl）曾一并
+// re-export，但**没有任何外部消费者**——本文件内部直接用 import 进来的那份，而外部消费者
+// 一律从 `article-text.js` 取。多导一份只是让「这个模块的公开面」比事实更宽，
+// 下一个人会以为它是 API 而不敢动。
+export { blocksToText } from './article-text.js'
+export type { InlineRun } from './article-text.js'
 
 /**
  * 抽取器的**内容版本**：抽取行为一变就要 +1。
@@ -25,9 +45,14 @@ import { decodeEntities, htmlToText, preToText } from './html-text.js'
  * 放在抽取逻辑旁边，改抽取的人改的就是同一个文件，漏抬版本变成「看得见的不一致」而不是静默事故。
  *
  * 版本 1 = 纯文本段落（已废弃）；2 = 结构化块；3 = 正文容器识别（去掉站点杂图）；
- * 4 = 正文 base 改用重定向落点（finalUrl）——相对图片不再按请求 URL 解析。
+ * 4 = 正文 base 改用重定向落点（finalUrl）——相对图片不再按请求 URL 解析；
+ * 5 = 正文内联语义（runs）与表格块（R5）——块形状变了，旧缓存里没有 runs / table。
+ *
+ * **为什么 4 → 5 是必须的而不是偷懒**：不抬版本，读者会长期看到「有的文章有链接、有的没有」，
+ * 而分界线是「你什么时候打开的它」——这类不一致最难解释，也最难让用户相信不是 bug。
+ * 代价（旧文章各重抓一次、单篇阅读进度重置一次）写进 CHANGELOG 的发布说明。
  */
-export const EXTRACTOR_REVISION = 4
+export const EXTRACTOR_REVISION = 5
 
 /**
  * 正文的**内容标识**（M5 02 的阅读进度键）：`<抽取器修订号>:<块列表摘要>`。
@@ -69,12 +94,16 @@ const MAX_SAME_IMAGE = 2
  * 这是列表」，样式必然变形——图片更是被直接丢弃。
  */
 export type ArticleBlock =
-  | { readonly kind: 'p'; readonly text: string }
-  | { readonly kind: 'h'; readonly level: number; readonly text: string }
+  | { readonly kind: 'p'; readonly text: string; readonly runs?: readonly InlineRun[] }
+  | { readonly kind: 'h'; readonly level: number; readonly text: string; readonly runs?: readonly InlineRun[] }
   | { readonly kind: 'pre'; readonly text: string }
   | { readonly kind: 'img'; readonly src: string; readonly alt?: string; readonly caption?: string }
-  | { readonly kind: 'list'; readonly ordered: boolean; readonly items: readonly string[] }
-  | { readonly kind: 'quote'; readonly text: string }
+  | { readonly kind: 'list'; readonly ordered: boolean; readonly items: readonly string[]; readonly itemRuns?: readonly (readonly InlineRun[])[] }
+  | { readonly kind: 'quote'; readonly text: string; readonly runs?: readonly InlineRun[] }
+  // align 的元素类型带 `undefined`：spec 决策 19a 要求「某列没声明 ⇒ 该位是 undefined」，
+  // 而决策 4 的字面写法是 Array<'left'|'center'|'right'> —— 两者只能取其一，这里取 19a
+  // （19a 是第二轮补的、且带明确判据）。整体都没声明时字段缺席，所以不会是「全 undefined 数组」。
+  | { readonly kind: 'table'; readonly header?: readonly string[]; readonly rows: readonly (readonly string[])[]; readonly align?: ReadonlyArray<CellAlign | undefined> }
 
 /** 抽取结果：标题 + 结构化块。 */
 export interface ExtractedArticle {
@@ -101,19 +130,6 @@ export function isFrameable(headers: Headers): boolean {
     }
   }
   return true
-}
-
-/** 只放行 http/https（挡掉 javascript: / data: —— 后者还可能是 1x1 跟踪像素）。 */
-function safeUrl(raw: string | undefined, base: string | undefined): string | undefined {
-  if (raw === undefined) return undefined
-  const trimmed = raw.trim()
-  if (trimmed === '' || trimmed.startsWith('data:')) return undefined
-  try {
-    const resolved = base === undefined ? new URL(trimmed) : new URL(trimmed, base)
-    return resolved.protocol === 'http:' || resolved.protocol === 'https:' ? resolved.toString() : undefined
-  } catch {
-    return undefined
-  }
 }
 
 /** 从标签串里取属性（大小写不敏感，支持单双引号与无引号）。 */
@@ -302,14 +318,6 @@ function firstRegion(text: string, lower: string, name: string): string | undefi
     if (hit.closing || hit.name !== name) continue
     const closeAt = findClosing(name, hit.end)
     return closeAt === -1 ? undefined : text.slice(hit.end, closeAt)
-  }
-  return undefined
-}
-
-/** 第一个同名空元素的标签本身。O(n)。 */
-function firstVoidTag(text: string, name: string): string | undefined {
-  for (const hit of eachTag(text)) {
-    if (!hit.closing && hit.name === name) return text.slice(hit.start, hit.end)
   }
   return undefined
 }
@@ -609,7 +617,480 @@ export function extractArticle(html: string, baseUrl?: string): ExtractedArticle
 }
 
 /**
- * 块抽取本体：段落 / 标题 / 代码 / 图片 / 列表 / 引用。输入是 HTML 片段（整页或某个容器）。
+ * —— 内联解析（2026-11-21，R5 02）——
+ *
+ * 把一段 HTML 片段解析成 `InlineRun[]`：普通文字 / 加粗 / 斜体 / 行内代码 / 链接。
+ *
+ * 为什么需要它：技术文章的正文里有一半信息在标记里。抽取层过去把 `<a>`、`<strong>`、`<em>`、
+ * `<code>` 一律当「未知标签只留文本」，读者拿到的是删减过的文章——链接没了、强调丢了、
+ * 行内代码与散文分不开。而客户端刻意没有 HTML 注入面，所以损失无法在渲染侧补回来。
+ *
+ * **为什么不用 `htmlToText` 再切**：它给每个标签塞一个空格（`"详见<a>官方文档</a>。"` ⇒
+ * `"详见 官方文档 。"`），与 runs 拼接天然不等；那条「`text` 由 runs 派生」的不变量就无从成立。
+ * 两条路只能选一条，本项选「runs 是权威，text 由它派生」（见 ADR-0007）。
+ *
+ * **安全边界**：输入是任意网页 HTML，所以这里只产出结构化数据、**绝不拼 HTML 字符串**；
+ * 未知标签一律只留文本；链接必须过 `safeUrl` 白名单（相对地址按 baseUrl 解析）。
+ */
+
+/** 内联标签 → run 语义。`a` 单独处理（要 href）。 */
+const INLINE_STYLE: ReadonlyMap<string, 'strong' | 'em' | 'code'> = new Map([
+  ['strong', 'strong'], ['b', 'strong'],
+  ['em', 'em'], ['i', 'em'],
+  ['code', 'code'], ['kbd', 'code'], ['samp', 'code'], ['tt', 'code'],
+])
+
+/**
+ * 块分隔符：这些位置把片段切成**多个块**，而不是产生 run。
+ *
+ * - `<br>`：既有行为就是切块（`htmlToText` 把它转换行、散文尾部再按行切），必须保持；
+ * - stash 占位符 `\u0000B<n>\u0000`：它是**内部协议**，生命周期止于「重建块顺序」。
+ *   把它当普通字符会让它变成 run 文本（既存缺陷：`<li>文字<pre>code</pre></li>` 的 items 里
+ *   就出现过 `"\u0000B0\u0000"`，实测）。见 `docs/pitfalls.md` §5.7b。
+ */
+const BLOCK_SEPARATORS = /<br\s*\/?>|\u0000B\d+\u0000/gi
+
+/**
+ * 一段内联 HTML → 按「块分隔」切开的 run 流组，外加**途中遇到的已 stash 块**。
+ *
+ * 返回的是 `{ groups, stashedIds }`：
+ * - `groups`：外层每个元素对应一个块（`<br>` 或占位符分隔），内层是该块的 run。
+ *   调用方据此产出多个块、各自派生 `text`——于是「`<p>甲<br>乙</p>` 产出两个段落块」的既有行为
+ *   一字不变，而 `<div>` 版式与 `<p>` 版式都能拿到 runs（不靠给 `p` 加专属 pass）。
+ * - `stashedIds`：这段片段里出现过的占位符编号，**按文档顺序**。
+ *
+ * ⚠️ 为什么要把 stashedIds 交出去（2026-11-21 评审实测抓到的回归）：保护 pass 的顺序是
+ * `figure → pre → table → ul → blockquote → img → h*`。于是 `<li>文字<table>…</table></li>` 里
+ * 表格**先**被换成占位符，再轮到 `ul` 调本函数。若占位符只是「切段时丢掉」，那份 table 块
+ * 就再也不会被取出——读者丢内容，而且是**静默**的（基线把表格摊成文字保住了，这里直接没了）。
+ * 所以切段可以丢占位符**文本**，但必须把它代表的块交回给调用方去展开。
+ *
+ * **归一化在切 run 之前**（决策 7 的顺序）：每个段先解析出带原始空白的 run，再由 `normalizeRuns`
+ * 在**字符级**重建边界并归一化空白。顺序反了，run 文本会带原始换行缩进，与归一化过的 `text`
+ * 必然不等。归一化**按段分别做**——块分隔处要切开再各自归一化，否则 `<p>甲<br>乙</p>` 会被
+ * 归一化成 `"甲 乙"` 一个块（换行被空格吃掉），切块行为就变了。
+ */
+function parseInlineRuns(fragment: string, baseUrl: string | undefined): { groups: InlineRun[][]; stashedIds: number[] } {
+  // 先按块分隔切段：分隔符本身不产出任何文字，只切
+  const segments = fragment.split(BLOCK_SEPARATORS)
+  const groups: InlineRun[][] = []
+  for (const segment of segments) {
+    // 段内先解析出「带原始空白的 run」，再在**归一化后的文本**上重建 run 边界
+    const raw = parseSegment(segment, baseUrl)
+    const normalized = normalizeRuns(raw)
+    if (normalized.length > 0) groups.push(normalized)
+  }
+  // 占位符按文档顺序收出来（split 会丢掉分隔符本身，所以单独扫一遍原串）
+  const stashedIds: number[] = []
+  for (const match of fragment.matchAll(/\u0000B(\d+)\u0000/g)) stashedIds.push(Number(match[1]))
+  return { groups, stashedIds }
+}
+
+/**
+ * 把一段没有块分隔符的片段解析成 run 流（空白保持原样）。
+ *
+ * 用一个标签栈维护「当前处于哪种内联语义里」：`<strong><em>x</em></strong>` 取**最外层**语义
+ * （栈里第一个非 text 的语义），内层样式丢失——不假装支持嵌套，写进验收。
+ *
+ * 未知标签：只丢标签本身，文本照留（`<mark>`、`<span class=…>` 都是这样）。
+ * 这是本项安全边界的一部分：不认识的标签绝不影响产出形状。
+ */
+function parseSegment(segment: string, baseUrl: string | undefined): InlineRun[] {
+  const runs: InlineRun[] = []
+  /** 内联语义栈：空 = 普通文字。只用于取「最外层」，不做嵌套样式。 */
+  const styleStack: Array<'strong' | 'em' | 'code'> = []
+  /** 链接栈：`<a>` 可以包住别的内联标签，取最外层链接的 href。 */
+  const linkStack: string[] = []
+  let cursor = 0
+
+  /** 当前应当产出的 run 种类：链接优先于样式（链接是可点的，样式只是视觉）。 */
+  const pushText = (raw: string): void => {
+    if (raw === '') return
+    const text = decodeEntities(raw)
+    if (text === '') return
+    const href = linkStack.length > 0 ? linkStack[linkStack.length - 1] : undefined
+    if (href !== undefined) {
+      runs.push({ kind: 'link', text, href })
+      return
+    }
+    const style = styleStack.length > 0 ? styleStack[0] : undefined
+    if (style === undefined) runs.push({ kind: 'text', text })
+    else runs.push({ kind: style, text })
+  }
+
+  for (const hit of eachTag(segment)) {
+    pushText(segment.slice(cursor, hit.start))
+    cursor = hit.end
+    if (hit.name === 'a') {
+      if (hit.closing) {
+        if (linkStack.length > 0) linkStack.pop()
+        continue
+      }
+      // 链接白名单在**抽取时**就过一遍：非法协议退化成普通文字（不产生 link run），
+      // 相对地址按 baseUrl 解析成绝对地址。渲染期还会再过一次 `httpUrlOrEmpty`（纵深防御）。
+      const href = safeUrl(attrOf(segment.slice(hit.start, hit.end), 'href'), baseUrl)
+      if (href !== undefined) linkStack.push(href)
+      continue
+    }
+    const style = INLINE_STYLE.get(hit.name)
+    if (style === undefined) continue
+    if (hit.closing) {
+      // 只弹出与当前栈顶同名的语义；不匹配的闭合标签忽略（畸形 HTML 不该错位后面的文本）
+      if (styleStack.length > 0 && styleStack[styleStack.length - 1] === style) styleStack.pop()
+      continue
+    }
+    // 自闭合写法（`<b/>`）在 HTML 里罕见但存在；没有闭合标签的 `<b>` 会一直生效到段尾，
+    // 这与浏览器把未闭合内联标签延续到父元素结束的行为一致。
+    styleStack.push(style)
+  }
+  pushText(segment.slice(cursor))
+  return runs
+}
+
+/**
+ * 在**归一化后的文本**上重建 run 边界，并合并相邻同类 run。
+ *
+ * 为什么必须重建而不是「先归一化再解析」：归一化会删掉跨标签的连续空白（`"foo <b> bar"` 两侧
+ * 的空格要收敛成一个），若先归一化再解析，标签位置就与文本对不上了。所以这里反过来：
+ * 用原始 run 的文本做归一化，再按「哪些字符被保留了」把边界映射回 run 上。
+ *
+ * 合并相邻同类 run 是**结构判据的一部分**：`<b>a</b><b>b</b>` 若产出两个 strong run，
+ * 一段被编辑器切碎的 HTML（`<b>甲</b><b>乙</b>…`）就会让 run 数等于标签数，
+ * 「run 数 ≤ 标签数 + 1」那条上限形同虚设，序列化体积也会无谓翻倍。
+ */
+function normalizeRuns(raw: readonly InlineRun[]): InlineRun[] {
+  // 拼接出整段原文，同时记下每个字符属于哪个 run
+  const owners: number[] = []
+  let joined = ''
+  for (const [index, run] of raw.entries()) {
+    for (const _char of run.text) owners.push(index)
+    joined += run.text
+  }
+  // 归一化：把连续空白收敛成单空格、去首尾空白。逐字符走一遍，记下「保留 / 丢弃」。
+  //
+  // ⚠️ 收敛出来的那个空格归**它自己原来所属的 run**（2026-11-21 真机实测踩到）：
+  // 源 HTML 里 `<a>` 两侧的空格通常写在标签**外面**（`自托管一个 <a>Vaultwarden</a> 自然而然`），
+  // 而空白字符在哪个 run 里，就说明它属于哪段文本。若按「归前一个 / 归后一个」这种邻接规则分配，
+  // 链接的可点区域会变成 `" Vaultwarden"` 或 `"Vaultwarden "` —— 点起来比看起来宽一格。
+  // 按空白自身的归属分配，链接边界就与作者写的一致：空格在 `<a>` 外就留在文本里，
+  // 在 `<a>` 内就留在链接里（真实站点 sspai 上确实存在后一种写法：`<a …> STUN 服务</a>`）。
+  //
+  // 证据等级：`实测` 只到「两种写法在真实站点上都存在」这一步；修复前后的**计数差异**没有可复现的
+  // 记录（当时的观察发生在更早的代码版本上，日志与库里都没有留痕）。判据本身由下面两条用例钉住，
+  // 不依赖那个数字。
+  const kept: Array<{ char: string; owner: number }> = []
+  let pendingSpaceOwner = -1
+  for (const [index, char] of [...joined].entries()) {
+    if (/\s/.test(char)) {
+      // 只记**第一个**空白字符的归属：连续空白收敛成一个空格，它属于这一串空白的起点。
+      if (pendingSpaceOwner === -1) pendingSpaceOwner = owners[index]
+      continue
+    }
+    if (pendingSpaceOwner !== -1 && kept.length > 0) kept.push({ char: ' ', owner: pendingSpaceOwner })
+    pendingSpaceOwner = -1
+    kept.push({ char, owner: owners[index] })
+  }
+  // 按 owner 归并回去，再合并相邻同类
+  const out: InlineRun[] = []
+  for (const { char, owner } of kept) {
+    const source = raw[owner]
+    const last = out.length > 0 ? out[out.length - 1] : undefined
+    if (last !== undefined && sameRunKind(last, source)) {
+      out[out.length - 1] = { ...last, text: last.text + char }
+      continue
+    }
+    out.push({ ...source, text: char })
+  }
+  return out
+}
+
+/** 两个 run 是否可以合并（同 kind；link 还要求 href 相同——不同目标不许并成一个链接）。 */
+function sameRunKind(a: InlineRun, b: InlineRun): boolean {
+  if (a.kind !== b.kind) return false
+  if (a.kind === 'link' && b.kind === 'link') return a.href === b.href
+  return true
+}
+
+/**
+ * 一个「单块」片段（标题 / 引用 / 列表项）的文本与可选 runs。
+ *
+ * 为什么这类块与散文路径不同：它们是**单个语义块**，片段里的换行只该收敛成空格（标题与引用
+ * 不该因为源 HTML 折行就变成两块），而散文路径的换行是块边界。所以这里把整段解析成一组 run 后
+ * 合并成一段——`parseInlineRuns` 的块分隔（`<br>` / 占位符）在这里也生效，取**第一组**以外的
+ * 组用空格接回去，保持「一个标题就是一个块」的既有行为。
+ */
+function inlineTextOf(fragment: string, baseUrl: string | undefined): { text: string; runs?: readonly InlineRun[]; stashedIds: number[] } {
+  const { groups, stashedIds } = parseInlineRuns(fragment, baseUrl)
+  if (groups.length === 0) return { text: '', stashedIds }
+  // 多组（源里含 <br>）时用空格接回一段：标题/引用/列表项的既有行为是单块，不切成多块。
+  const merged: InlineRun[] = []
+  for (const [index, group] of groups.entries()) {
+    if (index > 0) merged.push({ kind: 'text', text: ' ' })
+    merged.push(...group)
+  }
+  const runs = normalizeRuns(merged)
+  return { text: runsToText(runs), ...runsFieldOf(runs), stashedIds }
+}
+
+/**
+ * 把一串已 stash 的块编号还原成**占位符串**，交回文档流让「重建块顺序」那一步去展开。
+ *
+ * 为什么需要它（2026-11-21 评审实测抓到的回归）：保护 pass 的顺序是
+ * `figure → pre → table → ul → blockquote → img → h*`，所以 `<li>文字<table>…</table></li>` 里
+ * 表格先被换成占位符，再轮到 `ul` 调内联解析。内联解析按设计把占位符当块分隔（否则它会变成
+ * run 文本、污染 items 与搜索索引），于是那份 table 块**再也不会被取出** —— 读者静默丢内容，
+ * 而基线是把表格摊成文字保住的。
+ *
+ * 取舍：列表项 / 引用 / 标题里嵌的块会被提到**该块之后**重建（顺序略有偏移），而不是塞进
+ * items 里（单元格与列表项是纯字符串，装不下一个块）。宁可顺序不完美，也不许丢内容。
+ */
+function placeholdersOf(ids: readonly number[]): string {
+  return ids.map((id) => '\u0000B' + id + '\u0000').join('')
+}
+
+/**
+ * run 流的「要不要写进块」判定：**纯文本块不产出 runs**。
+ *
+ * 为什么：`runs` 的语义是「这段有内联语义」。给每个纯文本段落塞一个 text run 会让序列化体积
+ * 从 ×3.2 抬到 ×6.6（实测），而额度闸门数的是可见字符、看不见这个膨胀。缺席即「没有内联语义」。
+ */
+function runsFieldOf(runs: readonly InlineRun[]): { runs?: readonly InlineRun[] } {
+  return runs.some((run) => run.kind !== 'text') ? { runs } : {}
+}
+
+/** 列对齐：只认 `align` 属性的这三个值（`justify` 等一律忽略，见 parseTable 的注释）。 */
+type CellAlign = 'left' | 'center' | 'right'
+
+const ALIGN_VALUES: ReadonlySet<string> = new Set<string>(['left', 'center', 'right'])
+
+/**
+ * 一个单元格：文本 + 跨列 / 跨行跨度 + 该格**自己**声明的对齐。
+ *
+ * 跨度必须与文本一起带着走：占位网格要先知道「这一格占了几列」，才能算出一行的占位总数。
+ */
+interface TableCell {
+  readonly text: string
+  readonly colspan: number
+  readonly rowspan: number
+  readonly align?: CellAlign
+}
+
+/** 单元格文本：按 `htmlToText` 的既有规则收敛成单空格（表格单元格没有 runs，见 spec「不在范围」）。 */
+function cellTextOf(inner: string): string {
+  // ⚠️ 单元格是**纯字符串**，装不下一个块（spec 明确把「单元格富文本」划出范围）。
+  // 所以嵌在单元格里的 `pre` / `img` 等已被换成占位符的块，只能把占位符剥掉——
+  // 否则它会作为普通字符留下，读者在表格里看到 `B0`（NUL 不可见），
+  // 同时污染搜索索引与字符统计（评审实测：`<td><pre>x=1</pre></td>` ⇒ `"\u0000B0\u0000"`）。
+  return collapseWhitespace(htmlToText(inner.replace(/\u0000B\d+\u0000/g, ' ')))
+}
+
+/** 跨度属性：认不出 / 非正数一律当 1（编造更大的跨度会把整张表撑歪）。 */
+function spanOf(tag: string, name: string): number {
+  const raw = attrOf(tag, name)
+  if (raw === undefined) return 1
+  const value = Number.parseInt(raw, 10)
+  return Number.isFinite(value) && value > 0 ? value : 1
+}
+
+/**
+ * 一行（`<tr>` 内层 HTML）→ 按文档顺序的单元格。
+ *
+ * 为什么要先收集「所有单元格开标签」再切片，而不是逐个找闭合标签：真实站点大量省略 `</td>`
+ * （与 `</p>` 同一类省略）。找闭合标签的写法遇到未闭合单元格会一路吃到行尾，把后面的单元格
+ * 全部吞进第一个里 —— 行列当场就错位了。
+ */
+function cellsOf(rowInner: string): TableCell[] {
+  const openings: Array<{ name: string; start: number; end: number }> = []
+  for (const hit of eachTag(rowInner)) {
+    if (hit.closing || (hit.name !== 'td' && hit.name !== 'th')) continue
+    openings.push({ name: hit.name, start: hit.start, end: hit.end })
+  }
+  const cells: TableCell[] = []
+  for (const [index, opening] of openings.entries()) {
+    const next = openings[index + 1]
+    const raw = rowInner.slice(opening.end, next === undefined ? rowInner.length : next.start)
+    const tag = rowInner.slice(opening.start, opening.end)
+    // 行内最后一个单元格可能带闭合标签，它不属于文本
+    const inner = raw.replace(/<\s*\/\s*(?:td|th)\s*>/gi, '')
+    const declared = attrOf(tag, 'align')
+    const align = declared !== undefined && ALIGN_VALUES.has(declared.toLowerCase())
+      ? (declared.toLowerCase() as CellAlign)
+      : undefined
+    cells.push({
+      text: cellTextOf(inner),
+      colspan: spanOf(tag, 'colspan'),
+      rowspan: spanOf(tag, 'rowspan'),
+      ...(align === undefined ? {} : { align }),
+    })
+  }
+  return cells
+}
+
+/**
+ * 把一行单元格铺进占位网格的一行，返回**该行的占位总数**、铺好的格子，以及「本行跑完之后
+ * 每一列还被上方 rowspan 占着几行」。
+ *
+ * 占位网格是「合并单元格降级」的全部要害（spec 决策 17）：`rowspan` 的后续行必须知道
+ * 「这一列已经被上面那行占住了」，否则那些列会**左移**、整行与表头对不上。所以 `occupied`
+ * 显式记下每个列位被占用的剩余行数，铺格时先跳过它们。
+ *
+ * ⚠️ 计数口径（第一版在这里差了一行，实测被 `rowspan` 用例抓住）：`occupied[i]` 是
+ * 「**含本行在内**第 i 列还要被占用的行数」。所以铺格时**先用它判断**（>0 就该留空），
+ * 铺完本行再统一减 1 交给下一行。若先减再判断，本行自己会被漏掉一格 —— 那一列会被后面
+ * 的单元格占去，整行左移。
+ *
+ * 返回值里的 `width` 是「本行占位总数」（= 各格 colspan 之和 + 被上方占住的格数），
+ * `colCount` 取所有行的最大值 —— 于是**每行等长**、也不存在「超宽行」需要截断。
+ */
+function layOutRow(cells: readonly TableCell[], occupied: readonly number[], rowIndex: number, rowCount: number): {
+  readonly line: string[]
+  readonly width: number
+  readonly nextBlocked: number[]
+  /** 本行在哪些列上**声明**了对齐（与 `line` 同长；没声明的列是 undefined）。 */
+  readonly declared: ReadonlyArray<CellAlign | undefined>
+} {
+  const line: string[] = []
+  const declared: Array<CellAlign | undefined> = []
+  /** 本行铺完之后每一列还被占用的剩余行数。 */
+  const nextBlocked = occupied.map((remaining) => Math.max(0, remaining - 1))
+  let column = 0
+  for (const cell of cells) {
+    // 跳过被上方 rowspan 占住的列：这些格子属于上面的行，本行该列必须留空且**不左移**
+    while (column < occupied.length && occupied[column] > 0) {
+      line.push('')
+      declared.push(undefined)
+      column += 1
+    }
+    // 这一格占住的列区间从 `column` 起 —— 必须在自增**之前**记下来，否则占位会右移一列
+    // （实测踩到：`rowspan=2` 的格子把下一列标成占用，本行反而左移）。
+    const start = column
+    line.push(cell.text)
+    declared.push(cell.align)
+    column += 1
+    // colspan 内容进起始列，被跨的列留空串（不重排、不猜合并语义）
+    for (let offset = 1; offset < cell.colspan; offset += 1) {
+      line.push('')
+      declared.push(undefined)
+      column += 1
+    }
+    // rowspan 越界（跨度超出表尾）时只作用到表尾：多余的跨度自然失效，不会撑出空行
+    const span = Math.max(1, Math.min(cell.rowspan, rowCount - rowIndex))
+    // rowspan × colspan 占的是一个矩形：跨过的每一列都要在后续行里留空，否则那些列会左移
+    for (let offset = 1; offset < span; offset += 1) {
+      for (let width = 0; width < cell.colspan; width += 1) {
+        const at = start + width
+        while (nextBlocked.length <= at) nextBlocked.push(0)
+        nextBlocked[at] = Math.max(nextBlocked[at], span - 1)
+      }
+    }
+  }
+  // 行尾仍可能被上方 rowspan 占住（本行自己的单元格比那些列少）：那些列同样留空，不许左移
+  while (column < occupied.length && occupied[column] > 0) {
+    line.push('')
+    declared.push(undefined)
+    column += 1
+  }
+  return { line, width: line.length, nextBlocked, declared }
+}
+
+/**
+ * `<table>` 内层 HTML → table 块（认不出任何行时返回 undefined，让调用方按原样丢弃）。
+ *
+ * 三种表头形态都要对（spec 决策 16 / 验收 8）：
+ * - 有 `<thead>`：它的**第一行**是表头，其余行（含 thead 里多出来的行）继续按数据行处理
+ *   —— 块模型的 `header` 只有一行，多出来的 thead 行若丢掉就是静默吃内容；
+ * - 没有 thead，但首行**全是** `<th>`：首行当表头；
+ * - 纯 `<td>`：表头缺席，全部行进 `rows`。
+ *
+ * `<tfoot>` 丢弃、`<caption>` 不进数据行（它是表格标题而非数据行，spec「不在范围」里写明本轮
+ * 不做 caption 块）。
+ */
+function tableBlockOf(inner: string): ArticleBlock | undefined {
+  const theadRows = allRegions(inner, 'thead').flatMap((head) => allRegions(head, 'tr'))
+  // tfoot 先整块丢掉：它的 tr 与表体混在一起会让「数据行」凭空多出几行
+  const bodyHtml = rewriteTagRegions(inner, (name) => name === 'thead' || name === 'tfoot', () => ' ')
+  const bodyRows = allRegions(bodyHtml, 'tr').map(cellsOf)
+  const headRows = theadRows.map(cellsOf)
+
+  /** 首行全是 th 时把它当表头（很多站点不写 thead，只把首行加粗）。 */
+  const firstBody = bodyRows[0]
+  const implicitHeader = headRows.length === 0
+    && firstBody !== undefined
+    && firstBody.length > 0
+    && allTagNamesOf(allRegions(bodyHtml, 'tr')[0] ?? '').every((name) => name === 'th')
+
+  const headerCells = headRows[0] ?? (implicitHeader ? firstBody : undefined)
+  const dataCells: TableCell[][] = [
+    ...(headRows.length > 0 ? headRows.slice(1) : []),
+    ...(implicitHeader ? bodyRows.slice(1) : bodyRows),
+  ]
+  if (headerCells === undefined && dataCells.length === 0) return undefined
+
+  // 占位网格：先算每行占位总数，取最大值当列数，再把短行右补空串（于是每行等长）
+  const rowCount = dataCells.length
+  let blocked: number[] = []
+  const laid: Array<ReturnType<typeof layOutRow>> = []
+  for (const [index, cells] of dataCells.entries()) {
+    const laidOut = layOutRow(cells, blocked, index, rowCount)
+    laid.push(laidOut)
+    blocked = laidOut.nextBlocked
+  }
+  const headerLine = headerCells === undefined ? undefined : layOutRow(headerCells, [], 0, 0)
+  const colCount = Math.max(headerLine?.width ?? 0, ...laid.map((row) => row.width), 0)
+  if (colCount === 0) return undefined
+  const pad = (line: readonly string[]): string[] => {
+    const out = [...line]
+    while (out.length < colCount) out.push('')
+    return out
+  }
+
+  return {
+    kind: 'table',
+    ...(headerLine === undefined ? {} : { header: pad(headerLine.line) }),
+    rows: laid.map((row) => pad(row.line)),
+    ...alignFieldOf([
+      headerLine === undefined ? [] : headerLine.declared,
+      ...laid.map((row) => row.declared),
+    ], colCount),
+  }
+}
+
+/**
+ * 按**列**推出 `align`，全列都没声明时**整个字段缺席**（不产出 `[undefined, …]`）。
+ *
+ * 判据（spec 决策 19a）：某列的 `align` = 该列**第一个**声明了 `align` 的单元格的值 —— 按文档
+ * 顺序扫，表头行先于数据行。全列都没有声明 ⇒ 返回空对象，让 `align` 字段整体不出现在块里；
+ * 中间某列没有声明 ⇒ 该位是 `undefined`（数组里保留空位，否则后面的列会左移、对齐错位）。
+ *
+ * 只认 `align` 属性、不解析 `style="text-align:…"`：CSS 解析是脆弱规则且没有实测样本，
+ * 按 AGENTS.md「不为未经实测的样本扩规则」留在外面。
+ */
+function alignFieldOf(rows: ReadonlyArray<ReadonlyArray<CellAlign | undefined>>, colCount: number): {
+  align?: ReadonlyArray<CellAlign | undefined>
+} {
+  const columns: Array<CellAlign | undefined> = []
+  for (let column = 0; column < colCount; column += 1) {
+    let found: CellAlign | undefined
+    for (const row of rows) {
+      const value = row[column]
+      if (value !== undefined) { found = value; break }
+    }
+    columns.push(found)
+  }
+  return columns.some((value) => value !== undefined) ? { align: columns } : {}
+}
+
+/** 一行 HTML 里出现的单元格标签名（按文档顺序，只取 td / th）。 */
+function allTagNamesOf(rowHtml: string): string[] {
+  const names: string[] = []
+  for (const hit of eachTag(rowHtml)) {
+    if (!hit.closing && (hit.name === 'td' || hit.name === 'th')) names.push(hit.name)
+  }
+  return names
+}
+
+/**
+ * 块抽取本体：段落 / 标题 / 代码 / 图片 / 列表 / 引用 / 表格。输入是 HTML 片段（整页或某个容器）。
  */
 function collectBlocks(html: string, baseUrl: string | undefined): ArticleBlock[] {
   let body = dropRegions(html)
@@ -630,33 +1111,88 @@ function collectBlocks(html: string, baseUrl: string | undefined): ArticleBlock[
   }
 
   // ①②③ 按「越具体越先」的顺序保护：figure 含 img、list 含 li、pre 可能含大量符号
+  //
+  // ⚠️ figure pass 的**既有缺陷**（2026-11-21 实测，见 docs/pitfalls.md §5.7c）：它只找第一个 img，
+  // 找到就把 inner 其余内容一起丢掉、找不到就返回 `' '` 整块丢 —— 于是 `<figure>` 里的表格与代码块
+  // **两种形态都会被吞**：`<figure><table>` 与 `<figure><img><table>` 的表格都不见了，
+  // `<figure><pre>` 的代码块也不见了。票据原文只写了「没有 img 但有 table 时返回 inner」，
+  // 那条**不足以**覆盖第二种形态（img 找到了，表格仍被一起丢掉）。
+  //
+  // 修法：把 inner 里**可救的东西**按文档顺序摘出来 —— img 块 + 原样保留的 `<table>` / `<pre>` 区域。
+  // 后两者不在这里自己解析，而是原样放回 body 让后面同层的 table / pre pass 接手（它们已经在
+  // 散文尾部之前跑），这样表格的占位网格与代码块的缩进规则都只有一份实现。
+  // figure 里**既无 img 也无 table / pre** 时仍返回 `' '`（纯装饰容器，既有行为不变）。
   body = rewriteTagRegions(body, (name) => name === 'figure', (_name, inner) => {
-    const imgTag = firstVoidTag(inner, 'img')
-    const src = imgTag === undefined ? undefined : pickImageUrl(imgTag, baseUrl)
-    // 装饰性小图（头像/图标）即使包在 figure 里也不是正文，丢掉
-    if (src === undefined || isDecorativeImage(src)) return ' '
-    const caption = firstRegion(inner, inner.toLowerCase(), 'figcaption')
-    const text = caption === undefined ? '' : htmlToText(caption).replace(/\n/g, ' ').trim()
-    return stash({ kind: 'img', src, alt: imgTag === undefined ? undefined : attrOf(imgTag, 'alt'), caption: text === '' ? undefined : text })
+    const lower = inner.toLowerCase()
+    const findClosing = makeClosingFinder(inner, lower)
+    const parts: string[] = []
+    let imgStashed = false
+    let cursor = 0
+    for (const hit of eachTag(inner)) {
+      if (hit.closing || hit.start < cursor) continue
+      if (hit.name === 'img' && !imgStashed) {
+        const tag = inner.slice(hit.start, hit.end)
+        const src = pickImageUrl(tag, baseUrl)
+        // 装饰性小图（头像/图标）即使包在 figure 里也不是正文，丢掉；但不影响同块里的表格
+        if (src !== undefined && !isDecorativeImage(src)) {
+          const caption = firstRegion(inner, lower, 'figcaption')
+          const text = caption === undefined ? '' : htmlToText(caption).replace(/\n/g, ' ').trim()
+          parts.push(stash({ kind: 'img', src, alt: attrOf(tag, 'alt'), caption: text === '' ? undefined : text }))
+          imgStashed = true
+        }
+        cursor = hit.end
+        continue
+      }
+      if (hit.name !== 'table' && hit.name !== 'pre') continue
+      const closeAt = findClosing(hit.name, hit.end)
+      if (closeAt === -1) continue
+      const closeEnd = inner.indexOf('>', closeAt) + 1
+      // 原样放回：由后面同层的 table / pre pass 解析（表格的网格归一只有一份实现）
+      parts.push(inner.slice(hit.start, closeEnd))
+      cursor = closeEnd
+    }
+    return parts.length === 0 ? ' ' : parts.join('\n')
   })
   body = rewriteTagRegions(body, (name) => name === 'pre', (_name, inner) => {
     const text = preToText(inner)
     return text === '' ? ' ' : stash({ kind: 'pre', text })
   })
+  // ④ 表格：**必须与 pre 同层、在散文尾部之前**跑。散文尾部的 boundary 正则含 `tr` / `td`
+  //    但不含 `table` —— 晚一步跑的话表格已经被 tr/td 边界切碎成一堆段落，行列关系再也捡不回来。
+  body = rewriteTagRegions(body, (name) => name === 'table', (_name, inner) => {
+    const block = tableBlockOf(inner)
+    return block === undefined ? ' ' : stash(block)
+  })
   body = rewriteTagRegions(body, (name) => name === 'ul' || name === 'ol', (name, inner) => {
     const items: string[] = []
+    const itemRuns: Array<readonly InlineRun[]> = []
+    /** 列表项里嵌的已 stash 块（table / pre / img…）：它们的占位符要原样交回文档流。 */
+    const nested: number[] = []
     for (const li of allRegions(inner, 'li')) {
-      const text = htmlToText(li).replace(/\n/g, ' ').trim()
-      if (text !== '') items.push(text)
+      // 列表项走内联解析：`<li>详见<a>文档</a></li>` 的链接必须留下来。
+      // 同一个函数也顺手解决了**占位符泄漏**：`<li>文字<pre>code</pre></li>` 里 pre 已被换成
+      // `\u0000B0\u0000`，而 `parseInlineRuns` 把它当块分隔丢弃 —— 否则它会被当成普通文字
+      // 进 items（既存缺陷，实测过）。
+      const { text, runs, stashedIds } = inlineTextOf(li, baseUrl)
+      nested.push(...stashedIds)
+      if (text === '') continue
+      items.push(text)
+      itemRuns.push(runs ?? [{ kind: 'text', text }])
     }
     // 只有一个短项的「列表」多半是导航残留，丢掉
     if (items.length === 0 || (items.length === 1 && items[0].length < MIN_CONTENT_CHARS)) return ' '
-    return stash({ kind: 'list', ordered: name === 'ol', items })
+    // 与 items 等长同序；全部都是纯文本时整体缺席（runs 的语义是「有内联语义」）
+    const anyInline = itemRuns.some((runs) => runs.some((run) => run.kind !== 'text'))
+    const list = stash({ kind: 'list', ordered: name === 'ol', items, ...(anyInline ? { itemRuns } : {}) })
+    // 列表项里嵌的块紧跟列表之后重建：宁可顺序略有偏移，也不许把它们丢掉
+    // （评审实测：`<li>文字<table>` 的表格曾整块消失，而基线是把表格摊成文字保住的）。
+    return list + placeholdersOf(nested)
   })
   body = rewriteTagRegions(body, (name) => name === 'blockquote', (_name, inner) => {
-    const text = htmlToText(inner).replace(/\n+/g, ' ').trim()
+    const { text, runs, stashedIds } = inlineTextOf(inner, baseUrl)
     // 引用**不套散文长度门槛**：blockquote 标签本身就是语义信号，短引用（一句被引的话）也是引用
-    return text === '' ? ' ' : stash({ kind: 'quote', text })
+    const quote = text === '' ? ' ' : stash({ kind: 'quote', text, ...(runs === undefined ? {} : { runs }) })
+    return quote + placeholdersOf(stashedIds)
   })
   body = rewriteVoidTags(body, 'img', (tag) => {
     const src = pickImageUrl(tag, baseUrl)
@@ -664,8 +1200,9 @@ function collectBlocks(html: string, baseUrl: string | undefined): ArticleBlock[
     return stash({ kind: 'img', src, alt: attrOf(tag, 'alt') })
   })
   body = rewriteTagRegions(body, (name) => /^h[1-6]$/.test(name), (name, inner) => {
-    const text = htmlToText(inner).replace(/\n/g, ' ').trim()
-    return text === '' ? ' ' : stash({ kind: 'h', level: Number(name.slice(1)), text })
+    const { text, runs, stashedIds } = inlineTextOf(inner, baseUrl)
+    const heading = text === '' ? ' ' : stash({ kind: 'h', level: Number(name.slice(1)), text, ...(runs === undefined ? {} : { runs }) })
+    return heading + placeholdersOf(stashedIds)
   })
 
   // ④ 按边界切分剩余散文，并**在同一遍里按文档顺序重建块**
@@ -682,16 +1219,33 @@ function collectBlocks(html: string, baseUrl: string | undefined): ArticleBlock[
       continue
     }
     // 一个 piece 里可能含多行（被换行切开的相邻块）：逐行判断，避免把两段并成一段
-    for (const line of htmlToText(piece).split('\n')) {
-      const text = line.replace(/\s+/g, ' ').trim()
-      if (text.length >= MIN_CONTENT_CHARS) blocks.push({ kind: 'p', text })
+    for (const line of piece.split('\n')) {
+      // 散文路径本身产出 run 流（2026-11-21，R5 02）：`<p>` 与 `<div>` 一视同仁，
+      // 不像别的块类型那样靠「给某个标签加保护 pass」——那样 div 版式的站点会拿不到 runs，
+      // 变成「有的文章有链接、有的没有」。
+      // 占位符在散文路径里由 `split(/(\u0000B\d+\u0000)/)` 单独成 piece 处理（见循环开头），
+      // 所以这里拿到的 line 不会含占位符，stashedIds 恒为空。
+      for (const runs of parseInlineRuns(line, baseUrl).groups) {
+        // 门槛判**归一化后的可见字符数**，不是 `htmlToText` 那种带标签间隙的假长度：
+        // 38 个汉字嵌 6 个 <b> 的段落在旧实现里数出 50 字（保留），实际只有 38 字可读（应丢弃）。
+        const text = runsToText(runs)
+        if (text.length >= MIN_CONTENT_CHARS) blocks.push({ kind: 'p', text, ...runsFieldOf(runs) })
+      }
     }
   }
 
   // ⑤ 兜底：一个块都没有时按行取全文（会带导航噪声，故只作最后手段）
+  //
+  // ⚠️ 这条兜底**也必须走 run 流**（2026-11-21，R5 02 实测踩到）：它原先是
+  // `htmlToText(body).split('\n')` + 判 `line.length`，而 `htmlToText` 给每个标签塞一个空格
+  // ⇒ 38 个汉字嵌 6 个 `<b>` 的段落会被数成 50 字、从兜底路径**重新放回**正文，把第 ④ 步
+  // 刚刚按可见字符数丢弃的结果又捡回来。两条路径的口径必须是同一个，否则门槛判据形同虚设。
   if (blocks.length === 0) {
-    for (const line of htmlToText(body).split('\n')) {
-      if (line.length >= MIN_CONTENT_CHARS) blocks.push({ kind: 'p', text: line })
+    for (const line of body.split('\n')) {
+      for (const runs of parseInlineRuns(line, baseUrl).groups) {
+        const text = runsToText(runs)
+        if (text.length >= MIN_CONTENT_CHARS) blocks.push({ kind: 'p', text, ...runsFieldOf(runs) })
+      }
     }
   }
   return blocks
@@ -715,17 +1269,6 @@ function dedupeImages(blocks: readonly ArticleBlock[]): ArticleBlock[] {
     out.push(block)
   }
   return out
-}
-
-/** 正文纯文本（用于长度统计与日志）。 */
-export function blocksToText(blocks: readonly ArticleBlock[]): string {
-  return blocks
-    .map((block) => {
-      if (block.kind === 'img') return block.alt ?? ''
-      if (block.kind === 'list') return block.items.join(' ')
-      return block.text
-    })
-    .join('\n')
 }
 
 /**

@@ -25,6 +25,8 @@ import { linkKeyOf } from './duplicates.js'
 import { afterCursor } from './item-page.js'
 import { inDisplayWindow } from './display-window.js'
 import { countUnreadPerFeed, countUnreadSplit } from './unread.js'
+// 字符口径的唯一实现（替身不许另立一套判据，见 listArticleCacheEntries 的注释）
+import { articleCharsOf } from './retention.js'
 
 export interface MemoryStore extends ReaderStore {
   /** 裸露的 Map：用例直接断言 / 注入并发写（见 tests/helpers/reader-store-memory.mjs）。 */
@@ -154,19 +156,23 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): MemoryStore
      * 清算原料：**只交出 id / 字符数 / 抓取时间**，正文不跟着出来。
      * 桩也必须守这条 —— 否则测的其实是「桩自己把正文摊开了」，而生产单列这条正是为了不让正文进堆。
      */
+    /**
+     * 正文缓存清算原料：字符数**直接复用** `articleCharsOf`（R5 04 收口）。
+     *
+     * 为什么不再在这里手写一遍：本函数原先是「paragraphs 之和 **加** blocks 之和」，而
+     * `articleCharsOf` 是「有 paragraphs 就只算 paragraphs，否则算 blocks」（二选一）。
+     * 经 `normalizeLegacyArticle` 之后并存不该出现，但 `articleRecordSchema` 允许 —— 于是同一份
+     * 记录在两个实现上会算出不同的字符数，缓存淘汰的顺序随之不同（`store-contract.test.mjs`
+     * 的并存夹具就是钉这件事的）。
+     *
+     * 替身允许在**性能**上偷懒，但不许在**语义**上另立一套：正文本来就在堆上，直接调纯函数
+     * 既没有「正文进堆」的代价问题，也顺手删掉一份会与生产实现漂移的判据。
+     */
     listArticleCacheEntries: () => {
       const entries = []
       for (const [itemId, record] of items.entries()) {
         if (record.article === undefined) continue
-        const chars = (record.article.paragraphs ?? []).reduce((sum, paragraph) => sum + paragraph.length, 0)
-          + (record.article.blocks ?? []).reduce((sum, block) => {
-            const text = block['text']
-            if (typeof text === 'string') return sum + text.length
-            const listItems = block['items']
-            if (Array.isArray(listItems)) return sum + listItems.reduce<number>((inner, entry) => inner + String(entry).length, 0)
-            return sum
-          }, 0)
-        entries.push({ id: itemId, chars, fetchedAt: record.article.fetchedAt })
+        entries.push({ id: itemId, chars: articleCharsOf(record.article), fetchedAt: record.article.fetchedAt })
       }
       return entries
     },

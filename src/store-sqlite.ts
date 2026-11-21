@@ -37,6 +37,8 @@ import {
   type TagRecord,
 } from './domain.js'
 import { readConfigFile, writeConfigFile, type ReaderConfigFile } from './storage/config-file.js'
+// 表格的行列摊平：与 articleCharsOf / 搜索投影共用一份实现（article-text.ts 零 node 依赖）
+import { tableToText } from './article-text.js'
 import { SCHEMA_VERSION } from './storage/db.js'
 import { clampReadingRatio, type TagView } from './shared.js'
 import { sanitizeViewPreferences } from './preferences.js'
@@ -486,6 +488,10 @@ function articleCharsFromBody(body: string): number {
   for (const block of blocks) {
     if (typeof block !== 'object' || block === null) continue
     const fields = block as Record<string, unknown>
+    // 表格既没有 text 也没有 items：不单独认它就会把整张表算成 0 字符（大表格不占缓存额度）。
+    // 行列摊平复用 article-text.ts 的 tableToText —— 与 articleCharsOf / 搜索投影同一条实现，
+    // 不在这里写第二份遍历。
+    if (fields['kind'] === 'table') { sum += tableToText(fields).length; continue }
     if (typeof fields['text'] === 'string') { sum += fields['text'].length; continue }
     if (Array.isArray(fields['items'])) {
       for (const item of fields['items']) sum += String(item).length
