@@ -545,6 +545,36 @@ root 一变 effect 就重注册监听 —— 别把它也改成「现取」，�
 （它不依赖「中间恰好没有图」这个偶然事实：两篇块数相同且都非空时，裸下标就是 bug），
 但那句「换篇后三态复位」的用例在今天的夹具下**对两种 key 都绿**——它不是这条判定的判据。
 
+### 3.7 结构判据过严与过松一样是缺陷：会误杀正确实现
+
+**病象**（2026-11-21，R6 验收 6 的二次更正）：判据写成
+`hint.matches(':any-link, button, summary, input, select, textarea, [tabindex]') === false`，
+本意是「提示不许是可聚焦控件」。它把目标形态 `<span>` 放过了，却也把
+`<span tabIndex={-1}>` 一并拒绝 —— 而那个形态**空格翻页正常、Tab 也选不到**，是完全合格的实现。
+**根因**：`[tabindex]` 这个选择器表达的是「**有** tabindex 属性」，而想守的性质是
+「**不在 Tab 序里**」。两者在 `tabIndex === -1` 时正好相反：有属性、但不在 Tab 序。
+用「看起来相关的属性」代替「想守的那个性质」，判据就会在边界上朝错误的方向偏。
+**为什么过严同样有害**：实现者看到红，要么为了变绿去删一个**无害**属性（把代码改坏以迎合测试），
+要么怀疑自己本来正确的实现。测试是产出的一部分，它不该把正确实现判成不合格。
+
+**修法**：判据写「想守的那个性质」，必要时拆成两条**互补**的窄判据：
+```js
+assert.ok(!['BUTTON','SUMMARY','INPUT','SELECT','TEXTAREA'].includes(hint.tagName))  // 结构：不是可交互元素
+assert.ok(!(hint.tagName === 'A' && hint.hasAttribute('href')))                        // 结构：不是链接
+assert.ok(hint.tabIndex < 0)                                                          // 行为：Tab 选不到
+```
+**为什么单条都不够**（两条都是 `实测`）：
+- 只用 `tabIndex < 0` ⇒ 放过 `<button tabIndex={-1}>`：`tabIndex` 同样是 -1，但它可被 `focus()`
+  或鼠标聚焦，且**自带空格激活语义** —— 正是要防的那件事。
+- 只用 tagName 名单 ⇒ 放过 `<a>` 之外的怪形态（`contenteditable`、`<details>` 套壳等）。
+两条合起来的分类（`实测` 四形态）：`<span>` ✅ / `<span tabIndex={-1}>` ✅ /
+`<button>` ❌ / `<button tabIndex={-1}>` ❌。
+
+**同一族的另一个教训**（2026-11-21，R6 验收 5）：判据要**派发到被测元素本身**，不能沿用
+「派发到 `document`」的通用 helper。jsdom 里聚焦的 `<button>` 收到空格**既不 `preventDefault`
+也不 click**，所以「提示是 button」这件事在 document 派发路径上完全不可见 —— 老写法恒绿。
+同理别断 `defaultPrevented`（`routeKey` 自己会 prevent）：要断的是**业务后果**（`scrollTop` 有没有变）。
+
 ---
 
 ## 四、宿主 / 平台约束
