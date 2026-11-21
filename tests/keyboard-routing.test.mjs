@@ -539,10 +539,11 @@ test('R6 07：i 折叠整篇时顺带关灯箱（决策 24），展开方向上�
  */
 test('A 键只打开确认框，确认之前不得直接标读', { skip }, () => {
   const { ctx, store, confirmCalls } = makeCtx()
+  // 2026-11-21 用户拍板：只认大写字符 'A'（shift+a 产生的就是它）。小写 a 必须什么都不做。
   routeKey(keyEvent('a'), ctx)
-  assert.deepEqual(confirmCalls, [true], '小写 a 必须打开确认框')
+  assert.deepEqual(confirmCalls, [], '小写 a 不绑 —— 不得打开确认框')
   routeKey(keyEvent('A', { shiftKey: true }), ctx)
-  assert.deepEqual(confirmCalls, [true, true], 'shift+a 同样打开确认框')
+  assert.deepEqual(confirmCalls, [true], '大写 A 必须打开确认框')
   assert.equal(store.calls.filter(([name]) => name === 'markAllRead').length, 0, '确认之前不得调用 markAllRead')
 })
 

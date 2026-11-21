@@ -2115,7 +2115,7 @@ test('C4-b 迁入：A 的撤销窗口 5 秒后自动撤掉（此前 until 只写
 
 /* ==================== A 的二次确认（2026-11-21） ==================== */
 /* 用户报告的现场：按 A 什么都不发生。三条判据各守一段：
- *  ① 按 a/shift+a 必须**弹框**（不是直接标读，也不是没反应）；
+ *  ① 按大写 A 必须**弹框**（不是直接标读，也不是没反应）；
  *  ② 只有确认那一刻才标读，且撤销窗口照旧；
  *  ③ 0 候选也要弹框并说明 —— 静默 no-op 正是「按了没反应」的观感来源。 */
 
@@ -2127,10 +2127,10 @@ test('A 键弹确认框：显示条数与作用域，打开与 Esc 取消都不�
   const unread = () => h.store.get().items.filter((entry) => entry.readAt === undefined).length
   const before = unread()
 
-  h.press('a')
+  h.press('A', true)
   await h.settle()
   const card = doc.querySelector('[data-rss-markall-confirm]')
-  assert.ok(card !== null, '按小写 a 必须弹出确认框（旧实现只认大写的缺陷）')
+  assert.ok(card !== null, '按大写 A 必须弹出确认框')
   assert.match(card.textContent, /2 条未读/, '条数必须是当前列表里的未读（已读那条不算）')
   assert.match(card.textContent, /全部文章/, '作用域摘要必须写清当前列表')
   assert.equal(unread(), before, '打开确认框本身不得改任何条目的读态')
@@ -2140,7 +2140,7 @@ test('A 键弹确认框：显示条数与作用域，打开与 Esc 取消都不�
     '确认之前不得发真正标读的 markRead（dryRun 只数不写）',
   )
 
-  // shift+a 打开的是同一个框：关掉再用大写按一次，两条绑定都必须通到同一个入口
+  // 关掉再按一次必须能重新打开（确认框的状态在 Esc 后复位）
   doc.querySelector('[data-rss-markall-confirm] [role="dialog"]')
     .dispatchEvent(new h.win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
   await h.settle()
@@ -2149,7 +2149,7 @@ test('A 键弹确认框：显示条数与作用域，打开与 Esc 取消都不�
 
   h.press('A', true)
   await h.settle()
-  assert.ok(doc.querySelector('[data-rss-markall-confirm]') !== null, 'shift+a 也必须打开确认框')
+  assert.ok(doc.querySelector('[data-rss-markall-confirm]') !== null, '大写 A 必须能再次打开确认框')
 })
 
 test('A 在源视图里只标该源（范围进宿主，不落成整个库）', skip, async () => {
@@ -2161,10 +2161,10 @@ test('A 在源视图里只标该源（范围进宿主，不落成整个库）', 
   await h.settle()
   h.store.selectNav({ kind: 'feed', feedId: 'f1' })
   await h.settle()
-  h.press('a')
+  h.press('A', true)
   await h.settle()
   const card = h.win.document.querySelector('[data-rss-markall-confirm]')
-  assert.ok(card !== null, '源视图里按 a 必须弹确认框')
+  assert.ok(card !== null, '源视图里按大写 A 必须弹确认框')
   assert.match(card.textContent, /2 条未读/, '候选只算该源的 2 条，不是全库 3 条')
   h.win.document.querySelector('[data-rss-markall-ok]').click()
   await h.settle()
@@ -2180,7 +2180,7 @@ test('A 的确认框：确认后标读并给撤销窗口（只有确认那一刻
   const h = await mountReader({ items: [item({ id: 'a' }), item({ id: 'b' })] })
   await h.store.load('overview')
   await h.settle()
-  h.press('a')
+  h.press('A', true)
   await h.settle()
   const ok = h.win.document.querySelector('[data-rss-markall-ok]')
   assert.ok(ok !== null, '确认框必须有一个「标为已读」按钮')
@@ -2209,7 +2209,7 @@ test('A 的确认框：0 候选时按钮禁用并说明原因（不再静默 no-
   const h = await mountReader({ items: [item({ id: 'a', readAt: '2026-10-01T00:00:00.000Z' })] })
   await h.store.load('overview')
   await h.settle()
-  h.press('a')
+  h.press('A', true)
   await h.settle()
   const card = h.win.document.querySelector('[data-rss-markall-confirm]')
   assert.ok(card !== null, '即使 0 条候选也要弹框 —— 静默无反应正是用户报告的症状')
@@ -2218,9 +2218,9 @@ test('A 的确认框：0 候选时按钮禁用并说明原因（不再静默 no-
   assert.equal(ok.disabled, true, '0 条时确认按钮必须禁用')
 })
 
-test('改完时间范围后按 a 仍生效（下拉框用指针选完必须归还焦点）', skip, async () => {
+test('改完时间范围后按 A 仍生效（下拉框用指针选完必须归还焦点）', skip, async () => {
   // 回归判据：修复前，焦点留在 [data-rss-window] 上 ⇒ isTypingTarget 把随后所有按键吞掉，
-  // 按 a / shift+a 毫无反应（2026-11-21 真机实测）。这条用例在删掉 useSelectFocusReturn 时必红。
+  // 按大写 A 毫无反应（2026-11-21 真机实测）。这条用例在删掉 useSelectFocusReturn 时必红。
   const h = await mountReader({ items: [item({ id: 'a' })] })
   await h.store.load('overview')
   await h.settle()
@@ -2234,9 +2234,9 @@ test('改完时间范围后按 a 仍生效（下拉框用指针选完必须归�
   setControlValue(h.win, select, 'today')
   await h.settle()
   assert.notEqual(doc.activeElement, select, '指针选完范围后焦点必须离开 select，否则下一个快捷键会被吞掉')
-  h.press('a')
+  h.press('A', true)
   await h.settle()
-  assert.ok(doc.querySelector('[data-rss-markall-confirm]') !== null, '改完范围后按 a 必须能弹确认框')
+  assert.ok(doc.querySelector('[data-rss-markall-confirm]') !== null, '改完范围后按大写 A 必须能弹确认框')
 
   // 键盘路径不抢焦点：方向键多步选择不能被中途打断
   const selectAgain = doc.querySelector('[data-rss-window]')
@@ -3622,7 +3622,7 @@ test('R1-03 窗口控件：默认全部、四个档位、与「已加载」同�
   // 随后的 A 会被输入控件守卫吞掉 —— 那正是用户报告的那次「按 A 无反应」。
   assert.doesNotMatch(doc.querySelector('.dsh-rss-settings-panel').textContent, /A 键范围/,
     '「更多」里不得再有 A 键范围（它已归确认框）')
-  h.press('a')
+  h.press('A', true)
   await h.settle()
   const confirm = doc.querySelector('[data-rss-markall-confirm]')
   assert.ok(confirm !== null, '范围控件必须在 A 的确认框里')

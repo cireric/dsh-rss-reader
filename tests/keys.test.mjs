@@ -30,12 +30,12 @@ test('核心导航与 GR 约定', () => {
   assert.equal(resolveReaderKey('s'), 'star')
   assert.equal(resolveReaderKey('m'), 'toggleRead')
   assert.equal(resolveReaderKey('Escape'), 'back')
-  // 2026-11-21 决策变更：a 与 shift+a 都认。「GR 里全部已读就是 shift+a」只决定了 shift 那条
-  // 必须保留，不能推出小写必须不绑 —— 界面与帮助表写的是「a / shift+a」，按 r/R、f/F 的同一处理，
-  // 不写 shift 就不该要求 shift。旧断言 `a === 'none'` 是当轮的刻意约定，用户实测按小写 a
-  // 毫无反应后改派；这是**决策变更**，不是放宽断言（shift+a 那条仍在下面看着）。
+  // 2026-11-21 用户拍板：A 只认大写字符（shift+a 产生的就是它）—— 小写 a 不绑。
+  // 帮助表与 README 按同一口径写「A」（与 V 同一写法），所以标签与实现不再各说各话。
+  // 这不影响「按 A 无反应」那轮修复的其余部分（确认框、焦点归还、宿主范围求值都还在）。
   assert.equal(resolveReaderKey('A'), 'markAll')
-  assert.equal(resolveReaderKey('a'), 'markAll')
+  assert.equal(resolveReaderKey('A', true), 'markAll', '真实浏览器按下的就是大写 A')
+  assert.equal(resolveReaderKey('a'), 'none', '小写 a 不得触发（2026-11-21 决策）')
 })
 
 test('n/p 是扫视（滚动视野但不改选中），与 j/k 正交', () => {

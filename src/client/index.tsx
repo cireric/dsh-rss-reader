@@ -308,7 +308,7 @@ function HelpPanel({ onClose }: { onClose: () => void }): ReactNode {
  * **病象**：用鼠标改完顶栏的时间范围（旧版还有「A 键范围」）后再按 A / j / k，毫无反应。
  * **根因**：`<select>` 选完仍持有焦点，而 keyboard-routing.ts 的 isTypingTarget 把来自 SELECT 的
  * 按键全部当成「用户正在输入」放行给控件 —— 守卫本身没错（不抢输入控件的键），错的是控件用完
- * 不还焦点。实测：焦点在 [data-rss-window] 上按 shift+a，无撤销条、未读数不变；点一下列表再按就正常。
+ * 不还焦点。实测：焦点在 [data-rss-window] 上按大写 A，无撤销条、未读数不变；点一下列表再按就正常。
  *
  * 只对**指针**路径归还：键盘选 select 时方向键是多步的（每步都触发 change），中途抢走焦点会让
  * 一次选择只能走一步。pointerdown 打标记、keydown/blur 清标记，change 时按标记决定。

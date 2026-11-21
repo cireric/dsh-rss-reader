@@ -83,11 +83,10 @@ export function resolveReaderKey(key: string, shift = false): ReaderKeyAction {
     case 'F': return 'manageFeeds'
     case 's': return 'star'
     case 'm': return 'toggleRead'
-    // A = 标读（二次确认在新版由客户端弹框，见 keyboard-routing.ts 的 markAll 分支）。
-    // **小写 a 与大写 A 都认**：界面与帮助表写的就是「a / shift+a」，不写 shift 就不该要求 shift
-    // —— 与 r/R、f/F 同一处理。GR 里「全部已读」是 shift+a，所以大写这条也保留。
-    // 旧实现只认大写（注释写「GR 就是 shift+a」），用户按小写 a 毫无反应；2026-11-21 用户报告后修。
-    case 'a':
+    // A = 标读（二次确认由客户端弹框，见 keyboard-routing.ts 的 markAll 分支）。
+    // **只认大写字符 'A'**：2026-11-21 用户拍板 —— 标读是危险动作，只接受大写 A
+    //（键盘上 shift+a 产生的就是它；CapsLock 的大写 A 同样触发），小写 a 不绑。
+    // 帮助表与 README 按同一口径写「A」——与上面 V 的写法一致：大写字母标签 = 大写字符绑定。
     case 'A': return 'markAll'
     // ? = 打开/关闭快捷键帮助（GR §3.8 第 255 行）。浏览器在 shift+/ 时给的就是字面 '?'，
     // 所以这里写字符本身，不需要看 shift 标志。
@@ -197,9 +196,9 @@ export const READER_KEY_HELP: ReaderHelpSection[] = [
         bindings: [{ key: 's', action: 'star' }] },
       { label: 'm', summary: '切换已读 / 未读', scope: 'any',
         bindings: [{ key: 'm', action: 'toggleRead' }] },
-      // 标签必须写出两条绑定：小写 a 与大写 A（后者 = shift+a）。条数与范围在确认框里再确认。
-      { label: 'a / shift+a', summary: '把当前列表里的未读标为已读（先确认，可改范围）', scope: 'any',
-        bindings: [{ key: 'a', action: 'markAll' }, { key: 'A', shift: true, action: 'markAll' }] },
+      // 只列真实可用的绑定：大写字符 'A'（shift+a 产生；标签与 V 同一写法）。
+      { label: 'A', summary: '把当前列表里的未读标为已读（先确认，可改范围）', scope: 'any',
+        bindings: [{ key: 'A', shift: true, action: 'markAll' }] },
     ],
   },
   {

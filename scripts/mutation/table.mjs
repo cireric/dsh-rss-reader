@@ -2727,13 +2727,13 @@ export const MUTATIONS = [
     to: "\t\t\t\t\timagesExpanded,\n\t\t\t\t\texpandedGroups,\n\t\t\t\t\tmarkAllConfirm\n\t\t\t\t]);" },
   // ── 2026-11-21 A 键二次确认 + 下拉框还焦点 ──
   // 用户报告的现场是「按 A 什么都不发生」。这三条各守一段：键位解析、确认框、焦点归还。
-  { id: 'keys-A 只认大写（小写 a 失效）', file: 'lib/keys.js',
+  { id: 'keys-小写 a 也被接受（破坏大写 A 唯一性）', file: 'lib/keys.js',
     judges: ['keys.test.mjs'],
     judgeTests: ['核心导航与 GR 约定'],
-    // 拿掉小写那条 case：界面与帮助表写的是「a / shift+a」，按 r/R、f/F 的先例小写必须能用。
-    // 这正是 2026-11-21 之前的状态（用户按 a 毫无反应）。
-    from: "        case 'a':\n        case 'A': return 'markAll';",
-    to: "        case 'A': return 'markAll';" },
+    // 2026-11-21 用户拍板：标读是危险动作，只认大写 A。把 `case 'a'` 加回去就是那条被否决的
+    // 行为 —— 判据必须当场红（keys 测试断言 `a → none`）。
+    from: "        case 'A': return 'markAll';",
+    to: "        case 'a':\n        case 'A': return 'markAll';" },
   { id: 'client-A 跳过确认框直接标读', file: 'lib/client.js',
     judges: ['keyboard-routing.test.mjs', 'scroll-dom.test.mjs'],
     judgeTests: [
@@ -2746,7 +2746,7 @@ export const MUTATIONS = [
     to: 'run(() => { void store.markAllRead(); });' },
   { id: 'client-下拉框选完不归还焦点', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
-    judgeTests: ['改完时间范围后按 a 仍生效（下拉框用指针选完必须归还焦点）'],
+    judgeTests: ['改完时间范围后按 A 仍生效（下拉框用指针选完必须归还焦点）'],
     // 去掉 `getTarget()?.focus()`：焦点留在 select 上，isTypingTarget 会把随后所有按键吞掉
     // —— 2026-11-21 真机复现的原始症状（改完时间范围按 A 无撤销条、未读数不变）。
     // lib/client.js 实测 OCCURRENCES=1（commit 里那三行）。
