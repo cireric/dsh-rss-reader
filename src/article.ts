@@ -765,8 +765,13 @@ function normalizeRuns(raw: readonly InlineRun[]): InlineRun[] {
   // ⚠️ 收敛出来的那个空格归**它自己原来所属的 run**（2026-11-21 真机实测踩到）：
   // 源 HTML 里 `<a>` 两侧的空格通常写在标签**外面**（`自托管一个 <a>Vaultwarden</a> 自然而然`），
   // 而空白字符在哪个 run 里，就说明它属于哪段文本。若按「归前一个 / 归后一个」这种邻接规则分配，
-  // 链接的可点区域会变成 `" Vaultwarden"` 或 `"Vaultwarden "`（真实站点实测：sspai 那篇 10 个
-  // link run 里多个带多余空格，点起来比看起来宽）。按空白自身的归属分配，链接边界就与作者写的一致。
+  // 链接的可点区域会变成 `" Vaultwarden"` 或 `"Vaultwarden "` —— 点起来比看起来宽一格。
+  // 按空白自身的归属分配，链接边界就与作者写的一致：空格在 `<a>` 外就留在文本里，
+  // 在 `<a>` 内就留在链接里（真实站点 sspai 上确实存在后一种写法：`<a …> STUN 服务</a>`）。
+  //
+  // 证据等级：`实测` 只到「两种写法在真实站点上都存在」这一步；修复前后的**计数差异**没有可复现的
+  // 记录（当时的观察发生在更早的代码版本上，日志与库里都没有留痕）。判据本身由下面两条用例钉住，
+  // 不依赖那个数字。
   const kept: Array<{ char: string; owner: number }> = []
   let pendingSpaceOwner = -1
   for (const [index, char] of [...joined].entries()) {

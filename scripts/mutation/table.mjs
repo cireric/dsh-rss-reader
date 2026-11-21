@@ -52,7 +52,7 @@ export const MUTATIONS = [
     from: 'existing.article.revision === ARTICLE_REVISION',
     to: 'existing.article.revision !== ARTICLE_REVISION' },
   // 收敛出来的空格归「后一个 run」而不是空白自身所属的 run：链接的可点区域会比看起来宽
-  // （真机实测踩到：sspai 那篇 10 个 link run 里多个带前导空格）。判据见「标签外的空格不并入链接」。
+  // 判据见「标签外的空格不并入链接」与「标签内的空格属于链接」两条（真实站点上两种写法都存在）。
   { id: 'inline-空格并进链接', file: 'lib/article.js',
     judges: ['article.test.mjs'],
     judgeTests: ['内联：标签外的空格不并入链接（真机实测踩到：链接可点区域比看起来宽）'],
