@@ -3901,3 +3901,238 @@ test('R1-04 写操作后 split 由回包整份覆盖：标读后今天减 1，�
     '不改读态的动作（星标）也必须把 split 原样带回，不能抹掉')
   assert.match(doc.querySelector('.dsh-rss-counts').textContent, /共 4 条未读/)
 })
+
+/**
+ * 进入正文页并返回 `<article>` 正文列 —— 本组用例的公共前置。
+ *
+ * 为什么单独提出来：R5 03 的每一条判据都要先走「列表 → 按 V → 等正文落地」这条路，
+ * 而这条路的等待条件（view 变 article + settle）在四条用例里逐字重复过一次就够了。
+ * 失败时抛出的是「在哪一步没等到」，不是某条断言的行号。
+ */
+async function openArticle(h) {
+  await h.store.load('overview')
+  await h.settle()
+  h.press('V', true)
+  await h.waitFor(() => h.store.get().view === 'article', { timeout: 900, label: '进入正文页' })
+  await h.settle()
+  const body = h.win.document.querySelector('article.dsh-rss-article-column')
+  assert.ok(body !== null, '正文列必须存在')
+  return body
+}
+
+test('正文内联：链接渲染成 <a>，带 target=_blank 与 rel（含 noopener / noreferrer）', skip, async () => {
+  // 夹具的 text 与 runs 严格一致（抽取层保证的那条不变量），这样「渲染的是 runs 而不是 text」
+  // 不会因为内容不同而被误判成「两种都行」。
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    article: {
+      itemId: 'a', title: 'ART',
+      blocks: [{
+        kind: 'p', text: '详见官方文档。',
+        runs: [
+          { kind: 'text', text: '详见' },
+          { kind: 'link', text: '官方文档', href: 'https://example.com/docs' },
+          { kind: 'text', text: '。' },
+        ],
+      }],
+    },
+  })
+  const body = await openArticle(h)
+
+  const anchors = [...body.querySelectorAll('p a')]
+  assert.equal(anchors.length, 1, '链接必须渲染成恰好一个 <a>')
+  const anchor = anchors[0]
+  assert.equal(anchor.textContent, '官方文档', '链接文字就是 run 的文字')
+  assert.equal(anchor.getAttribute('href'), 'https://example.com/docs', 'href 原样落到 DOM')
+  assert.equal(anchor.getAttribute('target'), '_blank', '必须在新标签页打开（不丢掉正在读的这篇）')
+  const rel = (anchor.getAttribute('rel') ?? '').split(/\s+/).filter((token) => token !== '')
+  assert.ok(rel.includes('noopener'), 'rel 必须含 noopener（新标签页拿不到 window.opener）')
+  assert.ok(rel.includes('noreferrer'), 'rel 必须含 noreferrer（不泄漏来源地址）')
+  // 段落文本仍与 runs 拼接一致：元素渲染没有吞字、没有多加空格
+  assert.equal(body.querySelector('p').textContent, '详见官方文档。',
+    '段落可见文本必须逐字等于 runs 拼接结果')
+})
+
+test('正文内联：加粗 / 斜体 / 行内代码渲染成 strong / em / code，行内代码字号用 em', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    article: {
+      itemId: 'a', title: 'ART',
+      blocks: [{
+        kind: 'p', text: '不要在生产环境执行 npm install foo。',
+        runs: [
+          { kind: 'text', text: '不要' },
+          { kind: 'strong', text: '在生产环境' },
+          { kind: 'em', text: '执行' },
+          { kind: 'code', text: 'npm install foo' },
+          { kind: 'text', text: '。' },
+        ],
+      }],
+    },
+  })
+  const body = await openArticle(h)
+  const paragraph = body.querySelector('p')
+
+  const strong = paragraph.querySelector('strong')
+  assert.ok(strong !== null, '加粗 run 必须渲染成 <strong>')
+  assert.equal(strong.textContent, '在生产环境')
+
+  const em = paragraph.querySelector('em')
+  assert.ok(em !== null, '斜体 run 必须渲染成 <em>')
+  assert.equal(em.textContent, '执行')
+
+  const code = paragraph.querySelector('code')
+  assert.ok(code !== null, '行内代码 run 必须渲染成 <code>')
+  assert.equal(code.textContent, 'npm install foo')
+  // 字号必须是 em 而不是 px：正文字号可调，写死像素会让放大后的正文里代码反而更小。
+  // 断言的是**样式属性**（jsdom 没有布局能力，见 pitfalls §2.2），不是渲染出来的像素尺寸。
+  assert.match(code.style.fontSize, /em$/, '行内代码字号必须用 em 跟随正文字号，不许写 px')
+  assert.equal(code.style.fontSize, '0.9em')
+  assert.match(code.style.fontFamily, /monospace/, '行内代码必须用等宽字体，与散文分开')
+
+  // 顺序也是判据：run 流是有序的，元素必须按原顺序出现在段落里
+  assert.equal(paragraph.textContent, '不要在生产环境执行npm install foo。',
+    '三种内联元素按 run 顺序拼回可见文本，不吞字、不重排')
+})
+
+test('正文内联：非法链接退化成纯文本，不产生 <a>（渲染期白名单）', skip, async () => {
+  // 纵深防御（spec 决策 14）：抽取期已过 safeUrl，但历史脏数据可能带着 javascript: 落进缓存。
+  // 判据是「DOM 里没有 <a>、文字仍在」——两者缺一都不算合格（吞掉文字同样是内容损失）。
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    article: {
+      itemId: 'a', title: 'ART',
+      blocks: [{
+        kind: 'p', text: '别点这里，也别点那里。',
+        runs: [
+          { kind: 'text', text: '别点' },
+          { kind: 'link', text: '这里', href: 'javascript:alert(1)' },
+          { kind: 'text', text: '，也别点' },
+          { kind: 'link', text: '那里', href: 'data:text/html,<script>alert(1)</script>' },
+          { kind: 'text', text: '。' },
+        ],
+      }],
+    },
+  })
+  const body = await openArticle(h)
+  const paragraph = body.querySelector('p')
+
+  assert.equal(body.querySelectorAll('a').length, 0, '非法协议不许产生任何 <a>（javascript: / data: 都算）')
+  assert.equal(paragraph.textContent, '别点这里，也别点那里。', '退化成纯文本：文字一个都不能少')
+})
+
+test('正文内联：runs 缺席的块与今天逐字一致（纯文本段落 / 旧缓存 / 回退摘要）', skip, async () => {
+  // 02 之后纯文本段落**本来就不产出 runs**，所以这是常态路径而不是兼容分支。
+  // 判据同时覆盖三条来源：新缓存的纯文本块、老缓存的 paragraphs、以及回退摘要的 p 块。
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    article: {
+      itemId: 'a', title: 'ART',
+      // 无 runs 的 p / h / quote / list：四种都必须走原路径
+      blocks: [
+        { kind: 'p', text: '纯文本段落，没有任何内联语义。' },
+        { kind: 'h', text: '纯文本标题', level: 2 },
+        { kind: 'quote', text: '纯文本引用' },
+        { kind: 'list', ordered: false, items: ['条目一', '条目二'] },
+      ],
+    },
+  })
+  const body = await openArticle(h)
+
+  assert.equal(body.querySelector('p').textContent, '纯文本段落，没有任何内联语义。')
+  assert.equal(body.querySelector('p').querySelectorAll('strong, em, code, a').length, 0,
+    '没有 runs 的段落不许凭空长出内联元素')
+  // 标题块渲染成 div，但正文列里还有 header 的 meta div —— 按可见文本找，不按标签序号找
+  const heading = [...body.querySelectorAll('div')].find((element) => element.textContent === '纯文本标题')
+  assert.ok(heading !== undefined, '标题仍走 text（纯文本标题原样画出来）')
+  assert.equal(heading.querySelectorAll('strong, em, code, a').length, 0, '没有 runs 的标题不许长出内联元素')
+  assert.equal(body.querySelector('blockquote').textContent, '纯文本引用', '引用仍走 text')
+  assert.deepEqual([...body.querySelectorAll('li')].map((element) => element.textContent),
+    ['条目一', '条目二'], '列表仍走 items（没有 itemRuns 时逐字不变）')
+})
+
+test('正文内联：列表的 itemRuns 等长同序时按 run 渲染，长度对不上则整份退回纯文本', skip, async () => {
+  // 判据来自 spec 决策 1 的不变量：itemRuns 要么缺席、要么与 items 等长同序。
+  // 长度对不上时「能对上几条就渲染几条」会让同一列表里富文本与纯文本混排，读者无从分辨。
+  const items = ['用 npm install 装', '再看官方文档']
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    article: {
+      itemId: 'a', title: 'ART',
+      blocks: [
+        {
+          kind: 'list', ordered: true, items,
+          itemRuns: [
+            [
+              { kind: 'text', text: '用 ' },
+              { kind: 'code', text: 'npm install' },
+              { kind: 'text', text: ' 装' },
+            ],
+            [
+              { kind: 'text', text: '再看' },
+              { kind: 'link', text: '官方文档', href: 'https://example.com/docs' },
+            ],
+          ],
+        },
+        // 长度对不上（2 条 items、1 组 itemRuns）：整份退回 items
+        {
+          kind: 'list', ordered: false, items: ['甲', '乙'],
+          itemRuns: [[{ kind: 'strong', text: '甲' }]],
+        },
+      ],
+    },
+  })
+  const body = await openArticle(h)
+  const lists = [...body.querySelectorAll('ol, ul')]
+  assert.equal(lists.length, 2, '两个列表块都要画出来')
+
+  const [富文本列表, 退回列表] = lists
+  assert.equal(富文本列表.querySelector('li code').textContent, 'npm install', '列表项的 code run 渲染成 <code>')
+  assert.equal(富文本列表.querySelector('li a').getAttribute('href'), 'https://example.com/docs',
+    '列表项的 link run 也过白名单并渲染成 <a>')
+  assert.deepEqual([...富文本列表.querySelectorAll('li')].map((element) => element.textContent), items,
+    '列表项可见文本仍逐字等于 items')
+
+  assert.deepEqual([...退回列表.querySelectorAll('li')].map((element) => element.textContent), ['甲', '乙'],
+    'itemRuns 长度对不上时整份退回 items（不许只渲染能对上的那几行）')
+  assert.equal(退回列表.querySelectorAll('strong, em, code, a').length, 0,
+    '退回之后不许残留任何内联元素')
+})
+
+test('正文内联：点击链接不冒泡到整行（列表行是 role=button，同一条规矩防回归）', skip, async () => {
+  // 正文里的链接不在列表行内，但 spec 决策 15 要求把这条规矩写进验收 ——
+  // 免得日后把富文本铺进列表摘要时，点链接顺手把文章标成已读。
+  //
+  // 判据挂在 **document** 上而不是正文列上：React 18 把合成事件的监听器挂在根容器（#root），
+  // 所以锚点到 #root 之间的原生祖先**必然**先收到事件 —— 在那里挂计数器测的是 React 的委托机制，
+  // 不是被测行为（改成那样这条用例永远红，与实现无关）。stopPropagation 在 #root 那一层执行，
+  // 于是 document 成为「事件有没有逃出应用」的真实边界。
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    article: {
+      itemId: 'a', title: 'ART',
+      blocks: [{
+        kind: 'p', text: '详见官方文档。',
+        runs: [
+          { kind: 'text', text: '详见' },
+          { kind: 'link', text: '官方文档', href: 'https://example.com/docs' },
+          { kind: 'text', text: '。' },
+        ],
+      }],
+    },
+  })
+  const body = await openArticle(h)
+  const anchor = body.querySelector('p a')
+  assert.ok(anchor !== null, '前置条件：段落里有链接')
+
+  let escaped = 0
+  const onDocumentClick = () => { escaped += 1 }
+  h.win.document.addEventListener('click', onDocumentClick)
+  try {
+    anchor.dispatchEvent(new h.win.MouseEvent('click', { bubbles: true, cancelable: true }))
+    await h.settle()
+  } finally {
+    h.win.document.removeEventListener('click', onDocumentClick)
+  }
+  assert.equal(escaped, 0, '链接点击必须 stopPropagation，不许冒泡出应用（列表行的 role=button 依赖这条规矩）')
+})
