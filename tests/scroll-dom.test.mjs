@@ -4769,3 +4769,77 @@ test('i 在列表页不改变任何状态（图片开关只在正文页生效）
   const body = await openArticle(h)
   assert.equal(body.querySelectorAll('img').length, 0, '列表页那次 i 不许留下篇级覆盖')
 })
+
+/**
+ * —— 组级覆盖（R6 05；spec 决策 5 / 9 / 15、验收 7 / 21）——
+ *
+ * 03 已经让「点提示只展开那一组」成立（`expandImageGroup` 只 add 那一组、`foldOf` 组覆盖优先），
+ * 那条判据也已落在上面的「点提示只展开那一组」里（spec 验收 7 的「第二组仍折叠」）。
+ * 本段补的是**同一层语义的另外两半**：
+ *  ① 组覆盖必须压过**篇级**覆盖（上面那条只验到「压过偏好」，而两者在 `foldOf` 里是两行不同的代码）；
+ *  ② 组覆盖不落盘 —— `state.view` 那条复位依赖（`j`/`k` 换篇已被「组级覆盖是会话级瞬时状态」
+ *     那条覆盖，但「Esc 回列表后重开**同一篇**」走的是另一个依赖，那条路径此前只对篇级覆盖有判据）。
+ */
+
+test('组覆盖优先于篇级覆盖：按 i 把整篇写成折叠后，点过的那一组仍然展开', skip, async () => {
+  // spec 决策 5 的「组级优先于篇级」：读者明确点过的那一组，不该被一个全局开关盖掉。
+  // ⚠️ 夹具必须让**篇级覆盖**（而不是偏好）等于折叠：默认偏好是展开，按一次 `i` 把篇级写成
+  // `false` —— 若组覆盖不压过篇级，点提示后那张图仍然不出现（提示也不会消失），这条当场红。
+  // 与上面那条「点提示只展开那一组」的区别：那条的折叠来自**偏好**，这条来自**篇级覆盖**；
+  // 两种来源在 `foldOf` 里是两行不同的代码，一条用例守不住另一条。
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    article: twoGroupArticle(),
+  })
+  const body = await openArticle(h)
+  assert.equal(body.querySelectorAll('img').length, 3, '前置：默认偏好是展开，三张图都在')
+  assert.equal(foldHints(body).length, 0, '前置：展开态没有提示')
+
+  assert.equal(h.press('i'), true, '正文页的 i 必须被接管')
+  await h.settle()
+  assert.equal(body.querySelectorAll('img').length, 0, '前置：按 i 把篇级覆盖写成折叠')
+  const hints = foldHints(body)
+  assert.equal(hints.length, 2, '前置：两组各一条提示')
+
+  hints[0].dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
+  await h.settle()
+
+  const images = [...body.querySelectorAll('img')]
+  assert.equal(images.length, 1, '组覆盖必须压过篇级覆盖：只有点过的那一组展开')
+  assert.equal(images[0].getAttribute('src'), 'https://img.example/solo.png', '展开的图 src 必须与原块一致')
+  const remaining = foldHints(body)
+  assert.equal(remaining.length, 1, '另一组的提示必须还在')
+  assert.equal(remaining[0].getAttribute(FOLD_ATTR), '1', '剩下的是第二组（序号 1）')
+})
+
+test('组覆盖不落盘：Esc 回列表后重开同一篇，回到偏好决定的初始形态', skip, async () => {
+  // spec 验收 21 的**第二条**依赖（决策 15 的 `state.view`）：`closeArticle` 只 `set({ view: 'list' })`、
+  // 刻意保留 `article`（阅读进度落盘要用它），所以那一刻 `articleItemId` **不变** ——
+  // 只依赖 `articleItemId` 时，组覆盖会跨阅读会话留下来，重开同一篇会带着上次点开的组回来。
+  //
+  // 与「组级覆盖是会话级瞬时状态：换到下一篇时复位」那条**不重叠**：那条走 `j`/`k`（`articleItemId`
+  // 变了、`view` 一直是 `'article'`），这条走 Esc → 重开（`view` 变了、`articleItemId` 没变）。
+  // 两个依赖各有一条判据，缺哪一条都会让对应路径静默失效。
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    prefs: foldedPrefs(),
+    article: twoGroupArticle(),
+  })
+  const body = await openArticle(h)
+  foldHints(body)[0].dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
+  await h.settle()
+  assert.equal(body.querySelectorAll('img').length, 1, '前置：a 篇第 0 组已点开')
+
+  h.press('Escape')
+  await h.settle()
+  assert.equal(h.store.get().view, 'list', '前置：Esc 回列表')
+
+  h.press('V', true)
+  await h.waitFor(() => h.store.get().view === 'article', { timeout: 900, label: '重新进入正文页' })
+  await h.settle()
+  const reopened = h.win.document.querySelector('article.dsh-rss-article-column')
+  assert.ok(reopened !== null, '正文列必须存在')
+  assert.equal(reopened.querySelectorAll('img').length, 0,
+    '重开同一篇要回到偏好决定的形态（折叠）—— 组覆盖不跨阅读会话保留')
+  assert.equal(foldHints(reopened).length, 2, '两组提示都回来')
+})
