@@ -4190,3 +4190,41 @@ test('正文内联：点击链接不冒泡到整行（列表行是 role=button�
   }
   assert.equal(escaped, 0, '链接点击必须 stopPropagation，不许冒泡出应用（列表行的 role=button 依赖这条规矩）')
 })
+
+/**
+ * —— R6 01：正文图片不泄漏 Referer ——
+ *
+ * 判据读 `getAttribute('referrerpolicy')`，**不读** `img.referrerPolicy`：
+ * jsdom 里 `'referrerPolicy' in img === false`（`实测`，spec「补充说明」第 357 行），
+ * 读属性恒 `undefined`，会让这条用例对任何实现都恒红；而 React 18 会把 `referrerPolicy`
+ * 这个 prop 写成 DOM 的 `referrerpolicy` **属性**，那才是浏览器真正拿去发请求的东西。
+ *
+ * 这条**不设任何偏好**：默认态就是展开的，隐私不该要读者先做一次动作。
+ */
+test('R6 01：正文图片带 referrerpolicy="no-referrer"（默认展开态，无需任何设置）', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a' })],
+    article: {
+      itemId: 'a', title: 'ART',
+      blocks: [
+        { kind: 'p', text: '一张图。' },
+        { kind: 'img', src: 'https://cdn.example.com/one.png', alt: '图一', caption: '说明一' },
+        { kind: 'img', src: 'https://tracker.example.net/pixel.gif', alt: '' },
+      ],
+    },
+  })
+  const body = await openArticle(h)
+
+  const images = [...body.querySelectorAll('img')]
+  assert.equal(images.length, 2, '前置条件：两张图都要真的渲染出来（默认展开态）')
+  for (const image of images) {
+    assert.equal(
+      image.getAttribute('referrerpolicy'),
+      'no-referrer',
+      '图片 ' + image.getAttribute('src') + ' 必须带 referrerpolicy="no-referrer" —— 否则第三方图床能从 Referer 读到读者正在读哪一篇',
+    )
+  }
+  // 既有的两个图片属性不许被这条改动挤掉（同一处 props，最容易顺手改坏）
+  assert.equal(images[0].getAttribute('loading'), 'lazy')
+  assert.equal(images[0].getAttribute('decoding'), 'async')
+})

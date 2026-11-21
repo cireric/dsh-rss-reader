@@ -2413,6 +2413,16 @@ export const MUTATIONS = [
     // lib/shared.js 实测 OCCURRENCES=1。
     from: "        if (block['kind'] === 'table')\n            texts.push(tableToText(block));",
     to: "        if (false)\n            texts.push(tableToText(block));" },
+  // R6 01：正文图片不再外泄 Referer。删掉 referrerPolicy ⇒ 图片请求重新带上当前页 URL，
+  // 第三方图床/CDN/跟踪像素就能读到「读者正在读哪一篇」。这条**独立于折叠/灯箱**：
+  // 判据是产物里正文图片那处 props（client-bundle.test.mjs 按 ARTICLE_IMAGE_MAX_HEIGHT 定位，
+  // 不认行号），所以并行票新增的 `<img>` 不会让它失效，也不会替它兜底。
+  // lib/client.js 实测 OCCURRENCES=1（锚在 loading/decoding 两行的上下文上，单锚 referrerPolicy 也会命中）。
+  { id: 'client-图片无 referrerPolicy', file: 'lib/client.js',
+    judges: ['client-bundle.test.mjs'],
+    judgeTests: ['R6 01：产物里正文图片的 props 带 referrerPolicy: "no-referrer"'],
+    from: "\t\t\t\t\t\tloading: \"lazy\",\n\t\t\t\t\t\tdecoding: \"async\",\n\t\t\t\t\t\treferrerPolicy: \"no-referrer\",",
+    to: "\t\t\t\t\t\tloading: \"lazy\",\n\t\t\t\t\t\tdecoding: \"async\"," },
   // ── R6 02：图片折叠的决策层（分组纯函数 + expandImages 偏好） ───────────────
   // 这三条守的是**决策层**，不是渲染层：折叠/展开的 DOM 判据要等 03 才存在。
   // 因此 `client-默认值写成折叠` 这条在当前轮**还不能**由渲染用例抓住 —— 它只能由
