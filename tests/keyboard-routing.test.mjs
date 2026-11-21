@@ -22,6 +22,9 @@ import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
+// 直接取 lib 产物里的纯函数：`i` 的视图守卫住在 routeKey 里（不在 resolveReaderKey 里），
+// 所以这条守卫的判据必须同时看见这两层 —— 断言「resolveReaderKey 无条件解析」也要读它。
+import { resolveReaderKey } from '../lib/keys.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const require_ = createRequire(join(ROOT, 'package.json'))
@@ -352,4 +355,66 @@ test('列表按 / 聚焦本地搜索输入框', { skip }, () => {
   h.setup.panelRoot.appendChild(input)
   routeKeyOf('/', h)
   assert.equal(h.setup.document.activeElement, input)
+})
+
+/**
+ * —— R6 04：`i` 键切换整篇图片（spec 决策 10 / 14，验收 17）——
+ *
+ * 这一层能验的是**路由与守卫**：`i` 在正文页写什么、在别的视图里是不是一个 no-op。
+ * 「按了之后 DOM 里有没有 `<img>`」必须靠 tests/scroll-dom.test.mjs（本层不渲染 React）。
+ *
+ * 语义是「翻**基线**并清空组覆盖」，基线 = `篇级覆盖 ?? 偏好`（spec 决策 10）：
+ * 为什么翻基线而不是翻「当前是否全部展开」——有组覆盖时「部分展开」取反没有定义；
+ * 翻基线让行为与「读者点过几组」无关，确定且可测。
+ */
+
+/** 造 `i` 需要的 ctx 扩展：篇级覆盖 + 它的 setter + 组覆盖。 */
+function makeImageCtx({ view = 'article', imagesExpanded, expandedGroups = new Set(), expandImages = true } = {}) {
+  const imageCalls = []
+  const groupCalls = []
+  const h = makeCtx({
+    state: { view },
+    ctx: {
+      imagesExpanded,
+      setImagesExpanded: (next) => imageCalls.push(next),
+      expandedGroups,
+      setExpandedGroups: (next) => groupCalls.push(next),
+    },
+  })
+  // 偏好（expandImages）住在 store.get().reading 里：routeKey 读基线时要用它。
+  const base = h.store.get
+  h.store.get = () => ({ ...base(), reading: { expandImages } })
+  return { ...h, imageCalls, groupCalls }
+}
+
+test('R6 04：正文页按 i 写篇级覆盖并清空组覆盖（翻基线 ⇒ 全篇统一）', { skip }, () => {
+  // 偏好是展开、没有篇级覆盖 ⇒ 基线 = true ⇒ 写成 false（折叠整篇）
+  const h = makeImageCtx({ imagesExpanded: undefined, expandImages: true })
+  routeKeyOf('i', h)
+  assert.deepEqual(h.imageCalls, [false], '基线（偏好 true）取反 ⇒ 写 false')
+  assert.deepEqual(h.groupCalls, [new Set()], '同时清空组覆盖，否则读者点过的那组会逆着 i 留在展开态')
+  // 必须是新对象（或同一个空常量），不能原地 clear()：原地改会让 foldOf 的快照与 React 的
+  // 相等判断同时失灵（03 的注释已写明）。
+  assert.notEqual(h.groupCalls[0], undefined)
+})
+
+test('R6 04：i 翻的是基线（篇级覆盖 ?? 偏好），不是「当前是否全部展开」', { skip }, () => {
+  // 篇级覆盖已经是 true、偏好是 false：基线 = true ⇒ 再按一次写 false。
+  // 若实现写成 `!store.get().reading.expandImages`（只看偏好），这里会得到 true —— 按了没反应。
+  const h = makeImageCtx({ imagesExpanded: true, expandImages: false })
+  routeKeyOf('i', h)
+  assert.deepEqual(h.imageCalls, [false], '基线取「篇级覆盖」而不是偏好')
+})
+
+test('R6 04：列表页 / 订阅管理页按 i 不改变任何状态（守卫在 routeKey，不在 resolveReaderKey）', { skip }, () => {
+  // resolveReaderKey 必须**无条件**解析出 toggleImages（守卫住在 routeKey 的 view 判断里，
+  // 与 openArticle 的既有写法一致）—— 否则帮助表与实现会在「这个键认不认」上分家。
+  assert.equal(resolveReaderKey('i'), 'toggleImages')
+  for (const view of ['list', 'feeds']) {
+    const h = makeImageCtx({ view, expandImages: true })
+    routeKeyOf('i', h)
+    assert.deepEqual(h.imageCalls, [], view + ' 页按 i 不许改篇级覆盖')
+    assert.deepEqual(h.groupCalls, [], view + ' 页按 i 不许改组覆盖')
+    assert.deepEqual(h.store.calls, [], view + ' 页按 i 不许动 store')
+  }
 })

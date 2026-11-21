@@ -18,6 +18,9 @@ export type ReaderKeyAction =
   // 左栏导航（GR spec §3.8）：导航内移动选中 / 打开导航选中项 / 左栏显隐。
   // 与 j/k 是两条不同的轴：j/k 动的是右栏文章列表的选中项，navNext/navPrev 动的是左栏那一列。
   | 'navNext' | 'navPrev' | 'navOpen' | 'toggleNav'
+  // i = 展开 / 折叠**当前正文**的全部图片（R6 04，GR 里 i 原本空闲）。语义是「翻基线并清空组覆盖」，
+  // 细节在 keyboard-routing.ts 的 case：一次按键收掉整篇、再按一次放回来 —— 键盘流的主路径。
+  | 'toggleImages'
   | 'none'
 
 /**
@@ -54,6 +57,13 @@ export function resolveReaderKey(key: string, shift = false): ReaderKeyAction {
     case 'D': return shift === true ? 'halfPageUp' : 'none'
     case 'u': return 'toggleNav'
     case 'o': return 'expand'
+    // i = 展开 / 折叠当前正文的全部图片（R6 04；GR §3.8 里 i 原本未绑定）。
+    // ⚠️ **必须写成字面量 return，不许写成三元** `return view === 'article' ? … : …`：
+    //    tests/keys.test.mjs 的「帮助表反向覆盖」用正则 `return\s+'([A-Za-z]+)'` 从产物里抓动作名，
+    //    三元里的返回值抓不到（实测：它只抓到 21 个动作，漏掉 pageDown / pageUp / halfPageDown /
+    //    halfPageUp 这四个三元里的返回值）。写成三元 ⇒ 反向覆盖照样绿而判据失效，是假绿。
+    //    视图守卫因此住在 routeKey 的 `view !== 'article'` 判断里（与 openArticle 同形）。
+    case 'i': return 'toggleImages'
     // 1/2 = 视图密度（GR 原键位）：1 = expanded view「含条目描述/正文摘录」、2 = list view「只有标题行」
     case '1': return 'expandedView'
     case '2': return 'listView'
@@ -84,15 +94,20 @@ export function resolveReaderKey(key: string, shift = false): ReaderKeyAction {
 }
 
 /** 帮助浮窗里的适用视图。取值与 client 里那些 `if (view !== '...') return` 的裁决一一对应。 */
-export type ReaderHelpScope = 'list' | 'listArticle' | 'any'
+export type ReaderHelpScope = 'list' | 'listArticle' | 'any' | 'article'
 
 /**
  * 适用视图的显示文案。`any` 是空串：卡片上有一行图例说明「未标注 = 任何视图都生效」，
  * 不必为八行重复那两个字。
+ *
+ * `article`（R6 04 新增）是「只在正文页生效」：现有三档没有一档能表达它 —— 标 `listArticle`
+ * 就是让帮助浮窗在列表页撒谎（`i` 在列表页什么都不做），而标 `list` 更错。这正是本文件开头
+ * 记着的那类「标签与实现各说各话」的缺陷。`Record` 是穷尽的，扩枚举时 tsc 会强制补标签。
  */
 export const READER_HELP_SCOPE_LABEL: Record<ReaderHelpScope, string> = {
   list: '仅列表',
   listArticle: '列表 / 正文',
+  article: '仅正文',
   any: '',
 }
 
@@ -169,6 +184,9 @@ export const READER_KEY_HELP: ReaderHelpSection[] = [
     entries: [
       { label: 'V', summary: '在阅读器内读正文', scope: 'list',
         bindings: [{ key: 'V', shift: true, action: 'openArticle' }] },
+      // scope 是 article（仅正文）：`i` 在列表页 / 订阅管理页是 no-op（守卫在 routeKey 里）。
+      { label: 'i', summary: '展开 / 折叠正文图片', scope: 'article',
+        bindings: [{ key: 'i', action: 'toggleImages' }] },
       { label: 'v', summary: '用系统浏览器打开原站（并标已读）', scope: 'any',
         bindings: [{ key: 'v', action: 'openExternal' }] },
       { label: 's', summary: '星标 / 取消星标', scope: 'any',
