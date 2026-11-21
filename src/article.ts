@@ -645,19 +645,26 @@ const INLINE_STYLE: ReadonlyMap<string, 'strong' | 'em' | 'code'> = new Map([
 const BLOCK_SEPARATORS = /<br\s*\/?>|\u0000B\d+\u0000/gi
 
 /**
- * 一段内联 HTML → 按「块分隔」切开的 run 流组。
+ * 一段内联 HTML → 按「块分隔」切开的 run 流组，外加**途中遇到的已 stash 块**。
  *
- * 返回的是 `InlineRun[][]`：外层每个元素对应一个块（`<br>` 或占位符分隔），内层是该块的 run。
- * 调用方据此产出多个块、各自派生 `text`——于是「`<p>甲<br>乙</p>` 产出两个段落块」的既有行为
- * 一字不变，而 `<div>` 版式与 `<p>` 版式都能拿到 runs（不靠给 `p` 加专属 pass）。
+ * 返回的是 `{ groups, stashedIds }`：
+ * - `groups`：外层每个元素对应一个块（`<br>` 或占位符分隔），内层是该块的 run。
+ *   调用方据此产出多个块、各自派生 `text`——于是「`<p>甲<br>乙</p>` 产出两个段落块」的既有行为
+ *   一字不变，而 `<div>` 版式与 `<p>` 版式都能拿到 runs（不靠给 `p` 加专属 pass）。
+ * - `stashedIds`：这段片段里出现过的占位符编号，**按文档顺序**。
  *
- * **归一化在切 run 之前**（决策 7 的顺序）：先对整段的可见文本做 `collapseWhitespace`，再切 run。
- * 顺序反了，run 文本会带原始换行缩进，与归一化过的 `text` 必然不等。
+ * ⚠️ 为什么要把 stashedIds 交出去（2026-11-21 评审实测抓到的回归）：保护 pass 的顺序是
+ * `figure → pre → table → ul → blockquote → img → h*`。于是 `<li>文字<table>…</table></li>` 里
+ * 表格**先**被换成占位符，再轮到 `ul` 调本函数。若占位符只是「切段时丢掉」，那份 table 块
+ * 就再也不会被取出——读者丢内容，而且是**静默**的（基线把表格摊成文字保住了，这里直接没了）。
+ * 所以切段可以丢占位符**文本**，但必须把它代表的块交回给调用方去展开。
  *
- * 但注意：归一化**按块分别做**——块分隔处要切开再各自归一化，否则 `<p>甲<br>乙</p>` 会被
+ * **归一化在切 run 之前**（决策 7 的顺序）：每个段先解析出带原始空白的 run，再由 `normalizeRuns`
+ * 在**字符级**重建边界并归一化空白。顺序反了，run 文本会带原始换行缩进，与归一化过的 `text`
+ * 必然不等。归一化**按段分别做**——块分隔处要切开再各自归一化，否则 `<p>甲<br>乙</p>` 会被
  * 归一化成 `"甲 乙"` 一个块（换行被空格吃掉），切块行为就变了。
  */
-function parseInlineRuns(fragment: string, baseUrl: string | undefined): InlineRun[][] {
+function parseInlineRuns(fragment: string, baseUrl: string | undefined): { groups: InlineRun[][]; stashedIds: number[] } {
   // 先按块分隔切段：分隔符本身不产出任何文字，只切
   const segments = fragment.split(BLOCK_SEPARATORS)
   const groups: InlineRun[][] = []
@@ -667,7 +674,10 @@ function parseInlineRuns(fragment: string, baseUrl: string | undefined): InlineR
     const normalized = normalizeRuns(raw)
     if (normalized.length > 0) groups.push(normalized)
   }
-  return groups
+  // 占位符按文档顺序收出来（split 会丢掉分隔符本身，所以单独扫一遍原串）
+  const stashedIds: number[] = []
+  for (const match of fragment.matchAll(/\u0000B(\d+)\u0000/g)) stashedIds.push(Number(match[1]))
+  return { groups, stashedIds }
 }
 
 /**
@@ -798,9 +808,9 @@ function sameRunKind(a: InlineRun, b: InlineRun): boolean {
  * 合并成一段——`parseInlineRuns` 的块分隔（`<br>` / 占位符）在这里也生效，取**第一组**以外的
  * 组用空格接回去，保持「一个标题就是一个块」的既有行为。
  */
-function inlineTextOf(fragment: string, baseUrl: string | undefined): { text: string; runs?: readonly InlineRun[] } {
-  const groups = parseInlineRuns(fragment, baseUrl)
-  if (groups.length === 0) return { text: '' }
+function inlineTextOf(fragment: string, baseUrl: string | undefined): { text: string; runs?: readonly InlineRun[]; stashedIds: number[] } {
+  const { groups, stashedIds } = parseInlineRuns(fragment, baseUrl)
+  if (groups.length === 0) return { text: '', stashedIds }
   // 多组（源里含 <br>）时用空格接回一段：标题/引用/列表项的既有行为是单块，不切成多块。
   const merged: InlineRun[] = []
   for (const [index, group] of groups.entries()) {
@@ -808,7 +818,23 @@ function inlineTextOf(fragment: string, baseUrl: string | undefined): { text: st
     merged.push(...group)
   }
   const runs = normalizeRuns(merged)
-  return { text: runsToText(runs), ...runsFieldOf(runs) }
+  return { text: runsToText(runs), ...runsFieldOf(runs), stashedIds }
+}
+
+/**
+ * 把一串已 stash 的块编号还原成**占位符串**，交回文档流让「重建块顺序」那一步去展开。
+ *
+ * 为什么需要它（2026-11-21 评审实测抓到的回归）：保护 pass 的顺序是
+ * `figure → pre → table → ul → blockquote → img → h*`，所以 `<li>文字<table>…</table></li>` 里
+ * 表格先被换成占位符，再轮到 `ul` 调内联解析。内联解析按设计把占位符当块分隔（否则它会变成
+ * run 文本、污染 items 与搜索索引），于是那份 table 块**再也不会被取出** —— 读者静默丢内容，
+ * 而基线是把表格摊成文字保住的。
+ *
+ * 取舍：列表项 / 引用 / 标题里嵌的块会被提到**该块之后**重建（顺序略有偏移），而不是塞进
+ * items 里（单元格与列表项是纯字符串，装不下一个块）。宁可顺序不完美，也不许丢内容。
+ */
+function placeholdersOf(ids: readonly number[]): string {
+  return ids.map((id) => '\u0000B' + id + '\u0000').join('')
 }
 
 /**
@@ -840,7 +866,11 @@ interface TableCell {
 
 /** 单元格文本：按 `htmlToText` 的既有规则收敛成单空格（表格单元格没有 runs，见 spec「不在范围」）。 */
 function cellTextOf(inner: string): string {
-  return collapseWhitespace(htmlToText(inner))
+  // ⚠️ 单元格是**纯字符串**，装不下一个块（spec 明确把「单元格富文本」划出范围）。
+  // 所以嵌在单元格里的 `pre` / `img` 等已被换成占位符的块，只能把占位符剥掉——
+  // 否则它会作为普通字符留下，读者在表格里看到 `B0`（NUL 不可见），
+  // 同时污染搜索索引与字符统计（评审实测：`<td><pre>x=1</pre></td>` ⇒ `"\u0000B0\u0000"`）。
+  return collapseWhitespace(htmlToText(inner.replace(/\u0000B\d+\u0000/g, ' ')))
 }
 
 /** 跨度属性：认不出 / 非正数一律当 1（编造更大的跨度会把整张表撑歪）。 */
@@ -1125,12 +1155,15 @@ function collectBlocks(html: string, baseUrl: string | undefined): ArticleBlock[
   body = rewriteTagRegions(body, (name) => name === 'ul' || name === 'ol', (name, inner) => {
     const items: string[] = []
     const itemRuns: Array<readonly InlineRun[]> = []
+    /** 列表项里嵌的已 stash 块（table / pre / img…）：它们的占位符要原样交回文档流。 */
+    const nested: number[] = []
     for (const li of allRegions(inner, 'li')) {
       // 列表项走内联解析：`<li>详见<a>文档</a></li>` 的链接必须留下来。
       // 同一个函数也顺手解决了**占位符泄漏**：`<li>文字<pre>code</pre></li>` 里 pre 已被换成
       // `\u0000B0\u0000`，而 `parseInlineRuns` 把它当块分隔丢弃 —— 否则它会被当成普通文字
       // 进 items（既存缺陷，实测过）。
-      const { text, runs } = inlineTextOf(li, baseUrl)
+      const { text, runs, stashedIds } = inlineTextOf(li, baseUrl)
+      nested.push(...stashedIds)
       if (text === '') continue
       items.push(text)
       itemRuns.push(runs ?? [{ kind: 'text', text }])
@@ -1139,12 +1172,16 @@ function collectBlocks(html: string, baseUrl: string | undefined): ArticleBlock[
     if (items.length === 0 || (items.length === 1 && items[0].length < MIN_CONTENT_CHARS)) return ' '
     // 与 items 等长同序；全部都是纯文本时整体缺席（runs 的语义是「有内联语义」）
     const anyInline = itemRuns.some((runs) => runs.some((run) => run.kind !== 'text'))
-    return stash({ kind: 'list', ordered: name === 'ol', items, ...(anyInline ? { itemRuns } : {}) })
+    const list = stash({ kind: 'list', ordered: name === 'ol', items, ...(anyInline ? { itemRuns } : {}) })
+    // 列表项里嵌的块紧跟列表之后重建：宁可顺序略有偏移，也不许把它们丢掉
+    // （评审实测：`<li>文字<table>` 的表格曾整块消失，而基线是把表格摊成文字保住的）。
+    return list + placeholdersOf(nested)
   })
   body = rewriteTagRegions(body, (name) => name === 'blockquote', (_name, inner) => {
-    const { text, runs } = inlineTextOf(inner, baseUrl)
+    const { text, runs, stashedIds } = inlineTextOf(inner, baseUrl)
     // 引用**不套散文长度门槛**：blockquote 标签本身就是语义信号，短引用（一句被引的话）也是引用
-    return text === '' ? ' ' : stash({ kind: 'quote', text, ...(runs === undefined ? {} : { runs }) })
+    const quote = text === '' ? ' ' : stash({ kind: 'quote', text, ...(runs === undefined ? {} : { runs }) })
+    return quote + placeholdersOf(stashedIds)
   })
   body = rewriteVoidTags(body, 'img', (tag) => {
     const src = pickImageUrl(tag, baseUrl)
@@ -1152,8 +1189,9 @@ function collectBlocks(html: string, baseUrl: string | undefined): ArticleBlock[
     return stash({ kind: 'img', src, alt: attrOf(tag, 'alt') })
   })
   body = rewriteTagRegions(body, (name) => /^h[1-6]$/.test(name), (name, inner) => {
-    const { text, runs } = inlineTextOf(inner, baseUrl)
-    return text === '' ? ' ' : stash({ kind: 'h', level: Number(name.slice(1)), text, ...(runs === undefined ? {} : { runs }) })
+    const { text, runs, stashedIds } = inlineTextOf(inner, baseUrl)
+    const heading = text === '' ? ' ' : stash({ kind: 'h', level: Number(name.slice(1)), text, ...(runs === undefined ? {} : { runs }) })
+    return heading + placeholdersOf(stashedIds)
   })
 
   // ④ 按边界切分剩余散文，并**在同一遍里按文档顺序重建块**
@@ -1174,7 +1212,9 @@ function collectBlocks(html: string, baseUrl: string | undefined): ArticleBlock[
       // 散文路径本身产出 run 流（2026-11-21，R5 02）：`<p>` 与 `<div>` 一视同仁，
       // 不像别的块类型那样靠「给某个标签加保护 pass」——那样 div 版式的站点会拿不到 runs，
       // 变成「有的文章有链接、有的没有」。
-      for (const runs of parseInlineRuns(line, baseUrl)) {
+      // 占位符在散文路径里由 `split(/(\u0000B\d+\u0000)/)` 单独成 piece 处理（见循环开头），
+      // 所以这里拿到的 line 不会含占位符，stashedIds 恒为空。
+      for (const runs of parseInlineRuns(line, baseUrl).groups) {
         // 门槛判**归一化后的可见字符数**，不是 `htmlToText` 那种带标签间隙的假长度：
         // 38 个汉字嵌 6 个 <b> 的段落在旧实现里数出 50 字（保留），实际只有 38 字可读（应丢弃）。
         const text = runsToText(runs)
@@ -1191,7 +1231,7 @@ function collectBlocks(html: string, baseUrl: string | undefined): ArticleBlock[
   // 刚刚按可见字符数丢弃的结果又捡回来。两条路径的口径必须是同一个，否则门槛判据形同虚设。
   if (blocks.length === 0) {
     for (const line of body.split('\n')) {
-      for (const runs of parseInlineRuns(line, baseUrl)) {
+      for (const runs of parseInlineRuns(line, baseUrl).groups) {
         const text = runsToText(runs)
         if (text.length >= MIN_CONTENT_CHARS) blocks.push({ kind: 'p', text, ...runsFieldOf(runs) })
       }

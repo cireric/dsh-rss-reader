@@ -307,9 +307,10 @@ test('标题：剥掉站点后缀，但不碰本身就是标题的写法', () =>
 })
 
 
-test('正文 base 用重定向落点 finalUrl：相对图片按落点解析，而不是请求 URL', async () => {
+test('正文 base 用重定向落点 finalUrl：相对图片与相对链接都按落点解析，而不是请求 URL', async () => {
   const html = '<!doctype html><html><body><article><h1>标题</h1>'
-    + '<p>' + '这是一段足够长的正文，用来通过四十字符的内容门槛，并确保抽取器能认出正文容器。'.repeat(2) + '</p>'
+    + '<p>' + '这是一段足够长的正文，用来通过四十字符的内容门槛，并确保抽取器能认出正文容器。'.repeat(2)
+    + '详见<a href="doc/x">文档</a>。</p>'
     + '<img src="img/a.png" alt="示例图">'
     + '</article></body></html>'
   let calledWith = ''
@@ -324,6 +325,11 @@ test('正文 base 用重定向落点 finalUrl：相对图片按落点解析，�
   assert.ok(image !== undefined, '正文里的图片块必须保留')
   assert.equal(image.src, 'https://final.example/new/img/a.png',
     '相对 img src 必须按 finalUrl 解析：按请求 URL 会指向 origin.example/old/img/a.png（裂图）')
+  // 链接走的是同一条 baseUrl（spec 验收 2）：301 换路径后相对链接不许落到旧地址。
+  const link = result.blocks.flatMap((block) => block.runs ?? []).find((run) => run.kind === 'link')
+  assert.ok(link !== undefined, '相对链接必须抽成 link run')
+  assert.equal(link.href, 'https://final.example/new/doc/x',
+    '相对链接也必须按 finalUrl 解析（按请求 URL 会指向 origin.example/old/doc/x）')
 })
 
 /**
@@ -438,7 +444,6 @@ test('归一化先于切 run：text 必须无换行、无连续空白（严格�
   assert.ok(!/\n/.test(block.text), 'text 里不许有换行（块内折行是块边界，不是文本内容）')
   // run 文本也必须是归一化后的形态（不能只有 text 干净、runs 脏）
   for (const run of block.runs ?? []) {
-    assert.equal(run.text, run.text.replace(/\s+/g, ' ').trim() === '' ? run.text : run.text)
     assert.ok(!/\s{2}/.test(run.text), 'run 文本里不许有连续空白：' + JSON.stringify(run.text))
   }
 })
@@ -790,4 +795,44 @@ test('内联：标签内的空格属于链接（按空白自身归属，不是�
   assert.ok(link !== undefined)
   assert.equal(link.text, ' Vaultwarden ', '标签内的空格保留在链接里（源里就在 <a> 之内）')
   assert.equal(block.runs.map((run) => run.text).join(''), block.text, '不变量仍成立')
+})
+
+test('内联：列表项 / 引用 / 标题里嵌的块不许静默消失', () => {
+  // 评审实测抓到的回归：保护 pass 顺序是 figure → pre → table → ul → blockquote → img → h*，
+  // 所以 li 里的 table 先被换成占位符，再轮到 ul 调内联解析。若占位符只是「切段时丢掉」，
+  // 那份 table 块就再也不会被取出——读者丢内容，而且是静默的（基线是把表格摊成文字保住的）。
+  const long = '列表项文字足够长以便通过四十字符门槛的判断，这里再加一些文字凑够长度。'
+  const table = '<table><tr><td>参数</td><td>值</td></tr><tr><td>电压</td><td>220V</td></tr></table>'
+
+  const list = extractArticle('<article><ul><li>' + long + table + '</li><li>' + long + '</li></ul></article>', BASE).blocks
+  assert.ok(JSON.stringify(list).includes('220V'), 'li 里嵌的表格文字必须还在，实际：' + JSON.stringify(list.map((b) => b.kind)))
+
+  const quote = extractArticle('<article><blockquote>' + long + table + '</blockquote></article>', BASE).blocks
+  assert.ok(JSON.stringify(quote).includes('220V'), 'blockquote 里嵌的表格文字必须还在')
+
+  const heading = extractArticle('<article><h2>标题' + table + '</h2><p>' + long.repeat(2) + '</p></article>', BASE).blocks
+  assert.ok(JSON.stringify(heading).includes('220V'), '标题里嵌的表格文字必须还在')
+})
+
+test('表格：单元格里嵌的块不许漏出内部占位符', () => {
+  // pre pass 先于 table pass 跑，所以 <td><pre>x=1</pre></td> 的单元格里会留下占位符。
+  // 单元格是纯字符串（装不下一个块），所以只能把占位符剥掉——但它绝不能作为字符留下：
+  // 读者会在表格里看到 `B0`（NUL 不可见），同时污染搜索索引与字符统计。
+  const long = '正文段落内容重复以跨过门槛的判断并且确认它会被保留下来。'.repeat(3)
+  const blocks = extractArticle(
+    '<article><table><tr><th>代码示例</th></tr><tr><td><pre>x=1</pre></td></tr></table><p>' + long + '</p></article>',
+    BASE,
+  ).blocks
+  const table = blocks.find((block) => block.kind === 'table')
+  assert.ok(table !== undefined, '表格块必须保留')
+  // ⚠️ 不能用 `JSON.stringify(table).includes('\u0000')`：JSON.stringify 会把 NUL **转义**成
+  // 字面的反斜杠 u0000 六个字符，于是「含真实 NUL」永远判成 false —— 那是条空断言
+  // （2026-11-21 变异实测：改成这个写法后 `table-单元格漏出占位符` 直接幸存）。
+  // 直接查单元格字符串本身。
+  for (const cell of table.rows.flat()) {
+    assert.ok(!cell.includes('\u0000'), '单元格里不许出现内部占位符：' + JSON.stringify(cell))
+  }
+  for (const cell of table.header ?? []) {
+    assert.ok(!cell.includes('\u0000'), '表头里不许出现内部占位符：' + JSON.stringify(cell))
+  }
 })

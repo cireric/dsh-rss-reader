@@ -32,6 +32,25 @@ export const MUTATIONS = [
     judgeTests: ['不变量：runs 拼接严格等于 text（含行内标签两侧是汉字的形态）'],
     from: '实际只有 38 字可读（应丢弃）。\n                const text = runsToText(runs);',
     to: '实际只有 38 字可读（应丢弃）。\n                const text = htmlToText(line);' },
+  // 嵌套块被吞：列表项 / 引用 / 标题里嵌的 table / pre 会被内联解析当占位符丢弃（评审实测抓到的
+  // 回归）。判据是「嵌在 li 里的表格文字必须还在」。
+  { id: 'inline-嵌套块被占位符吞掉', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['内联：列表项 / 引用 / 标题里嵌的块不许静默消失'],
+    from: 'return list + placeholdersOf(nested);',
+    to: 'return list;' },
+  // 单元格里的占位符没剥掉：读者在表格里看到 `B0`，并污染搜索索引与字符统计。
+  { id: 'table-单元格漏出占位符', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['表格：单元格里嵌的块不许漏出内部占位符'],
+    from: "htmlToText(inner.replace(/\\u0000B\\d+\\u0000/g, ' '))",
+    to: 'htmlToText(inner)' },
+  // 旧修订号的缓存被当命中：读者永远看到升级前的块（spec 验收 13）。
+  { id: 'endpoint-旧修订号缓存当命中', file: 'lib/endpoints.js',
+    judges: ['reading-progress.test.mjs'],
+    judgeTests: ['article 端点：旧修订号的缓存被判过期 —— 回 cached:false 并重抓（不许静默给旧块）'],
+    from: 'existing.article.revision === ARTICLE_REVISION',
+    to: 'existing.article.revision !== ARTICLE_REVISION' },
   // 收敛出来的空格归「后一个 run」而不是空白自身所属的 run：链接的可点区域会比看起来宽
   // （真机实测踩到：sspai 那篇 10 个 link run 里多个带前导空格）。判据见「标签外的空格不并入链接」。
   { id: 'inline-空格并进链接', file: 'lib/article.js',

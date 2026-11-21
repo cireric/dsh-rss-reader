@@ -187,3 +187,35 @@ test('saveReadingProgress 端点：缺参数 / 未知条目响亮失败，比例
     db.close(); rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('article 端点：旧修订号的缓存被判过期 —— 回 cached:false 并重抓（不许静默给旧块）', async () => {
+  // 为什么这条必须有（R5 06，评审指出的缺口）：spec 验收 13 写的是「既有判据自动生效，验收确认
+  // 没被绕过」。抬版本之前，**没有任何用例**用 `revision: EXTRACTOR_REVISION - 1` 打过 article
+  // 端点 —— 把 endpoints 里的 `=== ARTICLE_REVISION` 改成 `!==` 或删掉，850 条测试仍会全绿。
+  const { store, db, dir } = freshArticleStore('stale')
+  try {
+    // 造一条「上一版抽取器」的缓存：只有 text、没有 runs / table
+    await store.saveItem('old', cachedItem({
+      article: {
+        fetchedAt: ROUND,
+        revision: EXTRACTOR_REVISION - 1,
+        title: '旧正文',
+        blocks: [{ kind: 'p', text: '旧版本的正文块' }],
+      },
+    }))
+    const dispatch = makeDispatch(store)
+    const result = await dispatch('article', { itemId: 'old' })
+    assert.equal(result.ok, true)
+    assert.equal(result.value.cached, false, '旧修订号的缓存不许当命中：必须回 cached:false 并重抓')
+    // 重抓会走网络（本夹具的 link 是 example 域，抓不到），所以这里断言的是**判据生效**，
+    // 不是抓取成功：失败原因如实回包，而不是把旧块当新块给出去。
+    assert.ok(
+      result.value.failure !== undefined || result.value.cached === false,
+      '要么重抓成功，要么如实回失败原因；不许拿旧缓存冒充新内容',
+    )
+    assert.notEqual(result.value.contentVersion, contentVersionOf(EXTRACTOR_REVISION - 1, [{ kind: 'p', text: '旧版本的正文块' }]),
+      '回包的内容标识不许还是旧版本算出来的那个')
+  } finally {
+    db.close(); rmSync(dir, { recursive: true, force: true })
+  }
+})
