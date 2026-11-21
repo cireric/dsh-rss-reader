@@ -9,6 +9,8 @@
  *   ③ 显式清理：只删「已读 + 未星标 + 未保持未读 + 早于阈值」的条目（按钮触发，不设定时器）。
  */
 
+import { tableToText } from './article-text.js'
+
 /** 一条记录在保留策略里被用到的字段。 */
 export interface RetentionRow {
   readonly id: string
@@ -82,6 +84,16 @@ export function selectArticleEvictions(entries: readonly ArticleEntry[], maxChar
  * 为什么必须是共享实现（2026-10-07 修）：refresh.ts 的闸门原先自己写了一份、只统计
  * paragraphs，而现行缓存只写 blocks —— 于是每源字符数恒为 0，8M 上限形同虚设，
  * 正文缓存无界增长。index.ts 的清理侧本来就算对了两种形态，所以这两处收敛到这里。
+ *
+ * **表格走 `article-text.ts` 的 `tableToText`，不在这里另写一份行列遍历**（2026-11-21，R5 04）：
+ * `table` 块既没有 `text` 也没有 `items`，只读那两个字段会把整张表算成 0 字符 ⇒ 一张大表格
+ * 不占额度、淘汰口径失真。
+ *
+ * ⚠️ 为什么只给 `table` 加分支、不把整段换成 `blockToText`（本票实测的取舍）：`blockToText`
+ * 对 `list` 用空格连接各项、对 `img` 返回 `alt`，而本函数现在是「各项长度直接相加、图片不计」。
+ * 整体替换会**顺手改掉**这两个口径（列表每多一项 +1 字、图片 alt 从 0 变成非 0），那是本票
+ * 范围外的行为变化，会让既有字符数与淘汰阈值一起漂移。所以这里保持既有语义，只把表格接到
+ * 共享投影上 —— 「表格的行列怎么摊平」这件事仍然只有一份实现。
  */
 export function articleCharsOf(
   article: { blocks?: Array<Record<string, unknown>>; paragraphs?: string[] } | undefined,
@@ -90,6 +102,8 @@ export function articleCharsOf(
   if (article.paragraphs !== undefined) return article.paragraphs.reduce((sum, paragraph) => sum + paragraph.length, 0)
   if (article.blocks === undefined) return 0
   return article.blocks.reduce((sum, block) => {
+    // 表格没有 text / items，必须单独认；行列摊平复用共享投影（search-worker 与 SQL 侧同一条）
+    if (block['kind'] === 'table') return sum + tableToText(block).length
     const text = block['text']
     if (typeof text === 'string') return sum + text.length
     const items = block['items']

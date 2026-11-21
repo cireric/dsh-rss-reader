@@ -540,3 +540,219 @@ test('搜索顺带修好：句子边界的词从搜不到变成搜得到', () =>
   const block = firstP('<article><p>详见<a href="https://ex.test/d">官方文档</a>。' + PAD + '</p></article>')
   assert.ok(block.text.includes('详见官方文档'), '连续串必须可被搜索命中（旧实现是 "详见 官方文档 。"）')
 })
+
+/**
+ * —— 表格块（R5 04）——
+ *
+ * 为什么这一族值得单独一组：一张参数对照表在旧实现里被 `tr` / `td` 边界切成若干段流水文字，
+ * 行列关系彻底读不出来；更隐蔽的是它**不占字符额度**（`table` 块没有 `text` / `items` 字段），
+ * 于是一张大表格在缓存淘汰口径里等于不存在。
+ */
+
+/** 取第一个表格块。 */
+const firstTable = (html, base = BASE) => extractArticle(html, base).blocks.find((block) => block.kind === 'table')
+
+test('表格：<thead> 的行进 header，其余行进 rows；没有 align 属性时字段整体缺席', () => {
+  const table = firstTable(
+    '<article><table>'
+    + '<thead><tr><th>参数</th><th>值</th></tr></thead>'
+    + '<tbody><tr><td>电压</td><td>220V</td></tr><tr><td>电流</td><td>10A</td></tr></tbody>'
+    + '</table><p>' + PAD + '</p></article>',
+  )
+  assert.ok(table !== undefined, '表格块被整块丢掉了')
+  assert.deepEqual(table.header, ['参数', '值'], 'thead 里的行必须是表头')
+  assert.deepEqual(table.rows, [['电压', '220V'], ['电流', '10A']], '表体行要按行列保留')
+  // 全列都没声明 align ⇒ 字段整体缺席，不是 [undefined, undefined]
+  assert.equal('align' in table, false, '没有声明 align 时不许产出 align 字段')
+})
+
+test('表格：没有 thead 但首行全是 th 也当表头；纯 td 的表头缺席', () => {
+  // 很多站点不写 thead，只把首行加粗 —— 判据是「首行全是 th」，不是「有没有 thead 标签」
+  const implicit = firstTable(
+    '<article><table><tr><th>型号</th><th>功率</th></tr><tr><td>A1</td><td>5W</td></tr></table><p>' + PAD + '</p></article>',
+  )
+  assert.ok(implicit !== undefined)
+  assert.deepEqual(implicit.header, ['型号', '功率'], '首行全 th 必须当表头')
+  assert.deepEqual(implicit.rows, [['A1', '5W']], '表头行不许同时留在 rows 里（否则首行显示两次）')
+
+  // 纯 td：没有表头可言，全部行进 rows，header 字段缺席
+  const plain = firstTable(
+    '<article><table><tr><td>甲</td><td>乙</td></tr><tr><td>丙</td><td>丁</td></tr></table><p>' + PAD + '</p></article>',
+  )
+  assert.ok(plain !== undefined)
+  assert.equal('header' in plain, false, '纯 td 的表格不许编造表头')
+  assert.deepEqual(plain.rows, [['甲', '乙'], ['丙', '丁']])
+
+  // 首行只有**部分**是 th 时不认表头：判据是「全是 th」，混排说明它不是表头行
+  const mixed = firstTable(
+    '<article><table><tr><th>甲</th><td>乙</td></tr><tr><td>丙</td><td>丁</td></tr></table><p>' + PAD + '</p></article>',
+  )
+  assert.ok(mixed !== undefined)
+  assert.equal('header' in mixed, false, '首行混排 th/td 不构成表头')
+  assert.deepEqual(mixed.rows, [['甲', '乙'], ['丙', '丁']])
+})
+
+test('表格：colspan 内容进起始列、被跨列留空；每行等长', () => {
+  const table = firstTable(
+    '<article><table>'
+    + '<tr><th>项目</th><th colspan="2">规格</th></tr>'
+    + '<tr><td>尺寸</td><td>宽</td><td>高</td></tr>'
+    + '</table><p>' + PAD + '</p></article>',
+  )
+  assert.ok(table !== undefined)
+  assert.deepEqual(table.header, ['项目', '规格', ''], 'colspan=2 的内容在起始列，下一列留空')
+  assert.deepEqual(table.rows, [['尺寸', '宽', '高']])
+  // 每行等长是「行列不错位」的可测形式：不存在短行，也不存在超宽行
+  const widths = [table.header.length, ...table.rows.map((row) => row.length)]
+  assert.deepEqual([...new Set(widths)], [3], '每行长度必须相等且等于 colCount，实际：' + JSON.stringify(widths))
+
+  // ⚠️ colspan 后面**还有单元格**的形态才是真正的判据（上面那条不够）：
+  // 被跨的列若不被占住，后面的「备注」会左移到第 2 列，整行与表头错位。
+  // 而「colspan 是行内最后一格」时，短行右补空串会把差异原样补回来 —— 实测：只测那种形态
+  // 时变异 `table-合并单元格错位` 幸存（78ms 全绿），补了这一条才见红。
+  const followed = firstTable(
+    '<article><table>'
+    + '<tr><th>项目</th><th colspan="2">规格</th><th>备注</th></tr>'
+    + '<tr><td>尺寸</td><td>宽</td><td>高</td><td>正常</td></tr>'
+    + '</table><p>' + PAD + '</p></article>',
+  )
+  assert.ok(followed !== undefined)
+  assert.deepEqual(followed.header, ['项目', '规格', '', '备注'],
+    'colspan 之后的单元格必须留在第 4 列（被跨列不许被它占去）')
+  assert.deepEqual(followed.rows, [['尺寸', '宽', '高', '正常']], '数据行同样不许左移')
+})
+
+test('表格：rowspan 的后续行被占列留空且位置正确（不左移）', () => {
+  const table = firstTable(
+    '<article><table>'
+    + '<tr><th>区域</th><th>站点</th><th>读数</th></tr>'
+    + '<tr><td rowspan="2">北区</td><td>A</td><td>1</td></tr>'
+    + '<tr><td>B</td><td>2</td></tr>'
+    + '</table><p>' + PAD + '</p></article>',
+  )
+  assert.ok(table !== undefined)
+  assert.deepEqual(table.header, ['区域', '站点', '读数'])
+  // 第二行没有「区域」格 —— 它被上一行占住。若实现不记占位，这里会变成 ['B','2','']：
+  // 站点与读数各左移一列，整张表与表头错位。
+  assert.deepEqual(table.rows, [
+    ['北区', 'A', '1'],
+    ['', 'B', '2'],
+  ], 'rowspan 的后续行该列必须留空且**不左移**')
+})
+
+test('表格：畸形行归一后每行等长且等于 colCount（短行右补空串，长行撑宽全表）', () => {
+  // 短行：第二行少一格 ⇒ 右补空串；长行：第三行多一格 ⇒ colCount 取最大值，全表跟着变宽。
+  // 这是「不猜测合并语义」的直接代价（spec 决策 17 接受它），比悄悄丢数据可预期。
+  const table = firstTable(
+    '<article><table>'
+    + '<tr><td>a1</td><td>a2</td><td>a3</td></tr>'
+    + '<tr><td>b1</td></tr>'
+    + '<tr><td>c1</td><td>c2</td><td>c3</td><td>c4</td></tr>'
+    + '</table><p>' + PAD + '</p></article>',
+  )
+  assert.ok(table !== undefined)
+  assert.deepEqual(table.rows, [
+    ['a1', 'a2', 'a3', ''],
+    ['b1', '', '', ''],
+    ['c1', 'c2', 'c3', 'c4'],
+  ], '每行都要补齐到 colCount=4')
+  const widths = new Set(table.rows.map((row) => row.length))
+  assert.deepEqual([...widths], [4], '每行长度必须相等')
+})
+
+test('表格：rowspan 超出表尾时只作用到表尾，不撑出空行', () => {
+  // 第二行（表尾）声明 rowspan=5：越界的 4 行必须被忽略 —— 既不许补出 4 个空行，
+  // 也不许让别的行少一格（那会变成「表尾突然变窄」）。
+  const table = firstTable(
+    '<article><table>'
+    + '<tr><td rowspan="5">跨到底</td><td>a2</td></tr>'
+    + '<tr><td>b2</td></tr>'
+    + '</table><p>' + PAD + '</p></article>',
+  )
+  assert.ok(table !== undefined)
+  assert.equal(table.rows.length, 2, 'rowspan 越界不许凭空多出行')
+  assert.deepEqual(table.rows, [['跨到底', 'a2'], ['', 'b2']], '越界跨度只作用到表尾（本行就是表尾）')
+})
+
+test('表格：<tfoot> 丢弃、<caption> 不进数据行、单元格空白收敛成单空格', () => {
+  const table = firstTable(
+    '<article><table>'
+    + '<caption>表一：参数对照</caption>'
+    + '<thead><tr><th>参数</th><th>值</th></tr></thead>'
+    + '<tbody><tr><td>\n  电压 \n  </td><td>220V</td></tr></tbody>'
+    + '<tfoot><tr><td>脚注不该出现</td><td>x</td></tr></tfoot>'
+    + '</table><p>' + PAD + '</p></article>',
+  )
+  assert.ok(table !== undefined)
+  assert.deepEqual(table.header, ['参数', '值'])
+  // caption 与 tfoot 的内容都不许混进数据行；单元格内部的换行与多余空白收敛成单空格
+  assert.deepEqual(table.rows, [['电压', '220V']], 'tfoot / caption 不得进数据行，单元格空白要收敛')
+  const flat = JSON.stringify(table)
+  assert.ok(!flat.includes('脚注不该出现'), 'tfoot 必须整块丢弃')
+  assert.ok(!flat.includes('参数对照'), 'caption 不是数据行（本轮不做 caption 块）')
+})
+
+test('表格：align 只认 align 属性，style="text-align" 不读，全列未声明时字段整体缺席', () => {
+  // 属性形态：按**列**取第一个声明的值；整列都没声明的列在数组里保留 undefined 空位
+  // （第 2 列的表头与单元格都没写 align ⇒ 该位是 undefined，且后面第 3 列不许因此左移）
+  const byAttr = firstTable(
+    '<article><table>'
+    + '<tr><th align="center">参数</th><th>值</th><th align="right">备注</th></tr>'
+    + '<tr><td>电压</td><td>220V</td><td align="left">正常</td></tr>'
+    + '</table><p>' + PAD + '</p></article>',
+  )
+  assert.ok(byAttr !== undefined)
+  assert.deepEqual(byAttr.align, ['center', undefined, 'right'],
+    '按列取第一个声明：第 1 列来自 th，第 2 列两行都没声明 ⇒ undefined，第 3 列来自 th（td 的 left 是第二声明）')
+  // 「第一个声明的值」而不是「最后一个」：第 3 列 th=right、td=left，取 right
+  assert.equal(byAttr.align[2], 'right', '同一列多处声明时取**第一个**（文档顺序，表头先于表体）')
+
+  // style 形态：**不读**（CSS 解析是脆弱规则且没有实测样本，spec 决策 19a 留在外面）
+  const byStyle = firstTable(
+    '<article><table>'
+    + '<tr><th style="text-align:center">参数</th><th>值</th></tr>'
+    + '<tr><td style="text-align: right">电压</td><td>220V</td></tr>'
+    + '</table><p>' + PAD + '</p></article>',
+  )
+  assert.ok(byStyle !== undefined)
+  assert.equal('align' in byStyle, false, 'style="text-align:…" 不许被读成 align')
+
+  // 非法值（justify 等）忽略
+  const byJustify = firstTable(
+    '<article><table><tr><td align="justify">甲</td></tr></table><p>' + PAD + '</p></article>',
+  )
+  assert.ok(byJustify !== undefined)
+  assert.equal('align' in byJustify, false, 'justify 不在 left/center/right 里，必须忽略')
+})
+
+test('表格：<figure> 里的表格不被吞（三种形态都要救回来）', () => {
+  const table = '<table><tr><th>参数</th><th>值</th></tr><tr><td>电压</td><td>220V</td></tr></table>'
+  const tableOf = (html) => extractArticle('<article>' + html + '<p>' + PAD + '</p></article>', BASE)
+    .blocks.filter((block) => block.kind === 'table')
+
+  // 形态一：figure 里只有 table（旧实现返回 ' ' 整块丢弃 —— 实测确认过）
+  const onlyTable = tableOf('<figure>' + table + '</figure>')
+  assert.equal(onlyTable.length, 1, '<figure><table> 的表格必须救回来（旧实现整块丢）')
+  assert.deepEqual(onlyTable[0].rows, [['电压', '220V']])
+
+  // 形态二：figure 里既有 img 又有 table（旧实现找到 img 后把 inner 其余内容一起丢 ——
+  // 这是票据原文没覆盖的形态，实测确认表格也会丢）
+  const imgAndTable = tableOf('<figure><img src="https://cdn.test/a.png">' + table + '</figure>')
+  assert.equal(imgAndTable.length, 1, '<figure><img><table> 的表格也必须留下')
+  const kinds = extractArticle('<article><figure><img src="https://cdn.test/a.png">' + table + '</figure><p>' + PAD + '</p></article>', BASE)
+    .blocks.map((block) => block.kind)
+  assert.ok(kinds.includes('img') && kinds.includes('table'), '图片与表格必须都在，实际：' + kinds.join(','))
+
+  // 形态三：figure 里只有 pre（旧实现同样整块丢；本票顺手一起救回，见「已知限制」的说明）
+  const preOnly = extractArticle('<article><figure><pre>code here</pre></figure><p>' + PAD + '</p></article>', BASE)
+    .blocks.filter((block) => block.kind === 'pre')
+  assert.equal(preOnly.length, 1, '<figure><pre> 的代码块必须救回来（同为 figure 吞内容的形态）')
+
+  // 既有行为不变：figure 里既无 img 也无 table / pre 时仍整块丢弃（纯装饰容器）。
+  // 段落用 PAD.repeat(2)：PAD 本身只有 37 字，单个不够 40 字门槛，会得到空块 —— 那会让这条
+  // 断言因为「段落被门槛丢掉」而假绿（实测踩到）。
+  const decorative = extractArticle('<article><figure><figcaption>只是图注</figcaption></figure><p>' + PAD.repeat(2) + '</p></article>', BASE)
+    .blocks
+  assert.deepEqual(decorative.map((block) => block.kind), ['p'], '无 img / table / pre 的 figure 仍整块丢弃')
+  assert.ok(!JSON.stringify(decorative).includes('只是图注'), '被丢弃的 figure 内容不许泄漏进正文')
+})

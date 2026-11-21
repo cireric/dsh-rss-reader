@@ -89,6 +89,10 @@ export type ArticleBlock =
   | { readonly kind: 'img'; readonly src: string; readonly alt?: string; readonly caption?: string }
   | { readonly kind: 'list'; readonly ordered: boolean; readonly items: readonly string[]; readonly itemRuns?: readonly (readonly InlineRun[])[] }
   | { readonly kind: 'quote'; readonly text: string; readonly runs?: readonly InlineRun[] }
+  // align 的元素类型带 `undefined`：spec 决策 19a 要求「某列没声明 ⇒ 该位是 undefined」，
+  // 而决策 4 的字面写法是 Array<'left'|'center'|'right'> —— 两者只能取其一，这里取 19a
+  // （19a 是第二轮补的、且带明确判据）。整体都没声明时字段缺席，所以不会是「全 undefined 数组」。
+  | { readonly kind: 'table'; readonly header?: readonly string[]; readonly rows: readonly (readonly string[])[]; readonly align?: ReadonlyArray<CellAlign | undefined> }
 
 /** 抽取结果：标题 + 结构化块。 */
 export interface ExtractedArticle {
@@ -303,14 +307,6 @@ function firstRegion(text: string, lower: string, name: string): string | undefi
     if (hit.closing || hit.name !== name) continue
     const closeAt = findClosing(name, hit.end)
     return closeAt === -1 ? undefined : text.slice(hit.end, closeAt)
-  }
-  return undefined
-}
-
-/** 第一个同名空元素的标签本身。O(n)。 */
-function firstVoidTag(text: string, name: string): string | undefined {
-  for (const hit of eachTag(text)) {
-    if (!hit.closing && hit.name === name) return text.slice(hit.start, hit.end)
   }
   return undefined
 }
@@ -810,8 +806,235 @@ function runsFieldOf(runs: readonly InlineRun[]): { runs?: readonly InlineRun[] 
   return runs.some((run) => run.kind !== 'text') ? { runs } : {}
 }
 
+/** 列对齐：只认 `align` 属性的这三个值（`justify` 等一律忽略，见 parseTable 的注释）。 */
+type CellAlign = 'left' | 'center' | 'right'
+
+const ALIGN_VALUES: ReadonlySet<string> = new Set<string>(['left', 'center', 'right'])
+
 /**
- * 块抽取本体：段落 / 标题 / 代码 / 图片 / 列表 / 引用。输入是 HTML 片段（整页或某个容器）。
+ * 一个单元格：文本 + 跨列 / 跨行跨度 + 该格**自己**声明的对齐。
+ *
+ * 跨度必须与文本一起带着走：占位网格要先知道「这一格占了几列」，才能算出一行的占位总数。
+ */
+interface TableCell {
+  readonly text: string
+  readonly colspan: number
+  readonly rowspan: number
+  readonly align?: CellAlign
+}
+
+/** 单元格文本：按 `htmlToText` 的既有规则收敛成单空格（表格单元格没有 runs，见 spec「不在范围」）。 */
+function cellTextOf(inner: string): string {
+  return collapseWhitespace(htmlToText(inner))
+}
+
+/** 跨度属性：认不出 / 非正数一律当 1（编造更大的跨度会把整张表撑歪）。 */
+function spanOf(tag: string, name: string): number {
+  const raw = attrOf(tag, name)
+  if (raw === undefined) return 1
+  const value = Number.parseInt(raw, 10)
+  return Number.isFinite(value) && value > 0 ? value : 1
+}
+
+/**
+ * 一行（`<tr>` 内层 HTML）→ 按文档顺序的单元格。
+ *
+ * 为什么要先收集「所有单元格开标签」再切片，而不是逐个找闭合标签：真实站点大量省略 `</td>`
+ * （与 `</p>` 同一类省略）。找闭合标签的写法遇到未闭合单元格会一路吃到行尾，把后面的单元格
+ * 全部吞进第一个里 —— 行列当场就错位了。
+ */
+function cellsOf(rowInner: string): TableCell[] {
+  const openings: Array<{ name: string; start: number; end: number }> = []
+  for (const hit of eachTag(rowInner)) {
+    if (hit.closing || (hit.name !== 'td' && hit.name !== 'th')) continue
+    openings.push({ name: hit.name, start: hit.start, end: hit.end })
+  }
+  const cells: TableCell[] = []
+  for (const [index, opening] of openings.entries()) {
+    const next = openings[index + 1]
+    const raw = rowInner.slice(opening.end, next === undefined ? rowInner.length : next.start)
+    const tag = rowInner.slice(opening.start, opening.end)
+    // 行内最后一个单元格可能带闭合标签，它不属于文本
+    const inner = raw.replace(/<\s*\/\s*(?:td|th)\s*>/gi, '')
+    const declared = attrOf(tag, 'align')
+    const align = declared !== undefined && ALIGN_VALUES.has(declared.toLowerCase())
+      ? (declared.toLowerCase() as CellAlign)
+      : undefined
+    cells.push({
+      text: cellTextOf(inner),
+      colspan: spanOf(tag, 'colspan'),
+      rowspan: spanOf(tag, 'rowspan'),
+      ...(align === undefined ? {} : { align }),
+    })
+  }
+  return cells
+}
+
+/**
+ * 把一行单元格铺进占位网格的一行，返回**该行的占位总数**、铺好的格子，以及「本行跑完之后
+ * 每一列还被上方 rowspan 占着几行」。
+ *
+ * 占位网格是「合并单元格降级」的全部要害（spec 决策 17）：`rowspan` 的后续行必须知道
+ * 「这一列已经被上面那行占住了」，否则那些列会**左移**、整行与表头对不上。所以 `occupied`
+ * 显式记下每个列位被占用的剩余行数，铺格时先跳过它们。
+ *
+ * ⚠️ 计数口径（第一版在这里差了一行，实测被 `rowspan` 用例抓住）：`occupied[i]` 是
+ * 「**含本行在内**第 i 列还要被占用的行数」。所以铺格时**先用它判断**（>0 就该留空），
+ * 铺完本行再统一减 1 交给下一行。若先减再判断，本行自己会被漏掉一格 —— 那一列会被后面
+ * 的单元格占去，整行左移。
+ *
+ * 返回值里的 `width` 是「本行占位总数」（= 各格 colspan 之和 + 被上方占住的格数），
+ * `colCount` 取所有行的最大值 —— 于是**每行等长**、也不存在「超宽行」需要截断。
+ */
+function layOutRow(cells: readonly TableCell[], occupied: readonly number[], rowIndex: number, rowCount: number): {
+  readonly line: string[]
+  readonly width: number
+  readonly nextBlocked: number[]
+  /** 本行在哪些列上**声明**了对齐（与 `line` 同长；没声明的列是 undefined）。 */
+  readonly declared: ReadonlyArray<CellAlign | undefined>
+} {
+  const line: string[] = []
+  const declared: Array<CellAlign | undefined> = []
+  /** 本行铺完之后每一列还被占用的剩余行数。 */
+  const nextBlocked = occupied.map((remaining) => Math.max(0, remaining - 1))
+  let column = 0
+  for (const cell of cells) {
+    // 跳过被上方 rowspan 占住的列：这些格子属于上面的行，本行该列必须留空且**不左移**
+    while (column < occupied.length && occupied[column] > 0) {
+      line.push('')
+      declared.push(undefined)
+      column += 1
+    }
+    // 这一格占住的列区间从 `column` 起 —— 必须在自增**之前**记下来，否则占位会右移一列
+    // （实测踩到：`rowspan=2` 的格子把下一列标成占用，本行反而左移）。
+    const start = column
+    line.push(cell.text)
+    declared.push(cell.align)
+    column += 1
+    // colspan 内容进起始列，被跨的列留空串（不重排、不猜合并语义）
+    for (let offset = 1; offset < cell.colspan; offset += 1) {
+      line.push('')
+      declared.push(undefined)
+      column += 1
+    }
+    // rowspan 越界（跨度超出表尾）时只作用到表尾：多余的跨度自然失效，不会撑出空行
+    const span = Math.max(1, Math.min(cell.rowspan, rowCount - rowIndex))
+    // rowspan × colspan 占的是一个矩形：跨过的每一列都要在后续行里留空，否则那些列会左移
+    for (let offset = 1; offset < span; offset += 1) {
+      for (let width = 0; width < cell.colspan; width += 1) {
+        const at = start + width
+        while (nextBlocked.length <= at) nextBlocked.push(0)
+        nextBlocked[at] = Math.max(nextBlocked[at], span - 1)
+      }
+    }
+  }
+  // 行尾仍可能被上方 rowspan 占住（本行自己的单元格比那些列少）：那些列同样留空，不许左移
+  while (column < occupied.length && occupied[column] > 0) {
+    line.push('')
+    declared.push(undefined)
+    column += 1
+  }
+  return { line, width: line.length, nextBlocked, declared }
+}
+
+/**
+ * `<table>` 内层 HTML → table 块（认不出任何行时返回 undefined，让调用方按原样丢弃）。
+ *
+ * 三种表头形态都要对（spec 决策 16 / 验收 8）：
+ * - 有 `<thead>`：它的**第一行**是表头，其余行（含 thead 里多出来的行）继续按数据行处理
+ *   —— 块模型的 `header` 只有一行，多出来的 thead 行若丢掉就是静默吃内容；
+ * - 没有 thead，但首行**全是** `<th>`：首行当表头；
+ * - 纯 `<td>`：表头缺席，全部行进 `rows`。
+ *
+ * `<tfoot>` 丢弃、`<caption>` 不进数据行（它是表格标题而非数据行，spec「不在范围」里写明本轮
+ * 不做 caption 块）。
+ */
+function tableBlockOf(inner: string): ArticleBlock | undefined {
+  const theadRows = allRegions(inner, 'thead').flatMap((head) => allRegions(head, 'tr'))
+  // tfoot 先整块丢掉：它的 tr 与表体混在一起会让「数据行」凭空多出几行
+  const bodyHtml = rewriteTagRegions(inner, (name) => name === 'thead' || name === 'tfoot', () => ' ')
+  const bodyRows = allRegions(bodyHtml, 'tr').map(cellsOf)
+  const headRows = theadRows.map(cellsOf)
+
+  /** 首行全是 th 时把它当表头（很多站点不写 thead，只把首行加粗）。 */
+  const firstBody = bodyRows[0]
+  const implicitHeader = headRows.length === 0
+    && firstBody !== undefined
+    && firstBody.length > 0
+    && allTagNamesOf(allRegions(bodyHtml, 'tr')[0] ?? '').every((name) => name === 'th')
+
+  const headerCells = headRows[0] ?? (implicitHeader ? firstBody : undefined)
+  const dataCells: TableCell[][] = [
+    ...(headRows.length > 0 ? headRows.slice(1) : []),
+    ...(implicitHeader ? bodyRows.slice(1) : bodyRows),
+  ]
+  if (headerCells === undefined && dataCells.length === 0) return undefined
+
+  // 占位网格：先算每行占位总数，取最大值当列数，再把短行右补空串（于是每行等长）
+  const rowCount = dataCells.length
+  let blocked: number[] = []
+  const laid: Array<ReturnType<typeof layOutRow>> = []
+  for (const [index, cells] of dataCells.entries()) {
+    const laidOut = layOutRow(cells, blocked, index, rowCount)
+    laid.push(laidOut)
+    blocked = laidOut.nextBlocked
+  }
+  const headerLine = headerCells === undefined ? undefined : layOutRow(headerCells, [], 0, 0)
+  const colCount = Math.max(headerLine?.width ?? 0, ...laid.map((row) => row.width), 0)
+  if (colCount === 0) return undefined
+  const pad = (line: readonly string[]): string[] => {
+    const out = [...line]
+    while (out.length < colCount) out.push('')
+    return out
+  }
+
+  return {
+    kind: 'table',
+    ...(headerLine === undefined ? {} : { header: pad(headerLine.line) }),
+    rows: laid.map((row) => pad(row.line)),
+    ...alignFieldOf([
+      headerLine === undefined ? [] : headerLine.declared,
+      ...laid.map((row) => row.declared),
+    ], colCount),
+  }
+}
+
+/**
+ * 按**列**推出 `align`，全列都没声明时**整个字段缺席**（不产出 `[undefined, …]`）。
+ *
+ * 判据（spec 决策 19a）：某列的 `align` = 该列**第一个**声明了 `align` 的单元格的值 —— 按文档
+ * 顺序扫，表头行先于数据行。全列都没有声明 ⇒ 返回空对象，让 `align` 字段整体不出现在块里；
+ * 中间某列没有声明 ⇒ 该位是 `undefined`（数组里保留空位，否则后面的列会左移、对齐错位）。
+ *
+ * 只认 `align` 属性、不解析 `style="text-align:…"`：CSS 解析是脆弱规则且没有实测样本，
+ * 按 AGENTS.md「不为未经实测的样本扩规则」留在外面。
+ */
+function alignFieldOf(rows: ReadonlyArray<ReadonlyArray<CellAlign | undefined>>, colCount: number): {
+  align?: ReadonlyArray<CellAlign | undefined>
+} {
+  const columns: Array<CellAlign | undefined> = []
+  for (let column = 0; column < colCount; column += 1) {
+    let found: CellAlign | undefined
+    for (const row of rows) {
+      const value = row[column]
+      if (value !== undefined) { found = value; break }
+    }
+    columns.push(found)
+  }
+  return columns.some((value) => value !== undefined) ? { align: columns } : {}
+}
+
+/** 一行 HTML 里出现的单元格标签名（按文档顺序，只取 td / th）。 */
+function allTagNamesOf(rowHtml: string): string[] {
+  const names: string[] = []
+  for (const hit of eachTag(rowHtml)) {
+    if (!hit.closing && (hit.name === 'td' || hit.name === 'th')) names.push(hit.name)
+  }
+  return names
+}
+
+/**
+ * 块抽取本体：段落 / 标题 / 代码 / 图片 / 列表 / 引用 / 表格。输入是 HTML 片段（整页或某个容器）。
  */
 function collectBlocks(html: string, baseUrl: string | undefined): ArticleBlock[] {
   let body = dropRegions(html)
@@ -832,18 +1055,57 @@ function collectBlocks(html: string, baseUrl: string | undefined): ArticleBlock[
   }
 
   // ①②③ 按「越具体越先」的顺序保护：figure 含 img、list 含 li、pre 可能含大量符号
+  //
+  // ⚠️ figure pass 的**既有缺陷**（2026-11-21 实测，见 docs/pitfalls.md §5.7c）：它只找第一个 img，
+  // 找到就把 inner 其余内容一起丢掉、找不到就返回 `' '` 整块丢 —— 于是 `<figure>` 里的表格与代码块
+  // **两种形态都会被吞**：`<figure><table>` 与 `<figure><img><table>` 的表格都不见了，
+  // `<figure><pre>` 的代码块也不见了。票据原文只写了「没有 img 但有 table 时返回 inner」，
+  // 那条**不足以**覆盖第二种形态（img 找到了，表格仍被一起丢掉）。
+  //
+  // 修法：把 inner 里**可救的东西**按文档顺序摘出来 —— img 块 + 原样保留的 `<table>` / `<pre>` 区域。
+  // 后两者不在这里自己解析，而是原样放回 body 让后面同层的 table / pre pass 接手（它们已经在
+  // 散文尾部之前跑），这样表格的占位网格与代码块的缩进规则都只有一份实现。
+  // figure 里**既无 img 也无 table / pre** 时仍返回 `' '`（纯装饰容器，既有行为不变）。
   body = rewriteTagRegions(body, (name) => name === 'figure', (_name, inner) => {
-    const imgTag = firstVoidTag(inner, 'img')
-    const src = imgTag === undefined ? undefined : pickImageUrl(imgTag, baseUrl)
-    // 装饰性小图（头像/图标）即使包在 figure 里也不是正文，丢掉
-    if (src === undefined || isDecorativeImage(src)) return ' '
-    const caption = firstRegion(inner, inner.toLowerCase(), 'figcaption')
-    const text = caption === undefined ? '' : htmlToText(caption).replace(/\n/g, ' ').trim()
-    return stash({ kind: 'img', src, alt: imgTag === undefined ? undefined : attrOf(imgTag, 'alt'), caption: text === '' ? undefined : text })
+    const lower = inner.toLowerCase()
+    const findClosing = makeClosingFinder(inner, lower)
+    const parts: string[] = []
+    let imgStashed = false
+    let cursor = 0
+    for (const hit of eachTag(inner)) {
+      if (hit.closing || hit.start < cursor) continue
+      if (hit.name === 'img' && !imgStashed) {
+        const tag = inner.slice(hit.start, hit.end)
+        const src = pickImageUrl(tag, baseUrl)
+        // 装饰性小图（头像/图标）即使包在 figure 里也不是正文，丢掉；但不影响同块里的表格
+        if (src !== undefined && !isDecorativeImage(src)) {
+          const caption = firstRegion(inner, lower, 'figcaption')
+          const text = caption === undefined ? '' : htmlToText(caption).replace(/\n/g, ' ').trim()
+          parts.push(stash({ kind: 'img', src, alt: attrOf(tag, 'alt'), caption: text === '' ? undefined : text }))
+          imgStashed = true
+        }
+        cursor = hit.end
+        continue
+      }
+      if (hit.name !== 'table' && hit.name !== 'pre') continue
+      const closeAt = findClosing(hit.name, hit.end)
+      if (closeAt === -1) continue
+      const closeEnd = inner.indexOf('>', closeAt) + 1
+      // 原样放回：由后面同层的 table / pre pass 解析（表格的网格归一只有一份实现）
+      parts.push(inner.slice(hit.start, closeEnd))
+      cursor = closeEnd
+    }
+    return parts.length === 0 ? ' ' : parts.join('\n')
   })
   body = rewriteTagRegions(body, (name) => name === 'pre', (_name, inner) => {
     const text = preToText(inner)
     return text === '' ? ' ' : stash({ kind: 'pre', text })
+  })
+  // ④ 表格：**必须与 pre 同层、在散文尾部之前**跑。散文尾部的 boundary 正则含 `tr` / `td`
+  //    但不含 `table` —— 晚一步跑的话表格已经被 tr/td 边界切碎成一堆段落，行列关系再也捡不回来。
+  body = rewriteTagRegions(body, (name) => name === 'table', (_name, inner) => {
+    const block = tableBlockOf(inner)
+    return block === undefined ? ' ' : stash(block)
   })
   body = rewriteTagRegions(body, (name) => name === 'ul' || name === 'ol', (name, inner) => {
     const items: string[] = []

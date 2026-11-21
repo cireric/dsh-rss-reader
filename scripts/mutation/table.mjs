@@ -2259,4 +2259,54 @@ export const MUTATIONS = [
     // 更早 M · 无日期 K」的守恒式当场破掉。不删行、不改参数个数 —— 崩溃式变异是假通过。
     from: "' COALESCE(SUM(CASE WHEN i.published_at IS NULL THEN 1 ELSE 0 END), 0) AS no_date'",
     to: "' COALESCE(SUM(CASE WHEN i.published_at IS NULL THEN 0 ELSE 0 END), 0) AS no_date'" },
+
+  // ── R5 04：表格块（抽取 / 渲染 / 三处字符统计）──
+  // 表头恒为空：headerCells 一律 undefined ⇒ 三种表头形态全部退化成数据行，
+  // 「表头显示两次 + 表头不加粗」当场可见。
+  { id: 'table-表头恒为空', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['表格：<thead> 的行进 header，其余行进 rows；没有 align 属性时字段整体缺席'],
+    from: "    const headerCells = headRows[0] ?? (implicitHeader ? firstBody : undefined);",
+    to: "    const headerCells = undefined;" },
+  // colspan 后不补空串：被跨的列不被占住 ⇒ **同一行里后面的单元格左移**到被跨列上。
+  // ⚠️ 这里踩过两次「等价变异」，锚点必须选对（实测，2026-11-21）：
+  //   ① 锚在 `line.push('')` 上、只删那一行 ⇒ 短行右补空串（pad 到 colCount）把差异补回来，
+  //      `['项目','规格']` 补成 `['项目','规格','']`，与期望完全相同 —— 必然幸存；
+  //   ② 锚在 `column += 1` 上 ⇒ 位置其实由 `line.push` 的**顺序**决定，`column` 只影响
+  //      「被上方 rowspan 占住」那段的推进，本夹具没有 rowspan，于是也等价。
+  // 真正决定「被跨列留空」的是**整个补空循环是否执行**：不跑它，`备注` 会落到第 3 列。
+  // 所以锚点选循环的边界（`offset < cell.colspan` → `offset < 1`）。
+  { id: 'table-合并单元格错位', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['表格：colspan 内容进起始列、被跨列留空；每行等长'],
+    from: "        for (let offset = 1; offset < cell.colspan; offset += 1) {\n            line.push('');\n            declared.push(undefined);\n            column += 1;\n        }",
+    to: "        for (let offset = 1; offset < 1; offset += 1) {\n            line.push('');\n            declared.push(undefined);\n            column += 1;\n        }" },
+  // rowspan 不占位：后续行不知道那一列被占住 ⇒ 该行整体左移一格，与表头错位。
+  // 这是「占位网格」存在的全部理由（spec 决策 17）。
+  { id: 'table-rowspan 不占位', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['表格：rowspan 的后续行被占列留空且位置正确（不左移）'],
+    from: "        for (let offset = 1; offset < span; offset += 1) {\n            for (let width = 0; width < cell.colspan; width += 1) {\n                const at = start + width;\n                while (nextBlocked.length <= at)\n                    nextBlocked.push(0);\n                nextBlocked[at] = Math.max(nextBlocked[at], span - 1);\n            }\n        }",
+    to: "        for (let offset = 1; offset < 1; offset += 1) {\n            for (let width = 0; width < cell.colspan; width += 1) {\n                const at = start + width;\n                while (nextBlocked.length <= at)\n                    nextBlocked.push(0);\n                nextBlocked[at] = Math.max(nextBlocked[at], span - 1);\n            }\n        }" },
+  // figure 吞掉表格：figure pass 只救 img，table / pre 区域原样丢弃 ⇒ 三种形态的内容都不见了。
+  // 这条守护的是票据原文**不够**的那部分（`<figure><img><table>` 也会丢）。
+  { id: 'figure-吞掉表格', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['表格：<figure> 里的表格不被吞（三种形态都要救回来）'],
+    from: "            if (hit.name !== 'table' && hit.name !== 'pre')\n                continue;",
+    to: "            if (true)\n                continue;" },
+  // align 读 style：把 align 的来源换成 style="text-align:…"，于是「style 不被读」这条判据翻红
+  // （spec 决策 19a 明确不解析 CSS）。
+  { id: 'align-读 style', file: 'lib/article.js',
+    judges: ['article.test.mjs'],
+    judgeTests: ['表格：align 只认 align 属性，style="text-align" 不读，全列未声明时字段整体缺席'],
+    from: "        const declared = attrOf(tag, 'align');",
+    to: "        const declared = attrOf(tag, 'style')?.replace(/^[^:]*:\\s*/, '').replace(/;.*$/, '');" },
+  // 字符统计忽略表格：table 块既无 text 也无 items ⇒ 整张表算成 0 字符，
+  // 大表格不占缓存额度、淘汰口径失真（而界面完全看不出来）。
+  { id: 'chars-字符统计忽略表格', file: 'lib/retention.js',
+    judges: ['retention.test.mjs', 'store-sqlite.test.mjs'],
+    judgeTests: ['articleCharsOf：表格块不再算成 0 字符（否则大表格不占缓存额度）', '字符统计：SQL 侧算出的 articleChars 含表格，且等于 articleCharsOf（口径一致）'],
+    from: "        if (block['kind'] === 'table')\n            return sum + tableToText(block).length;",
+    to: "        if (block['kind'] === 'table')\n            return sum;" },
 ]
