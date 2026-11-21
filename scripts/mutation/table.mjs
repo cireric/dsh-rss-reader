@@ -1165,16 +1165,22 @@ export const MUTATIONS = [
     judgeTests: ['✕ 关闭；焦点落在浮窗里之后 ? 与 Esc 仍然有效（非模态不许被自己的守卫吃掉）'],
     // lib/client.js:2269，唯一一处。isTypingTarget 会把 [role=dialog] 内的按键全吞掉（含 Esc）——
     // 鼠标点过一次 ✕ 之后，? 与 Esc 双双失效。判据是「✕ 关闭；焦点落在浮窗里之后…」那条用例。
-    from: 'role: "region",',
-    to: 'role: "dialog",' },
+    // ⚠️ 2026-11-21（R6 07）重锚：灯箱也用 `role: "region"`（spec 决策 25 的同一条约定），
+    // 裸锚从此命中 2 次 ⇒ 带上 className 那一行把范围收窄到**帮助浮窗卡片**。
+    from: 'className: "dsh-rss-help-card",\n\t\t\t\t\trole: "region",',
+    to: 'className: "dsh-rss-help-card",\n\t\t\t\t\trole: "dialog",' },
   // ⚠️ 2026-10-15（C1）重锚：依赖数组现在多了 expanded（routeKey 的 o 键要读它），
   // 且 tsdown 把它展开成多行 tab 形态（含 }, [ 前缀）。
+  // ⚠️ 2026-11-21（R6 04）再锚：依赖数组尾部又多了 imagesExpanded 与 expandedGroups
+  // （`i` 键要读篇级覆盖、要清组覆盖），所以 from/to 一起延长到新的尾部。
+  // 变异意图不变：拿掉 helpOpen ⇒ 按键处理器读到的永远是注册那一刻的 false。
   { id: 'client-helpOpen 不进依赖数组', file: 'lib/client.js',
     judges: ['overview-scale.test.mjs', 'scroll-dom.test.mjs'],
     // lib/client.js:2534-2538。少了 helpOpen，按键处理器读到的永远是注册那一刻的 false：
     // 浮窗开着按 Esc → 走「关文章」分支，浮窗留在屏幕上（与上面第三条同一个病象、不同根因）。
-    from: '}, [\n\t\t\t\t\troot,\n\t\t\t\t\tstore,\n\t\t\t\t\texpanded,\n\t\t\t\t\thelpOpen\n\t\t\t\t]);',
-    to: '}, [\n\t\t\t\t\troot,\n\t\t\t\t\tstore,\n\t\t\t\t\texpanded\n\t\t\t\t]);' },
+    // ⚠️ 2026-11-21（R6 07）再锚：依赖数组尾部又多了 lightboxSrc（`back` 要读灯箱态）。
+    from: '}, [\n\t\t\t\t\troot,\n\t\t\t\t\tstore,\n\t\t\t\t\texpanded,\n\t\t\t\t\thelpOpen,\n\t\t\t\t\timagesExpanded,\n\t\t\t\t\texpandedGroups,\n\t\t\t\t\tlightboxSrc\n\t\t\t\t]);',
+    to: '}, [\n\t\t\t\t\troot,\n\t\t\t\t\tstore,\n\t\t\t\t\texpanded,\n\t\t\t\t\timagesExpanded,\n\t\t\t\t\texpandedGroups,\n\t\t\t\t\tlightboxSrc\n\t\t\t\t]);' },
   // ── 自持存储骨架（2026-10-11 大规模存储任务 2）─────────────────────────────────
   // 这三个模块是「下次装载还能不能读到用户数据」的全部承重点，而它们的失效**全都安静**：
   // 版本闸写错 ⇒ 好库被当成坏库拒掉，界面表现是「重启之后订阅全没了」；
@@ -2413,4 +2419,307 @@ export const MUTATIONS = [
     // lib/shared.js 实测 OCCURRENCES=1。
     from: "        if (block['kind'] === 'table')\n            texts.push(tableToText(block));",
     to: "        if (false)\n            texts.push(tableToText(block));" },
+  // R6 01：正文图片的 referrer 策略被删掉 ⇒ 回落到浏览器默认。
+  //
+  // ⚠️ 2026-11-21 真机回归后**改写过这条**。原本守的是「必须是 no-referrer（隐私）」，
+  // 而真机实测证明那个判据**守错了方向**：no-referrer 让 Referer 变空，`cdnfile.sspai.com`
+  // （本机缓存 52.7% 的图）空 Referer 一律 403 ⇒ 所有图「加载失败」。
+  // 现在的判据是「必须是 strict-origin-when-cross-origin（能通过图床）」，理由见
+  // tests/scroll-dom.test.mjs 里那条用例头部的病象→根因→修法。
+  //
+  // 这条**独立于折叠/灯箱**：判据是产物里正文图片那处 props（client-bundle.test.mjs 按
+  // ARTICLE_IMAGE_MAX_HEIGHT 定位，不认行号），所以并行票新增的 `<img>` 不会让它失效，
+  // 也不会替它兜底。lib/client.js 实测 OCCURRENCES=1（锚在 loading/decoding 两行的上下文上）。
+  { id: 'client-图片无 referrerPolicy', file: 'lib/client.js',
+    judges: ['client-bundle.test.mjs'],
+    judgeTests: ['R6 01：产物里正文图片的 props 用 strict-origin-when-cross-origin 的 referrer 策略'],
+    from: "\t\t\t\t\t\tloading: \"lazy\",\n\t\t\t\t\t\tdecoding: \"async\",\n\t\t\t\t\t\treferrerPolicy: ARTICLE_IMAGE_REFERRER_POLICY,",
+    to: "\t\t\t\t\t\tloading: \"lazy\",\n\t\t\t\t\t\tdecoding: \"async\"," },
+  // 回归守门人：把策略常量改回 no-referrer（= 2026-11-21 那次真机事故的形态）⇒ 防盗链判据翻红。
+  // 与上一条互补：上一条守「别把属性删了」，这条守「别把它写回那个会让图床 403 的值」。
+  // 真机证据：空 Referer 对 cdnfile.sspai.com 是 403、非空 200（浏览器 UA，逐域名 curl，三轮一致）。
+  // ⚠️ 策略已抽成唯一来源常量，所以这条改的是**常量定义**（一处改动同时影响正文图与灯箱图，
+  // 正是「不许各写一份」的好处）。lib/client.js 实测 OCCURRENCES=1。
+  { id: 'client-referrer 写回 no-referrer', file: 'lib/client.js',
+    judges: ['client-bundle.test.mjs'],
+    judgeTests: ['R6 01：产物里正文图片的 props 用 strict-origin-when-cross-origin 的 referrer 策略'],
+    from: 'const ARTICLE_IMAGE_REFERRER_POLICY = "strict-origin-when-cross-origin";',
+    to: 'const ARTICLE_IMAGE_REFERRER_POLICY = "no-referrer";' },
+  // ── R6 02：图片折叠的决策层（分组纯函数 + expandImages 偏好） ───────────────
+  // 02 轮时这条只能由**偏好值本身**的判据抓，因为「折叠/展开的 DOM 判据」要等 03 才存在。
+  // 03 把那条 DOM 判据补上了（`tests/scroll-dom.test.mjs` 的「默认偏好（展开）」），
+  // 但**不能**简单地把 scroll-dom 塞进同一条的 judges —— 实测（2026-11-21 评审修复轮）：
+  //   · `lib/preferences.js` 是 tsc 产物，**客户端 bundle 不 import 它**：`lib/client.js`
+  //     把 `src/preferences.ts` 整份内联了（`//#region src/preferences.ts`，默认值在
+  //     lib/client.js 的 `const DEFAULT_READING_PREFERENCES` 里）。改 `lib/preferences.js`
+  //     的那份**碰不到 DOM 用例跑的代码** ⇒ 验收 1 恒绿，加进去也守不到它。
+  //   · 更糟的是 `judgeTests` 的 pattern 会作用到**所有** judge 文件上（suite.mjs 把
+  //     patterns 拼进同一条 `node --test` 命令）⇒ 加了验收 1 的 pattern 之后，
+  //     nav-persistence / store-sqlite 里一条用例都匹配不上，host 侧反而**失去守门人**
+  //     （实测：套件从 5 条红变成 0 条红，变异直接幸存）。
+  // 所以拆成**两条变异**，各守自己那一份产物，judges 与 judgeTests 都不混：
+  //   · 本条：host 侧 `lib/preferences.js`（tsc 产物），守偏好层；
+  //   · `client-默认值写成折叠（bundle 副本）`：bundle 内联的那一份，守 spec 验收 1。
+  // 两份默认值是同一个源码（`src/preferences.ts:93`）的两个产物 —— 这正是「改一处要改两处
+  // 锚点」的由来，漏掉任何一份都会让「默认值被翻成折叠」这件事有一半没人守。
+  { id: 'client-默认值写成折叠', file: 'lib/preferences.js',
+    judges: ['nav-persistence.test.mjs', 'store-sqlite.test.mjs'],
+    // 把默认值翻成折叠。所有「reading 里必须带 expandImages: true」的断言会一起红：
+    // 归一化后的 reading 与 DEFAULT_READING_PREFERENCES 都会变成 false。
+    // lib/preferences.js 实测 OCCURRENCES=1（`expandImages: true,`）。
+    from: '    expandImages: true,',
+    to: '    expandImages: false,' },
+  { id: 'client-默认值写成折叠（bundle 副本）', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    // 验收 1 的守门人（spec「测试决策」变异 2 字面要求的那条：「改为 false → 验收 1 翻红」）。
+    // 判据就是「默认偏好打开一篇含图文章 ⇒ `<img>` 直接渲染、DOM 里没有折叠提示」。
+    // ⚠️ judgeTests 写**完整测试名**：它是子串匹配（suite.mjs 转义后交给 --test-name-pattern），
+    // 前缀式会连带匹配到别的用例、也更容易在改名时静默失配；judgeSpec 会先校验名字字面量
+    // 还在不在，找不到就退回整文件并点名，不会静默跳过。
+    judgeTests: ['默认偏好（展开）：<img> 直接渲染、src 与原块一致，DOM 里没有折叠提示'],
+    // 定位：bundle 里内联的那份 `DEFAULT_READING_PREFERENCES`。缩进与 tsc 产物**不同**
+    // （tsdown 用 tab，`lib/preferences.js` 用 4 空格 —— docs/pitfalls.md §1.4 记的就是这个坑）。
+    // lib/client.js 实测 OCCURRENCES=1（`\t\t\texpandImages: true\n`，注意**没有尾逗号**：
+    // 它在对象字面量的最后一项，与 tsc 产物那份 `expandImages: true,` 不是同一串字节）。
+    from: '\t\t\texpandImages: true\n',
+    to: '\t\t\texpandImages: false\n' },
+  { id: 'prefs-图片偏好不校验类型', file: 'lib/preferences.js',
+    judges: ['nav-persistence.test.mjs'],
+    judgeTests: ['sanitizeViewPreferences：图片折叠偏好只判布尔，非布尔回落 true 且不带走同份记忆'],
+    // 去掉 `typeof === 'boolean'` 那道闸：字符串 / 数字被原样采用（`"yes"` 会变成一个
+    // 字符串真值、`0` 会悄悄关掉图片）。判据是**归一化后的确切值**，不是「有没有值」。
+    // lib/preferences.js 实测 OCCURRENCES=1（带上下文锚定，`expandImages:` 只此一处）。
+    from: "        expandImages: typeof readingSource['expandImages'] === 'boolean'\n            ? readingSource['expandImages']\n            : DEFAULT_READING_PREFERENCES.expandImages,",
+    to: "        expandImages: readingSource['expandImages'] ?? DEFAULT_READING_PREFERENCES.expandImages," },
+  { id: 'client-分组只认单张', file: 'lib/image-fold.js',
+    judges: ['image-fold.test.mjs'],
+    judgeTests: ['分组：连续三张图合成一组（一次展开三张，不是三组）'],
+    // 分组函数恒返回单元素组：相邻的三张图变成三组。症状是「点一次提示只放出一张」，
+    // 而提示文案「图片 3 张」与 DOM 里的图数对不上。判据在纯函数层（组数 + blockIndexes）。
+    // lib/image-fold.js 实测 OCCURRENCES=1（带上下文锚定，`continue;` + `flush();` 只此一处）。
+    from: "        if (isImageBlock(block)) {\n            indexes.push(at);\n            members.push(block);\n            continue;\n        }\n        // 任何非 img 块都是边界 —— 包括空 p。\n        flush();",
+    to: "        if (isImageBlock(block)) {\n            indexes.push(at);\n            members.push(block);\n            flush();\n            continue;\n        }\n        // 任何非 img 块都是边界 —— 包括空 p。\n        flush();" },
+  // ── R6 03：折叠渲染 + Aa 面板开关（渲染层的三条核心判定） ─────────────────────
+  // 这三条守的是**渲染层**，与上面 02 的决策层变异互补：02 那三条即使全被抓住，也仍可能
+  // 「判定说折叠、DOM 里却有 <img>」—— 那是本票验收 2 唯一的判据，只能在这里守。
+  { id: 'client-折叠仍渲染 img', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: [
+      '折叠偏好：单图带 caption ⇒ DOM 里没有 <img>，提示是「▸ 图片：<caption>」',
+      '折叠偏好：连续三张图合成一组，提示是「▸ 图片 3 张」（不是三条单图提示）',
+    ],
+    // 折叠分支改成照样渲染 <img>（`fold.shouldRender` 恒真）：提示没了、图片照旧出现。
+    // 症状正是本项要修的那件事——DOM 里有 <img> 就有请求、就有 Referer（spec 决策 7）。
+    // 判据是「折叠时 DOM 里 <img> 数量为 0」，不依赖 display:none 这类浏览器实现细节。
+    // lib/client.js 实测 OCCURRENCES=1（`fold.shouldRender(group.index)` 只此一处）。
+    // ⚠️ R6 06 重锚：块的 key 从裸 `index` 改成复合 `blockKeyOf(index)`（spec 决策 21，换篇复位），
+    // 这段产物的第二行跟着变了 ⇒ 旧 from 会报「未应用」（pitfalls §1.4）。判定本身没动。
+    // ⚠️ 2026-11-21（R6 07）再锚：`ArticleBlockView` 多了 `onOpenImage` 这个 prop（灯箱入口），
+    // tsdown 把 jsx 的第二参数从 `{ block }` 展开成 `{ block, onOpenImage }` 两行 ⇒ 旧 from
+    // 会报「未应用」（pitfalls §1.4）。判定本身没动。
+    // ⚠️ 2026-11-21（R6 评审修复轮）再锚：`article-pane.tsx` 里「不是图片块」与「该渲染」
+    // 两个逐字相同的 `ArticleBlockView` 分支合并成 `group === void 0 || fold.shouldRender(...)`
+    // ⇒ 产物首行从 `if (fold.shouldRender(group.index)) return …` 变成带 `||` 的形态，
+    // 旧 from 命中 0 次（pitfalls §1.4）。判定本身没动：把 `fold.shouldRender(...)` 这一项
+    // 换成恒真的 `true` 之后，折叠分支永远进不去 ⇒ 折叠偏好下照样渲染 <img>。
+    // 注意 to 里**必须保留** `group === void 0 ||` 这一项：整个条件换成 `if (true)` 会让
+    // 所有块都走 ArticleBlockView、折叠提示一条都不出现，症状虽然也是红，但变异落点从
+    // 「折叠判定失效」漂成「分组逻辑被删」—— 判据证明的就不是这条变异要证明的事了。
+    from: "if (group === void 0 || fold.shouldRender(group.index)) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ArticleBlockView, {\n\t\t\t\t\t\t\t\t\t\tblock,\n\t\t\t\t\t\t\t\t\t\tonOpenImage\n\t\t\t\t\t\t\t\t\t}, blockKeyOf(index));\n\t\t\t\t\t\t\t\t\tif (group.blockIndexes[0] !== index) return null;",
+    to: "if (group === void 0 || true) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ArticleBlockView, {\n\t\t\t\t\t\t\t\t\t\tblock,\n\t\t\t\t\t\t\t\t\t\tonOpenImage\n\t\t\t\t\t\t\t\t\t}, blockKeyOf(index));\n\t\t\t\t\t\t\t\t\tif (group.blockIndexes[0] !== index) return null;" },
+  { id: 'client-折叠提示可聚焦', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['折叠提示不在 Tab 序里：tabIndex < 0，且不是 BUTTON / SUMMARY / INPUT / SELECT / TEXTAREA、不是带 href 的链接'],
+    // 提示改成 `<button>`：Tab 能选中它、且自带空格激活语义。
+    // ⚠️ 这条**只可能**被验收 6（结构判据）抓住 —— jsdom 里普通 button 收到空格既不
+    // preventDefault 也不 click（实测），所以「空格翻页」那条对它恒绿。两条形态各守一面。
+    // lib/client.js 实测 OCCURRENCES=1（ImageFoldHint 的 jsx 元素名只此一处）。
+    from: "function ImageFoldHint({ group, onExpand }) {\n\t\t\treturn /* @__PURE__ */ (0, react_jsx_runtime.jsx)(\"div\", {",
+    to: "function ImageFoldHint({ group, onExpand }) {\n\t\t\treturn /* @__PURE__ */ (0, react_jsx_runtime.jsx)(\"button\", {" },
+  { id: 'client-折叠提示吞空格', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['折叠提示不抢空格：向提示元素本身派发 keydown，正文仍按一屏翻页且图片仍折叠'],
+    // 提示加 onKeyDown 里 preventDefault（照抄 Aa 面板 summary 那条先例）：
+    // routeKey 的 `event.defaultPrevented` 守卫会提前 return ⇒ 翻页静默失效。
+    // ⚠️ 这条**只可能**被验收 5 抓住，而验收 5 必须把事件派发到提示元素**本身**：
+    // 夹具的 press() 派发到 document，抓不到这个缺陷（spec 验收 5 的实测记录）。
+    // lib/client.js 实测 OCCURRENCES=1（ImageFoldHint 的 onClick 只此一处）。
+    from: "onClick: () => {\n\t\t\t\t\tonExpand(group.index);\n\t\t\t\t},\n\t\t\t\tstyle: {\n\t\t\t\t\tmargin: \"0 0 1.1em\",\n\t\t\t\t\tpadding: \"6px 10px\",",
+    to: "onClick: () => {\n\t\t\t\t\tonExpand(group.index);\n\t\t\t\t},\n\t\t\t\tonKeyDown: (event) => {\n\t\t\t\t\tif (event.key === \" \") event.preventDefault();\n\t\t\t\t},\n\t\t\t\tstyle: {\n\t\t\t\t\tmargin: \"0 0 1.1em\",\n\t\t\t\t\tpadding: \"6px 10px\"," },
+  // ── R6 04：`i` 键切换整篇图片 ───────────────────────────────────────────────
+  // 这四条守的是「一次按键收掉全篇」这条主路径的三个不同环节：
+  //   ① `routeKey` 里写不写篇级覆盖（语义本身）；
+  //   ② 状态有没有进 `KeyRoutingCtx`（按键与渲染的接线）；
+  //   ③ 状态有没有进 effect 依赖数组（闭包捕获旧值）；
+  //   ④ 动作在产物里是不是**字面量** return（反向覆盖正则看不看得见它）。
+  // ①②③ 必须各有一条：03 的实测教训是「测试全绿但按键与渲染脱钩」与「第二次按不生效」
+  // 是两种不同缺陷，一条变异守不住另一条。
+  { id: 'client-i 键不改会话覆盖', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: [
+      'i 键切换整篇图片：折叠偏好下按一次全部出现，再按一次全部消失（依赖数组没漏）',
+      'i 清空组覆盖：先点开某一组再按 i，全篇统一到同一形态（不是「部分展开取反」）',
+    ],
+    // `i` 解析出动作、`routeKey` 也进了分支，但**不写**篇级覆盖（把那次写入抹成空操作）。
+    // 症状正是本票要修的那件事：按 `i` 毫无反应，DOM 里的 `<img>` 一个都不变（spec 验收 4）。
+    // 判据是「按一次 ⇒ 三张图全部出现」，不依赖 store 里的布尔值。
+    // ⚠️ 2026-11-21（R6 07）重锚：`i` 现在先算 `const next = !(…)`（灯箱要读同一个结果来决定
+    // 关不关），写入点从 `setImagesExpanded(!baseline)` 变成 `setImagesExpanded(next)`。
+    // 语义与判据都没动 —— 这里仍然把那次写入抹成空操作。
+    // lib/client.js 实测 OCCURRENCES=1（`ctx.setImagesExpanded(next)` 只此一处）。
+    from: "\t\t\t\t\t\tctx.setImagesExpanded(next);",
+    to: "\t\t\t\t\t\tvoid next;" },
+  { id: 'client-i 的状态不传给 routeKey', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['i 键切换整篇图片：折叠偏好下按一次全部出现，再按一次全部消失（依赖数组没漏）'],
+    // 状态**没进** `KeyRoutingCtx`：`ctx.imagesExpanded` 永远是 undefined ⇒ 基线恒等于偏好，
+    // 于是每次按 `i` 都写「!偏好」这同一个值 —— 第一次展开成功、第二次收不起来。
+    // 这一条与「不改会话覆盖」不同：那个是分支里没写，这个是**按键读不到状态**（spec 验收 18）。
+    // ⚠️ 只摘 `imagesExpanded`、**保留** `setImagesExpanded`：若把 setter 也摘掉，按下会抛
+    // `TypeError: ctx.setImagesExpanded is not a function` —— 那是崩溃式假通过（pitfalls §2.7b），
+    // 套件红了却没有任何断言真的观察到「按键与渲染脱钩」。
+    // lib/client.js 实测 OCCURRENCES=1（ctx 字面量里那四行连续）。
+    from: "\t\t\t\t\t\t\thelpOpen,\n\t\t\t\t\t\t\tsetHelpOpen,\n\t\t\t\t\t\t\timagesExpanded,\n\t\t\t\t\t\t\tsetImagesExpanded,",
+    to: "\t\t\t\t\t\t\thelpOpen,\n\t\t\t\t\t\t\tsetHelpOpen,\n\t\t\t\t\t\t\tsetImagesExpanded," },
+  { id: 'client-i 的状态不在依赖数组里', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['i 键切换整篇图片：折叠偏好下按一次全部出现，再按一次全部消失（依赖数组没漏）'],
+    // 把 `imagesExpanded` 从 keydown effect 的依赖数组里拿掉：监听器闭包读到的是**注册那一刻**
+    // 的 `undefined` ⇒ 第二次按 `i` 仍以为基线是偏好（折叠），于是又写一次「展开」，图片收不起来。
+    // 这正是 2026-10-15「拿掉 expanded 后按 o 永远收不起来、当时 402 条测试全绿」的同族事故。
+    // ⚠️ 判据必须是**连按两次**：只按一次时读旧值也得到正确结果，那条用例对它恒绿。
+    // lib/client.js 实测 OCCURRENCES=1（依赖数组尾部那三行）。
+    // ⚠️ 2026-11-21（R6 07）再锚：依赖数组尾部又多了 lightboxSrc（`back` 要读灯箱态）。
+    // 只摘 `imagesExpanded`、保留 `lightboxSrc` 与 `expandedGroups`：判据仍指向「篇级覆盖被闭包捕获」。
+    from: "\t\t\t\t\thelpOpen,\n\t\t\t\t\timagesExpanded,\n\t\t\t\t\texpandedGroups,\n\t\t\t\t\tlightboxSrc\n\t\t\t\t]);",
+    to: "\t\t\t\t\thelpOpen,\n\t\t\t\t\texpandedGroups,\n\t\t\t\t\tlightboxSrc\n\t\t\t\t]);" },
+  { id: 'keys-i 写成三元', file: 'lib/keys.js',
+    judges: ['keys.test.mjs'],
+    judgeTests: ["产物字节：lib/keys.js 里存在字面量 return 'toggleImages'（不许写成三元）"],
+    // 把 `case 'i'` 的字面量 return 换成**三元**。这条守的是「反向覆盖正则看不看得见这个动作」：
+    // `tests/keys.test.mjs` 的「帮助表反向覆盖」用 `return\s+'([A-Za-z]+)'` 从产物里抓动作名，
+    // 三元里的返回值抓不到（实测它只抓到 21 个动作，漏掉 pageDown / pageUp / halfPageDown /
+    // halfPageUp 这四个三元里的返回值）⇒ 反向覆盖对它**恒绿**，这是既存判据的漏洞。
+    // 所以本条的判据必须是「断言产物字节里有字面量 `return 'toggleImages'`」（spec 验收 16）。
+    //
+    // ⚠️ 偏离 spec 给出的 `to`（`return view === 'article' ? … : …`）：`view` 在 `keys.ts` 的
+    // 作用域里**不存在**，那样写一按下就是 `ReferenceError: view is not defined` ——
+    // 崩溃式变异是假通过（pitfalls §2.7b）：套件红了，但没有任何断言真的观察到「产物里没有字面量」。
+    // 改用 `key === 'i'` 这个**在作用域内**的条件，语义与原来完全等价（`i` 仍解析成 toggleImages），
+    // 于是唯一变红的就是那条字节断言 —— 这恰好证明它是这条判据唯一的守门人。
+    // lib/keys.js 实测 OCCURRENCES=1（`case 'i': return 'toggleImages';` 只此一处）。
+    from: "        case 'i': return 'toggleImages';",
+    to: "        case 'i': return key === 'i' ? 'toggleImages' : 'none';" },
+  // ── R6 05：组级覆盖（点提示只展开那一组）─────────────────────────────────────
+  // spec 已批的 14 条变异里**没有**组级覆盖的专属条目（spec「覆盖缺口（已知，未补）」），
+  // 于是本票的核心判据「第二组仍折叠」在门槛里没有守门人：`client-i 键不改会话覆盖` 等四条
+  // 守的都是**篇级**覆盖那一路，点提示这一路无论写成什么形态都不会被它们看见。
+  //
+  // 缺陷形态：点提示时写**篇级**覆盖而不是组覆盖 —— 读者指着第一组说「我要看这一组」，
+  // 结果整篇的图都放出来了。这正是「鼠标路径与 `i` 各有语义」这条决定要防的那件事：
+  // 两者若都写篇级覆盖，`i` 清空组覆盖就没有对象可清，两条路径的语义也就塌成一条。
+  { id: 'client-点提示切整篇', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: [
+      '点提示只展开那一组：组内 <img> 出现且 src 与原块一致，另一组仍折叠',
+      '组覆盖优先于篇级覆盖：按 i 把整篇写成折叠后，点过的那一组仍然展开',
+      '组覆盖不落盘：Esc 回列表后重开同一篇，回到偏好决定的初始形态',
+    ],
+    // 把 `expandImageGroup` 的函数式累加换成一次篇级覆盖写入（`setImagesExpanded(true)`）。
+    // 保留 `useCallback` 的包装与空依赖数组：回调的身份语义不变，唯一变的是**它写了哪个状态**。
+    // ⚠️ `setImagesExpanded` 必须真的在该作用域内可达（不是换一个「等价但不崩溃」的写法就完事）：
+    // 它由同一个组件函数里更早的 `useState` 解构而来（产物 5793 行的
+    // `const [imagesExpanded, setImagesExpanded] = useState(void 0)`，早于 5871 行的本函数），
+    // 所以 `const` 的 TDZ 不成立，按下提示不会抛 `ReferenceError` —— 这是「语义等价于缺陷」
+    // 而不是「崩溃式假通过」的前提（pitfalls §2.7b）。
+    // 判据必须看**第二组仍折叠**：单组夹具对「展开这一组」与「展开整篇」恒绿，
+    // 所以上面三条 judgeTests 用的都是两组夹具（1 张 + 2 张，中间夹一段文字）。
+    // lib/client.js 实测 OCCURRENCES=1（整个 expandImageGroup 定义体只此一处）。
+    from: "\t\t\t\tconst expandImageGroup = (0, react.useCallback)((groupIndex) => {\n\t\t\t\t\tsetExpandedGroups((current) => {\n\t\t\t\t\t\tif (current.has(groupIndex)) return current;\n\t\t\t\t\t\tconst next = new Set(current);\n\t\t\t\t\t\tnext.add(groupIndex);\n\t\t\t\t\t\treturn next;\n\t\t\t\t\t});\n\t\t\t\t}, []);",
+    to: "\t\t\t\tconst expandImageGroup = (0, react.useCallback)((groupIndex) => {\n\t\t\t\t\tvoid groupIndex;\n\t\t\t\t\tsetImagesExpanded(true);\n\t\t\t\t}, []);" },
+  // ── R6 06：图片三态（载入中 / ok / 失败）────────────────────────────────────
+  // 这两条守的是**逐图的载入观察**，与 03 那三条（组层折叠）互不重叠：03 保证「折叠时没有 img」，
+  // 这里保证「img 出现之后读者知道它到底加载成功没有」。
+  { id: 'client-失败态不停留在载入中', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: [
+      'R6 06：onError 之后是失败态——文案「图片加载失败」+ alt，且 DOM 里没有 <img>（不留破图）',
+      'R6 06：失败态没有 alt 时只说「图片加载失败」，不编造说明文字',
+    ],
+    // onError 不置 failed ⇒ 图床挂掉 / 站点防盗链时读者永远看着「载入中」那块占位，
+    // 既不知道失败了、也拿不到 alt。判据是「失败态标记 + 文案 + DOM 里没有 <img>」三条一起。
+    // lib/client.js 实测 OCCURRENCES=1（`setState("failed")` 只此一处）。
+    from: "\t\t\t\t\t\tonError: () => {\n\t\t\t\t\t\t\tsetState(\"failed\");\n\t\t\t\t\t\t},",
+    to: "\t\t\t\t\t\tonError: () => {\n\t\t\t\t\t\t}," },
+  { id: 'client-已complete的图不补判', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: [
+      'R6 06：缓存命中的图在挂载前就已 complete（naturalWidth > 0）⇒ 直接是 ok，不停在「载入中」',
+      'R6 06：挂载前已 complete 但 naturalWidth === 0（加载失败后放弃）⇒ 补判成 failed',
+    ],
+    // 去掉挂载后的补判：缓存命中的图（`complete === true`、`load` 事件早已派发完毕）永远停在
+    // 「载入中」—— 这是 spec 决策 22 记的那件事，也是 pitfalls §3.1「事件可能早于监听器」的同族。
+    // 两条判据分别守 ok 与 failed 两半：只补判一半的实现会在另一条上红。
+    // lib/client.js 实测 OCCURRENCES=1（整个 useEffect 块只此一处）。
+    from: "\t\t\t(0, react.useEffect)(() => {\n\t\t\t\tconst image = imageRef.current;\n\t\t\t\tif (image === null) return;\n\t\t\t\tif (!image.complete) return;\n\t\t\t\tsetState(image.naturalWidth > 0 ? \"ok\" : \"failed\");\n\t\t\t}, [src]);",
+    to: "\t\t\t(0, react.useEffect)(() => {\n\t\t\t}, [src]);" },
+  // ── R6 07：灯箱（Esc 优先级 / 入口判据 / 折叠联动 / 依赖数组）──────────────────
+  // 四条守的是四个**互相独立**的环节，一条被抓住不代表另一条被守住：
+  //   ① `back` 的前置规则漏掉灯箱态 ⇒ Esc 直接退出正文（票面点名的 `client-灯箱Esc不关`）；
+  //   ② 入口不判 `ok` ⇒ 载入中的图也能点出一个空灯箱；
+  //   ③ `i` 折叠时不关灯箱 ⇒ 「全折叠了、一张图还占满屏」；
+  //   ④ `lightboxSrc` 不在依赖数组里 ⇒ 监听器闭包读到注册那一刻的 undefined，Esc 跳过灯箱。
+  // ④ 与 ① 症状相同但成因相反（一个是规则没写、一个是规则写了却读到旧值），
+  // 所以必须两条分开 —— 03/04 的实测教训正是「测试全绿而按键与渲染脱钩」。
+  { id: 'client-灯箱Esc不关', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs', 'keyboard-routing.test.mjs'],
+    judgeTests: [
+      'R6 07：Esc 关灯箱但**不退出正文**（view 仍为 article）',
+      'R6 07：Esc 的优先级——帮助关着、灯箱开着时只关灯箱，视图仍是正文',
+      'R6 07：Esc 的优先级是 帮助浮窗 → 灯箱 → 退出正文（一条链逐级下降）',
+    ],
+    // 删掉 `back` 里那两行灯箱前置规则（帮助之后、正文之前）。症状：灯箱开着时按 Esc
+    // **退出了正文** —— 灯箱随视图切换一起消失，看起来像「关掉了」，实际读者的阅读位置与
+    // 滚动位置都被丢掉（spec 决策 26 / 验收 11）。
+    // ⚠️ 判据必须同时看「灯箱消失」与「view 仍是 article」：只看灯箱消失的用例对这条恒绿。
+    // lib/client.js 实测 OCCURRENCES=1（`ctx.lightboxSrc !== void 0` 那一段只此一处）。
+    from: "\t\t\t\t\tif (ctx.lightboxSrc !== void 0) {\n\t\t\t\t\t\trun(() => ctx.setLightboxSrc(void 0));\n\t\t\t\t\t\tbreak;\n\t\t\t\t\t}\n",
+    to: "" },
+  { id: 'client-灯箱入口不判 ok', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['R6 07：载入中的图点不开——灯箱只对 state === "ok" 的图开放'],
+    // 把 `onClick` 无条件挂在每张图上：读者会在「还在加载」的占位块上点出一个空灯箱
+    // （或一张永远不出图的灯箱）。06 把三态写进 DOM 的第二个用处正是这里。
+    // ⚠️ 判据必须是「点了之后没有灯箱节点」，不是「图上有没有 onClick」——
+    // 后者是实现细节，前者才是读者看到的东西。
+    // lib/client.js 实测 OCCURRENCES=1（`state === "ok"` 的 onClick 三元只此一处）。
+    from: "\t\t\t\t\t\tonClick: state === \"ok\" ? () => {\n\t\t\t\t\t\t\tonOpen(src);\n\t\t\t\t\t\t} : void 0,",
+    to: "\t\t\t\t\t\tonClick: () => {\n\t\t\t\t\t\t\tonOpen(src);\n\t\t\t\t\t\t}," },
+  { id: 'client-i 折叠不关灯箱', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs', 'keyboard-routing.test.mjs'],
+    judgeTests: [
+      'R6 07：按 i 折叠整篇时一并关掉灯箱（不许出现「全折叠了、一张图还占满屏」）',
+      'R6 07：i 折叠整篇时顺带关灯箱（决策 24），展开方向上不写灯箱',
+    ],
+    // 去掉「结果是折叠 ⇒ 关灯箱」那一行：折叠态正文里没有 <img>，灯箱却是同一张图的大图，
+    // 读者会以为折叠没生效（spec 决策 24 点名的残留态）。
+    // ⚠️ 判据要两条一起：DOM 层（灯箱消失 + 提示出现）与路由层（折叠方向写灯箱、展开方向不写）。
+    // 只断 DOM 的用例对「无条件关灯箱」的写法也绿，那会把展开方向也一起关掉。
+    // lib/client.js 实测 OCCURRENCES=1（`if (!next)` 只此一处）。
+    from: "\t\t\t\t\t\tif (!next) ctx.setLightboxSrc(void 0);",
+    to: "\t\t\t\t\t\tvoid next;" },
+  { id: 'client-灯箱态不在依赖数组里', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: [
+      'R6 07：Esc 关灯箱但**不退出正文**（view 仍为 article）',
+      'R6 07：Esc 的优先级是 帮助浮窗 → 灯箱 → 退出正文（一条链逐级下降）',
+    ],
+    // 把 `lightboxSrc` 从 keydown effect 的依赖数组里拿掉：监听器闭包读到的是注册那一刻的
+    // `undefined` ⇒ Esc 跳过灯箱规则、直接 `closeArticle`。症状与「规则没写」一模一样，
+    // 但成因相反 —— 这正是 2026-10-15「拿掉 expanded 后按 o 永远收不起来、当时 402 条全绿」的同族。
+    // ⚠️ 必须保留 `expandedGroups`（它也是被读的对象）：只摘 `lightboxSrc`，否则会连带打红
+    // `i` 那一族用例，判据就不再指向「灯箱态闭包捕获」这一个缺陷。
+    // lib/client.js 实测 OCCURRENCES=1（依赖数组尾部那三行）。
+    from: "\t\t\t\t\timagesExpanded,\n\t\t\t\t\texpandedGroups,\n\t\t\t\t\tlightboxSrc\n\t\t\t\t]);",
+    to: "\t\t\t\t\timagesExpanded,\n\t\t\t\t\texpandedGroups\n\t\t\t\t]);" },
 ]

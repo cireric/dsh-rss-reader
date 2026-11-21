@@ -48,6 +48,34 @@ host 侧 `lib/*.js` 没有这种守护，旧产物会静默通过）。
 **为什么比幸存更隐蔽**：幸存至少说明这条变异跑了，未应用等于**这条根本没跑**。
 **修法**：先 `grep` 产物的真实形状，再写 `from`。本次实测踩到两条。
 
+### 1.4b 客户端 bundle **内联**了一份 `src/preferences.ts`（不是 import）
+
+**病象**（`实测`，2026-11-21 R6 评审修复轮）：给 `client-默认值写成折叠`（`file: 'lib/preferences.js'`）
+补上 `scroll-dom.test.mjs` 当 judge，期望「把默认值翻成折叠 ⇒ 验收 1 的 DOM 用例翻红」。
+结果门槛报 **survived**，而单独把 `lib/client.js` 里那份改成 false，同一条 DOM 用例**当场红**。
+
+**根因**：两层叠加。
+1. `lib/client.js` 是 tsdown 的单文件产物，它把 `src/preferences.ts` **整份内联**了
+   （`//#region src/preferences.ts`，默认值在 `const DEFAULT_READING_PREFERENCES` 里）。
+   `lib/preferences.js` 是 tsc 的另一份产物，**客户端根本不 import 它** ⇒ 改它碰不到 DOM 用例
+   跑的代码。同一个源码默认值因此有**两个产物副本、两套字节**（tsc 用 4 空格 + 尾逗号
+   `    expandImages: true,`；tsdown 用 3 个 tab + **无尾逗号** `\t\t\texpandImages: true\n`）。
+2. `judgeTests` 的 pattern 会作用到**所有** judge 文件（`suite.mjs` 把 patterns 拼进同一条
+   `node --test` 命令）⇒ 给这条加了只存在于 scroll-dom 的测试名之后，nav-persistence /
+   store-sqlite 里一条都匹配不上（详见 §2.14），host 侧反而**失去守门人**。
+   实测：加进去之后套件从 5 条红变成 0 条红，变异直接幸存 —— **修判据缺口的动作把判据删了**。
+
+**修法**：一个源码默认值 = 两条变异，各守自己那份产物，`judges` / `judgeTests` **不许混**：
+- `client-默认值写成折叠` → `lib/preferences.js`，judges 只留 host 侧的
+  `nav-persistence.test.mjs` / `store-sqlite.test.mjs`；
+- `client-默认值写成折叠（bundle 副本）` → `lib/client.js`，judges 只留 `scroll-dom.test.mjs`，
+  judgeTests 指向验收 1 那条用例。
+
+**一般规则**：凡 `src/` 里被**客户端**消费的模块（`preferences.ts` / `image-fold.ts` /
+`list-scroll.ts` / `shared.ts` …），`lib/<name>.js` 与 `lib/client.js` 里各有一份产物。
+变异要打在**跑判据的那一份**上：DOM / bundle 判据读 `lib/client.js`，host 判据读 `lib/*.js`。
+写变异前先问一句「这条判据跑的是哪份产物」，再看那份的字节形状。
+
 ### 1.5 改文件前必须用 read 读过它
 
 批量改写要用**锚点唯一**的替换，别用会跨段吞噬的惰性正则 ——
@@ -513,6 +541,115 @@ root 一变 effect 就重注册监听 —— 别把它也改成「现取」，�
 
 见 §1.1 / §1.5。客户端改动后 `lib/client.js` 的 mtime 若早于 `src`，跑的就是旧代码。
 
+### 3.5 图片的 `load` / `error` 可能早于监听器（缓存命中的图永远停在「载入中」）
+
+**病象**：慢网络下图片该显示「载入中」，但缓存命中的图**一直**停在「载入中」——它其实早就好了。
+**根因**：`complete` 是**同步可知**的，而 `load` 事件是**一次性**的。React 把 `<img>` 挂进 DOM
+与挂上 `onLoad` 监听器之间，浏览器可能已经完成了加载并派发过 `load`；那一刻监听器还不存在，
+事件就此丢失。所以「只靠 `onLoad` / `onError` 驱动三态」的实现对缓存命中的图**恒停在初始态**。
+（这与 §3.1「长驻监听器捕获会变的值」是同一族：**事件可能早于监听器**，只是这里的解法不同。）
+**修法**：挂载后补判一次 —— `article-pane.tsx` 的 `ArticleImage` 用 `ref` + `useEffect` 读
+`image.complete`，`naturalWidth > 0` 判 `ok`、否则 `failed`。`complete === true` 也覆盖
+「加载失败后浏览器放弃」那种情况（此时 `naturalWidth` 是 0），所以两个条件必须一起看。
+**⚠️** 别把补判写成「挂载时读一次就完事」的 `useState` 初值：那个值在首次渲染时就固定了，
+而 `ref.current` 要等 DOM 就位才有值。`useEffect` 在 DOM 提交之后跑，读到的才是当下的 `complete`。
+**测试侧（`实测`）**：jsdom 里 `<img>` **不加载资源、不派发 `load` / `error`**，所以三态用例必须
+手动 `dispatchEvent`；补判那条要把 `complete` / `naturalWidth` 桩在
+**`HTMLImageElement.prototype`** 上（测试拿不到「节点已创建、effect 还没跑」那个中间时刻），
+用例末尾还原 —— 原型是同一 JSDOM 实例内跨用例共享的。
+
+### 3.6 「换篇文章复用组件实例」的坑：`key` 不能用裸下标
+
+**病象**：A 篇的图 0 已经加载好，按 `j` 切到 B 篇，B 篇的图 0 **直接显示成已载入**——而它从没加载过。
+**根因**：`displayBlocks.map` 用裸 `index` 当 `key`。换文章时若块数相同，React 认为「同一批元素」
+只是 props 变了，于是**复用同一个组件实例**，里面的 `useState` 原封不动。
+**修法**：key 用 `itemId + ':' + index`（`article-pane.tsx` 的 `blockKeyOf`）。复合 key 让 React
+语义化地重挂，换篇即复位，**不需要** `useEffect` 去重置状态（用 effect 重置是同一个 bug 的补丁形态：
+它要额外记住「上一次是哪篇」，而 key 让 React 自己知道）。
+**⚠️ 测试侧的现实**：`loadArticle` 换篇时先 `set({ article: { loading: true } })`，那一刻
+`blocks` 为空 ⇒ 夹具会先提交一次「零图片」的渲染，图片组件本来就被卸载过一次。
+所以「裸下标会沿用旧态」在**当前夹具里复现不出来**（`实测`：探针观察到换篇序列
+`{imgs:0} → {imgs:1, loading}`，见票据 06 的交付说明）。复合 key 仍是正确形态
+（它不依赖「中间恰好没有图」这个偶然事实：两篇块数相同且都非空时，裸下标就是 bug），
+但那句「换篇后三态复位」的用例在今天的夹具下**对两种 key 都绿**——它不是这条判定的判据。
+
+### 3.7 结构判据过严与过松一样是缺陷：会误杀正确实现
+
+**病象**（2026-11-21，R6 验收 6 的二次更正）：判据写成
+`hint.matches(':any-link, button, summary, input, select, textarea, [tabindex]') === false`，
+本意是「提示不许是可聚焦控件」。它把目标形态 `<span>` 放过了，却也把
+`<span tabIndex={-1}>` 一并拒绝 —— 而那个形态**空格翻页正常、Tab 也选不到**，是完全合格的实现。
+**根因**：`[tabindex]` 这个选择器表达的是「**有** tabindex 属性」，而想守的性质是
+「**不在 Tab 序里**」。两者在 `tabIndex === -1` 时正好相反：有属性、但不在 Tab 序。
+用「看起来相关的属性」代替「想守的那个性质」，判据就会在边界上朝错误的方向偏。
+**为什么过严同样有害**：实现者看到红，要么为了变绿去删一个**无害**属性（把代码改坏以迎合测试），
+要么怀疑自己本来正确的实现。测试是产出的一部分，它不该把正确实现判成不合格。
+
+**修法**：判据写「想守的那个性质」，必要时拆成两条**互补**的窄判据：
+```js
+assert.ok(!['BUTTON','SUMMARY','INPUT','SELECT','TEXTAREA'].includes(hint.tagName))  // 结构：不是可交互元素
+assert.ok(!(hint.tagName === 'A' && hint.hasAttribute('href')))                        // 结构：不是链接
+assert.ok(hint.tabIndex < 0)                                                          // 行为：Tab 选不到
+```
+**为什么单条都不够**（两条都是 `实测`）：
+- 只用 `tabIndex < 0` ⇒ 放过 `<button tabIndex={-1}>`：`tabIndex` 同样是 -1，但它可被 `focus()`
+  或鼠标聚焦，且**自带空格激活语义** —— 正是要防的那件事。
+- 只用 tagName 名单 ⇒ 放过 `<a>` 之外的怪形态（`contenteditable`、`<details>` 套壳等）。
+两条合起来的分类（`实测` 四形态）：`<span>` ✅ / `<span tabIndex={-1}>` ✅ /
+`<button>` ❌ / `<button tabIndex={-1}>` ❌。
+
+**同一族的另一个教训**（2026-11-21，R6 验收 5）：判据要**派发到被测元素本身**，不能沿用
+「派发到 `document`」的通用 helper。jsdom 里聚焦的 `<button>` 收到空格**既不 `preventDefault`
+也不 click**，所以「提示是 button」这件事在 document 派发路径上完全不可见 —— 老写法恒绿。
+同理别断 `defaultPrevented`（`routeKey` 自己会 prevent）：要断的是**业务后果**（`scrollTop` 有没有变）。
+
+### 3.8 「隐私加固」把功能改坏：`no-referrer` 让图床 403，而测试看不见
+
+**病象**（2026-11-21 真机，R6 交付后）：装上带 `referrerPolicy="no-referrer"` 的版本，打开**任何**一篇
+带图文章，**所有图片都显示「图片加载失败」**。而当时 935 条测试全绿、变异门槛 316/316 全抓。
+
+**根因**（`实测`，浏览器 UA 逐域名 `curl`，三轮一致）：
+
+| 域名 | 占本机缓存 | 空 Referer | 仅 origin | R6 之前 |
+|---|---|---|---|---|
+| `cdnfile.sspai.com` | **52.7%** | **403** | 200 | 200 |
+| `icon.solidot.org` | 26.3% | 403 | 403 | **403**（既有） |
+| `s3.ifanr.com` | 15.6% | 200 | 200 | 200 |
+| `icon.zhiding.cn` | 4.2% | 200 | 403 | **403**（既有） |
+| 其余 | 1.2% | 200 | 200 | 200 |
+| **坏图占比** | | **78.9%** | **30.5%** | 30.5% |
+
+`no-referrer` 把 Referer 变成空，而 sspai 的图床**空 Referer 一律 403**。坏图率从 30.5% 涨到 78.9%。
+
+**两层教训**：
+
+① **测试看不见，是因为 jsdom 里 `<img>` 不发请求**。三态用例是手动派发 `load`/`error`、
+补判用例是桩 `HTMLImageElement.prototype` —— 真实浏览器的 403 会触发 `onError`，而 jsdom 里
+**根本没有这个事件可派发**。这与 spec 验收 3「请求计数在 jsdom 里不可观测」是同一类盲区，
+但那次结论是「判据并入 DOM 断言」，这次的盲区**掩盖的是真实缺陷**。
+⇒ **凡改图片/网络策略，判据必须有一条钉「策略值本身属于已知可通过图床的白名单」**，
+不能只钉「DOM 里有没有 `<img>`」。
+
+② **隐私收益要先证明它存在**。spec 决策 29 的理由是「Referer 把『我正在读哪一篇』告诉第三方」，
+但本插件是 SPA（`grep pushState|location|URLSearchParams src/client/` **零命中**），
+**没有按文章区分的 URL** —— Referer 里从来只有宿主 origin，不携带文章身份。
+用「52.7% 的图挂掉」去换一个**并不存在**的隐私收益，是净损失。
+
+**修法**：`referrerPolicy` 用 **`strict-origin-when-cross-origin`**（= 浏览器默认值）——
+跨源只发 origin、不发路径，sspai 恢复 200，坏图率精确回到 R6 前的 30.5%。
+抽成唯一来源常量 `ARTICLE_IMAGE_REFERRER_POLICY`，正文图 / 灯箱图 / 灯箱「原图」链接都读它。
+
+**⚠️ 顺带纠正一个容易误判的地方**：`icon.solidot.org`(26.3%) 与 `icon.zhiding.cn`(4.2%)
+**在 R6 之前就 403** —— 前者要**自家域名** Referer（`https://www.solidot.org/` 才 200，
+裸 `https://solidot.org/` 仍 403），后者要**非空** Referer。那是**既有的**防盗链问题，
+不是本次回归，改 `referrerPolicy` 也不会好。要修得按域名决定策略 —— 那是另一件事，
+别在修 referrer 时顺手加白名单（本仓库「不为未经实测的样本扩规则」）。
+
+**判据在哪**：`tests/scroll-dom.test.mjs` 的「正文图片的 referrer 策略是 strict-origin-when-cross-origin」
+（DOM 层）+ `tests/client-bundle.test.mjs` 的两条产物断言（策略常量值 + 正文/灯箱都引用它）。
+变异 `client-referrer 写回 no-referrer` 守「别改回那个会让图床 403 的值」，
+`client-图片无 referrerPolicy` 守「别把属性整个删了」。
+
 ---
 
 ## 四、宿主 / 平台约束
@@ -860,6 +997,19 @@ K=1 的四轮 `hits` 序列 `['broken', 1, 2, 'broken']`）。判据在 `tests/r
 
 ## 八、待验证 / 遗留
 
+- **图片组序号会在「同一篇重抓换掉 blocks」时漂到另一组**（2026-11-21，R6 05）：组级覆盖装的是
+  **组序号**（0..N-1），而组序号只在**当前这份 blocks** 里有意义。同一篇若重抓、正文块变了
+  （多一张图、少一段文字），同一个序号就落到另一组上 —— 读者点开的是 A 图，重抓后亮起来的是 B 图。
+  **当前不可达**（源码核对）：唯一能让「已经在正文页」的条目重新取数、从而换掉 `blocks` 的入口是
+  「重试抓取」按钮，而它只存在于 `bodyState === 'fallback'` 那个块里
+  （`src/client/article-pane.tsx:762`，`onRetry` 全仓只此一处使用）；而回退态要求
+  `!hasRenderedBlocks`（同文件 `:424-426`）—— 正文块为空才回退，回退内容不产生 `img` 块，
+  所以那一刻组覆盖必然是空集，没有序号可以漂。`j` / `k` 换篇走的是另一个 `itemId`，
+  复位 effect 会清空组覆盖，也不经过这条路径。
+  **不加防护代码**（spec 决策 16：为一条不可达路径加防护 = 没有实测样本的规则）。
+  将来若把「重试抓取」挪到 `failed` / `content` 态、或加「刷新正文」之类的入口，这条立刻变成可达：
+  届时的修法不是给序号加校验，而是把组标识换成**内容派生**的东西（组首图 `src` + 组内张数），
+  或者干脆在重抓成功时清空组覆盖 —— 后者更简单，且语义正确（新正文是另一次阅读）。
 - **`align` 只认 `align` 属性这条规则没有真实站点样本**（2026-11-21，R5）：表格对齐只读
   `<td align=right>` 这类属性，**不解析** `style="text-align:…"`、也不读 `<colgroup>`。
   这是按「不为未经实测的样本扩规则」刻意留的口子。真机上若看到「某站表格明明居中、阅读器里左对齐」，

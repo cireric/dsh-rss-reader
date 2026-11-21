@@ -6,7 +6,7 @@
  * 页面上下文里跑，是当初加沙箱要挡的事。取舍结论：**正文只走抽取视图**，想看原样就用
  * 「打开原站 ↗」在新标签页看——那是浏览器自己的上下文，没有沙箱折衷。
  */
-import { useCallback, useEffect, useRef, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { edgeTopFor, readingRatioOf, restoreTopFor } from '../list-scroll.js'
 
 /**
@@ -18,6 +18,7 @@ import { edgeTopFor, readingRatioOf, restoreTopFor } from '../list-scroll.js'
  */
 const ARTICLE_IMAGE_MAX_HEIGHT = 640
 import { estimateReadingMinutes, hasBodyText, httpUrlOrEmpty, type ItemView } from '../shared.js'
+import { foldOf, groupImageBlocks, type ImageFold, type ImageGroup } from '../image-fold.js'
 import { paragraphsOf } from '../html-text.js'
 import { READING_FONT_SIZES, READING_LINE_WIDTHS } from '../preferences.js'
 import type { ReadingPreferences } from '../preferences.js'
@@ -132,6 +133,157 @@ function InlineRunsView({ runs }: { runs: readonly InlineRun[] }): ReactNode {
 }
 
 /**
+ * 图片三态的标记属性名：值是 `loading` / `ok` / `failed`。
+ *
+ * 为什么要把内部状态写进 DOM：三态在 jsdom 里**没有任何别的可观测差别**（没有布局引擎、
+ * 图片不真的加载，见 `docs/pitfalls.md` §2.2），不标出来验收 9 的前半条就无法表达。
+ * 它同时是 07 灯箱的入口判据（只有 `ok` 的图可点），所以不是测试脚手架。
+ */
+const IMAGE_STATE_ATTR = 'data-rss-image-state'
+
+/** 图片容器的最小高度（px，spec 决策 20）：加载完成时把位移从「整张图」压到「高度差」。 */
+const ARTICLE_IMAGE_MIN_HEIGHT = 120
+
+/**
+ * 正文图与灯箱图共用的 referrer 策略（**唯一来源**，两处都读它，不许各写一份）。
+ *
+ * 为什么是 `strict-origin-when-cross-origin` 而不是 `no-referrer`：
+ * 2026-11-21 真机事故 —— `no-referrer` 让 Referer 变空，而 `cdnfile.sspai.com`（实测占本机缓存
+ * 52.7% 的图）**空 Referer 一律 403**，于是所有图都显示「图片加载失败」。
+ * 三态对照（浏览器 UA，逐域名 curl，三轮一致）：R6 前坏图 30.5% → no-referrer 78.9% → 本策略 30.5%。
+ *
+ * 而且那个隐私收益本就不存在：本插件是 SPA（`grep pushState|location|URLSearchParams src/client/`
+ * 零命中），没有按文章区分的 URL，Referer 里从来只有宿主 origin、不携带「正在读哪一篇」。
+ * 本策略跨源只发 origin、不发路径，既让图床通过，也仍然不暴露路径。
+ *
+ * ⚠️ 已知的**既有**问题（不是本属性造成，改它也不会好）：`icon.solidot.org`(26.3%) 要自家域名
+ * Referer、`icon.zhiding.cn`(4.2%) 要非空 Referer，两者在 R6 之前就 403。要修得按域名决定策略，
+ * 那是另一件事，别在这里顺手加白名单。
+ */
+const ARTICLE_IMAGE_REFERRER_POLICY = 'strict-origin-when-cross-origin'
+
+/** 一张图的载入观察值。 */
+type ImageState = 'loading' | 'ok' | 'failed'
+
+/**
+ * 正文里的一张图 —— 三态（`loading` / `ok` / `failed`）+ 占位。
+ *
+ * **为什么是独立子组件**（spec 决策 21）：`ArticleView` 那条「不放 `useState`」的约定管的是
+ * 折叠态（它必须被 `routeKey` 读到，所以住在 `index.tsx`）。逐图的载入观察值没有任何按键要读，
+ * 放进 `ArticleView` 会让每次图片载入都重渲染整篇正文。
+ *
+ * **为什么 `key` 必须是 `itemId + ':' + index`**（调用方负责）：换文章时若块数相同，React 会
+ * 复用同一个实例 ⇒ 沿用上一篇的 `ok` 态，而新图根本没加载过。复合 key 让 React 语义化地重挂，
+ * 换篇即复位，不需要 `useEffect` 去重置。
+ *
+ * **为什么挂载后还要补判 `complete`**（spec 决策 22）：缓存命中的图可能在 React 挂上
+ * `onLoad` 监听器**之前**就已经 `complete` 了 —— 那一刻 `load` 事件早已派发完毕，只靠
+ * `onLoad` 的图会永远停在「载入中」。这与 `docs/pitfalls.md` §3.1（长驻监听器不许捕获会变的值）
+ * 是同一族：**事件可能早于监听器**。用 `ref` + 挂载后跑一次的 effect 补判是正确的形态
+ * （`useEffect` 在 DOM 就位后跑，读到的 `complete` 是当下的值）。
+ */
+function ArticleImage({ src, alt, caption, onOpen }: {
+  src: string
+  alt: string
+  caption: string
+  /** 点开这张图（灯箱，R6 07）。只在 `state === 'ok'` 时挂到 `<img>` 上，见下面的注释。 */
+  onOpen: (src: string) => void
+}): ReactNode {
+  const [state, setState] = useState<ImageState>('loading')
+  const imageRef = useRef<HTMLImageElement | null>(null)
+
+  /**
+   * 补判「挂载前就已 complete」。
+   *
+   * 依赖数组只放 `src`：换图（同实例换 src）时要重新判一次，而 `setState` 是稳定的。
+   * `naturalWidth > 0` 才是「真的解码成功」——`complete === true` 也覆盖「加载失败后放弃」
+   * 那种情况（此时 `naturalWidth` 是 0），所以必须两个条件一起看（spec 决策 22）。
+   */
+  useEffect(() => {
+    const image = imageRef.current
+    if (image === null) return
+    if (!image.complete) return
+    setState(image.naturalWidth > 0 ? 'ok' : 'failed')
+  }, [src])
+
+  if (state === 'failed') {
+    /*
+     * 失败态**不渲染 `<img>`**（spec 决策 23）：留着它浏览器会画一个破图图标，
+     * 而我们要的是「图片加载失败」这行字 + alt。把图换成文案，同时也让
+     * 「失败态 DOM 里没有 img」成立 —— 注意与折叠态区分：折叠是根本没有 img，
+     * 失败态是 img 被替换成文案。
+     */
+    return (
+      <figure {...{ [IMAGE_STATE_ATTR]: state }} style={{ margin: '0 0 1.3em' }}>
+        <div style={{
+          minHeight: ARTICLE_IMAGE_MIN_HEIGHT, display: 'flex', flexDirection: 'column',
+          alignItems: 'center', justifyContent: 'center', gap: 4, padding: '12px 16px',
+          borderRadius: 6, textAlign: 'center',
+          border: '1px dashed color-mix(in srgb, currentColor 25%, transparent)',
+          background: 'color-mix(in srgb, currentColor 4%, transparent)',
+        }}>
+          <span>图片加载失败</span>
+          {/* 有 alt 就一并显示：它是这张图唯一的可读内容，丢掉等于什么都不剩 */}
+          {alt !== '' && <span className="dsh-rss-meta">{alt}</span>}
+        </div>
+        {caption !== '' && (
+          <figcaption className="dsh-rss-meta" style={{ marginTop: 8, textAlign: 'center' }}>{caption}</figcaption>
+        )}
+      </figure>
+    )
+  }
+
+  return (
+    <figure {...{ [IMAGE_STATE_ATTR]: state }} style={{ margin: '0 0 1.3em' }}>
+      {/*
+       * loading=lazy：长文里的图片很多，一次性加载会拖慢首屏。
+       * decoding=async 让解码不阻塞滚动。
+       * referrerPolicy=strict-origin-when-cross-origin：**浏览器默认值，显式写出来是为了钉住它**。
+       *
+       * ⚠️ 2026-11-21 真机回归（病象 → 根因 → 修法）：这里原本写的是 `no-referrer`（R6 01 的隐私改动），
+       * 结果**所有图都显示「图片加载失败」**。根因（`实测`，浏览器 UA 逐域名 curl）：空 Referer 会让
+       * `cdnfile.sspai.com`（本机缓存里 52.7% 的图）返回 403，非空才 200；三态对照是
+       * R6 前坏图 30.5% → R6 后 78.9% → 本策略 30.5%。也就是说那条隐私改动用「真实功能损坏」
+       * 换了一个**并不存在**的收益：本插件是 SPA（`grep pushState|location|URLSearchParams src/client/`
+       * 零命中），没有按文章区分的 URL，所以 Referer 里从来只有宿主 origin，不携带「正在读哪一篇」。
+       * 本策略跨源只发 origin、不发路径，既让图床通过，也仍然不暴露路径。
+       *
+       * 另注：`icon.solidot.org`(26.3%) 与 `icon.zhiding.cn`(4.2%) 在 R6 之前就 403 —— 那是**既有的**
+       * 防盗链问题（前者要自家域名 Referer，后者要非空），不是本次回归，也不由本属性决定。
+       * maxHeight 与 objectFit：正文里混着长截图与原图，只限宽的话一张 1×3000 的图会把版面撑出
+       * 几十屏。限高之后超长图缩成可辨认的尺寸（点开原站看大图），版面保持连续。
+       * minHeight 在外层容器上、不在 <img> 上（spec 决策 20）：占位要的是「容器先占住 120px」，
+       * 加在图上会把图本身拉高。
+       */}
+      <div style={{ minHeight: ARTICLE_IMAGE_MIN_HEIGHT }}>
+        {/*
+         * 灯箱入口（R6 07，spec 决策 24）：**只给 `ok` 的图挂点击**。
+         *
+         * 判据是 `state === 'ok'`，不是「有没有 `<img>`」——「载入中」的图也在 DOM 里，
+         * 若按元素类型挂点击，读者会在还在加载的占位块上点出一个空灯箱（或一张永远不出图的灯箱）。
+         * 这也正是 06 把三态写进 `data-rss-image-state` 的第二个用处（第一个是验收 9 的可观测性）。
+         *
+         * `cursor: zoom-in` 只在可点时给：它是「这张图能点」的唯一视觉线索，而不可点的图上
+         * 摆一个放大镜手势就是撒谎。
+         */}
+        <img ref={imageRef} src={src} alt={alt} loading="lazy" decoding="async" referrerPolicy={ARTICLE_IMAGE_REFERRER_POLICY}
+          onLoad={() => { setState('ok') }}
+          onError={() => { setState('failed') }}
+          onClick={state === 'ok' ? () => { onOpen(src) } : undefined}
+          style={{
+            display: 'block', margin: '0 auto', width: '100%', height: 'auto',
+            maxHeight: ARTICLE_IMAGE_MAX_HEIGHT, objectFit: 'contain', borderRadius: 6,
+            cursor: state === 'ok' ? 'zoom-in' : 'default',
+          }} />
+      </div>
+      {caption !== '' && (
+        <figcaption className="dsh-rss-meta" style={{ marginTop: 8, textAlign: 'center' }}>{caption}</figcaption>
+      )}
+    </figure>
+  )
+}
+
+/**
  * 单个正文块的渲染。
  *
  * 之所以要分类型：用户反馈「图片不显示、样式变形」——根因是抽取层过去只回传纯文本段落，
@@ -142,7 +294,11 @@ function InlineRunsView({ runs }: { runs: readonly InlineRun[] }): ReactNode {
  * 只在存在非 text run 时才写字段），所以「没有 runs」是常态路径，不是兼容分支 —— 旧缓存、
  * 纯文本段落、R4 的回退摘要（`paragraphBlocks` 造的 p 块）全都走这里。
  */
-function ArticleBlockView({ block }: { block: Record<string, unknown> }): ReactNode {
+function ArticleBlockView({ block, onOpenImage }: {
+  block: Record<string, unknown>
+  /** 点开这张图（灯箱）。图片块以外的块不读它。 */
+  onOpenImage: (src: string) => void
+}): ReactNode {
   const kind = typeof block['kind'] === 'string' ? block['kind'] : 'p'
   const text = typeof block['text'] === 'string' ? block['text'] : ''
   const runs = inlineRunsOf(block['runs'])
@@ -154,24 +310,8 @@ function ArticleBlockView({ block }: { block: Record<string, unknown> }): ReactN
     if (src === '') return null
     const alt = typeof block['alt'] === 'string' ? block['alt'] : ''
     const caption = typeof block['caption'] === 'string' ? block['caption'] : ''
-    return (
-      <figure style={{ margin: '0 0 1.3em' }}>
-        {/*
-         * loading=lazy：长文里的图片很多，一次性加载会拖慢首屏。
-         * decoding=async 让解码不阻塞滚动。
-         * maxHeight 与 objectFit：正文里混着长截图与原图，只限宽的话一张 1×3000 的图会把版面撑出
-         * 几十屏。限高之后超长图缩成可辨认的尺寸（点开原站看大图），版面保持连续。
-         */}
-        <img src={src} alt={alt} loading="lazy" decoding="async"
-          style={{
-            display: 'block', margin: '0 auto', maxWidth: '100%', height: 'auto',
-            maxHeight: ARTICLE_IMAGE_MAX_HEIGHT, objectFit: 'contain', borderRadius: 6,
-          }} />
-        {caption !== '' && (
-          <figcaption className="dsh-rss-meta" style={{ marginTop: 8, textAlign: 'center' }}>{caption}</figcaption>
-        )}
-      </figure>
-    )
+    // 三态与占位全在子组件里（spec 决策 21）：本组件保持无 state。
+    return <ArticleImage src={src} alt={alt} caption={caption} onOpen={onOpenImage} />
   }
 
   if (kind === 'pre') {
@@ -312,7 +452,140 @@ function paragraphBlocks(paragraphs: readonly string[]): Array<Record<string, un
   return paragraphs.map((text) => ({ kind: 'p', text }))
 }
 
-export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress }: {
+/** 折叠提示上的标记属性名：值是该组的序号（测试按它定位，spec 未规定名字，本票定为这个）。 */
+const IMAGE_FOLD_ATTR = 'data-rss-image-fold'
+
+/**
+ * 一组图片的折叠提示文案（spec 决策 8）。
+ *
+ * 单图优先 `caption` 再 `alt`：caption 是读者在图上看得见的图注，alt 是给读屏器与加载失败时用的
+ * 备选。两者都空时只说「图片」——**不编造**说明文字（AGENTS.md「不编造数据」）。
+ * 多图组按张数说话：列各图说明会把一条提示撑成一小段，而读者的意图只是「这里有 3 张图」。
+ */
+function foldLabelOf(group: ImageGroup): string {
+  if (group.blocks.length > 1) return '▸ 图片 ' + group.blocks.length + ' 张'
+  const block = group.blocks[0]
+  const caption = typeof block['caption'] === 'string' ? block['caption'] : ''
+  const alt = typeof block['alt'] === 'string' ? block['alt'] : ''
+  const label = caption !== '' ? caption : alt
+  return label === '' ? '▸ 图片' : '▸ 图片：' + label
+}
+
+/**
+ * 折叠态的一条提示。
+ *
+ * **刻意是普通文本元素 + `onClick`，不是 `<button>` / `<summary>`，也不给 `tabIndex`**（spec 决策 11）：
+ *  - 正文视图里**空格 = 翻页**。可聚焦控件（`<button>`）会带着自己的空格激活语义，而
+ *    `keyboard-routing.ts` 的 `isTypingTarget` 对 `<button>` 返回 `false` ⇒ 守卫不挡，
+ *    翻页静默失效；
+ *  - 提示进 Tab 序还会让键盘用户在长文里 Tab 过几十条提示。
+ * 键盘路径一律走 `i` 键（04 的票），鼠标路径走这里的 `onClick`——符合本插件「鼠标可选、键盘完备」的分工。
+ *
+ * 为什么是 `<div>` 而不是 `<span>`：它是块级的一条「占位提示」，夹在段落之间；行内 `<span>`
+ * 会让上下段落的间距塌成一行（视觉上分不清「这里有一张图被折叠了」）。
+ * `tabIndex` 在 `<div>` 上天然是 -1（`实测` jsdom：`<div>` / `<span>` 的 `tabIndex` 都是 -1），
+ * 所以不写它 —— 写了也只是让验收 6 的 `[tabindex]` 类判据有歧义。
+ * 也不加 `role="button"`：读屏器把它念成一段文字正是我们要的（它不是键盘可达的控件）。
+ */
+function ImageFoldHint({ group, onExpand }: {
+  group: ImageGroup
+  onExpand: (groupIndex: number) => void
+}): ReactNode {
+  return (
+    <div
+      {...{ [IMAGE_FOLD_ATTR]: String(group.index) }}
+      onClick={() => { onExpand(group.index) }}
+      style={{
+        margin: '0 0 1.1em', padding: '6px 10px', borderRadius: 6,
+        border: '1px dashed color-mix(in srgb, currentColor 25%, transparent)',
+        cursor: 'pointer', opacity: 0.85,
+      }}
+    >{foldLabelOf(group)}</div>
+  )
+}
+
+/**
+ * 灯箱覆盖层的标记属性名：值是它正在显示的那张图的 `src`。
+ *
+ * 与 `data-rss-image-state` / `data-rss-image-fold` 同一约定：标记写没写进 DOM 本身也是被测行为
+ * （测试按它现取节点，不认行号与组件树形状）。值放 `src` 而不是空串，是为了让「灯箱开的是哪张图」
+ * 在 DOM 里可直接读 —— 否则「换篇后灯箱关了」与「灯箱开成了新文章的第一张图」不可区分。
+ */
+const LIGHTBOX_ATTR = 'data-rss-lightbox'
+
+/**
+ * 灯箱（R6 07，spec 决策 24–28）：点已加载的正文图看大图。
+ *
+ * **为什么 `inset: 0` 挂在这里而不是面板根**：`ArticleView` 的外层已经是 `position: relative`
+ * （给右下角跳转按钮当地坐标系），覆盖层铺在那一层里就天然只盖正文面 —— 顶栏的「返回列表」
+ * 与左栏的源都还在，读者不用先关灯箱才能换一篇。挂到面板根会连它们一起盖住；挂进滚动容器
+ * 会让覆盖层跟着内容滚走。零布局改动。
+ *
+ * **`z-index: 5`**：压在正文之上、在帮助浮窗（`z-index: 6`）之下 —— 与 `back` 动作里
+ * 「帮助 → 灯箱 → 退出正文」的 Esc 优先级一致（视觉最上层先关）。
+ *
+ * **为什么不用 `role="dialog"` / `aria-modal`**（spec 决策 25）：`keyboard-routing.ts` 的
+ * `isTypingTarget` 会把焦点落在 `[role="dialog"]` / `[aria-modal="true"]` / `<dialog>` 里的按键
+ * **全部吞掉，含 Esc**。读者只要用鼠标点过一次灯箱里的图，焦点进了覆盖层，Esc 就再也关不掉它
+ * —— 帮助浮窗踩过同一个坑（`HelpPanel` 的注释记着那次实测事故）。所以这里用
+ * `role="region"` + `aria-label`，按键照常路由到正文（非模态，spec 决策 27）。
+ *
+ * **点背景关、点图不关**：关闭挂在外层 `onClick` 上，图上的 `onClick` 要 `stopPropagation()`。
+ * 不做「点图也关」——读者点一下大图常常是想看细节或只是误触，那一下不该把大图收掉。
+ */
+function Lightbox({ src, onClose }: {
+  src: string
+  onClose: () => void
+}): ReactNode {
+  return (
+    <div
+      {...{ [LIGHTBOX_ATTR]: src }}
+      role="region"
+      aria-label="图片查看"
+      // tabIndex 让覆盖层可聚焦：读者用鼠标点进来之后 Esc 仍要有落点可发（与浮窗同一条约定）。
+      // -1 而不是 0：它不该进 Tab 序 —— 键盘路径是「点图 → Esc」，中间不该多一站。
+      tabIndex={-1}
+      onClick={onClose}
+      style={{
+        position: 'absolute', inset: 0, zIndex: 5,
+        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+        gap: 12, padding: 16,
+        // 半透明遮罩：正文仍在背后隐约可见，读者不会以为「整页被换掉了」
+        background: 'color-mix(in srgb, var(--rss-bg) 88%, transparent)',
+        backdropFilter: 'blur(2px)',
+        outline: 'none',
+      }}
+    >
+      <img
+        src={src}
+        alt=""
+        // 与正文图同一条策略（2026-11-21 防盗链回归）：见正文图那段注释。
+        // 两处必须一致 —— 各写一个会出现「正文能显示、点开却失败」。
+        referrerPolicy={ARTICLE_IMAGE_REFERRER_POLICY}
+        // 点图本身不关闭：冒泡到外层就会触发 onClose，所以必须在这里截断。
+        onClick={(event) => { event.stopPropagation() }}
+        style={{
+          // 原尺寸（spec 决策 24）：限宽不横向溢出、限高不纵向撑出屏幕。
+          // objectFit: contain 让长截图等比缩进可视区，而不是被裁掉一头。
+          maxWidth: '100%', maxHeight: '100vh', objectFit: 'contain',
+          borderRadius: 6, background: 'var(--rss-bg)',
+        }}
+      />
+      <a
+        href={src}
+        target="_blank"
+        rel="noreferrer"
+        // 与正文图同一条策略：新标签打开也是一次请求，策略不一致会让「正文能看、点原图打不开」。
+        referrerPolicy={ARTICLE_IMAGE_REFERRER_POLICY}
+        // 链接的点击同样不许冒泡到背景（否则「点原图」会先把灯箱关掉再开新标签）
+        onClick={(event) => { event.stopPropagation() }}
+        style={{ fontSize: 13, color: 'var(--rss-accent)' }}
+      >原图 ↗</a>
+    </div>
+  )
+}
+
+export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress, expandedGroups, onExpandImageGroup, imagesExpanded, lightboxSrc, onOpenImage, onCloseLightbox }: {
   article: ArticleState | undefined
   item: ItemView | undefined
   onBack: () => void
@@ -327,6 +600,38 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
   /** 正文排版偏好（M5 01）：值归 store 所有，本组件只负责照着画、把用户的改动交回去 */
   reading: ReadingPreferences
   onReading: (patch: Partial<ReadingPreferences>) => void
+  /**
+   * 被点开的图片组序号（R6 03 的**组级覆盖**，spec 决策 5 / 14）。
+   *
+   * 状态住在 `index.tsx` 而不是本组件：`i` 键（04 的票）要在 `routeKey` 里读到它并清空它，
+   * 而 `routeKey` 与 `ArticleView` 是两个组件。本票只有「点提示」这一条写入路径，但它与 `i`
+   * 必须共享**同一个** state，否则 04 会再造一份、两份判定分家。
+   */
+  expandedGroups: ReadonlySet<number>
+  /** 点某组的折叠提示 ⇒ 只展开那一组（组是原子的，spec 决策 19）。 */
+  onExpandImageGroup: (groupIndex: number) => void
+  /**
+   * 图片折叠的**篇级覆盖**（R6 04，spec 决策 5 / 14）：`undefined` = 这一篇还没按过 `i`。
+   *
+   * 状态住在 `index.tsx`（与 `expandedGroups` 同一条通道），本组件只照着画：`i` 键在
+   * `routeKey` 里写它，若状态留在本组件里，按键与渲染就会脱钩（spec 验收 18）。
+   * 它与组覆盖是两层：`组覆盖 ?? 篇覆盖 ?? 偏好`（`foldOf` 是唯一裁决点）。
+   */
+  imagesExpanded: boolean | undefined
+  /**
+   * 灯箱正在显示的那张图的 `src`（R6 07，spec 决策 14 / 26）：`undefined` = 灯箱关着。
+   *
+   * 与 `imagesExpanded` / `expandedGroups` 同一条通道（`useState` 在 `index.tsx` → 进
+   * `KeyRoutingCtx` → 进 `routeKey` 调用 → 进依赖数组 → 作为 prop 传到这里）。
+   * **必须抬上去，不是可选**：`Esc` 由 `routeKey` 的 `back` 动作按优先级处理，而 `back`
+   * 读的是 `ctx`；状态留在本组件里，`Esc` 永远读不到它（spec 决策 14 的实测理由）。
+   * 本组件只负责照着画 —— 打开走 `onOpenImage`，关闭走 `onCloseLightbox`。
+   */
+  lightboxSrc: string | undefined
+  /** 点某张已载入的图 ⇒ 打开灯箱（写入 `lightboxSrc`）。 */
+  onOpenImage: (src: string) => void
+  /** 关闭灯箱（点背景）。`Esc` 走的是 `back` 动作，不经过这里。 */
+  onCloseLightbox: () => void
   /** 容器标记属性名：按键处理按它现取容器（取值集中在 list-scroll.ts 的 scrollSelectorFor） */
   scrollAttr: string
   /** 上/下一条是否可切（与键盘共用同一判定，见 canStepArticle） */
@@ -380,6 +685,44 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
   const displayBlocks: Array<Record<string, unknown>> = bodyState === 'fallback'
     ? paragraphBlocks(fallbackParagraphs)
     : readingBlocks
+  /**
+   * 图片组（spec 决策 16）：按 `displayBlocks` 的块顺序切，组序号就是这里的下标。
+   *
+   * 在**同一份** `displayBlocks` 上分组（不是 `readingBlocks`）：回退态画的是摘要段落，
+   * 两者不是同一个数组；拿错数组会让「回退态没有图片提示」这条自动成立的性质变成巧合。
+   * 回退段落不含 `img` 块 ⇒ 分组天然为空 ⇒ 提示不出现（spec 验收 23）。
+   */
+  const imageGroups = groupImageBlocks(displayBlocks)
+  /**
+   * 折叠判定体（spec 决策 6）：**每次渲染现造**，绝不进 `useMemo`。
+   *
+   * `foldOf` 在构造时对组覆盖 `Set` 取快照（见 `image-fold.ts` 的注释），所以把它缓存下来
+   * 再指望它跟着新 `Set` 变，症状是「点了提示没反应」或「`i` 按了不生效」。
+   * 三层输入齐了：偏好 `reading.expandImages`、篇级覆盖 `imagesExpanded`（04 的 `i` 写的）、
+   * 组级覆盖 `expandedGroups`（03 的点提示写的）。判定顺序 `组 ?? 篇 ?? 偏好` 只在 `foldOf` 里算。
+   */
+  const fold: ImageFold = foldOf(reading.expandImages, imagesExpanded, expandedGroups)
+  /** 块下标 → 该块所属的组；非图片块不在表里。 */
+  const groupOfBlock = new Map<number, ImageGroup>()
+  for (const group of imageGroups) {
+    for (const blockIndex of group.blockIndexes) groupOfBlock.set(blockIndex, group)
+  }
+  /**
+   * 本篇的条目 id：复合 key 的前半截（spec 决策 21）。
+   * 取 `article.itemId` 而不是 `item.id`：正文页的唯一真相是 article.itemId（见 list-actions.ts
+   * 的 loadArticle）—— item 可能已经被列表侧的选中变化换到别的条目，那时 key 会跟着错。
+   */
+  const articleItemId = article?.itemId ?? ''
+  /**
+   * 正文块的 React key：**`itemId + ':' + index`**，不是裸 `index`（spec 决策 21）。
+   *
+   * 裸下标在换文章时若块数相同，React 会复用同一个 `ArticleBlockView` 实例 ——
+   * 里面的 `<ArticleImage>` 于是沿用上一篇的 `ok` 态，而新图根本没加载过（读者看到一张
+   * 从没加载成功的图被当成「已载入」）。复合 key 让 React 语义化地重挂，换篇即复位，
+   * 不需要 `useEffect` 去重置状态。折叠提示也用同一个 key：它本身无状态，但同一个 map
+   * 里的 key 必须互不冲突。
+   */
+  const blockKeyOf = (at: number): string => articleItemId + ':' + at
   const title = article?.title || item?.title
   const publishedAt = item?.publishedAt
   // 历史行可能带脏 link（修复前落库的 javascript:）：渲染前过 shared.ts 的唯一白名单。
@@ -596,6 +939,21 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
                     <option value="dark">深色</option>
                   </select>
                 </label>
+                {/*
+                  * 「默认折叠图片」（R6 03）：与字号 / 栏宽 / 主题同处，值同样走 onReading 交回 store
+                  * 并落盘 —— 面板不持有状态，否则重开插件就恢复不了（spec 决策 3）。
+                  *
+                  * 为什么是复选框而不是 <select>：它是布尔值，两个 <option> 的「是/否」下拉要多一次
+                  * 点击才看得出当前状态；复选框的勾选态本身就是答案。
+                  * ⚠️ 它与折叠提示是两种元素：这里是真正的表单控件（在 `Aa` 面板里，Tab 得到、空格有意义），
+                  * 而正文里的提示不许进 Tab 序（spec 决策 11）—— 别把这条规矩套到面板上。
+                  */}
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <input type="checkbox" checked={reading.expandImages === false}
+                    aria-label="默认折叠图片"
+                    onChange={(event) => onReading({ expandImages: !event.target.checked })} />
+                  默认折叠图片
+                </label>
               </div>
             </details>
           </div>
@@ -660,7 +1018,26 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
                 {link ? '可以返回列表，或打开原站阅读。' : '可以按 Esc 返回列表。'}
               </div>
             </div>
-          ) : displayBlocks.map((block, index) => <ArticleBlockView key={index} block={block} />)}
+          ) : displayBlocks.map((block, index) => {
+            /*
+             * 折叠在**组层**判定（spec 决策 5 / 6 / 19），所以这一层先问判定体、再决定画什么。
+             * 组内任一成员被折叠 ⇒ 整组换成一条提示，且提示落在**组首块**的位置上：
+             * 这样段落与图片的相对顺序不变（spec 验收 20），提示也不会跑到组中间去。
+             * 判定只走 `fold.shouldRender(group.index)` 这一处 —— 不在 JSX 里另写
+             * `reading.expandImages === true`，否则「提示说折叠、DOM 里有 img」迟早发生。
+             */
+            const group = groupOfBlock.get(index)
+            // 「不是图片块」与「这一组该渲染」画出**同一样东西**，所以合并成一个分支：
+            // 分开写时两处 JSX 必须逐字同步，将来给 ArticleBlockView 加一个 prop 只改一处，
+            // 症状是「有的块带 onOpenImage、有的不带」——灯箱入口时灵时不灵，极难看出来。
+            // 语义没变：组覆盖 / 篇覆盖 / 偏好的裁决仍然只在 `fold.shouldRender` 那一处（决策 5）。
+            if (group === undefined || fold.shouldRender(group.index)) {
+              return <ArticleBlockView key={blockKeyOf(index)} block={block} onOpenImage={onOpenImage} />
+            }
+            // 折叠：只在组首块画提示，其余成员整块不渲染（组是原子的）
+            if (group.blockIndexes[0] !== index) return null
+            return <ImageFoldHint key={blockKeyOf(index)} group={group} onExpand={onExpandImageGroup} />
+          })}
         </article>
       </div>
 
@@ -687,6 +1064,13 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
             style={{ padding: '4px 8px', lineHeight: 1 }}>↓</button>
         </div>
       )}
+      {/*
+        * 灯箱放在**这一层**（`position: relative` 的正文外层）的最后：`inset: 0` 因此只铺正文面，
+        * 不盖顶栏与左栏（spec 决策 24）。放在滚动容器**之后**是关键 —— 放进去就会跟着内容滚走。
+        * 只在正文真的画出来时可能打开（入口是正文里的图），但这里不另加 `bodyState` 判断：
+        * 折叠 / 换篇 / 按 `i` 三条路径都会把它清掉，多一个守卫就多一处可能与那三条分家的判定。
+        */}
+      {lightboxSrc !== undefined && <Lightbox src={lightboxSrc} onClose={onCloseLightbox} />}
     </div>
   )
 }
