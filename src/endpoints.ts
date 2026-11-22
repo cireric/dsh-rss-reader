@@ -1,5 +1,5 @@
 /**
- * 浏览器半的读写通道：29 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
+ * 浏览器半的读写通道：30 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
  *
  * 原先这里是一个 switch：每臂各自手写 payload 解析、各自记得把未读账并进回包 ——
  * interface 的复杂度 ≈ implementation 的复杂度。现在「一个端点」是一个 module：
@@ -37,6 +37,7 @@ import {
 } from './endpoint-payloads.js'
 import type { createSearch } from './search.js'
 import type { Config } from './config.js'
+import type { SettingsControl } from './settings-control.js'
 import { EXTRACTOR_REVISION, contentVersionOf, fetchArticle, blocksToText } from './article.js'
 import { rebuildItem } from './domain.js'
 import { selectCleanup } from './retention.js'
@@ -67,6 +68,11 @@ export interface EndpointDeps {
   /** 上次刷新完成时间（刷新状态留在 index.ts 那侧，这里只读） */
   readonly lastRefreshCompletedAt: () => number | undefined
   readonly searchItems?: ReturnType<typeof createSearch>['run']
+  /**
+   * 本机设置覆盖层（R11 01）。**显式注入**而不是塞进 ReaderStore：settings 是插件配置，
+   * 不是条目数据（spec D30）。缺省只发生在测试桩没装配它时，端点会回 not-ready。
+   */
+  readonly settings?: SettingsControl
   readonly articleAttempts: Map<string, number>
 }
 
@@ -90,6 +96,7 @@ export interface EndpointCtx {
   readonly refreshNow: (options?: { force?: boolean; signal?: AbortSignal }) => Promise<RefreshRun>
   readonly lastRefreshCompletedAt: () => number | undefined
   readonly searchItems?: ReturnType<typeof createSearch>['run']
+  readonly settings?: SettingsControl
   readonly articleAttempts: Map<string, number>
 }
 
@@ -448,7 +455,7 @@ const buildOverview = (
   }
 }
 /**
- * 端点表：29 个端点一处声明（每项的 `payload` 是入参形状的唯一声明）。
+ * 端点表：30 个端点一处声明（每项的 `payload` 是入参形状的唯一声明）。
  *
  * 穷尽性由 `Record<Endpoint, EndpointSpec>` 保证 —— 名字表（shared.ts 的 ENDPOINT_NAMES）
  * 加了新端点而这里没跟上，编译就不过。这是本文件里唯一需要「加端点时改的地方」。
@@ -941,6 +948,22 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
     },
   }),
 
+  /**
+   * 设置页的**只读**快照（R11 01）：生效值 + 默认值（+ 启动时的读侧告警）。
+   *
+   * 为什么回包多一层 `settings`：界面要的是一个可扩展的对象 —— 06 票的只读区 / 版本 / 路径
+   * 会往同一个对象里加字段，而不是再造一个端点（spec D4.1 的回包形状）。
+   * 写路径是 02 票的 saveSettings，本票刻意不提供（先落盘再改内存的顺序需要单独一轮注意力）。
+   */
+  settings: defineEndpoint({
+    payload: noPayload,
+    to: async (_input, ctx) => {
+      if (ctx.settings === undefined) return fail('not-ready', '设置服务尚未就绪')
+      return ok({ settings: ctx.settings.snapshot() })
+    },
+  }),
+
+
   // ── 文件夹目录与变更接口（M2 02）────────────────────────────────────────
   // 与订阅同住 config.json；每个变更都在**一次**读改写里完成（改名连带成员归属）。
   // 名称规则与错误码归 src/folders.ts；这里只做 payload 形状校验与错误信封转换。
@@ -1118,7 +1141,7 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
  * 异常一律兜成 internal 信封 —— 不把 throw 泄进通道（调用方要的是带 code 的失败信封）。
  */
 export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: unknown, signal?: AbortSignal) => Promise<RpcResult<unknown>> {
-  const { config, log, ready, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems } = deps
+  const { config, log, ready, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings } = deps
 
   const dispatch = async (endpoint: string, payload: unknown, signal?: AbortSignal): Promise<RpcResult<unknown>> => {
     try {
@@ -1133,7 +1156,7 @@ export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: 
       if (spec === undefined) return fail('unknown-endpoint', '未知端点：' + endpoint)
 
       const ctx: EndpointCtx = {
-        store: target, ready, config, log, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, signal,
+        store: target, ready, config, log, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, signal,
       }
       const outcome = await spec.to(payload, ctx)
       const { result } = outcome

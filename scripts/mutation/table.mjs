@@ -739,8 +739,10 @@ export const MUTATIONS = [
       '正文视图下点文件夹 / 标签：同样回到列表、清空旧文章',
       '正文视图下切「未读 / 星标」过滤：回到列表',
     ],
-    from: '\t\t\tconst leaveArticleForScope = () => {\n\t\t\t\tif (get().view === "article") set({\n\t\t\t\t\tview: "list",\n\t\t\t\t\tarticle: void 0\n\t\t\t\t});\n\t\t\t};',
-    to: '\t\t\tconst leaveArticleForScope = () => {};' },
+    // 2026-11-22 R11 01：入口改名 leaveTransientViews 并多收一类 settings，锚点按产物重锚；
+    // 本条只抹掉「正文退出」，settings 分支留着 —— 否则两条判定会被同一条变异一起带走。
+    from: '\t\t\tconst leaveTransientViews = () => {\n\t\t\t\tconst view = get().view;\n\t\t\t\tif (view === "article") set({\n\t\t\t\t\tview: "list",\n\t\t\t\t\tarticle: void 0\n\t\t\t\t});\n\t\t\t\telse if (view === "settings") set({ view: "list" });\n\t\t\t};',
+    to: '\t\t\tconst leaveTransientViews = () => {\n\t\t\t\tconst view = get().view;\n\t\t\t\tif (view === "article") {\n\t\t\t\t} else if (view === "settings") set({ view: "list" });\n\t\t\t};' },
   // 每源未读数的**键域**（2026-10-10）。左栏角标按 feeds 表逐行渲染，键域必须严格 = feeds 表：
   // 删掉「以 feeds 表铺 0」后，0 未读的源会丢键，那一行变成「角标空白」而不是「角标 0」——
   // 界面上无从分辨，是最贵的那类沉默失败。非等价变异：丢键后取值变 undefined，两条测试会红。
@@ -2925,4 +2927,34 @@ export const MUTATIONS = [
     judgeTests: ['搜索：外部改库留下的空串作者读成 undefined（与列表同一份归一化）'],
     from: '            author: normalizeAuthor(typeof author === \'string\' ? author : undefined),',
     to: '            author: typeof author === \'string\' ? author : undefined,' },
+
+  // ── R11 01：设置页骨架（2026-11-22）────────────────────────────────────────
+  // 覆盖优先级反了：合并时把 settings 覆盖写回基线（等价于「patch 盖 settings」）。
+  // 判据是 settings 端点用例里的 effective 断言 —— 页面数字必须等于下一次刷新真正会用的值。
+  { id: 'settings-覆盖优先级', file: 'lib/settings-control.js',
+    judges: ['settings-endpoints.test.mjs'],
+    judgeTests: ['settings 覆盖优先级：settings.json > patch 基线，未覆盖的键仍跟 patch'],
+    from: '            config[key] = value;',
+    to: '            config[key] = baseline[key];' },
+  // 一个坏键让整份 overrides 失效：合法项被一起带走，页面把「坏值提示」变成「全部回默认」。
+  // 判据是 settings-file 的逐键丢用例（合法项照用 + dropped 计数 + 文件不重写）。
+  { id: 'settings-坏值整份隔离', file: 'lib/storage/settings-file.js',
+    judges: ['settings-file.test.mjs'],
+    judgeTests: ['坏值逐键丢：合法项照用、文件不被自动重写（内容与 mtime 都不变）'],
+    from: "    return { status: 'ok', overrides, dropped };",
+    to: "    return { status: 'ok', overrides: dropped > 0 ? {} : overrides, dropped };" },
+  // 删掉 Esc 的 settings 分支：设置页变成关不掉的页面（D20 的第一出口失效）。
+  // 判据是 DOM 用例的三出口里 Esc 那一段。
+  { id: 'settings-Esc 不回列表', file: 'lib/client.js',
+    judges: ['settings-page-dom.test.mjs'],
+    judgeTests: ['R11 01 退出设置页：Esc / 返回按钮 / 再点一次设置都回列表'],
+    from: '\t\t\t\t\tif (view === "settings") {\n\t\t\t\t\t\tevent.preventDefault();\n\t\t\t\t\t\tstore.closeSettings();\n\t\t\t\t\t\tbreak;\n\t\t\t\t\t}',
+    to: '\t\t\t\t\tif (view === "settings") {\n\t\t\t\t\t\tbreak;\n\t\t\t\t\t}' },
+  // 左栏导航不再退出设置页：点了没反应（D21 的现场）。
+  // 判据是 DOM 用例「点源 / 切过滤都回列表且导航生效」。
+  { id: 'settings-左栏导航不退出', file: 'lib/client.js',
+    judges: ['settings-page-dom.test.mjs'],
+    judgeTests: ['R11 01 左栏与过滤：设置页下点导航项或切过滤立即回列表且导航生效'],
+    from: '\t\t\t\telse if (view === "settings") set({ view: "list" });',
+    to: '\t\t\t\telse if (view === "settings") { /* 变异：不退出设置页 */ }' },
 ]

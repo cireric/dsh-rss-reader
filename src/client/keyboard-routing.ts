@@ -193,6 +193,16 @@ export function routeKey(event: KeyboardEvent, ctx: KeyRoutingCtx): void {
 
   const store = ctx.store
   const view = store.get().view
+  /**
+   * settings 视图**提前 return**（R11 01，spec D22）：只有 `?`（帮助）、`F`（订阅管理）、
+   * `Esc`（回列表）保持可用，其余动作一律不接管。
+   *
+   * 为什么不逐个 case 加 `if (view !== 'settings') return`：本层的 `run()` 都带
+   * `preventDefault`，而设置页要求 j / k 等阅读键**完全不动**、空格 / d 交给浏览器原生滚动。
+   * 「不接管」必须发生在 switch 之前 —— 在最外层 return 才能保证 `defaultPrevented === false`。
+   * 也不要在这里 focusScrollBox('settings')：滚动容器不在 list-scroll 的视图表里，会 warn。
+   */
+  if (view === 'settings' && action !== 'help' && action !== 'manageFeeds' && action !== 'back') return
   const run = (act: () => void): void => { event.preventDefault(); act() }
   switch (action) {
     case 'search':
@@ -330,7 +340,7 @@ export function routeKey(event: KeyboardEvent, ctx: KeyRoutingCtx): void {
     // r：刷新未读计数（只重取本地视图，不抓取 —— 规格不变量 1）
     case 'refreshCount': run(() => { void store.refreshCount() }); break
     case 'manageFeeds': run(() => store.toggleFeeds()); break
-    // Esc：帮助浮窗 → 灯箱 → 正文 → 订阅管理 → 列表。列表态不拦截（不抢弹层的 Esc）
+    // Esc：帮助浮窗 → 灯箱 → 正文 → 订阅管理 → 设置 → 列表。列表态不拦截（不抢弹层的 Esc）
     case 'back':
       // 帮助浮窗优先：开着帮助时 Esc **只**关帮助 —— 否则在正文页按 Esc 会「浮窗与文章一起
       // 消失」，而读者只是想收掉那张挡住视线的卡片（用户拍板的三个关闭出口之一）。
@@ -343,6 +353,9 @@ export function routeKey(event: KeyboardEvent, ctx: KeyRoutingCtx): void {
       if (ctx.lightboxSrc !== undefined) { run(() => ctx.setLightboxSrc(undefined)); break }
       if (view === 'article') { event.preventDefault(); store.closeArticle(); break }
       if (view === 'feeds') { event.preventDefault(); store.toggleFeeds(); break }
+      // 设置页与订阅管理同级：返回固定回列表，不记来源视图（D20 —— 记 prevView 会把
+      // ArticleView 的重挂与正文滚动恢复牵进来，收益低于风险）。
+      if (view === 'settings') { event.preventDefault(); store.closeSettings(); break }
       return
     // 视图密度只在条目流上有意义（在正文页/订阅管理页按 1/2 不该改背后的列表）
     case 'expandedView': if (view === 'list') store.setLayout('expanded'); break
