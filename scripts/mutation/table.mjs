@@ -2557,6 +2557,14 @@ export const MUTATIONS = [
     // lib/preferences.js 实测 OCCURRENCES=1（带上下文锚定，`expandImages:` 只此一处）。
     from: "        expandImages: typeof readingSource['expandImages'] === 'boolean'\n            ? readingSource['expandImages']\n            : DEFAULT_READING_PREFERENCES.expandImages,",
     to: "        expandImages: readingSource['expandImages'] ?? DEFAULT_READING_PREFERENCES.expandImages," },
+  { id: 'prefs-showUnread 类型', file: 'lib/preferences.js',
+    judges: ['nav-persistence.test.mjs'],
+    judgeTests: ['sanitizeViewPreferences：showUnread 只判布尔，"false" / 1 / null 一律回落 true 且不带走同份记忆'],
+    // R11 05 / D27.2：去掉 `typeof === 'boolean'` 那道闸，`"false"` / `1` 被当作真值原样采用
+    // （不是回落 true）。判据是**归一化后的确切值**：字符串 "false" 与数字 1 都必须变成布尔 true。
+    // lib/preferences.js 实测 OCCURRENCES=1（`showUnread` 的 `typeof` 闸只此一处）。
+    from: "    const showUnread = typeof source['showUnread'] === 'boolean'\n        ? source['showUnread']\n        : DEFAULT_VIEW_PREFERENCES.showUnread;",
+    to: "    const showUnread = source['showUnread'] ?? DEFAULT_VIEW_PREFERENCES.showUnread;" },
   { id: 'client-分组只认单张', file: 'lib/image-fold.js',
     judges: ['image-fold.test.mjs'],
     judgeTests: ['分组：连续三张图合成一组（一次展开三张，不是三组）'],

@@ -1292,10 +1292,13 @@ test('隐藏未读计数时左栏角标也消失（GR spec 不变量 8）', skip
   const feedRow = () => h.win.document.querySelector('[data-rss-nav-row="feed:f1"]')
   assert.equal(feedRow().getAttribute('data-rss-nav-badge'), '1', '前置条件：默认显示角标')
 
-  // 走真实交互：点顶栏那个复选框，而不是直调 store.setShowUnread —— 这样「顶栏 / 侧栏徽标 /
-  // 左栏角标三者同消」才真的被钉住（三者任一一处漏改，这里就会红）。
-  const toggle = [...h.win.document.querySelectorAll('input[type="checkbox"]')][0]
-  assert.ok(toggle !== undefined, '应当有「显示未读计数」复选框')
+  // 走真实交互：R11 05 起复选框从工具栏「更多」搬进了设置页，所以先进设置页再点它，
+  // 而不是直调 store.setShowUnread —— 这样「设置页控件 → store → 左栏角标」整条接线才被钉住。
+  h.win.document.querySelector('[data-rss-settings-open]').click()
+  await h.waitFor(() => h.win.document.querySelector('[data-rss-settings-page]') !== null, { label: '设置页上屏' })
+  await h.settle()
+  const toggle = h.win.document.querySelector('[data-rss-setting-checkbox="showUnread"]')
+  assert.ok(toggle !== null, '设置页「显示」区应当有「显示未读计数」复选框')
   toggle.dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
   await h.settle()
 
@@ -3618,10 +3621,10 @@ test('R1-03 窗口控件：默认全部、四个档位、与「已加载」同�
   h.press('j')
   assert.notEqual(h.store.get().selectedId, before, '失焦后 j 必须恢复')
 
-  // A 的范围控件 2026-11-21 搬进了确认框（「更多」里不再有它）：改完设置焦点留在 select 上，
-  // 随后的 A 会被输入控件守卫吞掉 —— 那正是用户报告的那次「按 A 无反应」。
-  assert.doesNotMatch(doc.querySelector('.dsh-rss-settings-panel').textContent, /A 键范围/,
-    '「更多」里不得再有 A 键范围（它已归确认框）')
+  // A 的范围控件 2026-11-21 搬进了确认框；R11 05 起工具栏「更多」整个删除（没有任何条目了）。
+  // 改完设置焦点留在 select 上，随后的 A 会被输入控件守卫吞掉 —— 那正是用户报告的那次「按 A 无反应」。
+  assert.equal(doc.querySelector('.dsh-rss-settings-panel'), null,
+    '工具栏「更多」必须已整个删除；列表视图里不该再有它的面板')
   h.press('A', true)
   await h.settle()
   const confirm = doc.querySelector('[data-rss-markall-confirm]')
@@ -4520,9 +4523,9 @@ test('R6 01：正文图片的 referrer 策略是 strict-origin-when-cross-origin
 /**
  * `Aa` 面板（正文排版偏好那一块）。
  *
- * ⚠️ 不能写 `querySelector('details.dsh-rss-settings')`：顶栏「更多」用的是**同一个** class，
- * 而它先出现在文档里 ⇒ 拿到的会是「更多」面板，断言全在错的节点上（本用例第一版就踩了）。
- * 按「哪个 details 里有字号选择」定位：这是语义定位（那一块就是排版面板），不是结构定位。
+ * ⚠️ 不能写 `querySelector('details.dsh-rss-settings')`：顶栏「更多」曾用同一个 class 且先出现在
+ * 文档里 ⇒ 拿到的是「更多」面板（本用例第一版就踩过）。R11 05 删掉了「更多」，但按
+ * 「哪个 details 里有字号选择」定位仍是语义定位（那一块就是排版面板），不依赖文档顺序。
  */
 function aaPanel(h) {
   const size = h.win.document.querySelector('select[aria-label="正文字号"]')

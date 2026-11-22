@@ -11,8 +11,8 @@
  * 视图记忆：面板重开后要恢复起来的那几项（两列布局任务 7 + R2-01）。
  *
  * 这几份状态刻意**只列被记忆的**：navSelection（虚拟视图 / 某个源）、filter、navVisible、
- * 正文排版 reading，以及 R2-01 的阅读位置 lastItemId（上次选中的那一行）与 R2-02 的
- * lastListScrollTop（列表滚到哪儿）。
+ * showUnread（R11 05 起从纯内存搬进来）、正文排版 reading，以及 R2-01 的阅读位置
+ * lastItemId（上次选中的那一行）与 R2-02 的 lastListScrollTop（列表滚到哪儿）。
  * 特别**不含 navCursor**（键盘光标）—— 理由见客户端 store 的恢复注释：光标是「焦点在哪」，
  * 是瞬时的指向，而这里记的是「上次看到哪儿」；恢复时按既有规则把它落到生效的那一行即可。
  */
@@ -30,6 +30,14 @@ export interface ViewPreferences {
     | { kind: 'tag'; tagId: string }
   filter: 'all' | 'unread' | 'starred'
   navVisible: boolean
+  /**
+   * 是否显示未读计数（R11 05 / D27.2）。
+   *
+   * 此前是纯内存状态（`state.showUnread`，重开面板回 `true`）；搬进设置页后必须记住，
+   * 所以并入同一份视图记忆。归一化规则与 navVisible 同一条：**只认布尔**，认不出回落 `true`。
+   * 默认 `true` = 改动前的既有行为（规格 §5 不变量 8「未读计数可隐藏」，不是默认隐藏）。
+   */
+  showUnread: boolean
   /** 正文排版（M5 01）。旧配置没有这个键 ⇒ 归一化时补默认值，不许因为缺字段就回落整份记忆。 */
   reading: ReadingPreferences
   /**
@@ -98,6 +106,7 @@ export const DEFAULT_VIEW_PREFERENCES: ViewPreferences = {
   navSelection: { kind: 'virtual' },
   filter: 'all',
   navVisible: true,
+  showUnread: true,
   reading: DEFAULT_READING_PREFERENCES,
 }
 
@@ -172,6 +181,13 @@ export function sanitizeViewPreferences(
     ? source['navVisible']
     : DEFAULT_VIEW_PREFERENCES.navVisible
 
+  // 显示未读计数（R11 05 / D27.2）：与 navVisible 同一条规则 —— 只认布尔。
+  // `"false"` / `1` / `null` 这些「看起来像」的值一律回落 true，不做真值转换：
+  // 把字符串 "false" 当 false 会悄悄关掉计数，读者完全无从解释（与图片折叠偏好同一条理由）。
+  const showUnread = typeof source['showUnread'] === 'boolean'
+    ? source['showUnread']
+    : DEFAULT_VIEW_PREFERENCES.showUnread
+
   const readingRaw = source['reading']
   const readingSource = typeof readingRaw === 'object' && readingRaw !== null && !Array.isArray(readingRaw)
     ? (readingRaw as Record<string, unknown>)
@@ -214,6 +230,7 @@ export function sanitizeViewPreferences(
     navSelection,
     filter,
     navVisible,
+    showUnread,
     reading,
     ...(lastItemId === undefined ? {} : { lastItemId }),
     ...(lastListScrollTop === undefined ? {} : { lastListScrollTop }),

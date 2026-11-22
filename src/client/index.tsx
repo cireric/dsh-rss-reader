@@ -876,19 +876,9 @@ export function createReader(store: ReaderStore): () => ReactNode {
             <RefreshIcon spinning={slowLoading} />
             {slowLoading ? '刷新中…' : '刷新'}
           </button>
-          <details className="dsh-rss-settings">
-            <summary className="dsh-rss-btn" onKeyDown={(event) => {
-              // 空格应打开原生折叠区，避免被文档级翻页快捷键接管。
-              if (event.key === ' ') event.stopPropagation()
-            }}>更多</summary>
-            <div className="dsh-rss-settings-panel">
-              <label>显示未读计数
-                <input type="checkbox" checked={state.showUnread} onChange={(event) => store.setShowUnread(event.target.checked)} />
-              </label>
-              {/* 「清理旧条目」R11 04 起搬进设置页「清理天数」行（预演 → 确认 → 执行，D27）：
-                  同一个动作不能有两个入口，否则两边的阈值与确认语义迟早分家。 */}
-            </div>
-          </details>
+          {/* R11 05：工具栏「更多」已整个撤销 —— 04 把清理搬进设置页后它只剩「显示未读计数」，
+              05 再把这一项搬进设置页「显示」区，菜单已没有任何条目。样式表里的
+              `.dsh-rss-settings` / `.dsh-rss-settings-panel` 仍被正文页 Aa 面板复用，所以不动。 */}
           {/* 设置入口（R11 01，D19）：放在「刷新」与「?」之间；再点一次回列表（与 F 的 toggle 同型）。
               所有视图都可见 —— 工具栏本来就常驻，不给它按视图分叉。 */}
           <button type="button" className="dsh-rss-btn" data-rss-settings-open=""
@@ -1040,6 +1030,10 @@ export function createReader(store: ReaderStore): () => ReactNode {
             settings={state.settings}
             error={state.settingsError}
             warningDismissed={state.settingsWarningDismissed}
+            reading={state.reading}
+            onReading={(patch) => store.setReading(patch)}
+            showUnread={state.showUnread}
+            onShowUnread={(value) => store.setShowUnread(value)}
             onClose={() => store.closeSettings()}
             onDismissWarning={() => store.dismissSettingsWarning()}
             onSave={(key, value) => store.saveSetting(key, value)}
