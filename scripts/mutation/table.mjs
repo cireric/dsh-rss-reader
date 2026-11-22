@@ -2982,6 +2982,13 @@ export const MUTATIONS = [
     judgeTests: ['saveSettings 接受 0：0 合法，且「抓全部源」由既有 selectStalestFeeds 判据给出'],
     from: '    refreshFeedsPerRound: { min: 0, max: 999 },',
     to: '    refreshFeedsPerRound: { min: 1, max: 999 },' },
+  // 清理天数的下限从 1 改成 0：0 会让 cutoff = 现在，一键清光所有已读条目（spec §4.1 / D9 的
+  // 数据事故边界）。判据是 03 的边界负例 —— 0 必须被端点判成 bad-request，且文件与内存都不变。
+  { id: 'settings-清理天数下限', file: 'lib/settings-schema.js',
+    judges: ['settings-endpoints.test.mjs'],
+    judgeTests: ['saveSettings 其余三项的非法边界：0 / 负数 / 超上限 / 小数都回 bad-request，文件与内存都不变'],
+    from: '    cleanupAfterDays: { min: 1, max: 3650 },',
+    to: '    cleanupAfterDays: { min: 0, max: 3650 },' },
   // ── R11 06：Agent 说明与关于区（2026-11-22）──────────────────────────────
   // 页面少渲染一条 Agent 说明：常量仍是 4、页面只画 3 ⇒ D24 的「条目数 == 常量长度」失效。
   // 判据是 DOM 用例里对渲染条目数与顺序的断言（直接测常量会自证，抓不到这条）。
