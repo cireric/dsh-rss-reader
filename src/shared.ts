@@ -19,6 +19,7 @@
  * `ctx.connection.requestRejection(req)` 套用同一套 Host/Origin 与浏览器鉴权。
  */
 import type { UnreadAccount } from './unread.js'
+import type { TunableKey } from './settings-schema.js'
 // 表格块没有 text / items，只有它能摊出可读文字。article-text.ts 零 node 依赖（本文件要进 client
 // bundle），行列摊平也只有那一份实现 —— 不在这里再写一遍遍历（spec 决策 9 / 10）。
 import { tableToText } from './article-text.js'
@@ -38,6 +39,8 @@ export const ENDPOINT_NAMES = [
   'viewPreferences', 'saveViewPreferences', 'saveReadingProgress', 'duplicateHints', 'searchItems',
   'listFolders', 'createFolder', 'renameFolder', 'deleteFolder', 'moveFeedToFolder', 'reorderFeeds',
   'listTags', 'createTag', 'renameTag', 'deleteTag', 'setItemTags',
+  // R11 01 / 02：设置页的读端点与写端点（写路径先落盘再改内存，见 settings-control.ts）。
+  'settings', 'saveSettings',
 ] as const
 export type Endpoint = (typeof ENDPOINT_NAMES)[number]
 
@@ -46,6 +49,44 @@ export type RpcResult<T> =
   // details 是宿主信封的必填字段（ConnectionRpcFailure，2026-10-06 源码核对；
   // 技能文档里的样板落后于源码，少了它 tsc 直接拒绝）
   | { ok: false; error: { code: string; message: string; details: object } }
+
+/**
+ * 「关于」区里一行只读参数（R11 06，spec D14.1）。
+ *
+ * 名单与顺序由**宿主**决定（Config 减去 `feeds` 与四个可调键），客户端只按回包顺序画。
+ * 值原样下发（数字 / 布尔 / 字符串），展示格式归客户端 —— 这样加字段或改展示不需要
+ * 在客户端抄一份当前值。
+ */
+export interface ReadOnlySettingView {
+  /** Config 字段名。 */
+  key: string
+  /** 当前生效值。 */
+  value: string | number | boolean
+}
+
+/**
+ * 设置页的 wire 形状（R11 01 / 06）。
+ *
+ * 只带界面真正用到的部分：生效值与默认值（来源层 overrides / inherited / explicit
+ * 刻意不下发，spec D16：界面不显示来源）；`warning` 是启动时读 `settings.json` 的告警
+ * （坏文件已隔离 / 坏值已忽略），正常态缺席，不阻断任何功能（D17）。
+ *
+ * 06 票追加的「关于」区数据同样只由宿主下发：版本在装载时读 package.json，路径来自
+ * settings 控制器，12 个只读参数来自同一份 Config —— 客户端不硬编码任何一项。
+ */
+export interface SettingsSnapshot {
+  effective: Record<TunableKey, number>
+  defaults: Record<TunableKey, number>
+  warning?: string
+  /** 插件版本（运行时读 package.json）。 */
+  version: string
+  /** 插件自持存储根：`$DSH_HOME/storages/rss-reader`。 */
+  dataDir: string
+  /** `settings.json` 的绝对路径。 */
+  settingsPath: string
+  /** 「其余 12 个参数（只读）」：名称 + 当前值，顺序由宿主白名单固定。 */
+  readOnly: ReadonlyArray<ReadOnlySettingView>
+}
 
 /** 文件夹目录的一条：名称 + 成员订阅 id（成员按 config.json 的订阅顺序）。 */
 export interface FolderView {
@@ -226,11 +267,18 @@ export interface ArticlePayload {
   /** 站点是否允许被 iframe 嵌入（决定能否切到「原站视图」） */
   frameable?: boolean
 }
-/** 显式清理（`cleanup` 端点）的结果：删除条数、释放字符数与阈值。 */
+/**
+ * 显式清理（`cleanup` 端点）的结果：删除条数、释放字符数与阈值。
+ *
+ * `dryRun` 是回包的自我标识（R11 04 / D27.1）：预演与执行走同一个端点，调用方必须能分辨
+ * 这次回包的 `deleted` 是「将要删」还是「已经删」—— 两者混为一谈会把预演当成已执行。
+ * 预演时 `deleted` = 如果现在执行会删多少，且一条都不删。
+ */
 export interface CleanupResult {
   deleted: number
   freedChars: number
   cutoff: string
+  dryRun: boolean
   unread: number
 }
 /** OPML 导出（`opmlExport`）的返回。 */

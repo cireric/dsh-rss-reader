@@ -24,6 +24,7 @@ import type { Config as ConfigShape } from './config.js'
 // config 不再经过 schema —— 全字段 undefined，抓取 / 正文缓存闸门 / 清理端点三处硬故障。
 export { Config }
 import { createDispatch, createHttpHandler } from './endpoints.js'
+import { createSettingsControl } from './settings-control.js'
 import { createLifecycle } from './lifecycle.js'
 import { createSearch } from './search.js'
 import { registerAgentTools } from './tools.js'
@@ -97,6 +98,15 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
     log('宿主传入的配置未经 schema 解析（' + JSON.stringify(rawConfig ?? null).slice(0, 60) + '），已按 schema 默认值补齐')
   }
 
+  // R11 01 / 02：本机设置的稀疏覆盖层（settings.json，读 + 写）。必须在 lifecycle / dispatch 拿到 config **之前**
+  // 完成合并 —— 四个可调键都是「调用时现读」，合并进同一个对象后下一次刷新就是新值。
+  // 读失败在这里只会变成设置页的警示条，不抛错：坏设置文件不该让阅读器打不开（spec D6）。
+  const settings = createSettingsControl({
+    config,
+    settingsPath: join(storagesRoot, 'settings.json'),
+    log,
+  })
+
   // 生命周期：打开 → 刷新 → 关停。它与 ctx 无关，测试直接 start/stop（2026-10-15 H2）。
   const session = createLifecycle({ config, storagesRoot, configFile, log, summarize })
 
@@ -108,6 +118,7 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
     lastRefreshCompletedAt: session.lastRefreshCompletedAt,
     articleAttempts: session.articleAttempts,
     searchItems: search.run,
+    settings,
   })
 
   // M3 02/03 的模型工具：**同步**注册（apply 必须同步，见上面的注释）。

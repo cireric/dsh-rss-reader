@@ -65,7 +65,9 @@ test('搜索直接使用旧版 v1 库，Worker 启动失败时仍可阅读且恢
     // 只在临时插件副本里移走 Worker，模拟发布缺件且保留真实加载失败路径。
     const lib = join(root, 'lib')
     cpSync(fileURLToPath(new URL('../lib/', import.meta.url)), lib, { recursive: true })
-    writeFileSync(join(root, 'package.json'), JSON.stringify({ type: 'module' }))
+    // 临时插件副本要与真实发布包同形：settings 控制器在装载时读包自身的 version
+    //（R11 06 关于区的版本号），缺了它 apply 会响亮失败 —— 这正是本夹具想复现的「发布缺件」之外的情况。
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ type: 'module', version: '0.0.0-test' }))
     symlinkSync(fileURLToPath(new URL('../node_modules/', import.meta.url)), join(root, 'node_modules'), 'dir')
     const { apply } = await import(pathToFileURL(join(lib, 'index.js')).href)
     let handler

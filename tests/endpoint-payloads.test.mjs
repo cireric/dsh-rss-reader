@@ -179,6 +179,29 @@ const CONTRACTS = {
     alsoValid: [withWindow({ itemId: 'a' })],
     invalid: [{}, { itemId: '' }, ...windowBadSamples({ itemId: 'a' })],
   },
+  // R11 01：settings 是零入参读端点（noPayload 接受并忽略 payload）。
+  settings: { valid: { anything: 1 }, invalid: [] },
+  // R11 02：写端点。patch / resetToDefaults 二选一；每个值走 settings-schema 的同一份范围判据。
+  saveSettings: {
+    valid: { patch: { refreshFeedsPerRound: 7 } },
+    alsoValid: [
+      { patch: { refreshFeedsPerRound: 0 } },
+      { patch: { refreshFeedsPerRound: 7, cleanupAfterDays: 45 } },
+      // D4.1 的 Partial 允许空对象：空 patch = 无操作成功（不是坏入参）。
+      { patch: {} },
+      { resetToDefaults: true },
+    ],
+    invalid: [
+      {},
+      { patch: { refreshFeedsPerRound: -1 } },
+      { patch: { refreshFeedsPerRound: 1000 } },
+      { patch: { refreshFeedsPerRound: '7' } },
+      { patch: { refreshFeedsPerRound: 7.5 } },
+      { patch: { rsshubBase: 'https://rsshub.example' } },
+      { patch: { refreshFeedsPerRound: 7 }, resetToDefaults: true },
+      { resetToDefaults: false },
+    ],
+  },
   viewPreferences: { valid: { anything: 1 }, invalid: [] },
   saveViewPreferences: {
     valid: { preferences: {} },
@@ -274,8 +297,10 @@ test('入参声明：每条坏样本都被拒，并给出字段路径', () => {
   }
   // 116 = R1 01 时的 81 + R1 02 给五个带账端点各补的 7 条窗口负例。
   // 121 = 116 + ADR-0008 给 markRead 补的 5 条选择器负例（两个范围 / 范围+all / ids+all / ids+dryRun / 空选择器）。
+  // 129 = 121 + R11 02 的 saveSettings 8 条负例（二选一 / 越界 / 非整数 / 非数字 / 非白名单键）；
+  // 空 patch 在 R11 评审 P3 后是合法的空操作，不再是负例。
   // 删样本、或新增端点忘了配负例，都必须在这里显形。
-  assert.equal(checked, 121, '坏样本条数变了（当前 ' + checked + '）—— 检查契约表是否漏了必填字段')
+  assert.equal(checked, 129, '坏样本条数变了（当前 ' + checked + '）—— 检查契约表是否漏了必填字段')
 })
 
 test('坏入参：每个接 payload 的端点，第一条坏样本都经 dispatch 回 bad-request', async () => {
@@ -292,7 +317,8 @@ test('坏入参：每个接 payload 的端点，第一条坏样本都经 dispatc
   }
   // R3 02 加了 reorderFeeds（有负例且经 dispatch 验过），所以接 payload 的端点从 23 变 24。
   // R1 02 给 cleanup 补了窗口负例（它原本是零入参、无负例），所以现在是 25。
-  assert.equal(covered.length, 25, '接 payload 的端点应当是 25 个，实际 ' + covered.length)
+  // R11 02 加了 saveSettings（有负例且经 dispatch 验过）：25 → 26。
+  assert.equal(covered.length, 26, '接 payload 的端点应当是 26 个，实际 ' + covered.length)
 })
 
 test('坏入参：统一 bad-request 信封、details.issues 指出字段，且不触达 store', async () => {

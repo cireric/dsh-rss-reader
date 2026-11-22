@@ -1,5 +1,5 @@
 /**
- * 浏览器半的读写通道：29 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
+ * 浏览器半的读写通道：31 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
  *
  * 原先这里是一个 switch：每臂各自手写 payload 解析、各自记得把未读账并进回包 ——
  * interface 的复杂度 ≈ implementation 的复杂度。现在「一个端点」是一个 module：
@@ -29,6 +29,7 @@ import {
   renameTagPayload,
   reorderFeedsPayload,
   saveReadingProgressPayload,
+  saveSettingsPayload,
   saveViewPreferencesPayload,
   scopePayload,
   searchQueryPayload,
@@ -37,6 +38,7 @@ import {
 } from './endpoint-payloads.js'
 import type { createSearch } from './search.js'
 import type { Config } from './config.js'
+import type { SettingsControl } from './settings-control.js'
 import { EXTRACTOR_REVISION, contentVersionOf, fetchArticle, blocksToText } from './article.js'
 import { rebuildItem } from './domain.js'
 import { selectCleanup } from './retention.js'
@@ -67,6 +69,11 @@ export interface EndpointDeps {
   /** 上次刷新完成时间（刷新状态留在 index.ts 那侧，这里只读） */
   readonly lastRefreshCompletedAt: () => number | undefined
   readonly searchItems?: ReturnType<typeof createSearch>['run']
+  /**
+   * 本机设置覆盖层（R11 01）。**显式注入**而不是塞进 ReaderStore：settings 是插件配置，
+   * 不是条目数据（spec D30）。缺省只发生在测试桩没装配它时，端点会回 not-ready。
+   */
+  readonly settings?: SettingsControl
   readonly articleAttempts: Map<string, number>
 }
 
@@ -90,6 +97,7 @@ export interface EndpointCtx {
   readonly refreshNow: (options?: { force?: boolean; signal?: AbortSignal }) => Promise<RefreshRun>
   readonly lastRefreshCompletedAt: () => number | undefined
   readonly searchItems?: ReturnType<typeof createSearch>['run']
+  readonly settings?: SettingsControl
   readonly articleAttempts: Map<string, number>
 }
 
@@ -448,7 +456,7 @@ const buildOverview = (
   }
 }
 /**
- * 端点表：29 个端点一处声明（每项的 `payload` 是入参形状的唯一声明）。
+ * 端点表：31 个端点一处声明（每项的 `payload` 是入参形状的唯一声明）。
  *
  * 穷尽性由 `Record<Endpoint, EndpointSpec>` 保证 —— 名字表（shared.ts 的 ENDPOINT_NAMES）
  * 加了新端点而这里没跟上，编译就不过。这是本文件里唯一需要「加端点时改的地方」。
@@ -866,9 +874,12 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
     invalidMessage: 'cleanup 的时间窗口无效（from / to 必须成对且 from < to）',
     carriesAccount: true,
     accountFrameOf,
-    to: async (_input, ctx) => {
+    to: async (input, ctx) => {
       // 显式清理（用户点按钮触发，**不设定时器**——验收项之一就是不残留定时器）。
       // 判据刻意保守：已读 + 未星标 + 未保持未读 + 早于阈值，四个条件缺一不可（见 retention.ts 注释）。
+      //
+      // R11 04 / D27.1：dryRun 只是**同一段判据的只读运行** —— 候选、cutoff、释放量全在这里
+      // 算一遍，唯一区别是「不删、不写删除日志」。所以预演数出来的 N 就是执行会删的 N。
       //
       // **候选集由存储侧一条 SQL 选出**（Task 5）：原先这里 `allItems()` 把整张 items 表
       // （10 万行）物化到 JS 再筛 —— 「点一次清理 = 一次全表遍历」，而 spec §3.1 只把清理记在
@@ -887,10 +898,17 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       const freedChars = candidates
         .filter((row) => doomed.has(row.id))
         .reduce((sum, row) => sum + row.articleChars + row.summaryChars, 0)
+      if (input.dryRun === true) {
+        // 预演：一条都不删、不写「清理：删除」（那是已经发生的既成事实）。日志用「将清理」，
+        // 与执行路径区分开 —— 排查「按钮点了没反应」时，日志说得出这次到底删没删。
+        ctx.log('预演：将清理 ' + doomed.size + ' 条已读旧条目（阈值 ' + ctx.config.cleanupAfterDays + ' 天，释放约 ' +
+          freedChars + ' 字符）')
+        return ok({ deleted: doomed.size, freedChars, cutoff, dryRun: true })
+      }
       for (const itemId of doomed) await ctx.store.deleteItem(itemId)
       ctx.log('清理：删除 ' + doomed.size + ' 条已读旧条目（阈值 ' + ctx.config.cleanupAfterDays + ' 天，释放约 ' +
         freedChars + ' 字符）')
-      return ok({ deleted: doomed.size, freedChars, cutoff })
+      return ok({ deleted: doomed.size, freedChars, cutoff, dryRun: false })
     },
   }),
 
@@ -940,6 +958,46 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       return ok({ preferences: saved })
     },
   }),
+
+  /**
+   * 设置页的**只读**快照（R11 01）：生效值 + 默认值（+ 启动时的读侧告警）。
+   *
+   * 为什么回包多一层 `settings`：界面要的是一个可扩展的对象 —— 06 票的只读区 / 版本 / 路径
+   * 会往同一个对象里加字段，而不是再造一个端点（spec D4.1 的回包形状）。
+   * 写路径是 02 票的 saveSettings，本票刻意不提供（先落盘再改内存的顺序需要单独一轮注意力）。
+   */
+  settings: defineEndpoint({
+    payload: noPayload,
+    to: async (_input, ctx) => {
+      if (ctx.settings === undefined) return fail('not-ready', '设置服务尚未就绪')
+      return ok({ settings: ctx.settings.snapshot() })
+    },
+  }),
+
+  /**
+   * 设置页的**写**端点（R11 02）：逐项保存一个可调参数。
+   *
+   * 回包与读端点同形（`{ settings: { effective, defaults } }`），客户端成功后用回包覆盖权威值 ——
+   * 不做乐观更新，界面上的数字只有宿主确认落盘后才成为「生效值」（spec D12）。
+   *
+   * 错误码分两种：非法入参在 `defineEndpoint` 就回 `bad-request`（文件与内存都不会被碰）；
+   * 写盘失败回 `write-failed` —— 它必须能和「你输错了」区分开，否则用户会去改一个本来合法的值。
+   */
+  saveSettings: defineEndpoint({
+    payload: saveSettingsPayload,
+    invalidMessage: 'saveSettings 需要 patch 或 resetToDefaults（二选一），patch 只接受白名单内的合法值',
+    to: async (input, ctx) => {
+      if (ctx.settings === undefined) return fail('not-ready', '设置服务尚未就绪')
+      // 恢复默认（07 票）：删 / 写规则在控制器里逐键判断，端点只负责把结果转成信封。
+      // 与 patch 分支共用同一条「先落盘再改内存」的失败语义（D7）。
+      const outcome = 'resetToDefaults' in input
+        ? ctx.settings.resetToDefaults()
+        : ctx.settings.save(input.patch)
+      if (!outcome.ok) return fail('write-failed', outcome.message)
+      return ok({ settings: outcome.snapshot })
+    },
+  }),
+
 
   // ── 文件夹目录与变更接口（M2 02）────────────────────────────────────────
   // 与订阅同住 config.json；每个变更都在**一次**读改写里完成（改名连带成员归属）。
@@ -1118,7 +1176,7 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
  * 异常一律兜成 internal 信封 —— 不把 throw 泄进通道（调用方要的是带 code 的失败信封）。
  */
 export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: unknown, signal?: AbortSignal) => Promise<RpcResult<unknown>> {
-  const { config, log, ready, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems } = deps
+  const { config, log, ready, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings } = deps
 
   const dispatch = async (endpoint: string, payload: unknown, signal?: AbortSignal): Promise<RpcResult<unknown>> => {
     try {
@@ -1133,7 +1191,7 @@ export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: 
       if (spec === undefined) return fail('unknown-endpoint', '未知端点：' + endpoint)
 
       const ctx: EndpointCtx = {
-        store: target, ready, config, log, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, signal,
+        store: target, ready, config, log, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, signal,
       }
       const outcome = await spec.to(payload, ctx)
       const { result } = outcome

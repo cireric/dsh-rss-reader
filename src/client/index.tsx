@@ -41,6 +41,8 @@ import { FeedsView } from './feeds-view.js'
 import { FeedNav } from './feed-nav.js'
 import { TagEditor } from './tag-editor.js'
 import { ArticleView } from './article-pane.js'
+import { SettingsView } from './settings-view.js'
+import { ConfirmDialog } from './confirm-dialog.js'
 // 空组覆盖住 `image-fold.ts`（R6 04 从本文件搬去）：`i` 键在 keyboard-routing.ts 里也要写它，
 // 两处各造一个 `new Set()` 会得到值相等但引用不同的两份「空组覆盖」，而 React 的相等判断与
 // `foldOf` 的快照语义都靠**同一个引用**才不多跑一次渲染。理由见那边的常量注释。
@@ -131,6 +133,43 @@ const STYLE = `
 .dsh-rss-status { padding:5px clamp(12px, 2vw, 28px); font-size:12px; color:var(--rss-muted);
   border-bottom:1px solid var(--rss-line); overflow-wrap:anywhere; }
 .dsh-rss-status--error { color:var(--rss-error); }
+/* R11 01 设置页：单页纵向滚动（D13 不做二级导航）。容器自己可聚焦 —— 空格 / d 要交给
+   浏览器原生滚动，而原生滚动要求焦点在可滚容器上（见 settings-view.tsx 的文件头）。 */
+/* container-type:inline-size 让下面的窄面板断点量**这个面板**而不是视口：宿主里浏览器可以很宽、
+   阅读器面板却很窄，@media 在那个场景永远不触发（D14.2 的堆叠要求会静默失效）。 */
+.dsh-rss-settings-page { flex:1; min-height:0; overflow-y:auto; outline:none;
+  container-type:inline-size; padding:12px clamp(12px, 2vw, 28px) 24px; }
+.dsh-rss-settings-head { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.dsh-rss-settings-title { margin:0; font-size:18px; line-height:1.3; }
+.dsh-rss-settings-warning { display:flex; align-items:center; flex-wrap:wrap; gap:6px; }
+.dsh-rss-settings-section { margin-top:18px; padding-top:14px; border-top:1px solid var(--rss-line); }
+.dsh-rss-settings-section-title { margin:0 0 8px; font-size:14px; }
+/* 一行 = 名称 + 帮助 + 值 + 单位。窄面板（<460px）下上下堆叠，值不与名称抢宽度（D14.2）。 */
+.dsh-rss-settings-row { display:flex; align-items:baseline; flex-wrap:wrap; gap:4px 10px; padding:6px 0; }
+.dsh-rss-settings-label { font-size:13px; }
+.dsh-rss-settings-value { font-size:13px; font-weight:600; font-variant-numeric:tabular-nums; }
+.dsh-rss-settings-unit { font-size:12px; color:var(--rss-muted); }
+.dsh-rss-settings-help { flex-basis:100%; margin:0; font-size:12px; color:var(--rss-muted); line-height:1.45; }
+/* R11 02 数值输入与就地反馈：只在本分区内新增，别的设置页样式不动。 */
+.dsh-rss-settings-input { font:inherit; font-size:13px; width:6.5em; padding:2px 6px;
+  border-radius:4px; color:inherit; background:var(--rss-bg); border:1px solid var(--rss-line);
+  font-variant-numeric:tabular-nums; }
+.dsh-rss-settings-input:disabled { opacity:.55; }
+.dsh-rss-settings-saved { font-size:12px; color:var(--rss-accent); }
+.dsh-rss-settings-error { flex-basis:100%; margin:0; font-size:12px; color:var(--rss-error); line-height:1.45; }
+/* R11 03：非整分钟的「= 90123 ms」只在这个前提下出现（整分钟不显示，D14.2）。 */
+.dsh-rss-settings-hint { flex-basis:100%; margin:0; font-size:12px; color:var(--rss-muted);
+  font-variant-numeric:tabular-nums; }
+/* R11 07：恢复默认影响整组，与上面的单项参数用一条分隔线隔开（D14.2 / D28）。 */
+.dsh-rss-settings-reset { display:flex; align-items:center; flex-wrap:wrap; gap:6px 12px;
+  margin-top:12px; padding-top:12px; border-top:1px solid var(--rss-line); }
+/* 窄面板 = **容器**宽度，不是视口宽度（容器查询以上面的 container-type 为前提）。 */
+@container (max-width: 460px) {
+  .dsh-rss-settings-row { flex-direction:column; align-items:flex-start; }
+}
+/* R11 06 关于区：绝对路径很长，窄面板里必须能断行，否则会横向溢出（只作用于本票新增节点）。 */
+.dsh-rss-about-value { overflow-wrap:anywhere; }
+.dsh-rss-about-summary { cursor:pointer; font-size:13px; margin-top:6px; }
 .dsh-rss-row { border-bottom:1px solid var(--rss-line); }
 .dsh-rss-row:hover, [data-rss-nav-row]:hover { background:var(--rss-hover); }
 .dsh-rss-row[data-rss-selected], [data-rss-nav-selected] { background:var(--rss-selected); }
@@ -380,8 +419,6 @@ function MarkAllConfirm({ state, store, onCancel, onConfirm }: {
   onConfirm: () => void
 }): ReactNode {
   const confirmRef = useRef<HTMLButtonElement | null>(null)
-  // 打开即聚焦「标为已读」：Enter 直接确认、Tab 到取消，键盘流不用先摸方向键。
-  useEffect(() => { confirmRef.current?.focus() }, [])
   /**
    * 条数由宿主 dry-run 给出（ADR-0008）：客户端只说「范围 × 过滤 × 窗 × 阈值」，
    * 候选在库全量上求值 —— 再按 `visible()` 数一遍就又会只看见已加载页（19 条未读显示 0）。
@@ -401,49 +438,46 @@ function MarkAllConfirm({ state, store, onCancel, onConfirm }: {
   const keptCount = store.visible().filter((item) => item.readAt === undefined && item.keptUnread === true).length
   const rangeSelect = useSelectFocusReturn(() => confirmRef.current)
   return (
-    <div className="dsh-rss-confirm" data-rss-markall-confirm="">
-      <div className="dsh-rss-confirm-card" role="dialog" aria-modal="true" aria-labelledby="dsh-rss-markall-title"
-        onKeyDown={(event) => {
-          if (event.key !== 'Escape') return
-          event.preventDefault()
-          event.stopPropagation()
-          onCancel()
-        }}>
-        <div className="dsh-rss-confirm-title" id="dsh-rss-markall-title" data-rss-markall-count={count ?? ''}>
-          {countFailed
-            ? '统计当前范围的未读失败了，请重试'
-            : count === undefined
-              ? '正在统计当前列表的未读…'
-              : count === 0
-                ? '当前范围没有可标记的未读'
-                : '把当前列表里的 ' + String(count) + ' 条未读标为已读？'}
-        </div>
-        <div className="dsh-rss-confirm-row">
-          <label>范围
-            <select data-rss-markall-range="" value={state.markAllRange} {...rangeSelect.pointer}
-              onChange={(event) => {
-                store.setMarkAllRange(event.target.value as MarkAllRange)
-                rangeSelect.commit()
-              }}>
-              <option value="all">全部</option>
-              <option value="day">早于 1 天</option>
-              <option value="week">早于 1 周</option>
-              <option value="month">早于 1 月</option>
-            </select>
-          </label>
-          <span className="dsh-rss-meta">{listScopeText(state)}</span>
-        </div>
-        {keptCount > 0 && (
-          <div className="dsh-rss-confirm-note">另有 {keptCount} 条「保持未读」不受影响</div>
-        )}
-        <div className="dsh-rss-confirm-actions">
-          <button type="button" className="dsh-rss-btn" data-rss-markall-cancel="" onClick={onCancel}>取消</button>
-          <button ref={confirmRef} type="button" className="dsh-rss-btn dsh-rss-btn--primary"
-            data-rss-markall-ok="" disabled={countFailed || count === undefined || count === 0}
-            onClick={onConfirm}>标为已读</button>
-        </div>
+    // 外壳与 Esc / 焦点归还在共享 ConfirmDialog（S6）；这里只提供内容与动作。
+    // 关框后的焦点仍由 closeMarkAllConfirm 还给面板根（与既有行为一致）。
+    <ConfirmDialog
+      titleId="dsh-rss-markall-title"
+      title={countFailed
+        ? '统计当前范围的未读失败了，请重试'
+        : count === undefined
+          ? '正在统计当前列表的未读…'
+          : count === 0
+            ? '当前范围没有可标记的未读'
+            : '把当前列表里的 ' + String(count) + ' 条未读标为已读？'}
+      titleAttrs={{ 'data-rss-markall-count': String(count ?? '') }}
+      rootAttrs={{ 'data-rss-markall-confirm': '' }}
+      cancelAttrs={{ 'data-rss-markall-cancel': '' }}
+      confirmAttrs={{ 'data-rss-markall-ok': '' }}
+      confirmLabel="标为已读"
+      confirmDisabled={countFailed || count === undefined || count === 0}
+      confirmRef={confirmRef}
+      onCancel={onCancel}
+      onConfirm={onConfirm}
+    >
+      <div className="dsh-rss-confirm-row">
+        <label>范围
+          <select data-rss-markall-range="" value={state.markAllRange} {...rangeSelect.pointer}
+            onChange={(event) => {
+              store.setMarkAllRange(event.target.value as MarkAllRange)
+              rangeSelect.commit()
+            }}>
+            <option value="all">全部</option>
+            <option value="day">早于 1 天</option>
+            <option value="week">早于 1 周</option>
+            <option value="month">早于 1 月</option>
+          </select>
+        </label>
+        <span className="dsh-rss-meta">{listScopeText(state)}</span>
       </div>
-    </div>
+      {keptCount > 0 && (
+        <div className="dsh-rss-confirm-note">另有 {keptCount} 条「保持未读」不受影响</div>
+      )}
+    </ConfirmDialog>
   )
 }
 
@@ -841,27 +875,14 @@ export function createReader(store: ReaderStore): () => ReactNode {
             <RefreshIcon spinning={slowLoading} />
             {slowLoading ? '刷新中…' : '刷新'}
           </button>
-          <details className="dsh-rss-settings">
-            <summary className="dsh-rss-btn" onKeyDown={(event) => {
-              // 空格应打开原生折叠区，避免被文档级翻页快捷键接管。
-              if (event.key === ' ') event.stopPropagation()
-            }}>更多</summary>
-            <div className="dsh-rss-settings-panel">
-              <label>显示未读计数
-                <input type="checkbox" checked={state.showUnread} onChange={(event) => store.setShowUnread(event.target.checked)} />
-              </label>
-              {/* 「A 键范围」2026-11-21 搬进 A 的确认框（用户拍板）：范围是**这次动作**的一部分，
-                  摆在这里会让读者先改设置、再按 A，而改完下拉框焦点留在控件上、快捷键全被吞掉
-                  （就是本轮那条「按 A 无反应」的现场）。现在它只在确认框里出现，一个控件一处。 */}
-              <button type="button" className="dsh-rss-btn" disabled={state.loading}
-                title="删除「已读且未星标」的旧条目（阈值可在 Config.cleanupAfterDays 调，默认 30 天）"
-                onClick={() => {
-                  if (window.confirm('清理已读的旧条目？\n\n只删除「已读 + 未星标 + 早于阈值」的条目，星标与未读的都会保留。此操作不可撤销。')) {
-                    void store.cleanup()
-                  }
-                }}>清理旧条目</button>
-            </div>
-          </details>
+          {/* R11 05：工具栏「更多」已整个撤销 —— 04 把清理搬进设置页后它只剩「显示未读计数」，
+              05 再把这一项搬进设置页「显示」区，菜单已没有任何条目。样式表里的
+              `.dsh-rss-settings` / `.dsh-rss-settings-panel` 仍被正文页 Aa 面板复用，所以不动。 */}
+          {/* 设置入口（R11 01，D19）：放在「刷新」与「?」之间；再点一次回列表（与 F 的 toggle 同型）。
+              所有视图都可见 —— 工具栏本来就常驻，不给它按视图分叉。 */}
+          <button type="button" className="dsh-rss-btn" data-rss-settings-open=""
+            title="设置：每次刷新抓取源数与运行参数" aria-pressed={state.view === 'settings'}
+            onClick={() => store.toggleSettings()}>设置</button>
           {/* 帮助入口放最右端：它是「说明书」，与左边那三个动作按钮不是一类东西。
               点击与按 ? 键走同一个开关，不写第二份逻辑。 */}
           <button type="button" className="dsh-rss-btn" style={{ fontWeight: 600 }}
@@ -1000,6 +1021,25 @@ export function createReader(store: ReaderStore): () => ReactNode {
             canNext={store.canStepArticle(1)}
             onPrev={() => { store.stepArticle(-1) }}
             onNext={() => { store.stepArticle(1) }}
+          />
+        )}
+
+        {state.view === 'settings' && (
+          <SettingsView
+            settings={state.settings}
+            error={state.settingsError}
+            warningDismissed={state.settingsWarningDismissed}
+            reading={state.reading}
+            onReading={(patch) => store.setReading(patch)}
+            showUnread={state.showUnread}
+            onShowUnread={(value) => store.setShowUnread(value)}
+            onClose={() => store.closeSettings()}
+            onDismissWarning={() => store.dismissSettingsWarning()}
+            onSave={(key, value) => store.saveSetting(key, value)}
+            onReset={() => store.resetSettings()}
+            onCleanupPreview={() => store.cleanupPreview()}
+            onCleanup={() => store.cleanup()}
+            onManageFeeds={() => store.toggleFeeds()}
           />
         )}
 

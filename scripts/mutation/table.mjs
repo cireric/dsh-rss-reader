@@ -739,8 +739,10 @@ export const MUTATIONS = [
       '正文视图下点文件夹 / 标签：同样回到列表、清空旧文章',
       '正文视图下切「未读 / 星标」过滤：回到列表',
     ],
-    from: '\t\t\tconst leaveArticleForScope = () => {\n\t\t\t\tif (get().view === "article") set({\n\t\t\t\t\tview: "list",\n\t\t\t\t\tarticle: void 0\n\t\t\t\t});\n\t\t\t};',
-    to: '\t\t\tconst leaveArticleForScope = () => {};' },
+    // 2026-11-22 R11 01：入口改名 leaveTransientViews 并多收一类 settings，锚点按产物重锚；
+    // 本条只抹掉「正文退出」，settings 分支留着 —— 否则两条判定会被同一条变异一起带走。
+    from: '\t\t\tconst leaveTransientViews = () => {\n\t\t\t\tconst view = get().view;\n\t\t\t\tif (view === "article") set({\n\t\t\t\t\tview: "list",\n\t\t\t\t\tarticle: void 0\n\t\t\t\t});\n\t\t\t\telse if (view === "settings") set({ view: "list" });\n\t\t\t};',
+    to: '\t\t\tconst leaveTransientViews = () => {\n\t\t\t\tconst view = get().view;\n\t\t\t\tif (view === "article") {\n\t\t\t\t} else if (view === "settings") set({ view: "list" });\n\t\t\t};' },
   // 每源未读数的**键域**（2026-10-10）。左栏角标按 feeds 表逐行渲染，键域必须严格 = feeds 表：
   // 删掉「以 feeds 表铺 0」后，0 未读的源会丢键，那一行变成「角标空白」而不是「角标 0」——
   // 界面上无从分辨，是最贵的那类沉默失败。非等价变异：丢键后取值变 undefined，两条测试会红。
@@ -2555,6 +2557,14 @@ export const MUTATIONS = [
     // lib/preferences.js 实测 OCCURRENCES=1（带上下文锚定，`expandImages:` 只此一处）。
     from: "        expandImages: typeof readingSource['expandImages'] === 'boolean'\n            ? readingSource['expandImages']\n            : DEFAULT_READING_PREFERENCES.expandImages,",
     to: "        expandImages: readingSource['expandImages'] ?? DEFAULT_READING_PREFERENCES.expandImages," },
+  { id: 'prefs-showUnread 类型', file: 'lib/preferences.js',
+    judges: ['nav-persistence.test.mjs'],
+    judgeTests: ['sanitizeViewPreferences：showUnread 只判布尔，"false" / 1 / null 一律回落 true 且不带走同份记忆'],
+    // R11 05 / D27.2：去掉 `typeof === 'boolean'` 那道闸，`"false"` / `1` 被当作真值原样采用
+    // （不是回落 true）。判据是**归一化后的确切值**：字符串 "false" 与数字 1 都必须变成布尔 true。
+    // lib/preferences.js 实测 OCCURRENCES=1（`showUnread` 的 `typeof` 闸只此一处）。
+    from: "    const showUnread = typeof source['showUnread'] === 'boolean'\n        ? source['showUnread']\n        : DEFAULT_VIEW_PREFERENCES.showUnread;",
+    to: "    const showUnread = source['showUnread'] ?? DEFAULT_VIEW_PREFERENCES.showUnread;" },
   { id: 'client-分组只认单张', file: 'lib/image-fold.js',
     judges: ['image-fold.test.mjs'],
     judgeTests: ['分组：连续三张图合成一组（一次展开三张，不是三组）'],
@@ -2925,4 +2935,133 @@ export const MUTATIONS = [
     judgeTests: ['搜索：外部改库留下的空串作者读成 undefined（与列表同一份归一化）'],
     from: '            author: normalizeAuthor(typeof author === \'string\' ? author : undefined),',
     to: '            author: typeof author === \'string\' ? author : undefined,' },
+
+  // ── R11 01：设置页骨架（2026-11-22）────────────────────────────────────────
+  // 覆盖优先级反了：合并时读基线而不是 settings 覆盖（等价于「patch 盖 settings」）。
+  // 判据是 settings 端点用例里的 effective 断言 —— 页面数字必须等于下一次刷新真正会用的值。
+  // 锚点取 `overrides[key]` 这一行而不是 `config[key] = value`：02 票的保存路径也有同样一行，
+  // 用后者会命中两次（锚点必须唯一，见本文件头部）。
+  { id: 'settings-覆盖优先级', file: 'lib/settings-control.js',
+    judges: ['settings-endpoints.test.mjs'],
+    judgeTests: ['settings 覆盖优先级：settings.json > patch 基线，未覆盖的键仍跟 patch'],
+    from: '            const value = overrides[key];',
+    to: '            const value = baseline[key];' },
+  // 一个坏键让整份 overrides 失效：合法项被一起带走，页面把「坏值提示」变成「全部回默认」。
+  // 判据是 settings-file 的逐键丢用例（合法项照用 + dropped 计数 + 文件不重写）。
+  { id: 'settings-坏值整份隔离', file: 'lib/storage/settings-file.js',
+    judges: ['settings-file.test.mjs'],
+    judgeTests: ['坏值逐键丢：合法项照用、文件不被自动重写（内容与 mtime 都不变）'],
+    from: "    return { status: 'ok', overrides, dropped };",
+    to: "    return { status: 'ok', overrides: dropped > 0 ? {} : overrides, dropped };" },
+  // 删掉 Esc 的 settings 分支：设置页变成关不掉的页面（D20 的第一出口失效）。
+  // 判据是 DOM 用例的三出口里 Esc 那一段。
+  { id: 'settings-Esc 不回列表', file: 'lib/client.js',
+    judges: ['settings-page-dom.test.mjs'],
+    judgeTests: ['R11 01 退出设置页：Esc / 返回按钮 / 再点一次设置都回列表'],
+    from: '\t\t\t\t\tif (view === "settings") {\n\t\t\t\t\t\tevent.preventDefault();\n\t\t\t\t\t\tstore.closeSettings();\n\t\t\t\t\t\tbreak;\n\t\t\t\t\t}',
+    to: '\t\t\t\t\tif (view === "settings") {\n\t\t\t\t\t\tbreak;\n\t\t\t\t\t}' },
+  // 左栏导航不再退出设置页：点了没反应（D21 的现场）。
+  // 判据是 DOM 用例「点源 / 切过滤都回列表且导航生效」。
+  { id: 'settings-左栏导航不退出', file: 'lib/client.js',
+    judges: ['settings-page-dom.test.mjs'],
+    judgeTests: ['R11 01 左栏与过滤：设置页下点导航项或切过滤立即回列表且导航生效'],
+    from: '\t\t\t\telse if (view === "settings") set({ view: "list" });',
+    to: '\t\t\t\telse if (view === "settings") { /* 变异：不退出设置页 */ }' },
+
+  // ── R11 02：第一个参数可写（2026-11-22）──────────────────────────────────
+  // 保存时把整份生效值钉进 overrides：用户没改过的三项也被写盘，此后 patch 再也改不动它们。
+  // 判据是稀疏写用例（文件里只许出现被点名的那一个键）。
+  { id: 'settings-未覆盖也写盘', file: 'lib/settings-control.js',
+    judges: ['settings-endpoints.test.mjs'],
+    judgeTests: ['saveSettings 稀疏写：只改一项就只写这一个键，形状 { version, overrides }、权限 0600、内存立即生效并留痕'],
+    from: '        const next = { ...overrides, ...patch };',
+    to: '        const next = { ...snapshotOf(config), ...patch };' },
+  // 先改内存再写盘：写失败时界面已经“生效”、重启后打回原形（D7 要消灭的半成功）。
+  // 判据是写盘失败用例的「内存旧值不变」断言。
+  { id: 'settings-写盘与内存顺序', file: 'lib/settings-control.js',
+    judges: ['settings-endpoints.test.mjs'],
+    judgeTests: ['saveSettings 写盘失败：端点回错误，内存旧值与文件旧内容都不变（先落盘再改内存，D7）'],
+    from: '        const before = snapshotOf(config);',
+    to: '        const before = snapshotOf(config);\n        for (const key of TUNABLE_KEYS) { const value = patch[key]; if (value !== undefined) config[key] = value; }' },
+  // 每轮源数的下限从 0 改成 1：0 = 抓全部源的合法语义被当成坏值（spec §4.1 / D9）。
+  // 判据是「saveSettings 接受 0」用例 —— 它会先被入参层拒绝，端点回 bad-request。
+  { id: 'settings-每轮源数 0', file: 'lib/settings-schema.js',
+    judges: ['settings-endpoints.test.mjs'],
+    judgeTests: ['saveSettings 接受 0：0 合法，且「抓全部源」由既有 selectStalestFeeds 判据给出'],
+    from: '    refreshFeedsPerRound: { min: 0, max: 999 },',
+    to: '    refreshFeedsPerRound: { min: 1, max: 999 },' },
+  // 清理天数的下限从 1 改成 0：0 会让 cutoff = 现在，一键清光所有已读条目（spec §4.1 / D9 的
+  // 数据事故边界）。判据是 03 的边界负例 —— 0 必须被端点判成 bad-request，且文件与内存都不变。
+  { id: 'settings-清理天数下限', file: 'lib/settings-schema.js',
+    judges: ['settings-endpoints.test.mjs'],
+    judgeTests: ['saveSettings 其余三项的非法边界：0 / 负数 / 超上限 / 小数都回 bad-request，文件与内存都不变'],
+    from: '    cleanupAfterDays: { min: 1, max: 3650 },',
+    to: '    cleanupAfterDays: { min: 0, max: 3650 },' },
+  // ── R11 06：Agent 说明与关于区（2026-11-22）──────────────────────────────
+  // 页面少渲染一条 Agent 说明：常量仍是 4、页面只画 3 ⇒ D24 的「条目数 == 常量长度」失效。
+  // 判据是 DOM 用例里对渲染条目数与顺序的断言（直接测常量会自证，抓不到这条）。
+  { id: 'settings-agent 条目数', file: 'lib/client.js',
+    judges: ['settings-agent-help.test.mjs'],
+    judgeTests: ['R11 06 Agent 说明：按 AGENT_HELP 固定顺序渲染全部条目，末尾是审批提示'],
+    from: 'children: [AGENT_HELP.map((entry) =>',
+    to: 'children: [AGENT_HELP.slice(0, -1).map((entry) =>' },
+
+  // ── R11 07：恢复默认（2026-11-22）───────────────────────────────────────
+  // 恢复默认时把四项无条件写成覆盖：继承值本来就等于默认的键也被钉进 settings.json。
+  // 这违反 D28 的「删覆盖」规则 —— 将来改默认值时这些钉子不会跟随，且文件里出现无意义覆盖。
+  // 判据是 A5 的落盘用例（继承 = 默认的三项必须在文件里消失）。
+  { id: 'settings-恢复默认', file: 'lib/settings-control.js',
+    judges: ['settings-endpoints.test.mjs'],
+    judgeTests: ['saveSettings 恢复默认：继承值等于默认的键删覆盖，不等于默认的键写一条等于默认值的覆盖（A5）'],
+    from: '            if (baseline[key] === target) {',
+    to: '            if (false) {' },
+  // ── R11 04：手动清理（2026-11-22）────────────────────────────────────────
+  // 跳过预演直接执行：按钮把「先 dryRun 数一遍」换成「直接 cleanup」⇒ 用户看不到将清理多少，
+  // 确认框的 N 也就无从谈起（spec D27.1 / C19 第一条）。判据是第一次 cleanup 请求必须带 dryRun。
+  { id: 'settings-清理按钮', file: 'lib/client.js',
+    judges: ['settings-page-dom.test.mjs'],
+    judgeTests: ['R11 04 手动清理：预演只算不删，C>0 弹确认框并含条数与阈值'],
+    from: 'const preview = await onCleanupPreview();',
+    to: 'const preview = await onCleanup();' },
+  // 预演也真删：dryRun 分支不再 return，于是「预演：将清理 N 条」之后照样执行删除 ——
+  // 用户点一次「立即清理」时，还没确认就先丢了数据（C19 第一条「预演不删」）。
+  { id: 'cleanup-预演真删', file: 'lib/endpoints.js',
+    judges: ['cleanup-endpoint.test.mjs'],
+    judgeTests: ['R11 04 cleanup dryRun：不删任何条目、读态逐条不变，计数 / 释放量 / 阈值与随后执行一致'],
+    from: 'return ok({ deleted: doomed.size, freedChars, cutoff, dryRun: true });',
+    to: '' },
+
+  // ── R11 评审修复（2026-11-22）────────────────────────────────────────────
+  // 空 patch 当成「有写入」继续走落盘：内容没变但 mtime 变了，写盘失败还会把空操作报成错误（P3）。
+  { id: 'settings-空 patch 也写盘', file: 'lib/settings-control.js',
+    judges: ['settings-endpoints.test.mjs'],
+    judgeTests: ['saveSettings 空 patch：无操作成功（返回当前快照、不写盘、不改内存），未知键仍 rejected（D4.1）'],
+    from: '        if (Object.keys(patch).length === 0)\n            return { ok: true, snapshot: snapshot() };',
+    to: '' },
+  // 读失败（EISDIR / EACCES）被当成坏文件隔离：原文件被改名，权限问题却一点没修（P4）。
+  { id: 'settings-读失败也隔离', file: 'lib/storage/settings-file.js',
+    judges: ['settings-file.test.mjs'],
+    judgeTests: ['读失败（EISDIR）是 I/O 错误，不是坏文件：返回 unreadable 且不做隔离改名'],
+    from: "        return { status: 'unreadable', reason: '读取失败：' + String(error) };",
+    to: "        return corrupt(path, '读取失败：' + String(error));" },
+  // 分钟输入回到「必须有整数位且小数点后必须有数字」：.5 / 10. 被拒（P5 的 D11 小数语义）。
+  { id: 'settings-分钟只认完整小数', file: 'lib/client.js',
+    judges: ['settings-page-dom.test.mjs'],
+    judgeTests: ['R11 03 分钟输入允许省略整数位/小数位：.5 → 30000 ms，10. → 600000 ms（D11）'],
+    from: '\t\t\t\tparse: (text) => /^[+-]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)$/.test(text) ? Math.round(Number(text) * MINUTE_MS) : void 0,',
+    to: '\t\t\t\tparse: (text) => /^[+-]?\\d+(\\.\\d+)?$/.test(text) ? Math.round(Number(text) * MINUTE_MS) : void 0,' },
+  // 确认框的 Esc 守卫整段消失（preventDefault + stopPropagation 都去掉）：事件继续到
+  // routeKey 的 back，焦点没进框时直接退出设置页（P7）。只去掉其中一个等价 —— preventDefault
+  // 也会让 routeKey 提前 return，所以变异必须两个一起去掉才有观察意义。
+  { id: 'settings-确认框 Esc 穿透', file: 'lib/client.js',
+    judges: ['settings-page-dom.test.mjs'],
+    judgeTests: ['R11 P7 确认框 Esc：焦点不在框内时 document 上的 Esc 只关确认框，不退设置页'],
+    from: '\t\t\t\t\tevent.preventDefault();\n\t\t\t\t\tevent.stopPropagation();\n\t\t\t\t\tif (busy) return;',
+    to: '\t\t\t\t\tif (busy) return;' },
+  // 「去订阅管理页」按钮不再走 toggleFeeds：D14③ 的指针变成死按钮（P1）。
+  { id: 'settings-订阅源顺序按钮不动', file: 'lib/client.js',
+    judges: ['settings-page-dom.test.mjs'],
+    judgeTests: ['R11 D14③ 订阅源顺序：只有说明与「去订阅管理页」，不复制排序控件（D15）'],
+    from: '\t\t\t\t\t\t\t\t\tonClick: onManageFeeds,',
+    to: '\t\t\t\t\t\t\t\t\tonClick: () => {},' },
 ]

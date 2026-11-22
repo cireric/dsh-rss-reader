@@ -14,6 +14,8 @@
  * 失败回统一的 bad-request 信封，成功才把已解析的值交给 handler。
  */
 import { z } from 'zod'
+import { isTunableKey, parseTunableValue } from './settings-schema.js'
+import type { TunableOverrides } from './settings-schema.js'
 
 /** 零入参端点：接受并忽略 payload（与阶段 5 之前的语义一致）。 */
 export const noPayload = z.unknown()
@@ -152,11 +154,16 @@ const browseShape = { ...scopeShape, ...windowShape }
 const emptyAsObject = (value: unknown): unknown => (value === null || value === undefined ? {} : value)
 
 /**
- * `cleanup`：零业务入参（旧语义是「接受并忽略 payload」），但它是五个带账端点之一 ——
- * 窗口片段与其它四个共用同一段声明。`null` / 缺省 / 带无关键的对象必须继续接受
- * （浏览器通道把「没有 payload」序列化成 null）；坏窗口则回自己的 invalidMessage。
+ * `cleanup`：唯一业务入参是 `dryRun`（R11 04 / D27.1），但预演与执行**共用同一个端点、同一份
+ * selectCleanup** —— 不新开 cleanupPreview 端点，否则「数」与「删」会变成两套判据。
+ * 它仍是五个带账端点之一：窗口片段与其它四个共用同一段声明，`null` / 缺省 / 带无关键的对象
+ * 必须继续接受（浏览器通道把「没有 payload」序列化成 null）；坏窗口则回自己的 invalidMessage。
  */
-export const cleanupPayload = z.preprocess(emptyAsObject, z.object(windowShape).refine(windowRule))
+export const cleanupPayload = z.preprocess(emptyAsObject, z.object({
+  /** 只算不删；缺省 false = 现有执行语义（不传即执行）。 */
+  dryRun: z.boolean().optional(),
+  ...windowShape,
+}).refine(windowRule))
 
 /**
  * `refresh`：浏览范围 + 显示窗（cursor 被忽略，保持旧行为）。
@@ -236,3 +243,48 @@ export const searchQueryPayload = z.object({
   to: searchDay,
   cursor: z.string().max(2048).optional(),
 }).refine(({ from, to }) => !from || !to || from <= to)
+
+/**
+ * `saveSettings` 的逐键 patch（R11 02，spec D4.1 / D5 / D9）。
+ *
+ * 形状（record）在这里判，**每个值仍走 `parseTunableValue`** —— 范围判据只有
+ * `settings-schema.ts` 一份。用 `superRefine` 而不是给四个键各写一遍 `.min().max()`：
+ * 后者就是第二份范围表，改一处漏一处时表现为「存得下却读不回」。
+ *
+ * 空 patch **合法**（D4.1 的 `Partial<Record<Key, number>>` 允许空对象）：它是「没有要改的项」，
+ * 由 `settings-control.ts` 明确处理成无操作成功 —— 不写盘、不改内存。未知键仍然 rejected：
+ * 「空」与「乱写」是两件事，只有前者能安全地当空操作。
+ */
+const tunablePatch = z.record(z.string(), z.unknown()).superRefine((patch, ctx) => {
+  for (const [key, value] of Object.entries(patch)) {
+    if (!isTunableKey(key)) {
+      ctx.addIssue({ code: 'custom', path: [key], message: '不是可设置的键' })
+      continue
+    }
+    if (parseTunableValue(key, value) === undefined) {
+      ctx.addIssue({ code: 'custom', path: [key], message: '值不合法' })
+    }
+  }
+}).transform((patch): TunableOverrides => {
+  // superRefine 通过后才跑到这里：此时每个键都是白名单键、每个值都能被同一判据解析成整数。
+  // 仍然复用 isTunableKey / parseTunableValue 做收窄与取值，不 cast、不另写一套判断。
+  const overrides: TunableOverrides = {}
+  for (const [key, value] of Object.entries(patch)) {
+    if (!isTunableKey(key)) continue
+    const parsed = parseTunableValue(key, value)
+    if (parsed !== undefined) overrides[key] = parsed
+  }
+  return overrides
+})
+
+/**
+ * `saveSettings` 入参（R11 02，spec D4.1）：`{ patch }` 与 `{ resetToDefaults: true }` **二选一**。
+ *
+ * 为什么用 union 而不是一个可选字段对象 + refine：union 让 handler 能按分支窄化类型，
+ * 不必再写一个「patch 可能缺席」的死分支。`resetToDefaults` 的逐键「删覆盖 / 写默认」判断在
+ * `settings-control.ts`（D28）：端点只验 `true` 字面量，把动作转成信封。
+ */
+export const saveSettingsPayload = z.union([
+  z.strictObject({ patch: tunablePatch }),
+  z.strictObject({ resetToDefaults: z.literal(true) }),
+])

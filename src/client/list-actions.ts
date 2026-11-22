@@ -138,20 +138,28 @@ export function createListActions(host: ListActionHost) {
   }
 
   /**
-   * 切作用域必须退出正文 —— `selectNav` / `setFilter` 共用的唯一入口。
+   * 切作用域必须退出「临时呈现视图」（正文 / 设置页）—— `selectNav` / `setFilter` / `setWindow`
+   * 共用的唯一入口。
    *
    * **病象**：正在看正文时点另一个源 / 文件夹 / 标签，或切「未读 / 星标」过滤，右栏仍停在上一篇——
-   * 它已经不属于当前作用域，读者看到的是「作用域变了、内容却没变」的自相矛盾。
+   * 它已经不属于当前作用域，读者看到的是「作用域变了、内容却没变」的自相矛盾。设置页同理：
+   * 左栏点了没反应，用户只会认为坏了（spec D21）。
    *
-   * **根因**：这两个动作只改作用域状态，没人收回跨域呈现状态 `view` / `article`。两样必须一起清：
+   * **根因**：这几个动作只改作用域状态，没人收回跨域呈现状态 `view` / `article`。两样必须一起清：
    * 正文面的唯一真相是 `article.itemId`，只把 `view` 改回列表会留下旧 `article`，而在途的正文回包
    * 仍会命中 `loadArticle` 的 `get().article?.itemId` 守卫，把一篇已经离开作用域的文章重新画回来。
    *
-   * **边界**：只接这两个入口。视图恢复、Esc 关闭（`closeArticle`）与搜索提交各有自己的语义，
+   * **为什么名字不叫 leaveArticleForScope**：R11 01 起它还要收设置页；叫「退出正文」会让下一个人
+   * 在 settings 分支上误以为这里只该管 article。设置页没有「内容快照」要清（`settings` 保留着，
+   * 下次进入先用旧值再刷新），所以只需把 view 落回列表。
+   *
+   * **边界**：只接这三个入口。视图恢复、Esc 关闭（`closeArticle`）与搜索提交各有自己的语义，
    * 不要顺手接上来 —— 关闭正文后保留 `article` 是阅读进度落盘要用的。
    */
-  const leaveArticleForScope = (): void => {
-    if (get().view === 'article') set({ view: 'list', article: undefined })
+  const leaveTransientViews = (): void => {
+    const view = get().view
+    if (view === 'article') set({ view: 'list', article: undefined })
+    else if (view === 'settings') set({ view: 'list' })
   }
 
   /**
@@ -163,7 +171,7 @@ export function createListActions(host: ListActionHost) {
    */
   const setFilter = (filter: Filter): void => {
     // 换过滤也是换作用域：正文里切「未读 / 星标」必须回列表，旧文章不属于新过滤。
-    leaveArticleForScope()
+    leaveTransientViews()
     set({ filter, navCursor: { kind: 'filter', filter } })
     relocateSelection()
     persistView()
@@ -176,8 +184,17 @@ export function createListActions(host: ListActionHost) {
   /** 切「全部标为已读」的时间范围。 */
   const setMarkAllRange = (markAllRange: MarkAllRange): void => { set({ markAllRange }) }
 
-  /** 隐藏 / 显示未读计数（规格 §5 不变量 8）。只影响呈现，不动数据。 */
-  const setShowUnread = (showUnread: boolean): void => { set({ showUnread }) }
+  /**
+   * 隐藏 / 显示未读计数（规格 §5 不变量 8）。只影响呈现，不动数据。
+   *
+   * R11 05 / D27.2：它不再是纯内存状态 —— 搬进设置页后必须记住，所以改完就整份落一次盘
+   * （persistView 带上当下 showUnread，与 navVisible / reading 同属一份视图记忆）。
+   * 这里仍是离散动作（点一下复选框），不需要防抖。
+   */
+  const setShowUnread = (showUnread: boolean): void => {
+    set({ showUnread })
+    persistView()
+  }
 
   /** 纯选中：只挪光标，**不**标已读、不展开（要副作用请走 activate —— 「打开一条」的唯一触发点）。 */
   const select = (itemId: string): void => {
@@ -905,10 +922,36 @@ export function createListActions(host: ListActionHost) {
   const closeArticle = (): void => { set({ view: 'list' }) }
 
   /**
+   * 清理预演（R11 04 / spec D27.1）：只问宿主「如果现在执行会删多少」，**一条都不删**。
+   *
+   * 与 cleanup 共用同一个端点与同一份窗口构造器，只多带一个 `dryRun: true` —— 计数与删
+   * 绝不能是两套实现（GLOSSARY「裁决者只有一个」）。这里刻意不重载 overview、不改列表：
+   * 预演之后数据没变，重载只会制造一次无意义的取数；确认框也由设置页决定，不在这里弹。
+   *
+   * 0 条时就地把「没有可清理的条目」交给全局 notice：这是**用户动作的结果**，与后续
+   * 是否执行无关。失败走全局 error 并返回 undefined —— 调用方只按计数决定弹不弹框。
+   */
+  const cleanupPreview = async (): Promise<CleanupResult | undefined> => {
+    try {
+      const result = await rpc<CleanupResult>('cleanup', { ...windowRequest().payload, dryRun: true })
+      if (result.deleted === 0) {
+        set({ notice: '没有可清理的条目（只清「已读且未星标」且早于阈值的旧条目）' })
+      }
+      return result
+    } catch (failure) {
+      set({ error: failure instanceof Error ? failure.message : String(failure) })
+      return undefined
+    }
+  }
+
+  /**
    * 显式清理：删除「已读 + 未星标 + 早于阈值」的旧条目。
    *
    * 判据在宿主侧（`retention.ts` 的 selectCleanup，有单测）。客户端只负责发起与**如实回报**：
    * 删了 0 条也要说清是 0 条，而不是让用户以为按钮坏了。
+   *
+   * R11 04 起这条动作只由设置页的确认框触发；预演（cleanupPreview）用的是同一份判据，
+   * 本动作保持「取窗口 → cleanup → 如实回报 → 重载 overview」不变。
    */
   const cleanup = async (): Promise<void> => {
     try {
@@ -950,7 +993,7 @@ export function createListActions(host: ListActionHost) {
     const state = get()
     if (state.search !== undefined) return
     if (state.displayWindow === displayWindow) return
-    leaveArticleForScope()
+    leaveTransientViews()
     set({ displayWindow, items: [], selectedId: undefined, nextCursor: undefined, loadingMore: false })
     await load('overview')
   }
@@ -960,11 +1003,11 @@ export function createListActions(host: ListActionHost) {
     actions: {
       visible, setFilter, setWindow, setLayout, setMarkAllRange, setShowUnread, select, selectRelative,
       markRead, activate, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllPlan, countMarkAllCandidates, markAllRead, undoMarkAll,
-      load, loadMore, cleanup, openArticle, retryArticle, closeArticle, stepArticle, canStepArticle, saveArticleProgress,
+      load, loadMore, cleanup, cleanupPreview, openArticle, retryArticle, closeArticle, stepArticle, canStepArticle, saveArticleProgress,
     },
     /** 跨域入口：选中重落。nav-actions 与视图恢复共用，刻意不上 ReaderStore 的公开面。 */
     relocateSelection,
-    /** 跨域入口：切作用域前退出正文。setFilter 在同文件直调，nav-actions 的 selectNav 经 host 注入。 */
-    leaveArticleForScope,
+    /** 跨域入口：切作用域前退出正文 / 设置页。setFilter 与 setWindow 在同文件直调，nav-actions 的 selectNav 经 host 注入。 */
+    leaveTransientViews,
   }
 }
