@@ -10,6 +10,10 @@
  *  ① 不是合法 JSON / 顶层不是对象 / 版本认不出 ⇒ 整份隔离为 `settings.json.corrupt-<时间戳>`；
  *  ② 某个键值超范围或类型错 ⇒ 只丢那个键，其余照用，**不自动重写文件**；
  *  ③ 认不出的键 ⇒ 读时忽略（写时也不会回写，因为写路径只遍历白名单）。
+ *
+ * ④ 另外还有一类**不是文件内容的问题**：读操作本身失败（EACCES / EISDIR…）。它不是坏文件，
+ * 不能走隔离改名 —— 改名既治不好权限，也会把一个暂时读不到的文件永久搬走。这类走
+ * `unreadable` 独立 outcome，由调用方用继承值继续并报警（D17 的警示条）。
  */
 import { closeSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -20,10 +24,12 @@ import type { TunableOverrides } from '../settings-schema.js'
 /** 本版只认 1；版本不是 1 与「不是合法 JSON」走同一条隔离路（D2 的闸门语义）。 */
 export const SETTINGS_VERSION = 1
 
-/** 读一次设置文件的三种结果。 `warning` 的文案由控制器拼，本模块只说事实。 */
+/** 读一次设置文件的四种结果。 `warning` 的文案由控制器拼，本模块只说事实。 */
 export type SettingsReadOutcome =
   | { readonly status: 'absent' }
   | { readonly status: 'ok'; readonly overrides: TunableOverrides; readonly dropped: number }
+  /** 读操作本身失败（不是坏文件）：继承值继续，不做隔离改名。 */
+  | { readonly status: 'unreadable'; readonly reason: string }
   | {
     readonly status: 'corrupt'
     readonly reason: string
@@ -33,11 +39,11 @@ export type SettingsReadOutcome =
   }
 
 /**
- * 读设置文件。**永远不抛**：坏文件不能阻断启动，返回 `corrupt` 由调用方决定怎么报警。
+ * 读设置文件。**永远不抛**：坏文件不能阻断启动，返回 `corrupt` / `unreadable` 由调用方决定怎么报警。
  *
- * 只有 ENOENT 算「从未写过」（D18）；其余读失败（EACCES / EISDIR…）与坏 JSON 同属
- * 「文件不可用」—— 都走隔离，区别只在 `reason`。把「读不出来」当成「没有」会让一次
- * 权限故障冒充首装，用户永远不会知道自己的设置为什么没生效。
+ * 只有 ENOENT 算「从未写过」（D18）。其余读失败（EACCES / EISDIR…）是 I/O 错误，不是「文件内容坏了」：
+ * 它们没有可隔离的坏数据，改名也修不好权限 ⇒ 返回 `unreadable`，让调用方用继承值继续并说明原因。
+ * 把「读不出来」当成「没有」会让一次权限故障冒充首装，用户永远不会知道自己的设置为什么没生效。
  */
 export function readSettingsFile(path: string): SettingsReadOutcome {
   let text: string
@@ -45,7 +51,8 @@ export function readSettingsFile(path: string): SettingsReadOutcome {
     text = readFileSync(path, 'utf8')
   } catch (error) {
     if (isErrno(error, 'ENOENT')) return { status: 'absent' }
-    return corrupt(path, '读取失败：' + String(error))
+    // 读失败 ≠ 坏文件（D6 只定义内容异常的三类）：不调 corrupt()，绝不做 renameSync。
+    return { status: 'unreadable', reason: '读取失败：' + String(error) }
   }
 
   let parsed: unknown

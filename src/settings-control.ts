@@ -111,7 +111,12 @@ export function createSettingsControl(deps: SettingsControlDeps): SettingsContro
   // 当前文件里真实存在的覆盖（不是生效值）：保存时要在这份之上做稀疏合并，
   // 否则「只改一项」会把另外三个 patch 基线值钉进文件（D3）。
   let overrides: TunableOverrides = {}
-  if (outcome.status === 'corrupt') {
+  if (outcome.status === 'unreadable') {
+    // 读不出来是 I/O 错误（EACCES / EISDIR…），不是坏文件：用继承值继续、报警、留日志，
+    // 但**不隔离改名** —— 改名治不好权限，还会把用户稍后能修好的文件搬走（D6 之外的一类）。
+    warning = '设置文件无法读取（' + outcome.reason + '），当前使用继承值'
+    log(warning)
+  } else if (outcome.status === 'corrupt') {
     // D6 第一类：整份隔离，用继承值继续。不抛错 —— 设置文件坏掉不该让阅读器打不开。
     warning = outcome.quarantinedTo === undefined
       ? '设置文件无法读取（隔离失败：' + (outcome.quarantineError ?? '原因未知') + '），当前使用继承值'
@@ -142,6 +147,10 @@ export function createSettingsControl(deps: SettingsControlDeps): SettingsContro
   })
 
   const save = (patch: TunableOverrides): SettingsSaveOutcome => {
+    // 空 patch = 没有要改的项（D4.1 的 Partial 允许空对象）。这里必须**显式**空操作：
+    // 继续往下会把现有 overrides 原样重写一遍 —— 内容没变但 mtime 变了，还会在写盘失败时
+    // 把一个「什么都没改」的请求报成错误。回当前快照即可。
+    if (Object.keys(patch).length === 0) return { ok: true, snapshot: snapshot() }
     const next: TunableOverrides = { ...overrides, ...patch }
     const before = snapshotOf(config)
     try {

@@ -3030,4 +3030,38 @@ export const MUTATIONS = [
     judgeTests: ['R11 04 cleanup dryRun：不删任何条目、读态逐条不变，计数 / 释放量 / 阈值与随后执行一致'],
     from: 'return ok({ deleted: doomed.size, freedChars, cutoff, dryRun: true });',
     to: '' },
+
+  // ── R11 评审修复（2026-11-22）────────────────────────────────────────────
+  // 空 patch 当成「有写入」继续走落盘：内容没变但 mtime 变了，写盘失败还会把空操作报成错误（P3）。
+  { id: 'settings-空 patch 也写盘', file: 'lib/settings-control.js',
+    judges: ['settings-endpoints.test.mjs'],
+    judgeTests: ['saveSettings 空 patch：无操作成功（返回当前快照、不写盘、不改内存），未知键仍 rejected（D4.1）'],
+    from: '        if (Object.keys(patch).length === 0)\n            return { ok: true, snapshot: snapshot() };',
+    to: '' },
+  // 读失败（EISDIR / EACCES）被当成坏文件隔离：原文件被改名，权限问题却一点没修（P4）。
+  { id: 'settings-读失败也隔离', file: 'lib/storage/settings-file.js',
+    judges: ['settings-file.test.mjs'],
+    judgeTests: ['读失败（EISDIR）是 I/O 错误，不是坏文件：返回 unreadable 且不做隔离改名'],
+    from: "        return { status: 'unreadable', reason: '读取失败：' + String(error) };",
+    to: "        return corrupt(path, '读取失败：' + String(error));" },
+  // 分钟输入回到「必须有整数位且小数点后必须有数字」：.5 / 10. 被拒（P5 的 D11 小数语义）。
+  { id: 'settings-分钟只认完整小数', file: 'lib/client.js',
+    judges: ['settings-page-dom.test.mjs'],
+    judgeTests: ['R11 03 分钟输入允许省略整数位/小数位：.5 → 30000 ms，10. → 600000 ms（D11）'],
+    from: '\t\t\t\tparse: (text) => /^[+-]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)$/.test(text) ? Math.round(Number(text) * MINUTE_MS) : void 0,',
+    to: '\t\t\t\tparse: (text) => /^[+-]?\\d+(\\.\\d+)?$/.test(text) ? Math.round(Number(text) * MINUTE_MS) : void 0,' },
+  // 确认框的 Esc 守卫整段消失（preventDefault + stopPropagation 都去掉）：事件继续到
+  // routeKey 的 back，焦点没进框时直接退出设置页（P7）。只去掉其中一个等价 —— preventDefault
+  // 也会让 routeKey 提前 return，所以变异必须两个一起去掉才有观察意义。
+  { id: 'settings-确认框 Esc 穿透', file: 'lib/client.js',
+    judges: ['settings-page-dom.test.mjs'],
+    judgeTests: ['R11 P7 确认框 Esc：焦点不在框内时 document 上的 Esc 只关确认框，不退设置页'],
+    from: '\t\t\t\t\tevent.preventDefault();\n\t\t\t\t\tevent.stopPropagation();\n\t\t\t\t\tif (busy) return;',
+    to: '\t\t\t\t\tif (busy) return;' },
+  // 「去订阅管理页」按钮不再走 toggleFeeds：D14③ 的指针变成死按钮（P1）。
+  { id: 'settings-订阅源顺序按钮不动', file: 'lib/client.js',
+    judges: ['settings-page-dom.test.mjs'],
+    judgeTests: ['R11 D14③ 订阅源顺序：只有说明与「去订阅管理页」，不复制排序控件（D15）'],
+    from: '\t\t\t\t\t\t\t\t\tonClick: onManageFeeds,',
+    to: '\t\t\t\t\t\t\t\t\tonClick: () => {},' },
 ]

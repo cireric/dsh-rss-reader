@@ -251,13 +251,11 @@ export const searchQueryPayload = z.object({
  * `settings-schema.ts` 一份。用 `superRefine` 而不是给四个键各写一遍 `.min().max()`：
  * 后者就是第二份范围表，改一处漏一处时表现为「存得下却读不回」。
  *
- * 空 patch 是坏入参：它既不是「保存某一项」，也不该悄悄写一次盘。
+ * 空 patch **合法**（D4.1 的 `Partial<Record<Key, number>>` 允许空对象）：它是「没有要改的项」，
+ * 由 `settings-control.ts` 明确处理成无操作成功 —— 不写盘、不改内存。未知键仍然 rejected：
+ * 「空」与「乱写」是两件事，只有前者能安全地当空操作。
  */
 const tunablePatch = z.record(z.string(), z.unknown()).superRefine((patch, ctx) => {
-  if (Object.keys(patch).length === 0) {
-    ctx.addIssue({ code: 'custom', path: [], message: 'patch 不能为空' })
-    return
-  }
   for (const [key, value] of Object.entries(patch)) {
     if (!isTunableKey(key)) {
       ctx.addIssue({ code: 'custom', path: [key], message: '不是可设置的键' })
@@ -283,9 +281,8 @@ const tunablePatch = z.record(z.string(), z.unknown()).superRefine((patch, ctx) 
  * `saveSettings` 入参（R11 02，spec D4.1）：`{ patch }` 与 `{ resetToDefaults: true }` **二选一**。
  *
  * 为什么用 union 而不是一个可选字段对象 + refine：union 让 handler 能按分支窄化类型，
- * 不必再写一个「patch 可能缺席」的死分支。`resetToDefaults` 的实现是 07 票，但**形状先定死**，
- * 07 只接实现；本票对它的处理是明确的「未实现」错误，绝不当成空操作（静默成功会让界面
- * 以为已经恢复默认）。
+ * 不必再写一个「patch 可能缺席」的死分支。`resetToDefaults` 的逐键「删覆盖 / 写默认」判断在
+ * `settings-control.ts`（D28）：端点只验 `true` 字面量，把动作转成信封。
  */
 export const saveSettingsPayload = z.union([
   z.strictObject({ patch: tunablePatch }),
