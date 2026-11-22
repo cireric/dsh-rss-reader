@@ -370,6 +370,72 @@ test('saveItem 覆盖整条；可选字段缺席时不留 null / undefined 键�
   }
 })
 
+test('author：saveItem 写读往返、覆写同一条目取新值、updateItem 改其他字段不丢（R12 验收 9）', async () => {
+  const { store, db, dir } = freshStore('author-roundtrip')
+  try {
+    await store.saveItem('i-1', item('f1', { author: '张三' }))
+    assert.equal(assertItem(store.item('i-1'), '带作者的条目').author, '张三', 'saveItem 带 author 后 item() 必须读回同值')
+
+    // 覆写同一条目、新值不同：守护 UPSERT 的 ON CONFLICT 那一半（只改 INSERT 会让这里读回旧作者）
+    await store.saveItem('i-1', item('f1', { author: '李四' }))
+    assert.equal(store.item('i-1').author, '李四', '覆写必须写入新作者，不能静默保留旧值')
+
+    await store.updateItem('i-1', (current) => ({ ...current, summary: '新摘要' }))
+    const updated = assertItem(store.item('i-1'), '改其他字段后的条目')
+    assert.equal(updated.author, '李四', 'updateItem 只改其他字段时作者不许丢')
+    assert.equal(updated.summary, '新摘要')
+
+    // listItems 与 item 共享同一份列映射（同源）
+    assert.equal(store.listItems('f1')[0][1].author, '李四')
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('author 读侧归一化：直接 SQL 改成空串 / 纯空白 ⇒ item() 与 listItems() 读回 undefined（R12 验收 21）', async () => {
+  const { store, db, dir } = freshStore('author-blank')
+  try {
+    await store.saveItem('empty', item('f1', { author: '张三' }))
+    await store.saveItem('spaces', item('f1', { link: 'https://site.example/post/2', author: '李四' }))
+    db.prepare("UPDATE items SET author = '' WHERE id = ?").run('empty')
+    db.prepare("UPDATE items SET author = '   ' WHERE id = ?").run('spaces')
+
+    const byId = assertItem(store.item('empty'), '外部改成空串的条目')
+    assert.equal(byId.author, undefined, '空串必须读成「没有作者」')
+    assert.equal(Object.hasOwn(byId, 'author'), false, 'undefined 不许以键的形式落进记录（.strict() 要的是键缺席）')
+
+    const listed = new Map(store.listItems('f1'))
+    for (const id of ['empty', 'spaces']) {
+      const record = assertItem(listed.get(id), 'listItems 里的 ' + id)
+      assert.equal(record.author, undefined, id + '：空白作者必须读成「没有作者」')
+      assert.equal(Object.hasOwn(record, 'author'), false, id + '：空白作者不许变成空串或 undefined 键')
+    }
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('新库（onDisk = 0 → migrateSchema 建表）author 列可写可读（R12 验收 1 的新库侧）', async () => {
+  const dir = tempDir('author-newdb')
+  try {
+    const db = openDatabase(join(dir, 'rss.db'))
+    try {
+      assert.equal(db.prepare('PRAGMA user_version').get().user_version, 0, '夹具前提：全新库还没盖版本章')
+      migrateSchema(db)
+      const store = createSqliteStore(db, join(dir, 'config.json'))
+      await store.saveItem('i-1', item('f1', { author: '张三' }))
+      assert.equal(store.item('i-1').author, '张三', '新库的建表路径必须带 author 列（只补迁移、不补新库是镜像错误）')
+      assert.equal(db.prepare('SELECT author FROM items WHERE id = ?').get('i-1').author, '张三')
+    } finally {
+      db.close()
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('saveItem 覆盖已有条目时正文不被级联删掉（ON CONFLICT DO UPDATE，而不是 INSERT OR REPLACE）', async () => {
   const { store, db, dir } = freshStore('upsert')
   try {

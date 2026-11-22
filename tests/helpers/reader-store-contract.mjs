@@ -278,7 +278,7 @@ export const contractCases = [
   {
     name: 'item / saveItem / listItems / allItems：条目的写入与两种读法',
     async run({ store }) {
-      const record = { feedId: 'f1', title: '标题', link: 'https://a.example/1', fetchedAt: '2026-11-01T00:00:00.000Z', starred: false }
+      const record = { feedId: 'f1', title: '标题', link: 'https://a.example/1', author: '张三', fetchedAt: '2026-11-01T00:00:00.000Z', starred: false }
       assert.equal(store.item('i1'), undefined)
       await store.saveItem('i1', record)
       assert.deepEqual(store.item('i1'), record)
@@ -302,6 +302,27 @@ export const contractCases = [
 
       await assert.rejects(() => store.updateItem('missing', (current) => current),
         '缺失条目必须拒绝 —— 写一次不等于创建')
+    },
+  },
+  {
+    // R12 验收 11：三份实现用同一份**干净值**夹具；只钉「有值往返一致 + 缺省不落键」。
+    // 空白拒绝 / trim 不在这里钉 —— memory-store 不做 schema 校验是既有分叉，
+    // 那两条由 tests/domain.test.mjs 的 Seam 1b 独占。
+    name: 'item：author 干净值往返、覆写取新值、updateItem 不丢；缺省时不落 author 键',
+    async run({ store }) {
+      const base = { feedId: 'f1', title: '标题', link: 'https://a.example/author', fetchedAt: '2026-11-01T00:00:00.000Z', starred: false }
+      await store.saveItem('with-author', { ...base, author: '张三' })
+      assert.equal(store.item('with-author').author, '张三', 'saveItem 带 author 后必须原样读回')
+
+      await store.updateItem('with-author', (current) => ({ ...current, summary: '新摘要' }))
+      assert.equal(store.item('with-author').author, '张三', 'updateItem 只改其他字段时 author 不许丢')
+
+      await store.saveItem('with-author', { ...base, author: '李四' })
+      assert.equal(store.item('with-author').author, '李四', '覆写同一条目必须取新值')
+
+      await store.saveItem('without-author', base)
+      assert.equal(Object.hasOwn(store.item('without-author'), 'author'), false,
+        '缺省时不许落 author 键（undefined 值也不行 —— .strict() 与「没有作者」的判据都靠键缺席）')
     },
   },
   {

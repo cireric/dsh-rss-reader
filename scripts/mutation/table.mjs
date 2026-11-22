@@ -1260,7 +1260,31 @@ export const MUTATIONS = [
     // 「写一次就等于创建」会让调用方失去「这条还在不在」的信号（src/store.ts:29）。
     // 判据：tests/store-sqlite.test.mjs 的「对缺失键拒绝」那条。
     from: "throw new Error('updateItem 拒绝：条目 ' + itemId + ' 不在库里。",
-    to: "sql(UPSERT_ITEM).run(itemId, itemId, '', '', null, '2026-10-11T00:00:00.000Z', null, null, 0, 0, null); return; throw new Error('updateItem 拒绝：条目 ' + itemId + ' 不在库里。" },
+    to: "sql(UPSERT_ITEM).run(itemId, itemId, '', '', null, '2026-10-11T00:00:00.000Z', null, null, 0, 0, null, null, null); return; throw new Error('updateItem 拒绝：条目 ' + itemId + ' 不在库里。" },
+  // ── R12 作者元数据：存储读写映射（票据 02）────────────────────────────────────
+  // 读侧列映射漏 author：库里明明有值，读出来却是 undefined —— 症状是「作者时有时无」，
+  // 而写入路径完全正常，单看写侧断言抓不到。判据：store-sqlite 的 author 往返用例。
+  { id: 'store-作者读侧丢列', file: 'lib/store-sqlite.js',
+    judges: ['store-sqlite.test.mjs'],
+    judgeTests: ['author：saveItem 写读往返、覆写同一条目取新值、updateItem 改其他字段不丢（R12 验收 9）'],
+    from: "    const author = normalizeAuthor(optionalText(row.author, 'items.author'));\n    if (author !== undefined)\n        record.author = author;",
+    to: "    const author = normalizeAuthor(optionalText(row.author, 'items.author'));\n    if (false)\n        record.author = author;" },
+  // 写侧漏绑：INSERT 仍是 13 列，但 author 永远落 NULL（node:sqlite 对缺参按 NULL 绑定）。
+  // 症状是「作者能解析、能搜，唯独落库即丢」—— 只有 saveItem 后读回才看得见。
+  // 判据：store-sqlite 的 author 往返用例（首段 saveItem 就翻红）。
+  { id: 'store-写侧丢列', file: 'lib/store-sqlite.js',
+    judges: ['store-sqlite.test.mjs'],
+    judgeTests: ['author：saveItem 写读往返、覆写同一条目取新值、updateItem 改其他字段不丢（R12 验收 9）'],
+    from: 'record.articleFailure ?? null, record.author ?? null);',
+    to: 'record.articleFailure ?? null);' },
+  // ON CONFLICT 漏 author：首次写入能读回作者，覆写同一条目时旧作者被静默保留 ——
+  // 只有「覆写取新值」这一半会翻红，单条 saveItem 往返抓不到。
+  // 判据：store-sqlite 的 author 往返用例第二段。
+  { id: 'store-UPSERT 的 ON CONFLICT 漏 author', file: 'lib/store-sqlite.js',
+    judges: ['store-sqlite.test.mjs'],
+    judgeTests: ['author：saveItem 写读往返、覆写同一条目取新值、updateItem 改其他字段不丢（R12 验收 9）'],
+    from: '    article_failure = excluded.article_failure,\n    author          = excluded.author`',
+    to: '    article_failure = excluded.article_failure`' },
   // ⚠️ **两条「本该有」的变异实测是等价变异，按 AGENTS.md 不入门槛**（2026-10-11 差分实测）：
   //
   // ① 「写条目改用 INSERT OR REPLACE」：REPLACE 会先删旧行、触发 texts 的 ON DELETE CASCADE，
