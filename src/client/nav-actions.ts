@@ -18,12 +18,12 @@ export interface NavActionHost {
   searchActions: { reset: () => void }
   /** 虚拟视图那一行要切 filter（selectNav 的回退路径用）。 */
   setFilter: (filter: 'all' | 'unread' | 'starred') => void
-  /** 切作用域前退出正文：`view` / `article` 由列表域的 leaveArticleForScope 收回（见 list-actions）。 */
-  leaveArticleForScope: () => void
+  /** 切作用域前退出正文 / 设置页：`view` / `article` 由列表域的 leaveTransientViews 收回（见 list-actions）。 */
+  leaveTransientViews: () => void
 }
 
 export function createNavActions(host: NavActionHost) {
-  const { get, set, reload, persistView, relocateSelection, searchActions, setFilter, leaveArticleForScope } = host
+  const { get, set, reload, persistView, relocateSelection, searchActions, setFilter, leaveTransientViews } = host
 
   /**
    * 切导航选中（左栏点源 / 任务 6 的键位都走这里）。
@@ -35,9 +35,10 @@ export function createNavActions(host: NavActionHost) {
    * 并存的第二套过滤状态——界面上只看得到 filter 顶栏，用户无从知道还有一层。
    */
   const selectNav = (next: NavSelection): void => {
-    // 正文视图下切源 / 文件夹 / 标签（含「再选同一个 = 取消选中」这条分支）也是切作用域：
-    // 先退出正文，否则右栏会继续显示一篇已经不属于新作用域的旧文章。搜索提交另有自己的回列表写法。
-    leaveArticleForScope()
+    // 正文 / 设置页下切源 / 文件夹 / 标签（含「再选同一个 = 取消选中」这条分支）也是切作用域：
+    // 先退出临时视图，否则右栏会继续显示一篇已经不属于新作用域的旧文章、或停在点了没反应的设置页。
+    // 搜索提交另有自己的回列表写法。
+    leaveTransientViews()
     const current = get().navSelection
     const cancelled = sameNavSelection(current, next)
     if (cancelled || next.kind === 'virtual') {

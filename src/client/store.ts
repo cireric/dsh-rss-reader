@@ -6,7 +6,7 @@
  * 列表、正文、订阅管理与键盘接线，任一改动都要动同一个文件。
  */
 import { useEffect, useState } from 'react'
-import { ROUTE_PATH, type DiscoveryResult, type Endpoint, type FeedView, type FolderView, type ItemView, type OpmlImportResult, type RpcResult, type SearchQuery, type TagView, type DuplicateHintView } from '../shared.js'
+import { ROUTE_PATH, type DiscoveryResult, type Endpoint, type FeedView, type FolderView, type ItemView, type OpmlImportResult, type RpcResult, type SearchQuery, type SettingsSnapshot, type TagView, type DuplicateHintView } from '../shared.js'
 import { DEFAULT_READING_PREFERENCES, sanitizeViewPreferences, validListScrollTop } from '../preferences.js'
 import type { ReadingPreferences, ViewPreferences } from '../preferences.js'
 import { clampScrollTop } from '../list-scroll.js'
@@ -58,6 +58,7 @@ import { createListActions } from './list-actions.js'
 import { createNavActions } from './nav-actions.js'
 import { createOpmlActions } from './opml-actions.js'
 import { createSearchActions } from './search-actions.js'
+import { createSettingsActions } from './settings-actions.js'
 import { createTagActions } from './tag-actions.js'
 import {
   navRowsOf, navCursorKey, nextExpandedOf, memorableSelectionOf, VIRTUAL_VIEWS,
@@ -112,8 +113,8 @@ export interface ReaderState {
   /** 刚被「全部标记已读」的条目，供短时撤销 */
   /** 一键已读的撤销条。窗口到期由 armUndoExpiry 的定时器负责，所以这里不需要存时间戳。 */
   undo: { ids: string[] } | undefined
-  /** 当前视图：列表 / 正文 / 订阅管理（订阅管理同样在主栏内切换） */
-  view: 'list' | 'article' | 'feeds'
+  /** 当前视图：列表 / 正文 / 订阅管理 / 设置（后两者同样在主栏内切换） */
+  view: 'list' | 'article' | 'feeds' | 'settings'
   /**
    * 条目流的**视图密度**（GR 的两视图）：expanded 含条目描述/正文摘录，list 只有标题行。
    * 注意与上面的 view 是两条正交的轴：view 决定「看哪个面板」，layout 决定「条目流怎么排」。
@@ -142,6 +143,16 @@ export interface ReaderState {
   accountWindow: DisplayWindowRange
   /** 是否显示未读计数（规格 §5 不变量 8：**未读计数可隐藏**）。默认显示 = 既有行为。 */
   showUnread: boolean
+  /**
+   * 设置页的生效值快照（R11 01）：`undefined` = 还没取到（正在取 / 读失败）。
+   *
+   * 与 `view === 'settings'` 分开：关掉页面再打开时沿用上一份，避免先闪一屏空值。
+   */
+  settings: SettingsSnapshot | undefined
+  /** 设置页取数失败的一句话（与全局 error 分开：设置页自己要能说明为什么空着）。 */
+  settingsError: string | undefined
+  /** 启动时的读侧告警（坏文件隔离 / 坏值忽略）是否已被本次会话关掉（D17）。 */
+  settingsWarningDismissed: boolean
   /** 最近一次导入的报告（坏源要逐条列出，不能只报总数） */
   importReport: OpmlImportResult | undefined
   /**
@@ -282,13 +293,15 @@ const browserDeps: ReaderStoreDeps = {
  *
  * | 域 | 拥有的 state | 动作 | 允许改别人的什么 |
  * |---|---|---|---|
- * | 列表 | `items` / `selectedId` / `nextCursor` / `loadingMore` / `filter` / `layout` / `markAllRange` / `displayWindow` / `accountWindow` / `undo`（账目 `unread` / `perFeedUnread` 由 account-mirror 的回包整体覆盖；`accountWindow` 标记这份账属于哪个档位） | load / loadMore / visible / setFilter / setWindow / setLayout / activate / selectRelative / markRead / toggleStar / toggleKeepUnread / toggleRead / markAllRead / undoMarkAll / cleanup / stepArticle / openArticle / retryArticle / rememberListScrollTop / takeListScrollTop | 只**读** feeds / tags；改账目一律经 account-mirror（回包整体覆盖）。**跨域写入逐条登记在此**：① setFilter 同步 `navCursor`（光标跟着过滤走，2026-10-10 的既有规则）；② overview 整份落地（applyOverview 与 load 的搜索分支）把 feeds / folders / tags 按宿主快照原样写回；③ 选中项失效时 applyOverview / load 把 navSelection + navCursor 回落虚拟视图（与「源被退订」同一条规则）；④ 正文动作（openArticle / retryArticle / stepArticle）写 `view` / `article` —— 这两份是跨域呈现状态，不归任何一块私有；⑤ setFilter / setWindow 经 leaveArticleForScope 写 `view` / `article`（切过滤 / 切档退出正文） |
+ * | 列表 | `items` / `selectedId` / `nextCursor` / `loadingMore` / `filter` / `layout` / `markAllRange` / `displayWindow` / `accountWindow` / `undo`（账目 `unread` / `perFeedUnread` 由 account-mirror 的回包整体覆盖；`accountWindow` 标记这份账属于哪个档位） | load / loadMore / visible / setFilter / setWindow / setLayout / activate / selectRelative / markRead / toggleStar / toggleKeepUnread / toggleRead / markAllRead / undoMarkAll / cleanup / stepArticle / openArticle / retryArticle / rememberListScrollTop / takeListScrollTop | 只**读** feeds / tags；改账目一律经 account-mirror（回包整体覆盖）。**跨域写入逐条登记在此**：① setFilter 同步 `navCursor`（光标跟着过滤走，2026-10-10 的既有规则）；② overview 整份落地（applyOverview 与 load 的搜索分支）把 feeds / folders / tags 按宿主快照原样写回；③ 选中项失效时 applyOverview / load 把 navSelection + navCursor 回落虚拟视图（与「源被退订」同一条规则）；④ 正文动作（openArticle / retryArticle / stepArticle）写 `view` / `article` —— 这两份是跨域呈现状态，不归任何一块私有；⑤ setFilter / setWindow 经 leaveTransientViews 写 `view` / `article`（切过滤 / 切档退出正文与设置页） |
  * | 搜索 | `search` / `searchRevision` / `searchRequest` / `searchPages` | submitSearch / loadSearch / resetSearchPage | 借列表的 items / selectedId / nextCursor / loading 展示；**不许**改 filter |
- * | 订阅 | `feeds` / `folders` / `discovery` / `feedsBusy` / `importReport` / `navSelection` / `navCursor` / `navVisible` / `foldedFolders` / `viewPreferences`（**deleteFolder 例外**：删掉当前所在文件夹时会把 `filter` 回落成 `all`，这条跨域写入登记在此） | addFeed / removeFeed / moveFeedOrder / importOpml / exportOpml / discover / createFolder / renameFolder / deleteFolder / moveFeedToFolder / selectNav / moveNavCursor / openNavCursor / toggleNav / toggleFolder / flushViewMemory | 改 navSelection 后必须走 persistView；**整份覆盖写必须带上当下的 selectedId**（否则一次普通导航就抹掉阅读位置）；选中 / j/k / 打开条目经 300ms 去抖写手记 lastItemId，面板卸载时 flush；退订只能经 `deleteSubscription`；selectNav 经列表域的 leaveArticleForScope 写 `view` / `article`（切作用域退出正文） |
+ * | 订阅 | `feeds` / `folders` / `discovery` / `feedsBusy` / `importReport` / `navSelection` / `navCursor` / `navVisible` / `foldedFolders` / `viewPreferences`（**deleteFolder 例外**：删掉当前所在文件夹时会把 `filter` 回落成 `all`，这条跨域写入登记在此） | addFeed / removeFeed / moveFeedOrder / importOpml / exportOpml / discover / createFolder / renameFolder / deleteFolder / moveFeedToFolder / selectNav / moveNavCursor / openNavCursor / toggleNav / toggleFolder / flushViewMemory | 改 navSelection 后必须走 persistView；**整份覆盖写必须带上当下的 selectedId**（否则一次普通导航就抹掉阅读位置）；选中 / j/k / 打开条目经 300ms 去抖写手记 lastItemId，面板卸载时 flush；退订只能经 `deleteSubscription`；selectNav 经列表域的 leaveTransientViews 写 `view` / `article`（切作用域退出正文与设置页） |
  * | 标签 | `tags` / 条目的 `tagIds` | createTag / renameTag / deleteTag / toggleItemTag | 乐观改 tagIds，失败回取当前页拉回真相（tagWrite 串行化 + tagEpoch 身份） |
+| 设置 | `settings` / `settingsError` / `settingsWarningDismissed` | loadSettings / openSettings / closeSettings / toggleSettings / dismissSettingsWarning | 只调 `settings` 端点取快照；`view: 'settings'` 是跨域呈现状态，与列表 / 订阅域同一条规则（左栏导航 / 切过滤 / 切档经列表域入口退出） |
  *
  * `view` / `article` 是跨域呈现状态：列表的 openArticle / retryArticle / closeArticle 与 setFilter、
- * 搜索的 submitSearch、导航的 selectNav（经列表域入口）与 toggleFeeds 都会写 —— 它不属于任何一块的私有 state。
+ * 搜索的 submitSearch、导航的 selectNav（经列表域入口）、toggleFeeds 与设置域的 open/closeSettings
+ * 都会写 —— 它不属于任何一块的私有 state。
  *
  * 列表滚动位置（R2-02）的 `lastListScrollTop` / `restoredListScrollTop` / `listScrollTouched` 是列表域的
  * **模块内**值：刻意不进 state、不触发渲染；`rememberListScrollTop` 与选中共享同一个 300ms 去抖写手，
@@ -304,7 +317,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   let state: ReaderState = {
     items: [], feeds: [], folders: [], tags: [], unread: 0, unreadSplit: undefined, filter: 'all',
     selectedId: undefined, loading: true, error: undefined, undo: undefined,
-    view: 'list', layout: 'list', markAllRange: 'all', displayWindow: 'all', accountWindow: 'all', showUnread: true, article: undefined, notice: undefined,
+    view: 'list', layout: 'list', markAllRange: 'all', displayWindow: 'all', accountWindow: 'all', showUnread: true, settings: undefined, settingsError: undefined, settingsWarningDismissed: false, article: undefined, notice: undefined,
     importReport: undefined, discovery: undefined, feedsBusy: false,
     navSelection: { kind: 'virtual' }, perFeedUnread: {}, navVisible: true,
     reading: DEFAULT_READING_PREFERENCES, duplicates: {},
@@ -653,7 +666,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
 
   // 列表域工厂：setFilter 要清搜索结果（reset 只能经搜索域的入口），所以建在搜索域之后；
   // 导航域又反过来借它的 setFilter / relocateSelection —— 工厂之间只传闭包，不含执行期副作用。
-  const { actions: listActions, relocateSelection, leaveArticleForScope } = createListActions({
+  const { actions: listActions, relocateSelection, leaveTransientViews } = createListActions({
     get, set, persistView, rpc: deps.rpc, log: deps.log,
     now: deps.now, setTimeout: deps.setTimeout, clearTimeout: deps.clearTimeout, open: deps.open,
     rememberSelection,
@@ -678,10 +691,13 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   const navActions = createNavActions({
     get, set, reload: () => listActions.load('overview'), persistView, relocateSelection, searchActions,
     setFilter: listActions.setFilter,
-    leaveArticleForScope,
+    leaveTransientViews,
   })
 
   const feedActions = createFeedActions({ get, set, rpc: deps.rpc, reload: () => listActions.load('overview') })
+
+  // 设置域（R11 01）：只读快照 + 视图开关。写路径是 02 票的 saveSettings。
+  const settingsActions = createSettingsActions({ get, set, rpc: deps.rpc, log: deps.log })
 
   return {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
@@ -698,6 +714,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     ...listActions,
     ...folderActions,
     ...tagActions,
+    ...settingsActions,
   }
 }
 

@@ -179,6 +179,8 @@ const CONTRACTS = {
     alsoValid: [withWindow({ itemId: 'a' })],
     invalid: [{}, { itemId: '' }, ...windowBadSamples({ itemId: 'a' })],
   },
+  // R11 01：settings 是零入参读端点（noPayload 接受并忽略 payload）。
+  settings: { valid: { anything: 1 }, invalid: [] },
   viewPreferences: { valid: { anything: 1 }, invalid: [] },
   saveViewPreferences: {
     valid: { preferences: {} },

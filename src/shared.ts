@@ -19,6 +19,7 @@
  * `ctx.connection.requestRejection(req)` 套用同一套 Host/Origin 与浏览器鉴权。
  */
 import type { UnreadAccount } from './unread.js'
+import type { TunableKey } from './settings-schema.js'
 // 表格块没有 text / items，只有它能摊出可读文字。article-text.ts 零 node 依赖（本文件要进 client
 // bundle），行列摊平也只有那一份实现 —— 不在这里再写一遍遍历（spec 决策 9 / 10）。
 import { tableToText } from './article-text.js'
@@ -38,6 +39,8 @@ export const ENDPOINT_NAMES = [
   'viewPreferences', 'saveViewPreferences', 'saveReadingProgress', 'duplicateHints', 'searchItems',
   'listFolders', 'createFolder', 'renameFolder', 'deleteFolder', 'moveFeedToFolder', 'reorderFeeds',
   'listTags', 'createTag', 'renameTag', 'deleteTag', 'setItemTags',
+  // R11 01：设置页的读端点（写端点是 02 票的 saveSettings）。
+  'settings',
 ] as const
 export type Endpoint = (typeof ENDPOINT_NAMES)[number]
 
@@ -46,6 +49,19 @@ export type RpcResult<T> =
   // details 是宿主信封的必填字段（ConnectionRpcFailure，2026-10-06 源码核对；
   // 技能文档里的样板落后于源码，少了它 tsc 直接拒绝）
   | { ok: false; error: { code: string; message: string; details: object } }
+
+/**
+ * 设置页的 wire 形状（R11 01）。
+ *
+ * 只带界面真正用到的两样：生效值与默认值 —— 来源层（overrides / inherited / explicit）
+ * 刻意不下发（spec D16：界面不显示来源）。`warning` 是启动时读 `settings.json` 的告警
+ * （坏文件已隔离 / 坏值已忽略），正常态缺席，不阻断任何功能（D17）。
+ */
+export interface SettingsSnapshot {
+  effective: Record<TunableKey, number>
+  defaults: Record<TunableKey, number>
+  warning?: string
+}
 
 /** 文件夹目录的一条：名称 + 成员订阅 id（成员按 config.json 的订阅顺序）。 */
 export interface FolderView {

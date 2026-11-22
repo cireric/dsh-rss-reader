@@ -138,20 +138,28 @@ export function createListActions(host: ListActionHost) {
   }
 
   /**
-   * 切作用域必须退出正文 —— `selectNav` / `setFilter` 共用的唯一入口。
+   * 切作用域必须退出「临时呈现视图」（正文 / 设置页）—— `selectNav` / `setFilter` / `setWindow`
+   * 共用的唯一入口。
    *
    * **病象**：正在看正文时点另一个源 / 文件夹 / 标签，或切「未读 / 星标」过滤，右栏仍停在上一篇——
-   * 它已经不属于当前作用域，读者看到的是「作用域变了、内容却没变」的自相矛盾。
+   * 它已经不属于当前作用域，读者看到的是「作用域变了、内容却没变」的自相矛盾。设置页同理：
+   * 左栏点了没反应，用户只会认为坏了（spec D21）。
    *
-   * **根因**：这两个动作只改作用域状态，没人收回跨域呈现状态 `view` / `article`。两样必须一起清：
+   * **根因**：这几个动作只改作用域状态，没人收回跨域呈现状态 `view` / `article`。两样必须一起清：
    * 正文面的唯一真相是 `article.itemId`，只把 `view` 改回列表会留下旧 `article`，而在途的正文回包
    * 仍会命中 `loadArticle` 的 `get().article?.itemId` 守卫，把一篇已经离开作用域的文章重新画回来。
    *
-   * **边界**：只接这两个入口。视图恢复、Esc 关闭（`closeArticle`）与搜索提交各有自己的语义，
+   * **为什么名字不叫 leaveArticleForScope**：R11 01 起它还要收设置页；叫「退出正文」会让下一个人
+   * 在 settings 分支上误以为这里只该管 article。设置页没有「内容快照」要清（`settings` 保留着，
+   * 下次进入先用旧值再刷新），所以只需把 view 落回列表。
+   *
+   * **边界**：只接这三个入口。视图恢复、Esc 关闭（`closeArticle`）与搜索提交各有自己的语义，
    * 不要顺手接上来 —— 关闭正文后保留 `article` 是阅读进度落盘要用的。
    */
-  const leaveArticleForScope = (): void => {
-    if (get().view === 'article') set({ view: 'list', article: undefined })
+  const leaveTransientViews = (): void => {
+    const view = get().view
+    if (view === 'article') set({ view: 'list', article: undefined })
+    else if (view === 'settings') set({ view: 'list' })
   }
 
   /**
@@ -163,7 +171,7 @@ export function createListActions(host: ListActionHost) {
    */
   const setFilter = (filter: Filter): void => {
     // 换过滤也是换作用域：正文里切「未读 / 星标」必须回列表，旧文章不属于新过滤。
-    leaveArticleForScope()
+    leaveTransientViews()
     set({ filter, navCursor: { kind: 'filter', filter } })
     relocateSelection()
     persistView()
@@ -950,7 +958,7 @@ export function createListActions(host: ListActionHost) {
     const state = get()
     if (state.search !== undefined) return
     if (state.displayWindow === displayWindow) return
-    leaveArticleForScope()
+    leaveTransientViews()
     set({ displayWindow, items: [], selectedId: undefined, nextCursor: undefined, loadingMore: false })
     await load('overview')
   }
@@ -964,7 +972,7 @@ export function createListActions(host: ListActionHost) {
     },
     /** 跨域入口：选中重落。nav-actions 与视图恢复共用，刻意不上 ReaderStore 的公开面。 */
     relocateSelection,
-    /** 跨域入口：切作用域前退出正文。setFilter 在同文件直调，nav-actions 的 selectNav 经 host 注入。 */
-    leaveArticleForScope,
+    /** 跨域入口：切作用域前退出正文 / 设置页。setFilter 与 setWindow 在同文件直调，nav-actions 的 selectNav 经 host 注入。 */
+    leaveTransientViews,
   }
 }

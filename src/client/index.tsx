@@ -41,6 +41,7 @@ import { FeedsView } from './feeds-view.js'
 import { FeedNav } from './feed-nav.js'
 import { TagEditor } from './tag-editor.js'
 import { ArticleView } from './article-pane.js'
+import { SettingsView } from './settings-view.js'
 // 空组覆盖住 `image-fold.ts`（R6 04 从本文件搬去）：`i` 键在 keyboard-routing.ts 里也要写它，
 // 两处各造一个 `new Set()` 会得到值相等但引用不同的两份「空组覆盖」，而 React 的相等判断与
 // `foldOf` 的快照语义都靠**同一个引用**才不多跑一次渲染。理由见那边的常量注释。
@@ -131,6 +132,24 @@ const STYLE = `
 .dsh-rss-status { padding:5px clamp(12px, 2vw, 28px); font-size:12px; color:var(--rss-muted);
   border-bottom:1px solid var(--rss-line); overflow-wrap:anywhere; }
 .dsh-rss-status--error { color:var(--rss-error); }
+/* R11 01 设置页：单页纵向滚动（D13 不做二级导航）。容器自己可聚焦 —— 空格 / d 要交给
+   浏览器原生滚动，而原生滚动要求焦点在可滚容器上（见 settings-view.tsx 的文件头）。 */
+.dsh-rss-settings-page { flex:1; min-height:0; overflow-y:auto; outline:none;
+  padding:12px clamp(12px, 2vw, 28px) 24px; }
+.dsh-rss-settings-head { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.dsh-rss-settings-title { margin:0; font-size:18px; line-height:1.3; }
+.dsh-rss-settings-warning { display:flex; align-items:center; flex-wrap:wrap; gap:6px; }
+.dsh-rss-settings-section { margin-top:18px; padding-top:14px; border-top:1px solid var(--rss-line); }
+.dsh-rss-settings-section-title { margin:0 0 8px; font-size:14px; }
+/* 一行 = 名称 + 帮助 + 值 + 单位。窄面板（<460px）下上下堆叠，值不与名称抢宽度（D14.2）。 */
+.dsh-rss-settings-row { display:flex; align-items:baseline; flex-wrap:wrap; gap:4px 10px; padding:6px 0; }
+.dsh-rss-settings-label { font-size:13px; }
+.dsh-rss-settings-value { font-size:13px; font-weight:600; font-variant-numeric:tabular-nums; }
+.dsh-rss-settings-unit { font-size:12px; color:var(--rss-muted); }
+.dsh-rss-settings-help { flex-basis:100%; margin:0; font-size:12px; color:var(--rss-muted); line-height:1.45; }
+@media (max-width: 460px) {
+  .dsh-rss-settings-row { flex-direction:column; align-items:flex-start; }
+}
 .dsh-rss-row { border-bottom:1px solid var(--rss-line); }
 .dsh-rss-row:hover, [data-rss-nav-row]:hover { background:var(--rss-hover); }
 .dsh-rss-row[data-rss-selected], [data-rss-nav-selected] { background:var(--rss-selected); }
@@ -862,6 +881,11 @@ export function createReader(store: ReaderStore): () => ReactNode {
                 }}>清理旧条目</button>
             </div>
           </details>
+          {/* 设置入口（R11 01，D19）：放在「刷新」与「?」之间；再点一次回列表（与 F 的 toggle 同型）。
+              所有视图都可见 —— 工具栏本来就常驻，不给它按视图分叉。 */}
+          <button type="button" className="dsh-rss-btn" data-rss-settings-open=""
+            title="设置：每次刷新抓取源数与运行参数" aria-pressed={state.view === 'settings'}
+            onClick={() => store.toggleSettings()}>设置</button>
           {/* 帮助入口放最右端：它是「说明书」，与左边那三个动作按钮不是一类东西。
               点击与按 ? 键走同一个开关，不写第二份逻辑。 */}
           <button type="button" className="dsh-rss-btn" style={{ fontWeight: 600 }}
@@ -1000,6 +1024,16 @@ export function createReader(store: ReaderStore): () => ReactNode {
             canNext={store.canStepArticle(1)}
             onPrev={() => { store.stepArticle(-1) }}
             onNext={() => { store.stepArticle(1) }}
+          />
+        )}
+
+        {state.view === 'settings' && (
+          <SettingsView
+            settings={state.settings}
+            error={state.settingsError}
+            warningDismissed={state.settingsWarningDismissed}
+            onClose={() => store.closeSettings()}
+            onDismissWarning={() => store.dismissSettingsWarning()}
           />
         )}
 
