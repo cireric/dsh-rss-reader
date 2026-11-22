@@ -171,6 +171,31 @@ test('rss_search：筛选条件原样进查询，结果按 PRD §8.2 的字段�
   assert.equal(item.snippetTruncated, true, '截断过就必须如实标记')
 })
 
+test('rss_search：摘要带 author（有值字符串 / 无值 null / 超长截断并标记）', async () => {
+  const { store } = freshStore('tools-author')
+  await store.saveFeed('https://feed.example/rss', { url: 'https://feed.example/rss', title: '探针源' })
+  const longAuthor = '作'.repeat(LABEL_MAX_CHARS + 20)
+  const stub = searchStub({
+    items: [hit({ author: '张三' }), hit({ id: 'item-2' }), hit({ id: 'item-3', author: longAuthor })],
+  })
+  const search = mount({ ready: () => store, searchItems: stub.run }).get('rss_search')
+  const page = await search.execute({ query: 'x' }, exec)
+
+  const [named, anonymous, long] = page.items
+  assert.equal(named.author, '张三', '有作者时摘要必须带字符串作者')
+  assert.equal('authorTruncated' in named, false, '没截断就不许凭空多一个标记')
+  // 「没有作者」与「没有这个字段」对模型是两件事：前者 null，后者会让模型以为工具不提供作者。
+  assert.equal('author' in anonymous, true, 'author 键本身必须存在')
+  assert.equal(anonymous.author, null, '无作者时必须是 null，不是 undefined / 空串')
+  assert.equal([...long.author].length, LABEL_MAX_CHARS, '作者超长按 label 预算截断')
+  assert.equal(long.authorTruncated, true, '截断过就必须如实标记')
+})
+
+test('rss_search：工具描述写明命中面含作者（否则模型不知道可以按作者检索）', () => {
+  const description = mount({ ready: () => undefined, searchItems: searchStub().run }).get('rss_search').description
+  assert.match(description, /author/i, '描述必须写明作者也参与匹配，实际：' + description)
+})
+
 test('rss_search：游标必须被查询条件栅栏住，换条件续页响亮失败', async () => {
   const { store } = freshStore('tools-cursor')
   await store.saveFeed('https://feed.example/rss', { url: 'https://feed.example/rss', title: '探针源' })
@@ -268,6 +293,28 @@ test('rss_read_article：四种 cached:false 各有可解释原因，命中时�
   assert.equal(huge.truncated, true, '超长正文必须标 truncated')
   assert.equal([...huge.text].length, ARTICLE_MAX_CHARS)
   assert.equal(huge.chars, ARTICLE_MAX_CHARS + 10, 'chars 报的是截断前的真实长度')
+})
+
+test('rss_read_article：base 元数据带 author（有值 / null）——搜索看到作者，读正文不能丢', async () => {
+  const { store } = freshStore('tools-article-author')
+  await store.saveFeed('https://feed.example/rss', { url: 'https://feed.example/rss', title: '探针源' })
+  const base = { feedId: 'https://feed.example/rss', title: '标题', link: 'https://feed.example/post/1', fetchedAt: '2026-11-01T00:00:00.000Z', starred: false }
+  await store.saveItem('named', {
+    ...base,
+    author: '张三',
+    article: { fetchedAt: '2026-11-01T00:00:00.000Z', revision: EXTRACTOR_REVISION, blocks: [{ kind: 'p', text: '正文' }] },
+  })
+  await store.saveItem('anonymous', base)
+  const read = mount({ ready: () => store, searchItems: searchStub().run }).get('rss_read_article')
+
+  const named = await read.execute({ itemId: 'named' }, exec)
+  assert.equal(named.cached, true)
+  assert.equal(named.author, '张三', '命中缓存的正文结果也必须带作者')
+
+  // 没有作者时同样要显式给 null：缺键会让模型以为工具不提供作者（与摘要同一条形状）。
+  const anonymous = await read.execute({ itemId: 'anonymous' }, exec)
+  assert.equal('author' in anonymous, true, 'author 键本身必须存在')
+  assert.equal(anonymous.author, null, '无作者时必须是 null')
 })
 
 test('rss_read_article：退订源的残留条目不得泄漏标题、链接或正文', async () => {
