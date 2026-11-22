@@ -132,6 +132,11 @@ async function mount({ settings, saveSettings, items, cleanupStub } = {}) {
         if (custom?.error !== undefined) return failEnvelope(custom.error)
         if (custom?.settings !== undefined) { settingsState = custom.settings; return ok({ settings: settingsState }) }
       }
+      // R11 07：恢复默认的客户端契约只看「生效值全默认」；文件层删/写规则由 endpoints 测试证明。
+      if (body.payload?.resetToDefaults === true) {
+        settingsState = { ...settingsState, effective: { ...settingsState.defaults } }
+        return ok({ settings: settingsState })
+      }
       const patch = body.payload?.patch ?? {}
       settingsState = { ...settingsState, effective: { ...settingsState.effective, ...patch } }
       return ok({ settings: settingsState })
@@ -686,6 +691,121 @@ test('R11 03 三行非法值：就地红字 + 零请求 + 输入保留（范围�
     assert.equal(h.store.get().settings.effective.refreshConcurrency, 5, '本地校验失败不许改权威值')
     assert.equal(h.store.get().settings.effective.minRefreshIntervalMs, 600000)
     assert.equal(h.store.get().settings.effective.cleanupAfterDays, 30)
+  } finally {
+    h.cleanup()
+  }
+})
+
+// ── R11 07：恢复默认（spec D28 / D14.2，验收 C15）──────────────────────────────────
+//
+// 客户端只发一个动作、不做删/写判断：确认框里列出的 N 项来自**当前快照**的 effective vs defaults，
+// 与宿主逐键规则同源 —— 生效值不等于默认值的项一定会在恢复时变化。确认后只发一次
+// `saveSettings({ resetToDefaults: true })`，回包即权威值；N 也是提示里显示的那个数。
+
+test('R11 07 恢复默认确认框：列出将变化的项与目标值，取消零写并还焦点', skip, async () => {
+  const h = await mount({
+    settings: {
+      // 900000 ms = 15 分钟：确认框按界面单位（分钟）展示目标值，不暴露毫秒。
+      effective: { ...TUNABLE_DEFAULTS, refreshConcurrency: 8, minRefreshIntervalMs: 900000, cleanupAfterDays: 45 },
+      defaults: { ...TUNABLE_DEFAULTS },
+    },
+  })
+  try {
+    await openSettings(h)
+    const button = h.$('[data-rss-reset-defaults]')
+    assert.ok(button !== null, '抓取与清理分区末尾必须有「恢复默认」按钮')
+    assert.equal(button.disabled, false, '有变化项时按钮可用')
+    button.click()
+    await h.waitFor(() => h.$('[data-rss-reset-confirm]') !== null, { label: '恢复默认确认框打开' })
+
+    const dialog = h.$('[data-rss-reset-confirm]')
+    assert.equal(dialog.getAttribute('role'), 'dialog', '确认框必须是 dialog')
+    assert.equal(dialog.getAttribute('aria-modal'), 'true', '确认框必须是模态语义')
+    assert.match(dialog.textContent ?? '', /抓取并发 8 → 5/, '确认框要列出变化的项与目标值')
+    assert.match(dialog.textContent ?? '', /自动刷新间隔 15 → 10/, '分钟单位按界面单位展示，不出现 900000')
+    assert.match(dialog.textContent ?? '', /清理天数 45 → 30/)
+    assert.doesNotMatch(dialog.textContent ?? '', /每次刷新抓取源数/, '没变化的项不该出现在确认框里')
+
+    h.$('[data-rss-reset-cancel]').click()
+    await h.waitFor(() => h.$('[data-rss-reset-confirm]') === null, { label: '取消后确认框关闭' })
+    assert.equal(h.requests.filter((entry) => entry.endpoint === 'saveSettings').length, 0,
+      '取消必须零写：不发任何 saveSettings')
+    assert.equal(h.win.document.activeElement, button, '确认框关闭后焦点回到「恢复默认」按钮')
+    assert.equal(h.store.get().settings.effective.refreshConcurrency, 8, '取消后生效值不变')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R11 07 恢复默认确认：一次 reset 请求、四项生效值全默认、提示「已恢复 N 项默认值」', skip, async () => {
+  const h = await mount({
+    settings: {
+      effective: { ...TUNABLE_DEFAULTS, refreshConcurrency: 8, minRefreshIntervalMs: 900000, cleanupAfterDays: 45 },
+      defaults: { ...TUNABLE_DEFAULTS },
+    },
+  })
+  try {
+    await openSettings(h)
+    h.$('[data-rss-reset-defaults]').click()
+    await h.waitFor(() => h.$('[data-rss-reset-confirm]') !== null, { label: '恢复默认确认框打开' })
+    h.$('[data-rss-reset-ok]').click()
+    await h.waitFor(() => h.store.get().settings?.effective.cleanupAfterDays === 30
+      && h.store.get().settings?.effective.refreshConcurrency === 5,
+    { label: '恢复默认成功后的回包生效值' })
+    await h.waitFor(() => h.$('[data-rss-reset-confirm]') === null, { label: '成功后确认框关闭' })
+
+    const saves = h.requests.filter((entry) => entry.endpoint === 'saveSettings')
+    assert.deepEqual(saves.map((entry) => entry.payload), [{ resetToDefaults: true }],
+      '确认后必须一次请求完成，且入参只有 resetToDefaults（客户端不做逐项 patch）')
+    assert.deepEqual(h.store.get().settings.effective, TUNABLE_DEFAULTS, '四项生效值必须全部等于默认值')
+    assert.equal(h.store.get().notice, '已恢复 3 项默认值', 'N 是实际发生变化的项数（这里三项不是默认）')
+    assert.ok([...h.win.document.querySelectorAll('[role="status"]')]
+      .some((node) => node.textContent === '已恢复 3 项默认值'), '提示必须可见（全局 notice）')
+    assert.equal(h.$('[data-rss-reset-defaults]').disabled, true, '恢复后四项全默认 ⇒ 按钮转为禁用')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R11 07 恢复默认：四项本来就是默认值时按钮禁用，点击不弹框也不写', skip, async () => {
+  const h = await mount({
+    settings: { effective: { ...TUNABLE_DEFAULTS }, defaults: { ...TUNABLE_DEFAULTS } },
+  })
+  try {
+    await openSettings(h)
+    const button = h.$('[data-rss-reset-defaults]')
+    assert.ok(button !== null)
+    assert.equal(button.disabled, true, 'N = 0 时按钮必须禁用（spec D28）')
+    button.click()
+    await h.settle()
+    assert.equal(h.$('[data-rss-reset-confirm]'), null, '禁用按钮不许弹出确认框')
+    assert.equal(h.requests.filter((entry) => entry.endpoint === 'saveSettings').length, 0, 'N = 0 时零写')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R11 07 恢复默认失败：确认框保留并显示错误，生效值不变', skip, async () => {
+  const h = await mount({
+    settings: {
+      effective: { ...TUNABLE_DEFAULTS, cleanupAfterDays: 45 },
+      defaults: { ...TUNABLE_DEFAULTS },
+    },
+    saveSettings: async (payload) => (payload?.resetToDefaults === true
+      ? { error: { code: 'write-failed', message: '磁盘已满' } }
+      : undefined),
+  })
+  try {
+    await openSettings(h)
+    h.$('[data-rss-reset-defaults]').click()
+    await h.waitFor(() => h.$('[data-rss-reset-confirm]') !== null, { label: '恢复默认确认框打开' })
+    h.$('[data-rss-reset-ok]').click()
+    await h.waitFor(() => h.$('[data-rss-reset-error]') !== null, { label: '恢复默认失败的就地错误' })
+    assert.match(h.$('[data-rss-reset-error]').textContent ?? '', /磁盘已满/, '确认框里要保留失败原因')
+    assert.ok(h.$('[data-rss-reset-confirm]') !== null, '失败时确认框不关闭，用户可重试')
+    assert.equal(h.store.get().settings.effective.cleanupAfterDays, 45, '失败不许改权威生效值')
+    assert.match(h.store.get().error ?? '', /恢复默认失败：.*磁盘已满/, '顶部错误条也要能看见失败')
+    assert.equal(h.requests.filter((entry) => entry.endpoint === 'saveSettings').length, 1, '只尝试一次，不自动重试')
   } finally {
     h.cleanup()
   }

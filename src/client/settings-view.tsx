@@ -1,6 +1,5 @@
 /**
- * 设置页（R11 01 骨架 / 02 第一个可写参数 / 03 其余三个参数 / 04 手动清理 /
- * 06 Agent 说明与关于区）。
+ * 设置页（R11 01 骨架 / 02 第一个可写参数 / 03 其余三个参数 / 04 手动清理 / 06 Agent 说明与关于区 / 07 恢复默认）。
  *
  * 五个分区按 spec D13 的顺序全部占位；①「抓取与清理」的四行都是**可写**的数值输入框
  * （03 票补齐并发 / 自动刷新间隔 / 清理天数；显示开关在 05 票填入）；04 票在「清理天数」
@@ -26,7 +25,7 @@ import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { AGENT_APPROVAL_NOTE, AGENT_HELP } from '../agent-help.js'
 import type { CleanupResult, ReadOnlySettingView, SettingsSnapshot } from '../shared.js'
 import { parseTunableValue, TUNABLE_RANGES, type TunableKey } from '../settings-schema.js'
-import type { SaveSettingResult } from './settings-actions.js'
+import type { ResetSettingsResult, SaveSettingResult } from './settings-actions.js'
 
 /** 成功反馈的停留时间：短到不挡视线，长到能看见（spec D14.2 定稿「约 1.4 秒」）。 */
 const SAVED_FEEDBACK_MS = 1400
@@ -51,6 +50,8 @@ export interface SettingsViewProps {
   onDismissWarning: () => void
   /** 逐项保存：由 store 的保存串行链执行，返回是否成功与失败的当下生效值。 */
   onSave: (key: TunableKey, value: number) => Promise<SaveSettingResult>
+  /** 页面级恢复默认：走同一条保存串行链，一次请求把四项恢复成默认值。 */
+  onReset: () => Promise<ResetSettingsResult>
   /**
    * 清理预演（D27.1）：只取「如果现在执行会删多少」，不删任何条目。
    * 返回 undefined = 失败（全局 error 已由 store 设置），设置页不弹确认框。
@@ -71,6 +72,39 @@ const SECTIONS = [
   { key: 'agent', title: 'Agent 说明' },
   { key: 'about', title: '关于' },
 ] as const
+
+/**
+ * 恢复默认的四个键与界面文案（D28）。顺序与上面的输入行一致；`mode` 决定「15 → 10」这种
+ * 展示用分钟还是原值，**不复制第二套单位判断**。
+ */
+const RESET_ROWS = [
+  { key: 'refreshFeedsPerRound', label: '每次刷新抓取源数', mode: 'integer' },
+  { key: 'refreshConcurrency', label: '抓取并发', mode: 'integer' },
+  { key: 'minRefreshIntervalMs', label: '自动刷新间隔', mode: 'minutes' },
+  { key: 'cleanupAfterDays', label: '清理天数', mode: 'integer' },
+] as const satisfies ReadonlyArray<{ readonly key: TunableKey; readonly label: string; readonly mode: RowMode }>
+
+interface ResetChange {
+  readonly key: TunableKey
+  readonly text: string
+}
+
+/**
+ * 确认框里「将变化的项与目标值」。判据与宿主 D28 同源：**当前生效值 ≠ 默认值**的项，
+ * 恢复默认后必然变化；相等的项不在列表里，也是按钮 N = 0 的判据。
+ */
+function resetChangesOf(settings: SettingsSnapshot | undefined): ResetChange[] {
+  if (settings === undefined) return []
+  return RESET_ROWS.flatMap((row) => {
+    const current = settings.effective[row.key]
+    const target = settings.defaults[row.key]
+    if (current === target) return []
+    return [{
+      key: row.key,
+      text: row.label + ' ' + displayOf(row.mode, current) + ' → ' + displayOf(row.mode, target),
+    }]
+  })
+}
 
 interface NumberSettingRowProps {
   readonly settingKey: TunableKey
@@ -236,10 +270,17 @@ function readOnlyText(entry: ReadOnlySettingView): string {
 }
 
 export function SettingsView(props: SettingsViewProps): ReactNode {
-  const { settings, error, warningDismissed, onClose, onDismissWarning, onSave, onCleanupPreview, onCleanup } = props
+  const { settings, error, warningDismissed, onClose, onDismissWarning, onSave, onReset, onCleanupPreview, onCleanup } = props
   const box = useRef<HTMLDivElement | null>(null)
+  const resetButton = useRef<HTMLButtonElement | null>(null)
+  const resetConfirmButton = useRef<HTMLButtonElement | null>(null)
+  const [resetOpen, setResetOpen] = useState(false)
+  const [resetting, setResetting] = useState(false)
+  const [resetError, setResetError] = useState<string | undefined>(undefined)
   // 进入即聚焦滚动容器（见文件头注释）。依赖空数组：只在挂载时做一次，重新渲染不该抢焦点。
   useEffect(() => { box.current?.focus() }, [])
+  // 恢复默认的确认框打开即聚焦确认键：键盘流不用先摸方向键（与 MarkAllConfirm 同一约定）。
+  useEffect(() => { if (resetOpen) resetConfirmButton.current?.focus() }, [resetOpen])
   /**
    * 清理按钮的三种瞬时状态：
    *  - `cleanupDaysSaving`：阈值正在写盘 —— 按钮禁用，避免用旧阈值预演（D14.2）；
@@ -288,6 +329,30 @@ export function SettingsView(props: SettingsViewProps): ReactNode {
 
   const warning = settings?.warning
   const readOnly = settings?.readOnly ?? []
+  const resetChanges = resetChangesOf(settings)
+
+  /**
+   * 关闭确认框并把焦点还给「恢复默认」按钮（D14.2）。
+   *
+   * 成功恢复后四项全是默认值，按钮随即变成禁用态；浏览器不会把焦点留在一个禁用按钮上，
+   * 这时退回设置页容器 —— 至少 Esc / 原生滚动仍然落在设置页，而不是掉到 body。
+   */
+  const closeReset = (): void => {
+    setResetOpen(false)
+    setResetError(undefined)
+    const button = resetButton.current
+    if (button !== null && !button.disabled) button.focus()
+    else box.current?.focus()
+  }
+
+  const confirmReset = async (): Promise<void> => {
+    setResetting(true)
+    setResetError(undefined)
+    const result = await onReset()
+    setResetting(false)
+    if (result.ok) closeReset()
+    else setResetError('恢复失败：' + result.message)
+  }
   return (
     <div ref={box} tabIndex={0} className="dsh-rss-settings-page" data-rss-settings-page="">
       <div className="dsh-rss-settings-head">
@@ -362,6 +427,20 @@ export function SettingsView(props: SettingsViewProps): ReactNode {
                     onClick={() => { void startCleanup() }}>立即清理</button>
                 )}
               />
+              {/* D14.2 / D28：恢复默认影响整组，用一条分隔线与上面的单项参数区隔开。 */}
+              <div className="dsh-rss-settings-reset" data-rss-reset-row="">
+                <button ref={resetButton} type="button" className="dsh-rss-btn" data-rss-reset-defaults=""
+                  disabled={resetChanges.length === 0 || resetting}
+                  onClick={() => {
+                    setResetError(undefined)
+                    setResetOpen(true)
+                  }}>
+                  恢复默认
+                </button>
+                <span className="dsh-rss-settings-help">
+                  把上面四项数值恢复成代码默认值；显示区的两个开关不受影响。
+                </span>
+              </div>
             </>
           )}
           {section.key === 'agent' && (
@@ -408,6 +487,35 @@ export function SettingsView(props: SettingsViewProps): ReactNode {
           )}
         </section>
       ))}
+      {resetOpen && (
+        <div className="dsh-rss-confirm">
+          <div className="dsh-rss-confirm-card" role="dialog" aria-modal="true"
+            aria-labelledby="dsh-rss-reset-title" data-rss-reset-confirm=""
+            onKeyDown={(event) => {
+              // Esc 只关确认框，不能冒泡到设置页的「Esc 回列表」（与 MarkAllConfirm 同一条）。
+              if (event.key !== 'Escape') return
+              event.preventDefault()
+              event.stopPropagation()
+              if (!resetting) closeReset()
+            }}>
+            <div className="dsh-rss-confirm-title" id="dsh-rss-reset-title">恢复默认设置？</div>
+            <div className="dsh-rss-confirm-note" data-rss-reset-changes="">
+              将变化的项：{resetChanges.map((change) => change.text).join('；')}
+            </div>
+            {resetError !== undefined && (
+              <p className="dsh-rss-settings-error" role="alert" data-rss-reset-error="">{resetError}</p>
+            )}
+            <div className="dsh-rss-confirm-actions">
+              <button type="button" className="dsh-rss-btn" data-rss-reset-cancel=""
+                disabled={resetting} onClick={closeReset}>取消</button>
+              <button ref={resetConfirmButton} type="button" className="dsh-rss-btn dsh-rss-btn--primary"
+                data-rss-reset-ok="" disabled={resetting} onClick={() => { void confirmReset() }}>
+                {resetting ? '恢复中…' : '恢复默认'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {/* 清理确认框（D27.1）：N 来自刚才那次 dryRun，D 是当前生效阈值。挂在设置页根内 ——
           面板卸载 / 离开设置页时随视图一起消失；Esc 由卡片自己处理，免得穿透去关设置页。 */}
       {cleanupConfirm !== undefined && (

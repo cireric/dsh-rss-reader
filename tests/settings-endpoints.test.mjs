@@ -7,7 +7,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Config } from '../lib/config.js'
@@ -260,14 +260,128 @@ test('saveSettings 写盘失败：端点回错误，内存旧值与文件旧内�
   }
 })
 
-test('saveSettings 入参二选一：resetToDefaults 本票明确回「未实现」，不许静默成功', async () => {
+// ── R11 07：恢复默认（spec D28 / D8，验收 A5 / C15）────────────────────────────
+//
+// 核心规则只有一条：**继承值恰好等于默认值 ⇒ 删覆盖；不等于默认值 ⇒ 写一条等于默认值的覆盖**。
+// 前者保证「恢复默认」不留下无意义的钉子（否则将来改默认值这项不再跟随），后者保证结果一定是
+// 「生效值 = 默认值」—— 因为删掉覆盖会回落到 patch 基线，而基线本身不等于默认。
+
+const TUNABLE_DEFAULTS = {
+  refreshFeedsPerRound: 20,
+  refreshConcurrency: 5,
+  minRefreshIntervalMs: 600000,
+  cleanupAfterDays: 30,
+}
+
+/** 除四个可调键之外的 Config 字段（恢复默认不许碰它们）。 */
+function nonTunableConfig(config) {
+  const { refreshFeedsPerRound, refreshConcurrency, minRefreshIntervalMs, cleanupAfterDays, ...rest } = config
+  return rest
+}
+
+test('saveSettings 恢复默认：继承值等于默认的键删覆盖，不等于默认的键写一条等于默认值的覆盖（A5）', async () => {
+  const h = harness({
+    // patch 基线：两个键显式写成默认值（继承值 = 默认 ⇒ 该删覆盖），清理天数写 45（不等 ⇒ 该写覆盖）。
+    patch: { refreshConcurrency: 5, cleanupAfterDays: 45 },
+    file: JSON.stringify({ version: 1, overrides: {
+      refreshFeedsPerRound: 7,
+      refreshConcurrency: 8,
+      minRefreshIntervalMs: 120000,
+      cleanupAfterDays: 60,
+    } }),
+  })
+  const restBefore = nonTunableConfig(h.config)
+  try {
+    const result = await h.dispatch('saveSettings', { resetToDefaults: true })
+    assert.equal(result.ok, true, '恢复默认必须成功')
+    assert.deepEqual(result.value.settings.effective, TUNABLE_DEFAULTS,
+      '一次请求后四项生效值必须全部回到默认（客户端不再补发其它请求）')
+    assert.deepEqual(JSON.parse(fileText(h)), { version: 1, overrides: { cleanupAfterDays: 30 } },
+      '继承值 = 默认值的三项必须删覆盖；cleanupAfterDays 继承 45 ≠ 30 ⇒ 写一条等于默认值的覆盖')
+    // 文件与内存必须一致：下一次 refreshNow / cleanup 读的是同一个 config 对象。
+    assert.deepEqual({
+      refreshFeedsPerRound: h.config.refreshFeedsPerRound,
+      refreshConcurrency: h.config.refreshConcurrency,
+      minRefreshIntervalMs: h.config.minRefreshIntervalMs,
+      cleanupAfterDays: h.config.cleanupAfterDays,
+    }, TUNABLE_DEFAULTS)
+    assert.deepEqual(h.settings.snapshot().effective, TUNABLE_DEFAULTS, '端点快照与内存一致')
+    assert.deepEqual(h.logs.filter((line) => line.startsWith('恢复默认：')), [
+      '恢复默认：refreshFeedsPerRound 删覆盖（20）',
+      '恢复默认：refreshConcurrency 删覆盖（5）',
+      '恢复默认：minRefreshIntervalMs 删覆盖（600000）',
+      '恢复默认：cleanupAfterDays 60 → 30',
+    ], 'D8：逐键记实际动作 —— 删覆盖记结果值，写覆盖记旧生效值 → 新值')
+    // 只碰四个可调键：settings.json 里不会出现白名单之外的键（显示区开关根本不在这个文件里）。
+    assert.deepEqual(Object.keys(JSON.parse(fileText(h)).overrides), ['cleanupAfterDays'],
+      '恢复默认的写入面只有四个可调键')
+    assert.deepEqual(nonTunableConfig(h.config), restBefore,
+      '恢复默认只碰四个可调键：其余 Config 字段（订阅种子 / 抓取参数 / 日期等）原样不动')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('saveSettings 恢复默认：继承值不等于默认且原本没有覆盖时补一条默认覆盖，重复调用不再写盘', async () => {
+  const h = harness({ patch: { cleanupAfterDays: 45 } })
+  try {
+    const first = await h.dispatch('saveSettings', { resetToDefaults: true })
+    assert.equal(first.ok, true)
+    assert.deepEqual(JSON.parse(fileText(h)), { version: 1, overrides: { cleanupAfterDays: 30 } },
+      '删覆盖会回落 45，所以必须补一条 30 的覆盖')
+    assert.equal(first.value.settings.effective.cleanupAfterDays, 30)
+    assert.deepEqual(h.logs.filter((line) => line.startsWith('恢复默认：')),
+      ['恢复默认：cleanupAfterDays 45 → 30'])
+
+    // 再把 mtime 拨到过去：第二次恢复默认已经是幂等态（四项都等于默认），不该再写一次文件。
+    const past = new Date('2000-01-01T00:00:00Z')
+    utimesSync(h.settingsPath, past, past)
+    const beforeMtime = statSync(h.settingsPath).mtimeMs
+    const logsBefore = h.logs.length
+    const second = await h.dispatch('saveSettings', { resetToDefaults: true })
+    assert.equal(second.ok, true, '已经全默认时再点一次也必须成功（幂等），不许报错')
+    assert.equal(statSync(h.settingsPath).mtimeMs, beforeMtime, '没有实际动作时不许重写文件')
+    assert.equal(h.logs.length, logsBefore, '没有实际动作时不许编造日志')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('saveSettings 恢复默认：四项本来就都是继承默认时不创建 settings.json（没有钉子可删）', async () => {
   const h = harness()
   try {
     const result = await h.dispatch('saveSettings', { resetToDefaults: true })
-    assert.equal(result.ok, false, '07 票才实现恢复默认；现在不能假装成功')
-    assert.equal(result.error.code, 'not-implemented')
-    assert.match(result.error.message, /恢复默认/)
-    assert.equal(fileText(h), undefined, '未实现的分支不许写盘')
+    assert.equal(result.ok, true)
+    assert.equal(fileText(h), undefined, '全默认时恢复默认不该凭空造一份空覆盖文件')
+    assert.deepEqual(result.value.settings.effective, TUNABLE_DEFAULTS)
+    assert.deepEqual(h.logs.filter((line) => line.startsWith('恢复默认：')), [],
+      '没有任何实际动作就不该逐键记「删覆盖」')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('saveSettings 恢复默认写盘失败：端点回 write-failed，内存与文件都不变（D7 同一条顺序）', async () => {
+  const h = harness({
+    patch: { cleanupAfterDays: 45 },
+    file: JSON.stringify({ version: 1, overrides: { refreshConcurrency: 8 } }),
+  })
+  const beforeFile = fileText(h)
+  try {
+    chmodSync(h.dir, 0o500)
+    let result
+    try {
+      result = await h.dispatch('saveSettings', { resetToDefaults: true })
+    } finally {
+      chmodSync(h.dir, 0o700)
+    }
+    assert.equal(result.ok, false, '写盘失败必须回错误（恢复默认不能假装成功）')
+    assert.equal(result.error.code, 'write-failed', '错误码与「你输错了」分开')
+    assert.equal(fileText(h), beforeFile, '写盘失败时文件保持旧内容')
+    assert.equal(h.config.refreshConcurrency, 8, '写盘失败时内存生效值保持旧值')
+    assert.equal(h.config.cleanupAfterDays, 45)
+    assert.deepEqual(h.logs.filter((line) => line.startsWith('恢复默认：')), [],
+      '没写成功就不能留下「已恢复」的日志')
   } finally {
     h.cleanup()
   }
