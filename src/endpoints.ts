@@ -1,5 +1,5 @@
 /**
- * 浏览器半的读写通道：30 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
+ * 浏览器半的读写通道：31 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
  *
  * 原先这里是一个 switch：每臂各自手写 payload 解析、各自记得把未读账并进回包 ——
  * interface 的复杂度 ≈ implementation 的复杂度。现在「一个端点」是一个 module：
@@ -29,6 +29,7 @@ import {
   renameTagPayload,
   reorderFeedsPayload,
   saveReadingProgressPayload,
+  saveSettingsPayload,
   saveViewPreferencesPayload,
   scopePayload,
   searchQueryPayload,
@@ -455,7 +456,7 @@ const buildOverview = (
   }
 }
 /**
- * 端点表：30 个端点一处声明（每项的 `payload` 是入参形状的唯一声明）。
+ * 端点表：31 个端点一处声明（每项的 `payload` 是入参形状的唯一声明）。
  *
  * 穷尽性由 `Record<Endpoint, EndpointSpec>` 保证 —— 名字表（shared.ts 的 ENDPOINT_NAMES）
  * 加了新端点而这里没跟上，编译就不过。这是本文件里唯一需要「加端点时改的地方」。
@@ -960,6 +961,30 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
     to: async (_input, ctx) => {
       if (ctx.settings === undefined) return fail('not-ready', '设置服务尚未就绪')
       return ok({ settings: ctx.settings.snapshot() })
+    },
+  }),
+
+  /**
+   * 设置页的**写**端点（R11 02）：逐项保存一个可调参数。
+   *
+   * 回包与读端点同形（`{ settings: { effective, defaults } }`），客户端成功后用回包覆盖权威值 ——
+   * 不做乐观更新，界面上的数字只有宿主确认落盘后才成为「生效值」（spec D12）。
+   *
+   * 错误码分两种：非法入参在 `defineEndpoint` 就回 `bad-request`（文件与内存都不会被碰）；
+   * 写盘失败回 `write-failed` —— 它必须能和「你输错了」区分开，否则用户会去改一个本来合法的值。
+   */
+  saveSettings: defineEndpoint({
+    payload: saveSettingsPayload,
+    invalidMessage: 'saveSettings 需要 patch 或 resetToDefaults（二选一），patch 只接受白名单内的合法值',
+    to: async (input, ctx) => {
+      if (ctx.settings === undefined) return fail('not-ready', '设置服务尚未就绪')
+      if ('resetToDefaults' in input) {
+        // 07 票接这个分支。现在必须响亮拒绝：静默成功会让界面以为四项都恢复默认了。
+        return fail('not-implemented', '恢复默认尚未实现（R11 票据 07）')
+      }
+      const outcome = ctx.settings.save(input.patch)
+      if (!outcome.ok) return fail('write-failed', outcome.message)
+      return ok({ settings: outcome.snapshot })
     },
   }),
 

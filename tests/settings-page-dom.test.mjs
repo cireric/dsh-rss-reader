@@ -84,7 +84,7 @@ async function waitFor(predicate, { timeout = 2000, interval = 5, label = '条�
  * 起一个 DOM 环境 + 渲染真实 Reader。返回的对象与 scroll-dom.test.mjs 的同名夹具同形
  * （press / settle / waitFor / store），但只桩本票会碰到的端点。
  */
-async function mount({ settings } = {}) {
+async function mount({ settings, saveSettings } = {}) {
   const { JSDOM } = STACK
   const globalSnapshot = {}
   for (const key of ['window', 'document', 'HTMLElement', 'Element', 'Node', 'KeyboardEvent', 'ResizeObserver', 'fetch']) {
@@ -113,18 +113,31 @@ async function mount({ settings } = {}) {
     items: [], folders: [], tags: [], unread: 0,
     perFeedUnread: { f1: 0, f2: 0 }, refreshed: false,
   }
-  const settingsReply = settings ?? { effective: { ...TUNABLE_DEFAULTS }, defaults: { ...TUNABLE_DEFAULTS } }
+  let settingsState = settings ?? { effective: { ...TUNABLE_DEFAULTS }, defaults: { ...TUNABLE_DEFAULTS } }
   const ok = (value) => ({ ok: true, status: 200, json: async () => ({ ok: true, value }) })
+  // 宿主通道的真实形态：HTTP 200 + 信封 ok:false（browserRpc 先看 response.ok 再看信封）。
+  const failEnvelope = (error) => ({ ok: true, status: 200, json: async () => ({ ok: false, error }) })
   const requests = []
   let pendingFetches = 0
   const fetchStub = async (_url, init) => {
     const body = JSON.parse(init.body)
     requests.push({ endpoint: body.endpoint, payload: body.payload })
-    if (body.endpoint === 'settings') return ok({ settings: settingsReply })
+    if (body.endpoint === 'settings') return ok({ settings: settingsState })
+    if (body.endpoint === 'saveSettings') {
+      // 桩默认按 patch 合并生效值并回同形快照；用例可以用 saveSettings 选项改写（失败 / 延迟）。
+      if (saveSettings !== undefined) {
+        const custom = await saveSettings(body.payload)
+        if (custom?.error !== undefined) return failEnvelope(custom.error)
+        if (custom?.settings !== undefined) { settingsState = custom.settings; return ok({ settings: settingsState }) }
+      }
+      const patch = body.payload?.patch ?? {}
+      settingsState = { ...settingsState, effective: { ...settingsState.effective, ...patch } }
+      return ok({ settings: settingsState })
+    }
     if (body.endpoint === 'viewPreferences') return ok({})
     if (body.endpoint === 'overview' || body.endpoint === 'refresh') return ok(overview)
     if (body.endpoint === 'duplicateHints') return ok({ hints: [] })
-    return { ok: false, status: 200, json: async () => ({ ok: false, error: { code: 'unknown-endpoint', message: '桩未实现 ' + body.endpoint, details: {} } }) }
+    return failEnvelope({ code: 'unknown-endpoint', message: '桩未实现 ' + body.endpoint, details: {} })
   }
   const trackedFetch = async (...args) => {
     pendingFetches += 1
@@ -188,6 +201,20 @@ async function mount({ settings } = {}) {
   return { win, store, requests, press, settle, waitFor, cleanup, $ }
 }
 
+
+/** 把受控 input 的值设进去并派发 React 认的 input 事件（原生 setter 绕过 React 的 value tracker）。 */
+function setControlValue(win, element, value) {
+  const setter = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value')?.set
+  if (setter === undefined) throw new Error('找不到 INPUT 的 value setter')
+  setter.call(element, value)
+  element.dispatchEvent(new win.Event('input', { bubbles: true }))
+}
+
+/** 等一个设置行上的「已保存 ✓」/红字标记出现（设置页的反馈是异步的）。 */
+async function waitForSaved(h, key) {
+  await h.waitFor(() => h.$('[data-rss-setting-saved="' + key + '"]') !== null, { label: key + ' 的「已保存 ✓」' })
+}
+
 /** 进入设置页并等它上屏。 */
 async function openSettings(h) {
   h.$('[data-rss-settings-open]').click()
@@ -219,11 +246,14 @@ test('R11 01 设置页骨架：工具栏进入、标题与返回按钮、五分�
   const row = h.$('[data-rss-setting="refreshFeedsPerRound"]')
   assert.ok(row !== null, '第一个分区里必须有「每次刷新抓取源数」这一行')
   assert.equal(row.querySelector('.dsh-rss-settings-label')?.textContent, '每次刷新抓取源数')
-  assert.equal(row.querySelector('[data-rss-setting-value]')?.textContent, '7', '只读值必须显示宿主下发的生效值')
+  // R11 02：这一行从只读值变成输入框，初值必须显示宿主下发的生效值。
+  const input = row.querySelector('[data-rss-setting-input="refreshFeedsPerRound"]')
+  assert.ok(input !== null, '第一个参数必须有输入框（02 票把只读改成可写）')
+  assert.equal(input.value, '7', '输入框初值必须是宿主下发的生效值')
   // D16：行内没有来源标签、没有「清除本页设置」这类小链接。
   assert.doesNotMatch(row.textContent ?? '', /本页覆盖|插件配置|默认值|清除本页设置/)
   assert.equal(row.querySelector('a'), null, '行内不许有链接')
-  assert.equal(row.querySelector('button'), null, '本票这一行只读，不该出现按钮')
+  assert.equal(row.querySelector('button'), null, '这一行不需要按钮（失焦 / 回车提交）')
 })
 
 test('R11 01 退出设置页：Esc / 返回按钮 / 再点一次设置都回列表', skip, async () => {
@@ -321,4 +351,119 @@ test('R11 01 输入控件守卫：焦点在设置页输入框内时阅读键让�
   assert.equal(event.defaultPrevented, false, '输入框里的 j 不该被阅读器接管')
   assert.equal(h.store.get().selectedId, selectedBefore, '输入框里的 j 不许移动列表选中')
   assert.equal(h.store.get().view, 'settings', '输入框里的 j 不许切视图')
+})
+
+// ── R11 02：第一个参数可写（spec D12 / D14.2，验收 C16–C17）────────────────────────────
+//
+// 这一组钉的是**交互契约**：失焦/回车提交、成功就地一闪、非法值零请求、失败保留输入。
+// 「另一个输入框里已键入但未提交的文字不丢」在 02 票只有一行可写输入，所以用一个同页的
+// 草稿输入 + 页面根节点身份一起证明「没有整页重绘」—— 重挂会把两样都带走。
+
+test('R11 02 保存成功：失焦提交合法值，S 就地「已保存 ✓」约 1.4 秒，且不整页重绘', async () => {
+  const h = await mount()
+  await openSettings(h)
+  const page = h.$('[data-rss-settings-page]')
+  // 模拟另一个还有未提交文字的输入框（03 票会把它变成真控件）。
+  const draft = h.win.document.createElement('input')
+  draft.setAttribute('data-test-draft', '')
+  h.$('[data-rss-settings-section="fetch"]').appendChild(draft)
+  draft.focus()
+  setControlValue(h.win, draft, '草稿未提交')
+
+  const input = h.$('[data-rss-setting-input="refreshFeedsPerRound"]')
+  input.focus()
+  setControlValue(h.win, input, '7')
+  input.blur()
+  await waitForSaved(h, 'refreshFeedsPerRound')
+
+  const saves = h.requests.filter((entry) => entry.endpoint === 'saveSettings')
+  assert.equal(saves.length, 1, '一次提交只发一次保存')
+  assert.deepEqual(saves[0].payload, { patch: { refreshFeedsPerRound: 7 } }, 'patch 必须只带被改的键')
+  assert.equal(h.$('[data-rss-setting-saved="refreshFeedsPerRound"]').textContent, '已保存 ✓')
+  assert.equal(h.store.get().settings.effective.refreshFeedsPerRound, 7, '成功后用回包覆盖权威值')
+  assert.equal(h.$('[data-rss-settings-page]'), page, '保存反馈不许整页重绘（节点身份不变）')
+  assert.equal(draft.value, '草稿未提交', '另一个输入框里未提交的文字不许丢')
+
+  // 约 1.4 秒后消失：不能一直挂着，也不能立刻消失（那等于没反馈）。
+  await h.waitFor(() => h.$('[data-rss-setting-saved="refreshFeedsPerRound"]') === null,
+    { timeout: 2500, label: '「已保存 ✓」自动消失' })
+})
+
+test('R11 02 保存成功：回车提交，与失焦走同一路径', async () => {
+  const h = await mount()
+  await openSettings(h)
+  const input = h.$('[data-rss-setting-input="refreshFeedsPerRound"]')
+  input.focus()
+  setControlValue(h.win, input, '8')
+  // 回车只负责把输入框交给失焦路径（提交逻辑只写一份，避免两条路径漂移）。
+  input.dispatchEvent(new h.win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+  await waitForSaved(h, 'refreshFeedsPerRound')
+  const saves = h.requests.filter((entry) => entry.endpoint === 'saveSettings')
+  assert.deepEqual(saves.map((entry) => entry.payload), [{ patch: { refreshFeedsPerRound: 8 } }])
+  assert.equal(h.store.get().settings.effective.refreshFeedsPerRound, 8)
+})
+
+test('R11 02 非法值：负数 / 超上限 / 非数字都是就地红字 + 零请求 + 输入保留', async () => {
+  const h = await mount()
+  await openSettings(h)
+  const input = h.$('[data-rss-setting-input="refreshFeedsPerRound"]')
+  for (const bad of ['-1', '1000', 'abc', '']) {
+    input.focus()
+    setControlValue(h.win, input, bad)
+    input.blur()
+    await h.waitFor(() => h.$('[data-rss-setting-error="refreshFeedsPerRound"]') !== null,
+      { label: bad + ' 的就地红字' })
+    assert.equal(h.requests.filter((entry) => entry.endpoint === 'saveSettings').length, 0,
+      '非法值必须零请求：' + JSON.stringify(bad))
+    assert.equal(input.value, bad, '非法输入必须保留，不许悄悄改成别的数：' + JSON.stringify(bad))
+  }
+  assert.equal(h.store.get().settings.effective.refreshFeedsPerRound, 20, '本地校验失败不许改权威值')
+})
+
+test('R11 02 保存失败：输入保留、就地显示「保存失败：… 当前生效值仍是 N」、顶部有提示', async () => {
+  const h = await mount({
+    saveSettings: () => ({ error: { code: 'write-failed', message: '磁盘满了', details: {} } }),
+  })
+  await openSettings(h)
+  const input = h.$('[data-rss-setting-input="refreshFeedsPerRound"]')
+  input.focus()
+  setControlValue(h.win, input, '9')
+  input.blur()
+  await h.waitFor(() => h.$('[data-rss-setting-error="refreshFeedsPerRound"]') !== null,
+    { label: '保存失败的就地提示' })
+  const error = h.$('[data-rss-setting-error="refreshFeedsPerRound"]').textContent
+  assert.match(error, /保存失败：/, '就地错误必须以「保存失败：」开头')
+  assert.match(error, /当前生效值仍是 20/, '必须告诉用户此刻真正生效的值')
+  assert.equal(input.value, '9', '失败时保留用户输入，方便改完重试')
+  assert.match(h.store.get().error ?? '', /保存设置失败/, '顶部状态条也要有提示（D12）')
+})
+
+test('R11 02 保存串行化：第二次保存等第一次回包，且只接受最新一次回包为权威（风险 3）', async () => {
+  const order = []
+  let releaseFirst
+  const firstGate = new Promise((resolve) => { releaseFirst = resolve })
+  let call = 0
+  const h = await mount({
+    saveSettings: async (payload) => {
+      call += 1
+      const mine = call
+      order.push('start' + mine + ':' + payload.patch.refreshFeedsPerRound)
+      if (mine === 1) await firstGate
+      order.push('end' + mine)
+      return { settings: { effective: { ...TUNABLE_DEFAULTS, refreshFeedsPerRound: payload.patch.refreshFeedsPerRound }, defaults: { ...TUNABLE_DEFAULTS } } }
+    },
+  })
+  await openSettings(h)
+  const first = h.store.saveSetting('refreshFeedsPerRound', 7)
+  const second = h.store.saveSetting('refreshFeedsPerRound', 9)
+  // 第一条在飞时，第二条不许发出去（串行链不是并发请求）。
+  await h.waitFor(() => order.length >= 1, { label: '第一次保存发出' })
+  // 不能用 settle()：这里故意让第一条请求一直悬着；给足时间证明第二条不会偷偷发出去。
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  assert.deepEqual(order, ['start1:7'], '第一次回包前不许发第二次')
+  releaseFirst()
+  const results = await Promise.all([first, second])
+  assert.deepEqual(order, ['start1:7', 'end1', 'start2:9', 'end2'], '两次保存必须按提交顺序串行')
+  assert.equal(results[1].ok, true)
+  assert.equal(h.store.get().settings.effective.refreshFeedsPerRound, 9, '最新一次回包才是权威')
 })

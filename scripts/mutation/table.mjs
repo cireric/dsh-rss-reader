@@ -2929,13 +2929,15 @@ export const MUTATIONS = [
     to: '            author: typeof author === \'string\' ? author : undefined,' },
 
   // ── R11 01：设置页骨架（2026-11-22）────────────────────────────────────────
-  // 覆盖优先级反了：合并时把 settings 覆盖写回基线（等价于「patch 盖 settings」）。
+  // 覆盖优先级反了：合并时读基线而不是 settings 覆盖（等价于「patch 盖 settings」）。
   // 判据是 settings 端点用例里的 effective 断言 —— 页面数字必须等于下一次刷新真正会用的值。
+  // 锚点取 `overrides[key]` 这一行而不是 `config[key] = value`：02 票的保存路径也有同样一行，
+  // 用后者会命中两次（锚点必须唯一，见本文件头部）。
   { id: 'settings-覆盖优先级', file: 'lib/settings-control.js',
     judges: ['settings-endpoints.test.mjs'],
     judgeTests: ['settings 覆盖优先级：settings.json > patch 基线，未覆盖的键仍跟 patch'],
-    from: '            config[key] = value;',
-    to: '            config[key] = baseline[key];' },
+    from: '            const value = overrides[key];',
+    to: '            const value = baseline[key];' },
   // 一个坏键让整份 overrides 失效：合法项被一起带走，页面把「坏值提示」变成「全部回默认」。
   // 判据是 settings-file 的逐键丢用例（合法项照用 + dropped 计数 + 文件不重写）。
   { id: 'settings-坏值整份隔离', file: 'lib/storage/settings-file.js',
@@ -2958,6 +2960,28 @@ export const MUTATIONS = [
     from: '\t\t\t\telse if (view === "settings") set({ view: "list" });',
     to: '\t\t\t\telse if (view === "settings") { /* 变异：不退出设置页 */ }' },
 
+  // ── R11 02：第一个参数可写（2026-11-22）──────────────────────────────────
+  // 保存时把整份生效值钉进 overrides：用户没改过的三项也被写盘，此后 patch 再也改不动它们。
+  // 判据是稀疏写用例（文件里只许出现被点名的那一个键）。
+  { id: 'settings-未覆盖也写盘', file: 'lib/settings-control.js',
+    judges: ['settings-endpoints.test.mjs'],
+    judgeTests: ['saveSettings 稀疏写：只改一项就只写这一个键，形状 { version, overrides }、权限 0600、内存立即生效并留痕'],
+    from: '        const next = { ...overrides, ...patch };',
+    to: '        const next = { ...snapshotOf(config), ...patch };' },
+  // 先改内存再写盘：写失败时界面已经“生效”、重启后打回原形（D7 要消灭的半成功）。
+  // 判据是写盘失败用例的「内存旧值不变」断言。
+  { id: 'settings-写盘与内存顺序', file: 'lib/settings-control.js',
+    judges: ['settings-endpoints.test.mjs'],
+    judgeTests: ['saveSettings 写盘失败：端点回错误，内存旧值与文件旧内容都不变（先落盘再改内存，D7）'],
+    from: '        const before = snapshotOf(config);',
+    to: '        const before = snapshotOf(config);\n        for (const key of TUNABLE_KEYS) { const value = patch[key]; if (value !== undefined) config[key] = value; }' },
+  // 每轮源数的下限从 0 改成 1：0 = 抓全部源的合法语义被当成坏值（spec §4.1 / D9）。
+  // 判据是「saveSettings 接受 0」用例 —— 它会先被入参层拒绝，端点回 bad-request。
+  { id: 'settings-每轮源数 0', file: 'lib/settings-schema.js',
+    judges: ['settings-endpoints.test.mjs'],
+    judgeTests: ['saveSettings 接受 0：0 合法，且「抓全部源」由既有 selectStalestFeeds 判据给出'],
+    from: '    refreshFeedsPerRound: { min: 0, max: 999 },',
+    to: '    refreshFeedsPerRound: { min: 1, max: 999 },' },
   // ── R11 06：Agent 说明与关于区（2026-11-22）──────────────────────────────
   // 页面少渲染一条 Agent 说明：常量仍是 4、页面只画 3 ⇒ D24 的「条目数 == 常量长度」失效。
   // 判据是 DOM 用例里对渲染条目数与顺序的断言（直接测常量会自证，抓不到这条）。
