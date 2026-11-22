@@ -84,7 +84,7 @@ async function waitFor(predicate, { timeout = 2000, interval = 5, label = '条�
  * 起一个 DOM 环境 + 渲染真实 Reader。返回的对象与 scroll-dom.test.mjs 的同名夹具同形
  * （press / settle / waitFor / store），但只桩本票会碰到的端点。
  */
-async function mount({ settings, saveSettings, items, cleanupStub } = {}) {
+async function mount({ settings, saveSettings, items, cleanupStub, article, prefs = { value: undefined, writes: [] } } = {}) {
   const { JSDOM } = STACK
   const globalSnapshot = {}
   for (const key of ['window', 'document', 'HTMLElement', 'Element', 'Node', 'KeyboardEvent', 'ResizeObserver', 'fetch']) {
@@ -114,6 +114,21 @@ async function mount({ settings, saveSettings, items, cleanupStub } = {}) {
     feeds: [{ id: 'f1', title: '源一' }, { id: 'f2', title: '源二' }],
     items: storedItems, folders: [], tags: [], unread: 0,
     perFeedUnread: { f1: 0, f2: 0 }, refreshed: false,
+  }
+  /**
+   * 每次回包都按**夹具现状**重算未读账（R11 05：显示开关要断言「角标与标题栏未读数」）。
+   * 固定 0 会让「隐藏后消失 / 恢复后回来」两条都因为前置条件不成立而假绿。
+   */
+  const overviewNow = () => {
+    const perFeedUnread = { f1: 0, f2: 0 }
+    for (const entry of storedItems) {
+      if (entry.readAt === undefined && perFeedUnread[entry.feedId] !== undefined) perFeedUnread[entry.feedId] += 1
+    }
+    return {
+      ...overview, items: storedItems,
+      unread: Object.values(perFeedUnread).reduce((sum, count) => sum + count, 0),
+      perFeedUnread,
+    }
   }
   let settingsState = settings ?? { effective: { ...TUNABLE_DEFAULTS }, defaults: { ...TUNABLE_DEFAULTS } }
   const ok = (value) => ({ ok: true, status: 200, json: async () => ({ ok: true, value }) })
@@ -160,8 +175,30 @@ async function mount({ settings, saveSettings, items, cleanupStub } = {}) {
       }
       return ok({ deleted: doomed.length, freedChars, cutoff: '2020-01-01T00:00:00.000Z', dryRun, unread: 0 })
     }
-    if (body.endpoint === 'viewPreferences') return ok({})
-    if (body.endpoint === 'overview' || body.endpoint === 'refresh') return ok({ ...overview, items: storedItems })
+    // 视图记忆（R11 05）：重开面板 = 新 store 读同一份宿主 prefs，写盘落进同一个对象。
+    if (body.endpoint === 'viewPreferences') return ok({ preferences: prefs.value })
+    if (body.endpoint === 'saveViewPreferences') {
+      prefs.value = body.payload?.preferences
+      prefs.writes.push(body.payload?.preferences)
+      return ok({ preferences: prefs.value })
+    }
+    if (body.endpoint === 'article') {
+      if (article !== undefined) {
+        const payload = typeof article === 'function' ? article(body.payload.itemId) : article
+        if (payload !== undefined) return ok(payload)
+      }
+      return ok({ itemId: body.payload.itemId, title: 'ART', blocks: [{ kind: 'p', text: '正文' }] })
+    }
+    // 打开即已读：回包必须带完整账目（宿主契约），否则左栏角标会被 undefined 覆盖。
+    if (body.endpoint === 'markRead' || body.endpoint === 'unmarkRead') {
+      const ids = Array.isArray(body.payload?.itemIds) ? body.payload.itemIds : []
+      for (const id of ids) {
+        const entry = storedItems.find((candidate) => candidate.id === id)
+        if (entry !== undefined) entry.readAt = body.endpoint === 'markRead' ? '2026-11-22T00:00:00.000Z' : undefined
+      }
+      return ok({ ...overviewNow(), changed: ids.length })
+    }
+    if (body.endpoint === 'overview' || body.endpoint === 'refresh') return ok(overviewNow())
     if (body.endpoint === 'duplicateHints') return ok({ hints: [] })
     return failEnvelope({ code: 'unknown-endpoint', message: '桩未实现 ' + body.endpoint, details: {} })
   }
@@ -213,10 +250,18 @@ async function mount({ settings, saveSettings, items, cleanupStub } = {}) {
     return event.defaultPrevented
   }
   let cleaned = false
+  let unmounted = false
+  /** 关面板但保留 store / JSDOM（R11 05 的「重开面板」用例要再挂一次）。 */
+  const unmount = async () => {
+    if (cleaned || unmounted) return
+    unmounted = true
+    reactRoot.unmount()
+    await settle()
+  }
   const cleanup = () => {
     if (cleaned) return
     cleaned = true
-    reactRoot.unmount()
+    if (!unmounted) { unmounted = true; reactRoot.unmount() }
     dom.window.close()
     for (const key of Object.keys(globalSnapshot)) {
       try { globalThis[key] = globalSnapshot[key] } catch (error) { console.warn('[settings-page-dom] 全局还原失败：', key, error) }
@@ -226,7 +271,7 @@ async function mount({ settings, saveSettings, items, cleanupStub } = {}) {
   const $ = (selector) => win.document.querySelector(selector)
   /** 预演前后的条目与读态快照：C19 要求「逐条不变」，所以读态一起带上。 */
   const itemsNow = () => storedItems.map((entry) => ({ id: entry.id, readAt: entry.readAt, starred: entry.starred === true, keptUnread: entry.keptUnread === true }))
-  return { win, store, requests, press, settle, waitFor, cleanup, $, itemsNow }
+  return { win, store, requests, press, settle, waitFor, cleanup, unmount, $, itemsNow, prefs }
 }
 
 
@@ -993,14 +1038,198 @@ test('R11 04 手动清理：清理天数正在保存时「立即清理」禁用�
   }
 })
 
-test('R11 04 工具栏：「更多」里不再有「清理旧条目」按钮', async () => {
+test('R11 05 工具栏：「更多」整个消失，两个旧功能在设置页都有入口', async () => {
   const h = await mount()
   try {
     await h.settle()
+    // 04 把清理搬走后菜单就只剩「显示未读计数」一项；05 再把它搬进设置页，整个 <details> 已无内容。
+    const more = [...h.win.document.querySelectorAll('summary')]
+      .find((summary) => (summary.textContent ?? '').trim() === '更多')
+    // 断言布尔而不是元素本身：jsdom 节点被 util.inspect 展开会拖死整个测试进程（实测 SIGKILL）。
+    assert.equal(more === undefined, true, '工具栏「更多」按钮必须整个删除（不是留一个空菜单）')
+    assert.equal(h.$('.dsh-rss-settings-panel'), null, '列表视图不应再有「更多」面板')
     assert.equal([...h.win.document.querySelectorAll('button')]
       .some((button) => (button.textContent ?? '').includes('清理旧条目')), false,
     '「更多」里的旧清理入口必须已删除（清理动作只住在设置页）')
-    assert.doesNotMatch(h.$('.dsh-rss-settings-panel')?.textContent ?? '', /清理旧条目/)
+
+    await openSettings(h)
+    assert.ok(h.$('[data-rss-setting-checkbox="expandImages"]') !== null, '「默认折叠图片」在设置页')
+    assert.ok(h.$('[data-rss-setting-checkbox="showUnread"]') !== null, '「显示未读计数」在设置页')
+    assert.ok(h.$('[data-rss-cleanup-now]') !== null, '清理入口在设置页')
+  } finally {
+    h.cleanup()
+  }
+})
+
+// ── R11 05：显示区两个开关（spec D14 ② / D27.2 / 验收 C18）────────────────────
+//
+// 这一组刻意**走真实点击**：开关的价值全在「点一下 → store → 落盘 → 另一个面板 / 左栏 / 标题栏
+// 跟着变」这条接线。直调 store 只能证明状态机，证明不了控件真的接上了。
+
+/** 点一下复选框（jsdom 的原生 click 会先切换 checked，再派发 click —— React 的 onChange 靠它）。 */
+function clickCheckbox(h, element) {
+  element.dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
+}
+
+const IMAGE_ARTICLE = {
+  itemId: 'a', title: 'ART',
+  blocks: [
+    { kind: 'p', text: '一张图。' },
+    { kind: 'img', src: 'https://img.example/one.png', alt: '图一' },
+    { kind: 'img', src: 'https://img.example/two.png', alt: '图二' },
+  ],
+}
+
+test('R11 05 显示区：两个开关带帮助文案，「默认折叠图片」与正文页 Aa 面板双向同步', skip, async () => {
+  const h = await mount({ items: [item({ id: 'a' })], article: IMAGE_ARTICLE })
+  try {
+    await h.settle()
+    await openSettings(h)
+
+    const section = h.$('[data-rss-settings-section="display"]')
+    assert.ok(section !== null, '五分区里的「显示」区必须存在')
+    const expand = h.$('[data-rss-setting-checkbox="expandImages"]')
+    const unread = h.$('[data-rss-setting-checkbox="showUnread"]')
+    assert.ok(expand !== null, '「默认折叠图片」复选框必须在显示区')
+    assert.ok(unread !== null, '「显示未读计数」复选框必须在显示区')
+    // 一行小字说明自己的作用（票面验收项）
+    assert.match(section.textContent, /打开文章时不自动加载图片/, '「默认折叠图片」的帮助文案是验收项')
+    assert.match(section.textContent, /左栏与标题栏的未读数字/, '「显示未读计数」的帮助文案是验收项')
+    assert.match(section.textContent, /字号 \/ 栏宽 \/ 主题在正文页的 Aa 面板调整/, '显示区末尾要有 Aa 面板指针')
+    // 默认 expandImages = true ⇒ 「默认折叠图片」未勾选；showUnread 默认 true ⇒ 勾选
+    assert.equal(expand.checked, false, '默认展开图片 ⇒ 「默认折叠图片」开关不勾选')
+    assert.equal(unread.checked, true, '默认显示未读计数')
+
+    // 设置页改 → 正文页 Aa 面板同步
+    clickCheckbox(h, expand)
+    await h.settle()
+    assert.equal(h.store.get().reading.expandImages, false, '勾上「默认折叠图片」必须写进同一份 reading')
+    const saved = h.requests.filter((entry) => entry.endpoint === 'saveViewPreferences').at(-1)
+    assert.ok(saved !== undefined, '改显示开关必须落盘')
+    assert.equal(saved.payload.preferences.reading.expandImages, false, '落盘带 reading.expandImages = false')
+    assert.equal(saved.payload.preferences.showUnread, true, '整份写必须带上 showUnread')
+
+    h.$('[data-rss-settings-back]').click()
+    await h.settle()
+    h.press('V', true)
+    await h.waitFor(() => h.store.get().view === 'article', { label: '进入正文页' })
+    await h.settle()
+    const aa = h.$('input[aria-label="默认折叠图片"]')
+    assert.ok(aa !== null, '正文页 Aa 面板必须有同一个开关')
+    assert.equal(aa.checked, true, '设置页勾上折叠 ⇒ Aa 面板必须同步勾选（同一份状态）')
+
+    // 正文页改 → 设置页同步
+    clickCheckbox(h, aa)
+    await h.settle()
+    assert.equal(h.store.get().reading.expandImages, true, 'Aa 面板取消折叠 ⇒ reading.expandImages = true')
+    h.press('Escape')
+    await h.settle()
+    assert.equal(h.store.get().view, 'list', '前置：Esc 回列表')
+    await openSettings(h)
+    assert.equal(h.$('[data-rss-setting-checkbox="expandImages"]').checked, false,
+      'Aa 面板取消折叠 ⇒ 设置页开关必须同步取消勾选（反向同步）')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R11 05 取消「默认折叠图片」后打开含图文章：图片直接出现，不需要展开动作', skip, async () => {
+  const prefs = {
+    value: {
+      navSelection: { kind: 'virtual' }, filter: 'all', navVisible: true, showUnread: true,
+      reading: { fontSize: 16, lineWidth: 760, theme: 'auto', expandImages: false },
+    },
+    writes: [],
+  }
+  const h = await mount({ items: [item({ id: 'a' })], article: IMAGE_ARTICLE, prefs })
+  try {
+    await h.settle()
+    assert.equal(h.store.get().reading.expandImages, false, '前置：偏好恢复成折叠')
+
+    h.press('V', true)
+    await h.waitFor(() => h.store.get().view === 'article', { label: '进入正文页' })
+    await h.settle()
+    assert.equal(h.win.document.querySelectorAll('article img').length, 0, '折叠态不许渲染 <img>')
+    assert.equal(h.win.document.querySelectorAll('[data-rss-image-fold]').length, 1,
+      '折叠态要有一条提示（说明这里确实有图被折叠了）')
+
+    h.press('Escape')
+    await h.settle()
+    await openSettings(h)
+    const expand = h.$('[data-rss-setting-checkbox="expandImages"]')
+    assert.equal(expand.checked, true, '前置：当前是折叠偏好 ⇒ 开关勾选')
+    clickCheckbox(h, expand)
+    await h.settle()
+    assert.equal(h.store.get().reading.expandImages, true, '取消勾选 ⇒ 偏好回到展开')
+
+    h.$('[data-rss-settings-back]').click()
+    await h.settle()
+    h.press('V', true)
+    await h.waitFor(() => h.store.get().view === 'article', { label: '再次进入正文页' })
+    await h.settle()
+    assert.equal(h.win.document.querySelectorAll('article img').length, 2,
+      '取消勾选后打开含图文章：图片必须直接出现（两张都渲染）')
+    assert.equal(h.win.document.querySelectorAll('[data-rss-image-fold]').length, 0,
+      '图片直接出现 = 没有任何折叠提示，不需要展开动作')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R11 05 显示未读计数：左栏角标与标题栏立即消失/恢复，落盘并在重开面板后保持', skip, async () => {
+  const prefs = { value: undefined, writes: [] }
+  const h = await mount({ items: [item({ id: 'a', feedId: 'f1' })], prefs })
+  try {
+    await h.settle()
+    const badgeOf = (mountHandle) => mountHandle.$('[data-rss-nav-row="feed:f1"]')?.getAttribute('data-rss-nav-badge')
+    assert.equal(badgeOf(h), '1', '前置：默认显示左栏角标')
+    assert.ok(h.$('[data-rss-unread-count]') !== null, '前置：标题栏有未读数')
+
+    await openSettings(h)
+    const toggle = h.$('[data-rss-setting-checkbox="showUnread"]')
+    assert.equal(toggle.checked, true, '默认显示未读计数')
+
+    clickCheckbox(h, toggle)
+    await h.settle()
+    assert.equal(h.store.get().showUnread, false, '关闭立即生效')
+    assert.equal(badgeOf(h), null, '关闭后左栏角标必须立即消失')
+    const savedOff = h.requests.filter((entry) => entry.endpoint === 'saveViewPreferences').at(-1)
+    assert.ok(savedOff !== undefined, '关闭必须落盘（D27.2）')
+    assert.equal(savedOff.payload.preferences.showUnread, false, '落盘的 showUnread = false')
+    assert.equal(prefs.value?.showUnread, false, '写进视图记忆的必须就是关闭态')
+
+    h.$('[data-rss-settings-back]').click()
+    await h.settle()
+    assert.equal(h.$('[data-rss-unread-count]'), null, '标题栏未读数也必须消失')
+
+    // 重新打开立即恢复（不重启）
+    await openSettings(h)
+    clickCheckbox(h, h.$('[data-rss-setting-checkbox="showUnread"]'))
+    await h.settle()
+    assert.equal(h.store.get().showUnread, true, '重新勾选立即生效')
+    assert.equal(badgeOf(h), '1', '左栏角标立即恢复')
+    h.$('[data-rss-settings-back]').click()
+    await h.settle()
+    assert.ok(h.$('[data-rss-unread-count]') !== null, '标题栏未读数立即恢复')
+
+    // 再关一次，然后模拟「关面板 → 重开面板」：新 store 读同一份宿主偏好
+    await openSettings(h)
+    clickCheckbox(h, h.$('[data-rss-setting-checkbox="showUnread"]'))
+    await h.settle()
+    assert.equal(prefs.value?.showUnread, false)
+    await h.unmount()
+
+    const second = await mount({ items: [item({ id: 'a', feedId: 'f1' })], prefs })
+    try {
+      await second.settle()
+      assert.equal(second.store.get().showUnread, false, '重开面板必须恢复「不显示未读计数」')
+      assert.equal(badgeOf(second), null, '重开后左栏角标仍然隐藏')
+      await openSettings(second)
+      assert.equal(second.$('[data-rss-setting-checkbox="showUnread"]').checked, false,
+        '重开后设置页开关仍是未勾选')
+    } finally {
+      second.cleanup()
+    }
   } finally {
     h.cleanup()
   }

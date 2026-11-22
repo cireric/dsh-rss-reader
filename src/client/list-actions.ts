@@ -184,8 +184,17 @@ export function createListActions(host: ListActionHost) {
   /** 切「全部标为已读」的时间范围。 */
   const setMarkAllRange = (markAllRange: MarkAllRange): void => { set({ markAllRange }) }
 
-  /** 隐藏 / 显示未读计数（规格 §5 不变量 8）。只影响呈现，不动数据。 */
-  const setShowUnread = (showUnread: boolean): void => { set({ showUnread }) }
+  /**
+   * 隐藏 / 显示未读计数（规格 §5 不变量 8）。只影响呈现，不动数据。
+   *
+   * R11 05 / D27.2：它不再是纯内存状态 —— 搬进设置页后必须记住，所以改完就整份落一次盘
+   * （persistView 带上当下 showUnread，与 navVisible / reading 同属一份视图记忆）。
+   * 这里仍是离散动作（点一下复选框），不需要防抖。
+   */
+  const setShowUnread = (showUnread: boolean): void => {
+    set({ showUnread })
+    persistView()
+  }
 
   /** 纯选中：只挪光标，**不**标已读、不展开（要副作用请走 activate —— 「打开一条」的唯一触发点）。 */
   const select = (itemId: string): void => {

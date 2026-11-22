@@ -7,7 +7,7 @@
  */
 import { useEffect, useState } from 'react'
 import { ROUTE_PATH, type DiscoveryResult, type Endpoint, type FeedView, type FolderView, type ItemView, type OpmlImportResult, type RpcResult, type SearchQuery, type SettingsSnapshot, type TagView, type DuplicateHintView } from '../shared.js'
-import { DEFAULT_READING_PREFERENCES, sanitizeViewPreferences, validListScrollTop } from '../preferences.js'
+import { DEFAULT_READING_PREFERENCES, DEFAULT_VIEW_PREFERENCES, sanitizeViewPreferences, validListScrollTop } from '../preferences.js'
 import type { ReadingPreferences, ViewPreferences } from '../preferences.js'
 import { clampScrollTop } from '../list-scroll.js'
 import type { DisplayWindowRange } from '../display-window.js'
@@ -141,7 +141,10 @@ export interface ReaderState {
    * 初值 `all` 不是猜测：store 的第一笔账来自挂载时的 refresh（默认档位就是「全部」）。
    */
   accountWindow: DisplayWindowRange
-  /** 是否显示未读计数（规格 §5 不变量 8：**未读计数可隐藏**）。默认显示 = 既有行为。 */
+  /**
+   * 是否显示未读计数（规格 §5 不变量 8：**未读计数可隐藏**）。默认显示 = 既有行为。
+   * R11 05 起它不再只是内存状态：初值由视图记忆恢复，改动经 setShowUnread → persistView 落盘（D27.2）。
+   */
   showUnread: boolean
   /**
    * 设置页的生效值快照（R11 01）：`undefined` = 还没取到（正在取 / 读失败）。
@@ -317,7 +320,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   let state: ReaderState = {
     items: [], feeds: [], folders: [], tags: [], unread: 0, unreadSplit: undefined, filter: 'all',
     selectedId: undefined, loading: true, error: undefined, undo: undefined,
-    view: 'list', layout: 'list', markAllRange: 'all', displayWindow: 'all', accountWindow: 'all', showUnread: true, settings: undefined, settingsError: undefined, settingsWarningDismissed: false, article: undefined, notice: undefined,
+    view: 'list', layout: 'list', markAllRange: 'all', displayWindow: 'all', accountWindow: 'all', showUnread: DEFAULT_VIEW_PREFERENCES.showUnread, settings: undefined, settingsError: undefined, settingsWarningDismissed: false, article: undefined, notice: undefined,
     importReport: undefined, discovery: undefined, feedsBusy: false,
     navSelection: { kind: 'virtual' }, perFeedUnread: {}, navVisible: true,
     reading: DEFAULT_READING_PREFERENCES, duplicates: {},
@@ -428,6 +431,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
       navSelection: memorableSelectionOf(state.navSelection),
       filter: state.filter,
       navVisible: state.navVisible,
+      showUnread: state.showUnread,
       reading: state.reading,
     }
     if (state.selectedId !== undefined) preferences.lastItemId = state.selectedId
@@ -470,6 +474,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
       navSelection: prefs.navSelection,
       filter: prefs.filter,
       navVisible: prefs.navVisible,
+      showUnread: prefs.showUnread,
       reading: prefs.reading,
       navCursor: prefs.navSelection.kind === 'feed'
         ? { kind: 'feed', feedId: prefs.navSelection.feedId }

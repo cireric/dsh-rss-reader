@@ -1,11 +1,16 @@
 /**
- * 设置页（R11 01 骨架 / 02 第一个可写参数 / 03 其余三个参数 / 04 手动清理 / 06 Agent 说明与关于区 / 07 恢复默认）。
+ * 设置页（R11 01 骨架 / 02 第一个可写参数 / 03 其余三个参数 / 04 手动清理 / 05 显示开关 /
+ * 06 Agent 说明与关于区 / 07 恢复默认）。
  *
  * 五个分区按 spec D13 的顺序全部占位；①「抓取与清理」的四行都是**可写**的数值输入框
- * （03 票补齐并发 / 自动刷新间隔 / 清理天数；显示开关在 05 票填入）；04 票在「清理天数」
- * 行右侧加「立即清理」：先预演（dryRun）再确认，设置页只负责触发与展示，取窗口和判据都在
- * store / 宿主那一侧（D27）；06 票填 ④ Agent 说明与 ⑤ 关于（版本 / 路径 / 12 个只读参数）。
- * 这里刻意不预埋假控件。
+ * （03 票补齐并发 / 自动刷新间隔 / 清理天数）；②「显示」是 05 票的两个视图开关
+ * （默认折叠图片 / 显示未读计数）；04 票在「清理天数」行右侧加「立即清理」：先预演（dryRun）
+ * 再确认，设置页只负责触发与展示，取窗口和判据都在 store / 宿主那一侧（D27）；06 票填
+ * ④ Agent 说明与 ⑤ 关于（版本 / 路径 / 12 个只读参数）。这里刻意不预埋假控件。
+ *
+ * 两个显示开关都**不持有自己的状态**：值经 props 直接读 store（reading / showUnread），
+ * 改动交回 store 的 setReading / setShowUnread —— 前者与正文页 Aa 面板是同一份 reading，
+ * 后者是 D27.2 要求持久化的视图记忆。组件里再存一份副本就会重新出现「两个面板各说各话」。
  *
  * 为什么容器自己 `tabIndex={0}` 并在挂载时聚焦：设置页要承接**浏览器原生**的空格 / d 翻页
  * （spec D22 明确要求这些键不被 preventDefault）。原生滚动的前提是焦点在可滚容器上；
@@ -25,6 +30,7 @@ import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { AGENT_APPROVAL_NOTE, AGENT_HELP } from '../agent-help.js'
 import type { CleanupResult, ReadOnlySettingView, SettingsSnapshot } from '../shared.js'
 import { parseTunableValue, TUNABLE_RANGES, type TunableKey } from '../settings-schema.js'
+import type { ReadingPreferences } from '../preferences.js'
 import type { ResetSettingsResult, SaveSettingResult } from './settings-actions.js'
 
 /** 成功反馈的停留时间：短到不挡视线，长到能看见（spec D14.2 定稿「约 1.4 秒」）。 */
@@ -48,6 +54,14 @@ export interface SettingsViewProps {
   warningDismissed: boolean
   onClose: () => void
   onDismissWarning: () => void
+  /** 正文排版偏好：与正文页 Aa 面板共用同一份 state（05 票）。 */
+  reading: ReadingPreferences
+  /** 改正文排版（只传变化的那一项，由 store 合并）。 */
+  onReading: (patch: Partial<ReadingPreferences>) => void
+  /** 是否显示未读计数（05 票 / D27.2）：左栏角标与标题栏共用这一位。 */
+  showUnread: boolean
+  /** 改「显示未读计数」：store 会整份落盘，重开面板后保持。 */
+  onShowUnread: (value: boolean) => void
   /** 逐项保存：由 store 的保存串行链执行，返回是否成功与失败的当下生效值。 */
   onSave: (key: TunableKey, value: number) => Promise<SaveSettingResult>
   /** 页面级恢复默认：走同一条保存串行链，一次请求把四项恢复成默认值。 */
@@ -260,6 +274,39 @@ function NumberSettingRow(props: NumberSettingRowProps): ReactNode {
   )
 }
 
+interface ToggleSettingRowProps {
+  readonly settingKey: 'expandImages' | 'showUnread'
+  readonly label: string
+  readonly help: string
+  readonly checked: boolean
+  /** 参数是「勾选后的状态」本身（不是控件反向语义）：由调用方投影成 store 的值。 */
+  readonly onChange: (checked: boolean) => void
+}
+
+/**
+ * 一个视图开关行：复选框 + 名称 + 一句帮助（D14.2：行内只留这些）。
+ *
+ * 为什么状态完全由 props 决定、组件不存副本：两个开关都要求「设置页 / 正文页 Aa 面板」
+ * 或「设置页 / 左栏 / 标题栏」实时同源（05 票的双向同步验收）。组件里存一份 draft 就会出现
+ * 两个面板各自显示不同值的经典缺陷 —— 复选框不是文本输入框，没有「正在编辑」这个中间态。
+ */
+function ToggleSettingRow(props: ToggleSettingRowProps): ReactNode {
+  const { settingKey, label, help, checked, onChange } = props
+  const inputId = useId()
+  const helpId = useId()
+  return (
+    <div className="dsh-rss-settings-row" data-rss-setting={settingKey}>
+      <label className="dsh-rss-settings-label" htmlFor={inputId}>
+        <input id={inputId} type="checkbox" data-rss-setting-checkbox={settingKey}
+          checked={checked} aria-describedby={helpId}
+          onChange={(event) => onChange(event.target.checked)} />
+        {' '}{label}
+      </label>
+      <p className="dsh-rss-settings-help" id={helpId}>{help}</p>
+    </div>
+  )
+}
+
 /**
  * 只读参数的展示文本。`logFile` 空串是「没设」而不是「空路径」——
  * 说清它仍会走宿主日志，免得读者以为日志被关了（D14.1）。
@@ -270,7 +317,11 @@ function readOnlyText(entry: ReadOnlySettingView): string {
 }
 
 export function SettingsView(props: SettingsViewProps): ReactNode {
-  const { settings, error, warningDismissed, onClose, onDismissWarning, onSave, onReset, onCleanupPreview, onCleanup } = props
+  const {
+    settings, error, warningDismissed, onClose, onDismissWarning,
+    reading, onReading, showUnread, onShowUnread,
+    onSave, onReset, onCleanupPreview, onCleanup,
+  } = props
   const box = useRef<HTMLDivElement | null>(null)
   const resetButton = useRef<HTMLButtonElement | null>(null)
   const resetConfirmButton = useRef<HTMLButtonElement | null>(null)
@@ -441,6 +492,30 @@ export function SettingsView(props: SettingsViewProps): ReactNode {
                   把上面四项数值恢复成代码默认值；显示区的两个开关不受影响。
                 </span>
               </div>
+            </>
+          )}
+          {section.key === 'display' && (
+            <>
+              {/* 05 票 / D14 ②：两个都是视图开关。第一个写 setReading —— 与正文页 Aa 面板同一份
+                  reading；第二个写 setShowUnread —— D27.2 要求它落进视图记忆。 */}
+              <ToggleSettingRow
+                settingKey="expandImages"
+                label="默认折叠图片"
+                help="打开文章时不自动加载图片"
+                checked={reading.expandImages === false}
+                onChange={(folded) => onReading({ expandImages: !folded })}
+              />
+              <ToggleSettingRow
+                settingKey="showUnread"
+                label="显示未读计数"
+                help="左栏与标题栏的未读数字"
+                checked={showUnread}
+                onChange={onShowUnread}
+              />
+              {/* D14 ② 末尾指针：排版控件不在本页重复一套。 */}
+              <p className="dsh-rss-settings-help" data-rss-display-pointer="">
+                字号 / 栏宽 / 主题在正文页的 Aa 面板调整
+              </p>
             </>
           )}
           {section.key === 'agent' && (
