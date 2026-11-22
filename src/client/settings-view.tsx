@@ -1,9 +1,11 @@
 /**
- * 设置页（R11 01 骨架 / 02 第一个可写参数 / 03 其余三个参数 / 06 Agent 说明与关于区 / 07 恢复默认）。
+ * 设置页（R11 01 骨架 / 02 第一个可写参数 / 03 其余三个参数 / 04 手动清理 / 06 Agent 说明与关于区 / 07 恢复默认）。
  *
  * 五个分区按 spec D13 的顺序全部占位；①「抓取与清理」的四行都是**可写**的数值输入框
- * （03 票补齐并发 / 自动刷新间隔 / 清理天数；显示开关在 04–05 票填入）；06 票填
- * ④ Agent 说明与 ⑤ 关于（版本 / 路径 / 12 个只读参数）。这里刻意不预埋假控件。
+ * （03 票补齐并发 / 自动刷新间隔 / 清理天数；显示开关在 05 票填入）；04 票在「清理天数」
+ * 行右侧加「立即清理」：先预演（dryRun）再确认，设置页只负责触发与展示，取窗口和判据都在
+ * store / 宿主那一侧（D27）；06 票填 ④ Agent 说明与 ⑤ 关于（版本 / 路径 / 12 个只读参数）。
+ * 这里刻意不预埋假控件。
  *
  * 为什么容器自己 `tabIndex={0}` 并在挂载时聚焦：设置页要承接**浏览器原生**的空格 / d 翻页
  * （spec D22 明确要求这些键不被 preventDefault）。原生滚动的前提是焦点在可滚容器上；
@@ -21,7 +23,7 @@
  */
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { AGENT_APPROVAL_NOTE, AGENT_HELP } from '../agent-help.js'
-import type { ReadOnlySettingView, SettingsSnapshot } from '../shared.js'
+import type { CleanupResult, ReadOnlySettingView, SettingsSnapshot } from '../shared.js'
 import { parseTunableValue, TUNABLE_RANGES, type TunableKey } from '../settings-schema.js'
 import type { ResetSettingsResult, SaveSettingResult } from './settings-actions.js'
 
@@ -50,6 +52,13 @@ export interface SettingsViewProps {
   onSave: (key: TunableKey, value: number) => Promise<SaveSettingResult>
   /** 页面级恢复默认：走同一条保存串行链，一次请求把四项恢复成默认值。 */
   onReset: () => Promise<ResetSettingsResult>
+  /**
+   * 清理预演（D27.1）：只取「如果现在执行会删多少」，不删任何条目。
+   * 返回 undefined = 失败（全局 error 已由 store 设置），设置页不弹确认框。
+   */
+  onCleanupPreview: () => Promise<CleanupResult | undefined>
+  /** 清理执行：既有 store.cleanup()（第二次请求不带 dryRun，成功后重载 overview）。 */
+  onCleanup: () => Promise<void>
 }
 
 /**
@@ -107,6 +116,13 @@ interface NumberSettingRowProps {
   readonly mode?: RowMode
   readonly value: number | undefined
   readonly onSave: SettingsViewProps['onSave']
+  /** 行内右侧的动作节点（目前只有「清理天数」的「立即清理」）。 */
+  readonly action?: ReactNode
+  /**
+   * 保存开始 / 结束时通知父组件。清理按钮据此在本字段正在写盘时禁用 —— 否则用户改完阈值
+   * 立刻点清理，预演用的还是旧阈值（D14.2 明确要求）。
+   */
+  readonly onSavingChange?: (saving: boolean) => void
 }
 
 /** 权威值 → 输入框展示文本。分钟模式不做四舍五入：1.50205 就是 1.50205（D11）。 */
@@ -147,7 +163,7 @@ function rangeErrorText(mode: RowMode, key: TunableKey): string {
  * 提交逻辑只有 `commit` 一份，两条路径不会漂移。
  */
 function NumberSettingRow(props: NumberSettingRowProps): ReactNode {
-  const { settingKey, label, unit, help, hint, mode = 'integer', value, onSave } = props
+  const { settingKey, label, unit, help, hint, mode = 'integer', value, onSave, action, onSavingChange } = props
   const inputId = useId()
   const helpId = useId()
   const effectiveText = value === undefined ? '' : displayOf(mode, value)
@@ -188,7 +204,14 @@ function NumberSettingRow(props: NumberSettingRowProps): ReactNode {
     }
     setError(undefined)
     setSaved(false)
-    const result = await onSave(settingKey, next)
+    // 从这里开始有一次真实的写盘在飞：父组件要在窗口期内禁用依赖「当前阈值」的动作。
+    onSavingChange?.(true)
+    let result: SaveSettingResult
+    try {
+      result = await onSave(settingKey, next)
+    } finally {
+      onSavingChange?.(false)
+    }
     if (result.ok) {
       dirty.current = false
       setSaved(true)
@@ -221,6 +244,7 @@ function NumberSettingRow(props: NumberSettingRowProps): ReactNode {
           event.currentTarget.blur()
         }} />
       <span className="dsh-rss-settings-unit">{unit}</span>
+      {action}
       {saved && (
         <span className="dsh-rss-settings-saved" data-rss-setting-saved={settingKey} role="status">已保存 ✓</span>
       )}
@@ -246,7 +270,7 @@ function readOnlyText(entry: ReadOnlySettingView): string {
 }
 
 export function SettingsView(props: SettingsViewProps): ReactNode {
-  const { settings, error, warningDismissed, onClose, onDismissWarning, onSave, onReset } = props
+  const { settings, error, warningDismissed, onClose, onDismissWarning, onSave, onReset, onCleanupPreview, onCleanup } = props
   const box = useRef<HTMLDivElement | null>(null)
   const resetButton = useRef<HTMLButtonElement | null>(null)
   const resetConfirmButton = useRef<HTMLButtonElement | null>(null)
@@ -257,6 +281,52 @@ export function SettingsView(props: SettingsViewProps): ReactNode {
   useEffect(() => { box.current?.focus() }, [])
   // 恢复默认的确认框打开即聚焦确认键：键盘流不用先摸方向键（与 MarkAllConfirm 同一约定）。
   useEffect(() => { if (resetOpen) resetConfirmButton.current?.focus() }, [resetOpen])
+  /**
+   * 清理按钮的三种瞬时状态：
+   *  - `cleanupDaysSaving`：阈值正在写盘 —— 按钮禁用，避免用旧阈值预演（D14.2）；
+   *  - `cleanupBusy`：预演在飞 —— 防连点堆出两次预演；
+   *  - `cleanupConfirm`：确认框里的 N 与阈值 D。N 只来自宿主 dryRun 的回包（D27.1）。
+   */
+  const [cleanupDaysSaving, setCleanupDaysSaving] = useState(false)
+  const [cleanupBusy, setCleanupBusy] = useState(false)
+  const [cleanupConfirm, setCleanupConfirm] = useState<{ count: number; days: number } | undefined>(undefined)
+  const cleanupButton = useRef<HTMLButtonElement | null>(null)
+  const cleanupConfirmButton = useRef<HTMLButtonElement | null>(null)
+  // 打开即聚焦「清理」：Enter 直接确认，Tab 到取消（与 MarkAllConfirm 同一条键盘流）。
+  useEffect(() => {
+    if (cleanupConfirm !== undefined) cleanupConfirmButton.current?.focus()
+  }, [cleanupConfirm])
+
+  /** 关框并把焦点还给触发它的「立即清理」：不还焦点，之后的 Esc / j 会落到 body（既有约定）。 */
+  const closeCleanupConfirm = (): void => {
+    setCleanupConfirm(undefined)
+    cleanupButton.current?.focus()
+  }
+
+  const startCleanup = async (): Promise<void> => {
+    if (cleanupBusy || cleanupDaysSaving || settings === undefined) return
+    setCleanupBusy(true)
+    try {
+      const preview = await onCleanupPreview()
+      // undefined = 预演失败：全局 error 已由 store 设置，绝不弹框。
+      if (preview === undefined) return
+      // 0 条时 store 已经把「没有可清理的条目」放进全局 notice；这里同样不弹框。
+      if (preview.deleted === 0) return
+      setCleanupConfirm({
+        count: preview.deleted,
+        days: settings.effective.cleanupAfterDays,
+      })
+    } finally {
+      setCleanupBusy(false)
+    }
+  }
+
+  const confirmCleanup = (): void => {
+    // 先关框、还焦点，再发执行请求：删除是异步的，界面不该停在「正在确认」的中间态。
+    closeCleanupConfirm()
+    void onCleanup()
+  }
+
   const warning = settings?.warning
   const readOnly = settings?.readOnly ?? []
   const resetChanges = resetChangesOf(settings)
@@ -346,6 +416,16 @@ export function SettingsView(props: SettingsViewProps): ReactNode {
                 hint="清理判据：已读、未星标、未保持未读，且发布时间早于该天数；0 会清光已读条目，所以非法"
                 value={settings?.effective.cleanupAfterDays}
                 onSave={onSave}
+                onSavingChange={setCleanupDaysSaving}
+                action={(
+                  // D27：阈值与动作是同一件事，所以按钮就在这一行右侧。次级按钮（ghost）
+                  // 不与「保存」抢主次；点在输入框失焦之后也能用（按钮在行内、不是行的提交入口）。
+                  <button ref={cleanupButton} type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
+                    data-rss-cleanup-now=""
+                    title="先预演将清理多少条，再确认执行；只删已读、未星标、未保持未读的旧条目"
+                    disabled={cleanupBusy || cleanupDaysSaving || settings === undefined}
+                    onClick={() => { void startCleanup() }}>立即清理</button>
+                )}
               />
               {/* D14.2 / D28：恢复默认影响整组，用一条分隔线与上面的单项参数区隔开。 */}
               <div className="dsh-rss-settings-reset" data-rss-reset-row="">
@@ -432,6 +512,35 @@ export function SettingsView(props: SettingsViewProps): ReactNode {
                 data-rss-reset-ok="" disabled={resetting} onClick={() => { void confirmReset() }}>
                 {resetting ? '恢复中…' : '恢复默认'}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* 清理确认框（D27.1）：N 来自刚才那次 dryRun，D 是当前生效阈值。挂在设置页根内 ——
+          面板卸载 / 离开设置页时随视图一起消失；Esc 由卡片自己处理，免得穿透去关设置页。 */}
+      {cleanupConfirm !== undefined && (
+        <div className="dsh-rss-confirm" data-rss-cleanup-confirm="">
+          <div className="dsh-rss-confirm-card" role="dialog" aria-modal="true"
+            aria-labelledby="dsh-rss-cleanup-title"
+            onKeyDown={(event) => {
+              if (event.key !== 'Escape') return
+              event.preventDefault()
+              event.stopPropagation()
+              closeCleanupConfirm()
+            }}>
+            <div className="dsh-rss-confirm-title" id="dsh-rss-cleanup-title"
+              data-rss-cleanup-count={cleanupConfirm.count}>
+              {'将清理 ' + cleanupConfirm.count + ' 条旧条目（早于 ' + cleanupConfirm.days + ' 天）'}
+            </div>
+            <div className="dsh-rss-confirm-note">
+              只删除「已读 + 未星标 + 未保持未读」且早于阈值的条目。此操作不可撤销。
+            </div>
+            <div className="dsh-rss-confirm-actions">
+              <button type="button" className="dsh-rss-btn" data-rss-cleanup-cancel=""
+                onClick={closeCleanupConfirm}>取消</button>
+              <button ref={cleanupConfirmButton} type="button"
+                className="dsh-rss-btn dsh-rss-btn--primary" data-rss-cleanup-ok=""
+                onClick={confirmCleanup}>清理</button>
             </div>
           </div>
         </div>

@@ -913,10 +913,36 @@ export function createListActions(host: ListActionHost) {
   const closeArticle = (): void => { set({ view: 'list' }) }
 
   /**
+   * 清理预演（R11 04 / spec D27.1）：只问宿主「如果现在执行会删多少」，**一条都不删**。
+   *
+   * 与 cleanup 共用同一个端点与同一份窗口构造器，只多带一个 `dryRun: true` —— 计数与删
+   * 绝不能是两套实现（GLOSSARY「裁决者只有一个」）。这里刻意不重载 overview、不改列表：
+   * 预演之后数据没变，重载只会制造一次无意义的取数；确认框也由设置页决定，不在这里弹。
+   *
+   * 0 条时就地把「没有可清理的条目」交给全局 notice：这是**用户动作的结果**，与后续
+   * 是否执行无关。失败走全局 error 并返回 undefined —— 调用方只按计数决定弹不弹框。
+   */
+  const cleanupPreview = async (): Promise<CleanupResult | undefined> => {
+    try {
+      const result = await rpc<CleanupResult>('cleanup', { ...windowRequest().payload, dryRun: true })
+      if (result.deleted === 0) {
+        set({ notice: '没有可清理的条目（只清「已读且未星标」且早于阈值的旧条目）' })
+      }
+      return result
+    } catch (failure) {
+      set({ error: failure instanceof Error ? failure.message : String(failure) })
+      return undefined
+    }
+  }
+
+  /**
    * 显式清理：删除「已读 + 未星标 + 早于阈值」的旧条目。
    *
    * 判据在宿主侧（`retention.ts` 的 selectCleanup，有单测）。客户端只负责发起与**如实回报**：
    * 删了 0 条也要说清是 0 条，而不是让用户以为按钮坏了。
+   *
+   * R11 04 起这条动作只由设置页的确认框触发；预演（cleanupPreview）用的是同一份判据，
+   * 本动作保持「取窗口 → cleanup → 如实回报 → 重载 overview」不变。
    */
   const cleanup = async (): Promise<void> => {
     try {
@@ -968,7 +994,7 @@ export function createListActions(host: ListActionHost) {
     actions: {
       visible, setFilter, setWindow, setLayout, setMarkAllRange, setShowUnread, select, selectRelative,
       markRead, activate, openSelected, toggleStar, toggleKeepUnread, toggleRead, markAllPlan, countMarkAllCandidates, markAllRead, undoMarkAll,
-      load, loadMore, cleanup, openArticle, retryArticle, closeArticle, stepArticle, canStepArticle, saveArticleProgress,
+      load, loadMore, cleanup, cleanupPreview, openArticle, retryArticle, closeArticle, stepArticle, canStepArticle, saveArticleProgress,
     },
     /** 跨域入口：选中重落。nav-actions 与视图恢复共用，刻意不上 ReaderStore 的公开面。 */
     relocateSelection,

@@ -874,9 +874,12 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
     invalidMessage: 'cleanup 的时间窗口无效（from / to 必须成对且 from < to）',
     carriesAccount: true,
     accountFrameOf,
-    to: async (_input, ctx) => {
+    to: async (input, ctx) => {
       // 显式清理（用户点按钮触发，**不设定时器**——验收项之一就是不残留定时器）。
       // 判据刻意保守：已读 + 未星标 + 未保持未读 + 早于阈值，四个条件缺一不可（见 retention.ts 注释）。
+      //
+      // R11 04 / D27.1：dryRun 只是**同一段判据的只读运行** —— 候选、cutoff、释放量全在这里
+      // 算一遍，唯一区别是「不删、不写删除日志」。所以预演数出来的 N 就是执行会删的 N。
       //
       // **候选集由存储侧一条 SQL 选出**（Task 5）：原先这里 `allItems()` 把整张 items 表
       // （10 万行）物化到 JS 再筛 —— 「点一次清理 = 一次全表遍历」，而 spec §3.1 只把清理记在
@@ -895,10 +898,17 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       const freedChars = candidates
         .filter((row) => doomed.has(row.id))
         .reduce((sum, row) => sum + row.articleChars + row.summaryChars, 0)
+      if (input.dryRun === true) {
+        // 预演：一条都不删、不写「清理：删除」（那是已经发生的既成事实）。日志用「将清理」，
+        // 与执行路径区分开 —— 排查「按钮点了没反应」时，日志说得出这次到底删没删。
+        ctx.log('预演：将清理 ' + doomed.size + ' 条已读旧条目（阈值 ' + ctx.config.cleanupAfterDays + ' 天，释放约 ' +
+          freedChars + ' 字符）')
+        return ok({ deleted: doomed.size, freedChars, cutoff, dryRun: true })
+      }
       for (const itemId of doomed) await ctx.store.deleteItem(itemId)
       ctx.log('清理：删除 ' + doomed.size + ' 条已读旧条目（阈值 ' + ctx.config.cleanupAfterDays + ' 天，释放约 ' +
         freedChars + ' 字符）')
-      return ok({ deleted: doomed.size, freedChars, cutoff })
+      return ok({ deleted: doomed.size, freedChars, cutoff, dryRun: false })
     },
   }),
 

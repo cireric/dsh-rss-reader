@@ -3007,4 +3007,19 @@ export const MUTATIONS = [
     judgeTests: ['saveSettings 恢复默认：继承值等于默认的键删覆盖，不等于默认的键写一条等于默认值的覆盖（A5）'],
     from: '            if (baseline[key] === target) {',
     to: '            if (false) {' },
+  // ── R11 04：手动清理（2026-11-22）────────────────────────────────────────
+  // 跳过预演直接执行：按钮把「先 dryRun 数一遍」换成「直接 cleanup」⇒ 用户看不到将清理多少，
+  // 确认框的 N 也就无从谈起（spec D27.1 / C19 第一条）。判据是第一次 cleanup 请求必须带 dryRun。
+  { id: 'settings-清理按钮', file: 'lib/client.js',
+    judges: ['settings-page-dom.test.mjs'],
+    judgeTests: ['R11 04 手动清理：预演只算不删，C>0 弹确认框并含条数与阈值'],
+    from: 'const preview = await onCleanupPreview();',
+    to: 'const preview = await onCleanup();' },
+  // 预演也真删：dryRun 分支不再 return，于是「预演：将清理 N 条」之后照样执行删除 ——
+  // 用户点一次「立即清理」时，还没确认就先丢了数据（C19 第一条「预演不删」）。
+  { id: 'cleanup-预演真删', file: 'lib/endpoints.js',
+    judges: ['cleanup-endpoint.test.mjs'],
+    judgeTests: ['R11 04 cleanup dryRun：不删任何条目、读态逐条不变，计数 / 释放量 / 阈值与随后执行一致'],
+    from: 'return ok({ deleted: doomed.size, freedChars, cutoff, dryRun: true });',
+    to: '' },
 ]

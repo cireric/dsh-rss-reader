@@ -154,11 +154,16 @@ const browseShape = { ...scopeShape, ...windowShape }
 const emptyAsObject = (value: unknown): unknown => (value === null || value === undefined ? {} : value)
 
 /**
- * `cleanup`：零业务入参（旧语义是「接受并忽略 payload」），但它是五个带账端点之一 ——
- * 窗口片段与其它四个共用同一段声明。`null` / 缺省 / 带无关键的对象必须继续接受
- * （浏览器通道把「没有 payload」序列化成 null）；坏窗口则回自己的 invalidMessage。
+ * `cleanup`：唯一业务入参是 `dryRun`（R11 04 / D27.1），但预演与执行**共用同一个端点、同一份
+ * selectCleanup** —— 不新开 cleanupPreview 端点，否则「数」与「删」会变成两套判据。
+ * 它仍是五个带账端点之一：窗口片段与其它四个共用同一段声明，`null` / 缺省 / 带无关键的对象
+ * 必须继续接受（浏览器通道把「没有 payload」序列化成 null）；坏窗口则回自己的 invalidMessage。
  */
-export const cleanupPayload = z.preprocess(emptyAsObject, z.object(windowShape).refine(windowRule))
+export const cleanupPayload = z.preprocess(emptyAsObject, z.object({
+  /** 只算不删；缺省 false = 现有执行语义（不传即执行）。 */
+  dryRun: z.boolean().optional(),
+  ...windowShape,
+}).refine(windowRule))
 
 /**
  * `refresh`：浏览范围 + 显示窗（cursor 被忽略，保持旧行为）。
