@@ -978,11 +978,11 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
     invalidMessage: 'saveSettings 需要 patch 或 resetToDefaults（二选一），patch 只接受白名单内的合法值',
     to: async (input, ctx) => {
       if (ctx.settings === undefined) return fail('not-ready', '设置服务尚未就绪')
-      if ('resetToDefaults' in input) {
-        // 07 票接这个分支。现在必须响亮拒绝：静默成功会让界面以为四项都恢复默认了。
-        return fail('not-implemented', '恢复默认尚未实现（R11 票据 07）')
-      }
-      const outcome = ctx.settings.save(input.patch)
+      // 恢复默认（07 票）：删 / 写规则在控制器里逐键判断，端点只负责把结果转成信封。
+      // 与 patch 分支共用同一条「先落盘再改内存」的失败语义（D7）。
+      const outcome = 'resetToDefaults' in input
+        ? ctx.settings.resetToDefaults()
+        : ctx.settings.save(input.patch)
       if (!outcome.ok) return fail('write-failed', outcome.message)
       return ok({ settings: outcome.snapshot })
     },

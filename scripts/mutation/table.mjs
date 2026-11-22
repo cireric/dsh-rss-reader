@@ -2997,4 +2997,14 @@ export const MUTATIONS = [
     judgeTests: ['R11 06 Agent 说明：按 AGENT_HELP 固定顺序渲染全部条目，末尾是审批提示'],
     from: 'children: [AGENT_HELP.map((entry) =>',
     to: 'children: [AGENT_HELP.slice(0, -1).map((entry) =>' },
+
+  // ── R11 07：恢复默认（2026-11-22）───────────────────────────────────────
+  // 恢复默认时把四项无条件写成覆盖：继承值本来就等于默认的键也被钉进 settings.json。
+  // 这违反 D28 的「删覆盖」规则 —— 将来改默认值时这些钉子不会跟随，且文件里出现无意义覆盖。
+  // 判据是 A5 的落盘用例（继承 = 默认的三项必须在文件里消失）。
+  { id: 'settings-恢复默认', file: 'lib/settings-control.js',
+    judges: ['settings-endpoints.test.mjs'],
+    judgeTests: ['saveSettings 恢复默认：继承值等于默认的键删覆盖，不等于默认的键写一条等于默认值的覆盖（A5）'],
+    from: '            if (baseline[key] === target) {',
+    to: '            if (false) {' },
 ]

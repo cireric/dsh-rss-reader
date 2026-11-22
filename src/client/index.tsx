@@ -157,6 +157,9 @@ const STYLE = `
 /* R11 03：非整分钟的「= 90123 ms」只在这个前提下出现（整分钟不显示，D14.2）。 */
 .dsh-rss-settings-hint { flex-basis:100%; margin:0; font-size:12px; color:var(--rss-muted);
   font-variant-numeric:tabular-nums; }
+/* R11 07：恢复默认影响整组，与上面的单项参数用一条分隔线隔开（D14.2 / D28）。 */
+.dsh-rss-settings-reset { display:flex; align-items:center; flex-wrap:wrap; gap:6px 12px;
+  margin-top:12px; padding-top:12px; border-top:1px solid var(--rss-line); }
 @media (max-width: 460px) {
   .dsh-rss-settings-row { flex-direction:column; align-items:flex-start; }
 }
@@ -1048,6 +1051,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
             onClose={() => store.closeSettings()}
             onDismissWarning={() => store.dismissSettingsWarning()}
             onSave={(key, value) => store.saveSetting(key, value)}
+            onReset={() => store.resetSettings()}
           />
         )}
 

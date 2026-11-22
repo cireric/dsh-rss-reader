@@ -6,7 +6,7 @@
  * 放进任一既有域都会让那块同时管两种数据来源（端点的 settings 与条目数据）。
  */
 import type { SettingsSnapshot } from '../shared.js'
-import type { TunableKey } from '../settings-schema.js'
+import { TUNABLE_KEYS, type TunableKey } from '../settings-schema.js'
 import type { ReaderState, ReaderStoreDeps } from './store.js'
 
 /**
@@ -18,6 +18,11 @@ import type { ReaderState, ReaderStoreDeps } from './store.js'
 export type SaveSettingResult =
   | { readonly ok: true; readonly settings: SettingsSnapshot }
   | { readonly ok: false; readonly message: string; readonly current: number | undefined }
+
+/** 「恢复默认」的结果：失败只带可展示的原因；N 由动作在提交时按「生效值 vs 默认值」算出。 */
+export type ResetSettingsResult =
+  | { readonly ok: true; readonly settings: SettingsSnapshot }
+  | { readonly ok: false; readonly message: string }
 
 export interface SettingsActionHost {
   get: () => ReaderState
@@ -88,6 +93,43 @@ export function createSettingsActions(host: SettingsActionHost) {
     return run
   }
 
+  /**
+   * 页面级「恢复默认」（07 票，D28）：客户端只发一个动作，删 / 写覆盖的判断全在宿主。
+   *
+   * 与逐项保存共用同一条串行链和「只认最新一次回包」的规则（风险 3）：恢复默认与普通保存
+   * 交错时，晚提交的那次回包才是权威值。N 在**提交那一刻**按「生效值 vs 默认值」现算 ——
+   * 它既是确认框列出的变化项数，也是成功提示里的数，两处不允许各算一套。
+   */
+  const resetSettings = (): Promise<ResetSettingsResult> => {
+    const ticket = ++latestSave
+    const run = saveChain.then(async (): Promise<ResetSettingsResult> => {
+      const before = get().settings
+      const changed = before === undefined
+        ? []
+        : TUNABLE_KEYS.filter((key) => before.effective[key] !== before.defaults[key])
+      try {
+        const result = await rpc<{ settings?: SettingsSnapshot }>('saveSettings', { resetToDefaults: true })
+        const snapshot = result?.settings
+        if (snapshot === undefined) throw new Error('saveSettings 回包缺少 settings 字段')
+        if (ticket === latestSave) {
+          set({
+            settings: snapshot,
+            settingsError: undefined,
+            notice: '已恢复 ' + changed.length + ' 项默认值',
+          })
+        }
+        return { ok: true, settings: snapshot }
+      } catch (failure) {
+        const message = failure instanceof Error ? failure.message : String(failure)
+        set({ error: '恢复默认失败：' + message })
+        log('warn', '[rss-reader] 恢复默认失败', failure)
+        return { ok: false, message }
+      }
+    })
+    saveChain = run.then(() => undefined, () => undefined)
+    return run
+  }
+
   /** 进入设置页并取一次快照。返回固定回列表（D20：不记 prevView）。 */
   const openSettings = (): void => {
     set({ view: 'settings' })
@@ -105,5 +147,5 @@ export function createSettingsActions(host: SettingsActionHost) {
   /** 关闭警示条只影响本次会话的显示（D17：警示不阻断任何功能）。 */
   const dismissSettingsWarning = (): void => { set({ settingsWarningDismissed: true }) }
 
-  return { loadSettings, openSettings, closeSettings, toggleSettings, dismissSettingsWarning, saveSetting }
+  return { loadSettings, openSettings, closeSettings, toggleSettings, dismissSettingsWarning, saveSetting, resetSettings }
 }

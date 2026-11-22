@@ -35,6 +35,14 @@ export interface SettingsControl {
    */
   save: (patch: TunableOverrides) => SettingsSaveOutcome
   /**
+   * 页面级「恢复默认」（07 票，D28）：一次写盘把四个可调键恢复成代码默认。
+   *
+   * 逐键的删 / 写判断只看**合并前的基线**（`baseline`）与默认值是否相等，不看当前生效值 ——
+   * 当前生效值可能是用户刚覆盖的值，拿它判断会得出「已经等于默认就什么都不用做」，而文件里的
+   * 旧覆盖（或将来改默认值后的钉子）仍然留着。
+   */
+  resetToDefaults: () => SettingsSaveOutcome
+  /**
    * 合并**之前**的四键基线快照（D4）。
    *
    * 界面不展示它（D16），恢复默认（07 票）靠它判断某个键该删覆盖还是写一条等于默认值的覆盖（D28）。
@@ -154,7 +162,52 @@ export function createSettingsControl(deps: SettingsControlDeps): SettingsContro
     return { ok: true, snapshot: snapshot() }
   }
 
-  return { baseline, snapshot, save }
+  /**
+   * 恢复默认（R11 07，spec D28 / D8）。
+   *
+   * 逐键规则：
+   *  - 基线恰好等于默认值 ⇒ **删覆盖**，生效值回落到基线（正好是默认值），不留钉子；
+   *  - 基线不等于默认值 ⇒ **写一条等于默认值的覆盖** —— 删掉覆盖只会回落到非默认的基线。
+   *
+   * 整组只写一次盘，成功后才改内存并逐键留痕（与 save 同一条 D7 顺序）。四项本来就都已是
+   * 默认值时直接返回、不碰文件：写一份相同内容只会改 mtime，还多一次可能失败的 IO。
+   */
+  const resetToDefaults = (): SettingsSaveOutcome => {
+    const prior = snapshotOf(config)
+    const next: TunableOverrides = { ...overrides }
+    const actions: Array<{ readonly key: TunableKey; readonly kind: 'delete' | 'write' }> = []
+    for (const key of TUNABLE_KEYS) {
+      const target = defaults[key]
+      if (baseline[key] === target) {
+        if (next[key] !== undefined) {
+          delete next[key]
+          actions.push({ key, kind: 'delete' })
+        }
+      } else if (next[key] !== target) {
+        next[key] = target
+        actions.push({ key, kind: 'write' })
+      }
+    }
+    if (actions.length === 0) return { ok: true, snapshot: snapshot() }
+    try {
+      // ① 先落盘（D7）：失败时下面的内存改写一行都不执行。
+      writeSettingsFile(settingsPath, next)
+    } catch (error) {
+      return { ok: false, message: error instanceof Error ? error.message : String(error) }
+    }
+    // ② 落盘成功后才认这份状态：四项一起回到默认值（删覆盖的键由基线回落，写覆盖的键由覆盖给出）。
+    overrides = next
+    for (const key of TUNABLE_KEYS) config[key] = defaults[key]
+    for (const action of actions) {
+      // D8：删覆盖记结果值（括号里的默认值）；写覆盖记旧的生效值 → 新的默认值。
+      log(action.kind === 'delete'
+        ? '恢复默认：' + action.key + ' 删覆盖（' + defaults[action.key] + '）'
+        : '恢复默认：' + action.key + ' ' + prior[action.key] + ' → ' + defaults[action.key])
+    }
+    return { ok: true, snapshot: snapshot() }
+  }
+
+  return { baseline, snapshot, save, resetToDefaults }
 }
 
 /** 四键快照：只搬运白名单键，不整份复制 Config（配置面有 17 个字段，设置页只关心这四个）。 */
