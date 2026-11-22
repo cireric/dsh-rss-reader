@@ -14,6 +14,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { DatabaseSync } from 'node:sqlite'
 import { openDatabase, migrateSchema, SCHEMA_VERSION } from '../lib/storage/db.js'
 import { createSqliteStore } from '../lib/store-sqlite.js'
 import { writeConfigFile } from '../lib/storage/config-file.js'
@@ -120,9 +121,9 @@ test('itemsByLinkKeys：写入时就落 link_key，批量查按它走', async ()
   }
 })
 
-test('v2→v4 升级：只加表与派生列，旧数据一行不动、link_key 回填到位（M5 03 的派生列）', async () => {
-  // 造一个**真实 v2 库**：先建到当前版本，再把 v3/v4 加的东西拆掉、版本章退回 2 ——
-  // 形状与 M5 02 之前的库一致（少 reading_progress 表、items 少 link_key 列）。
+test('v2→v5 升级：只加表与派生列，旧数据一行不动、link_key 回填到位（M5 03 的派生列）', async () => {
+  // 造一个**真实 v2 库**：先建到当前版本，再把 v3/v4/v5 加的东西拆掉、版本章退回 2 ——
+  // 形状与 M5 02 之前的库一致（少 reading_progress 表、items 少 link_key / author 列）。
   const dir = mkdtempSync(join(tmpdir(), 'rss-progress-v2-'))
   try {
     const db = openDatabase(join(dir, 'rss.db'))
@@ -130,10 +131,21 @@ test('v2→v4 升级：只加表与派生列，旧数据一行不动、link_key 
     db.exec('DROP TABLE reading_progress')
     db.exec('DROP INDEX i3')
     db.exec('ALTER TABLE items DROP COLUMN link_key')
+    db.exec('ALTER TABLE items DROP COLUMN author')
     db.exec('PRAGMA user_version = 2')
     db.prepare('INSERT INTO items (id, feed_id, title, link, fetched_at, starred) VALUES (?, ?, ?, ?, ?, 0)')
       .run('old-1', FEED_A, '老条目', 'https://site.example/old?utm_source=x#top', ROUND)
     db.close()
+
+    // 迁移前断言列真的不存在：只改 user_version 的「旧库」会让「迁移补列」的断言空转（spec 验收 4）
+    const legacy = new DatabaseSync(join(dir, 'rss.db'), { readOnly: true })
+    try {
+      const columns = legacy.prepare('PRAGMA table_info(items)').all().map((column) => column.name)
+      assert.equal(columns.includes('author'), false, '前置条件：v2 夹具必须真的没有 author 列')
+      assert.equal(columns.includes('link_key'), false, '前置条件：v2 夹具必须真的没有 link_key 列')
+    } finally {
+      legacy.close()
+    }
 
     const reopened = openDatabase(join(dir, 'rss.db'))
     try {
@@ -145,6 +157,8 @@ test('v2→v4 升级：只加表与派生列，旧数据一行不动、link_key 
       // v4 的派生列必须**在同一事务里回填**：空值意味着跨源提示对老条目静默失效
       assert.equal(reopened.prepare('SELECT link_key FROM items WHERE id = ?').get('old-1').link_key,
         'https://site.example/old', 'link_key 必须是归一化之后的键（去掉 utm/fragment）')
+      assert.equal(reopened.prepare('SELECT author FROM items WHERE id = ?').get('old-1').author, null,
+        'v5 的 author 列必须补上，且旧行保持 NULL（只加列、不回填）')
       migrateSchema(reopened) // 幂等
       assert.equal(reopened.prepare('PRAGMA user_version').get().user_version, SCHEMA_VERSION)
     } finally {

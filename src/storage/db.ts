@@ -20,17 +20,20 @@ import { linkKeyOf } from '../duplicates.js'
  * 与「条目/订阅的记录形状」无关，只描述**表结构本身**。任何破坏性改动都必须升它，
  * 而升它就必须同时想清楚老库怎么办 —— 本模块只会**拒绝**不认识的版本，不做原地迁移。
  */
-export const SCHEMA_VERSION = 4
+export const SCHEMA_VERSION = 5
 
 /**
  * 本版**能打开并升级**的旧版本。
  *
  * - v1 = M2 05 之前的真实表形状（tests/fixtures/rss-storage-v1.sql）；
- * - v2 = 加了 tags/item_tags 却没有 reading_progress 的形状（M5 02 之前的库）。
+ * - v2 = 加了 tags/item_tags 却没有 reading_progress 的形状（M5 02 之前的库）；
+ * - v3 = 有阅读进度、缺 link_key 的形状（M5 03 之前的库）；
+ * - v4 = 有 link_key、缺 author 的形状（R12 之前的库）。
  *
- * 两条升级都**只加表**，不改 items/texts/cursors 的任何一行。
+ * 四条升级都**只加表或加列**，不改 items/texts/cursors 的任何一行；漏掉任何一版都会让那版
+ * 用户的库升到 v5 却缺列 —— 症状是「老库打不开」（no such column），比功能缺失严重得多。
  */
-const UPGRADABLE_VERSIONS = new Set([1, 2, 3])
+const UPGRADABLE_VERSIONS = new Set([1, 2, 3, 4])
 
 /** 出错时的消息尾巴：把「去找什么」写清楚，比只报 errno 有用。 */
 const errnoOf = (error: unknown): string =>
@@ -47,7 +50,7 @@ const errnoOf = (error: unknown): string =>
  * 版本不认识就**响亮抛错**：静默降级或重建库等于把用户的已读态、星标连同桌面上的订阅一起丢掉。
  *
  * @param path 库文件路径，或 `:memory:`（测试用）。
- * @throws 库的 `user_version` 既不是 0（全新）、可升级的 1，也不是 {@link SCHEMA_VERSION} 时，消息含路径。
+ * @throws 库的 `user_version` 既不是 0（全新）、可升级的 1–4，也不是 {@link SCHEMA_VERSION} 时，消息含路径。
  */
 export function openDatabase(path: string): DatabaseSync {
   const isMemory = path === ':memory:'
@@ -107,7 +110,7 @@ function configureDatabase(db: DatabaseSync, path: string): void {
   }
   if (onDisk !== 0 && onDisk !== SCHEMA_VERSION && !UPGRADABLE_VERSIONS.has(onDisk)) {
     throw new Error(
-      `订阅数据库 ${path} 的格式版本是 ${onDisk}，本版只能读 ${SCHEMA_VERSION}（或从 v1 升级）：` +
+      `订阅数据库 ${path} 的格式版本是 ${onDisk}，本版只能读 ${SCHEMA_VERSION}（或从可升级的旧版本（1–4）升级）：` +
         '不会降级或重建（那会丢掉已读态与星标）。请升级插件，或从备份恢复后重试。',
     )
   }
@@ -154,6 +157,20 @@ const LINK_KEY_DDL = `
   CREATE INDEX i3 ON items(link_key);
 `
 
+/**
+ * v5 给 items 加 `author`（feed 给的原始作者，ADR-0009）。
+ *
+ * **只加列、不回填**：旧条目在 feed 那次响应里早已滚出去，任何回填都只能是猜测（猜出来的
+ * 作者比没有作者更坏）。可空 + 无 DEFAULT 是这条纪律的物理表达：NOT NULL 或 DEFAULT 会把
+ * 「不知道」写成一个值。刷新时对仍在响应里的老条目做机会式补全（refresh.ts），不在迁移里做。
+ *
+ * 四条升级分支都要拼上这段 —— 只在 v4→v5 里加，v1/v2/v3 的库会升到 v5 却缺列，
+ * 而 ITEM_SELECT 一旦含 i.author 就是 no such column（版本章已盖成 5，下次启动照样放行）。
+ */
+const AUTHOR_DDL = `
+  ALTER TABLE items ADD COLUMN author TEXT;
+`
+
 /** 给已有行补 link_key。解析不出的链接写空串（与 linkKeyOf 的「不参与判定」同义）。 */
 function backfillLinkKeys(db: DatabaseSync): void {
   const rows = db.prepare('SELECT id, link FROM items').all()
@@ -185,10 +202,12 @@ function assertV1Schema(db: DatabaseSync): void {
 /**
  * 建表/升级并盖版本章。幂等：已经盖过章就直接返回（插件每次装载都会走一遍）。
  *
- * 升级路径有两条，都是**只加表**：v1 → v3（M2 05 的 tags/item_tags + M5 02 的 reading_progress）、
- * v2 → v3（只加 reading_progress）。items/texts/cursors 一行都不改，所以旧条目、正文缓存、
- * 订阅归属与阅读状态在升级中保持原样；升级后的库不再能被旧版插件打开（旧版的版本闸只认
- * 自己那一版），回滚路径是从备份恢复 rss.db。
+ * 升级路径有**四条**且**互斥**，每条只拼「那一版缺的东西」：
+ * v1 → v5（tags/item_tags + reading_progress + link_key + author）、
+ * v2 → v5（reading_progress + link_key + author）、v3 → v5（link_key + author）、
+ * v4 → v5（author）。items/texts/cursors 一行都不改，所以旧条目、正文缓存、订阅归属与阅读
+ * 状态在升级中保持原样；升级后的库不再能被旧版插件打开（旧版的版本闸只认自己那一版），
+ * 回滚路径是从备份恢复 rss.db。
  */
 export function migrateSchema(db: DatabaseSync): void {
   const row = db.prepare('PRAGMA user_version').get()
@@ -204,19 +223,24 @@ export function migrateSchema(db: DatabaseSync): void {
   if (onDisk === 1) {
     assertV1Schema(db)
     // v1 直接补到当前版本：所有 DDL 在**同一个事务**里，避免「盖了版本章却少一张表」
-    applyDdl(db, 'v1→v4 升级', TAGS_DDL + PROGRESS_DDL + LINK_KEY_DDL, backfillLinkKeys)
+    applyDdl(db, 'v1→v5 升级', TAGS_DDL + PROGRESS_DDL + LINK_KEY_DDL + AUTHOR_DDL, backfillLinkKeys)
     return
   }
   if (onDisk === 2) {
-    applyDdl(db, 'v2→v4 升级', PROGRESS_DDL + LINK_KEY_DDL, backfillLinkKeys)
+    applyDdl(db, 'v2→v5 升级', PROGRESS_DDL + LINK_KEY_DDL + AUTHOR_DDL, backfillLinkKeys)
     return
   }
   if (onDisk === 3) {
-    applyDdl(db, 'v3→v4 升级', LINK_KEY_DDL, backfillLinkKeys)
+    applyDdl(db, 'v3→v5 升级', LINK_KEY_DDL + AUTHOR_DDL, backfillLinkKeys)
+    return
+  }
+  if (onDisk === 4) {
+    // v4 只缺 author 一列：不碰 link_key（它已在 v4 回填过，重算会抹掉「不参与判定」的空串语义）
+    applyDdl(db, 'v4→v5 升级', AUTHOR_DDL)
     return
   }
   throw new Error(
-    `订阅数据库的格式版本是 ${onDisk}，不是空库（0）、可升级的 v1/v2/v3 或当前版本 ${SCHEMA_VERSION}：` +
+    `订阅数据库的格式版本是 ${onDisk}，不是空库（0）、可升级的 v1/v2/v3/v4 或当前版本 ${SCHEMA_VERSION}：` +
       '拒绝建表/升级，以免把不认识的库覆盖成半成品。',
   )
 }
@@ -250,6 +274,9 @@ const BASE_SCHEMA_DDL = `
     feed_id         TEXT NOT NULL,
     title           TEXT NOT NULL,
     link            TEXT NOT NULL,
+    -- feed 给的作者原名（v5）：**可空、无默认值** —— 「不知道」就留 NULL，迁移不回填（ADR-0009）。
+    -- 归一化不在本模块做：写入与读侧共用同一处规则，这里只负责存原值。
+    author          TEXT,
     published_at    TEXT,
     fetched_at      TEXT NOT NULL,
     summary         TEXT,
@@ -332,5 +359,5 @@ const PROGRESS_DDL = `
   );
 `
 
-/** 全新库一次建到当前版本；升级路径见 migrateSchema（v1/v2 都只补表）。 */
+/** 全新库一次建到当前版本；升级路径见 migrateSchema（v1–v4 都只补表/补列，不改旧行）。 */
 const SCHEMA_DDL = BASE_SCHEMA_DDL + TAGS_DDL + PROGRESS_DDL

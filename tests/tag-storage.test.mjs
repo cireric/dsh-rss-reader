@@ -76,7 +76,7 @@ function freshStore(tag) {
 const tagNames = (tags) => tags.map((tag) => tag.name).sort()
 const tagIds = (tags) => tags.reduce((acc, tag) => ({ ...acc, [tag.name]: tag.id }), {})
 
-test('v1→v4 升级：只加表与派生列，条目/正文/游标/阅读状态原样保留，且回填 link_key', () => {
+test('v1→v5 升级：只加表与派生列，条目/正文/游标/阅读状态原样保留，且回填 link_key', () => {
   const { dir, path } = makeV1('upgrade')
   try {
     const before = snapshot(path)
@@ -92,6 +92,14 @@ test('v1→v4 升级：只加表与派生列，条目/正文/游标/阅读状态
       for (const table of ['tags', 'item_tags', 'reading_progress']) {
         assert.ok(after.tables.includes(table), table + ' 表必须建出来')
       }
+      // v5 的 author 列必须在这条**一次跳到 v5** 的路径上出现：只在 v4→v5 里加，就正好漏掉这里
+      const itemColumns = db.prepare('PRAGMA table_info(items)').all().map((column) => column.name)
+      assert.ok(itemColumns.includes('author'), 'v1→v5 后 items 必须有 author 列（缺列 = 老库打不开）')
+      assert.deepEqual(
+        db.prepare('SELECT id, author FROM items ORDER BY id').all().map((row) => [row.id, row.author]),
+        [['item-1', null]],
+        '旧行的 author 必须是 NULL：迁移只加列、不回填',
+      )
       // v4 的派生列必须在**升级时**回填（不回填的话跨源重复提示对老条目静默失效，而且没有任何报错）
       const keys = db.prepare('SELECT id, link FROM items ORDER BY id').all()
       assert.ok(keys.length > 0, '前置条件：老库里有用例条目')

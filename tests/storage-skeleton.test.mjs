@@ -174,8 +174,9 @@ test('openDatabase 建库为 0600、WAL、busy_timeout=5000，migrateSchema 才�
     assert.equal(db.prepare('PRAGMA journal_mode').get().journal_mode, 'wal', '必须真的开在 WAL 上')
     assert.equal(db.prepare('PRAGMA busy_timeout').get().timeout, 5000, '并发写要靠 busy_timeout 排队')
 
-    // v4 = M5 03 给 items 加了派生列 link_key（只加列 + 回填，v1/v2/v3 都能升上来）
-  assert.equal(SCHEMA_VERSION, 4, '物理布局版本是对外契约，改它必须同时想迁移')
+    // v5 = R12 给 items 加了可空的 author 列（只加列、不回填，v1–v4 都能升上来；
+    // 版本号写死在这里是有意的：改物理版本必须同时想迁移，这条断言会逼人重看四条升级路径）
+    assert.equal(SCHEMA_VERSION, 5, '物理布局版本是对外契约，改它必须同时想迁移')
     assert.equal(db.prepare('PRAGMA user_version').get().user_version, 0, 'migrateSchema 之前不许盖章')
     migrateSchema(db)
     assert.equal(db.prepare('PRAGMA user_version').get().user_version, SCHEMA_VERSION)
