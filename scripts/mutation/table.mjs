@@ -2902,4 +2902,19 @@ export const MUTATIONS = [
     judgeTests: ['R12 04 列表行：单源视图有作者两段、无作者只有时间，且无伪造文案与空段'],
     from: 'author !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {',
     to: 'selectedFeed === void 0 && author !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {' },
+
+  // ── R12 票据 05：按作者搜索（2026-11-22）──────────────────────────────────
+  // 作者谓词恒假：只有作者名命中的条目从结果里消失，与既有三路的并集缺行（验收 14 翻红）。
+  { id: 'search-作者谓词失效', file: 'lib/search-worker.js',
+    judges: ['search.test.mjs'],
+    judgeTests: ['搜索：作者名命中，与标题 / 摘要 / 正文混合时分页稳定（非 ASCII 大写作者）'],
+    from: '      OR (i.author IS NOT NULL AND instr(${lower}(i.author), :${key}) > 0))`;',
+    to: '      OR 0)`;' },
+  // 搜索读侧不归一化：外部改库留下的 '' 原样进 ItemView，搜索行出现空段、rss_search 输出 "" 而不是 null
+  //（验收 21 的搜索段翻红）。这是「归一化只有一处」的第二条读路径（决策 20）。
+  { id: 'search-作者读侧不归一化', file: 'lib/search-worker.js',
+    judges: ['search.test.mjs'],
+    judgeTests: ['搜索：外部改库留下的空串作者读成 undefined（与列表同一份归一化）'],
+    from: '            author: normalizeAuthor(typeof author === \'string\' ? author : undefined),',
+    to: '            author: typeof author === \'string\' ? author : undefined,' },
 ]

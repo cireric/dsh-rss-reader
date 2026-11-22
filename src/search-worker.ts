@@ -5,6 +5,9 @@ import { decodeCursor, encodeCursor, recencyOf } from './cursor.js'
 // 表格的行列摊平：与 articleCharsOf / SQL 侧字符统计共用一份实现（article-text.ts 零 node 依赖，
 // 在 worker 线程里 import 安全）
 import { tableToText } from './article-text.js'
+// 作者读侧归一化与 store / refresh 同源（R12 决策 3、20）。零依赖叶子，worker 线程里 import 安全；
+// 外部改库留下的 '' / 纯空白在这里也必须落成 undefined，否则搜索行会出现空段。
+import { normalizeAuthor } from './author.js'
 
 const db = new DatabaseSync(workerData, { readOnly: true })
 const port = parentPort
@@ -70,8 +73,12 @@ function search({ query, feeds, limit, flag }: Job): SearchPage {
     params[key] = term
     // 中文和 ASCII 查询可先走 SQLite 的原生匹配。其余词仍用 Unicode 小写。
     const lower = /[^\x00-\x7f\p{Script=Han}]/u.test(term) ? 'rss_search_lower' : 'lower'
+    // 作者是第四路：与上面三路同属一个 term 的 OR，逐词之间仍是 AND，所以「只返回字面命中」
+    // 的语义不变。lower 必须复用上面按词选出的变量 —— 非 ASCII 词写死 SQLite lower() 会漏掉
+    // 'Änne' 这类大写作者。IS NOT NULL 与正文那一路同形：显式表达「NULL 不是命中」。
     return `(instr(${lower}(i.title), :${key}) > 0 OR instr(${lower}(i.summary), :${key}) > 0
-      OR CASE WHEN t.body IS NOT NULL THEN instr(rss_search_text(t.body), :${key}) > 0 ELSE 0 END)`
+      OR CASE WHEN t.body IS NOT NULL THEN instr(rss_search_text(t.body), :${key}) > 0 ELSE 0 END
+      OR (i.author IS NOT NULL AND instr(${lower}(i.author), :${key}) > 0))`
   })
   // SQLite 的 CASE 会短路。先检查较长的词，跳过已经无法满足 AND 的正文匹配。
   const match = predicates.reduceRight((rest, predicate) => `CASE WHEN ${predicate} THEN ${rest} ELSE 0 END`, '1')
@@ -106,19 +113,21 @@ function search({ query, feeds, limit, flag }: Job): SearchPage {
   }
   // 用 CASE 固定取消检查的顺序，即使没有任何匹配也会检查共享标记。
   const rows = db.prepare(`SELECT i.id, i.feed_id, i.title, i.link, i.published_at, i.fetched_at,
-    i.read_at, i.starred, i.kept_unread, i.summary
+    i.read_at, i.starred, i.kept_unread, i.summary, i.author
     FROM items i INDEXED BY ${query.feedId === undefined ? 'i2' : 'i1'}
     LEFT JOIN texts t ON t.item_id = i.id
     WHERE ${where.join(' AND ')} AND CASE WHEN rss_search_active() THEN (${match}) ELSE 0 END
     ORDER BY i.recency DESC, i.id ASC LIMIT :limit`).all(params)
   const items: ItemView[] = []
   for (const row of rows.slice(0, limit)) {
-    const { id, feed_id, title, link, published_at, fetched_at, read_at, starred, kept_unread, summary } = row
+    const { id, feed_id, title, link, published_at, fetched_at, read_at, starred, kept_unread, summary, author } = row
     if (typeof id !== 'string' || typeof feed_id !== 'string' || typeof title !== 'string'
       || typeof link !== 'string' || typeof fetched_at !== 'string') throw new Error('搜索条目格式无效')
     const feedTitle = titles.get(feed_id)
     if (feedTitle === undefined) throw new Error('搜索条目所属源无效')
     items.push({ id, feedId: feed_id, feedTitle, title, link, fetchedAt: fetched_at,
+      // 第二条读路径必须与 toItemRecord 同源：外部改库留下的 '' / 纯空白也落成 undefined。
+      author: normalizeAuthor(typeof author === 'string' ? author : undefined),
       publishedAt: typeof published_at === 'string' ? published_at : undefined,
       readAt: typeof read_at === 'string' ? read_at : undefined,
       summary: typeof summary === 'string' ? summary : undefined,
