@@ -7,8 +7,8 @@
  * 「事件没被 preventDefault、列表选中没动」这两条。
  *
  * 与 scroll-dom.test.mjs 同一套装配方式（jsdom 从 dsh checkout 里解析，缺依赖则跳过）：
- * 这里只需要 overview / viewPreferences / settings 三个桩，所以不复制那 400 行夹具，
- * 只保留本票用得到的部分。
+ * 这里只需要 overview / viewPreferences / settings / saveSettings / cleanup 这几个桩，
+ * 所以不复制那 400 行夹具，只保留本票用得到的部分。
  */
 import { test, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
@@ -84,7 +84,7 @@ async function waitFor(predicate, { timeout = 2000, interval = 5, label = '条�
  * 起一个 DOM 环境 + 渲染真实 Reader。返回的对象与 scroll-dom.test.mjs 的同名夹具同形
  * （press / settle / waitFor / store），但只桩本票会碰到的端点。
  */
-async function mount({ settings, saveSettings } = {}) {
+async function mount({ settings, saveSettings, items, cleanupStub } = {}) {
   const { JSDOM } = STACK
   const globalSnapshot = {}
   for (const key of ['window', 'document', 'HTMLElement', 'Element', 'Node', 'KeyboardEvent', 'ResizeObserver', 'fetch']) {
@@ -108,9 +108,11 @@ async function mount({ settings, saveSettings } = {}) {
   const jsxRuntime = require_(join(STACK.reactPath, 'jsx-runtime'))
   const createRoot = require_(join(STACK.reactDomPath, 'client')).createRoot
 
+  // 条目数组可变：cleanup 的桩件要能「预演只算、执行才删」，列表重载后也能看见真实删没删。
+  let storedItems = [...(items ?? [])]
   const overview = {
     feeds: [{ id: 'f1', title: '源一' }, { id: 'f2', title: '源二' }],
-    items: [], folders: [], tags: [], unread: 0,
+    items: storedItems, folders: [], tags: [], unread: 0,
     perFeedUnread: { f1: 0, f2: 0 }, refreshed: false,
   }
   let settingsState = settings ?? { effective: { ...TUNABLE_DEFAULTS }, defaults: { ...TUNABLE_DEFAULTS } }
@@ -134,8 +136,27 @@ async function mount({ settings, saveSettings } = {}) {
       settingsState = { ...settingsState, effective: { ...settingsState.effective, ...patch } }
       return ok({ settings: settingsState })
     }
+    // R11 04：cleanup 桩件必须支持 dryRun —— 预演只算不删，执行才删（C19 第一条）。
+    if (body.endpoint === 'cleanup') {
+      if (cleanupStub !== undefined) {
+        const custom = await cleanupStub(body.payload)
+        if (custom?.error !== undefined) return failEnvelope(custom.error)
+        if (custom?.value !== undefined) return ok(custom.value)
+      }
+      const dryRun = body.payload?.dryRun === true
+      // 与宿主同一条判据的**最小投影**：已读、未星标、未保持未读。
+      const doomed = storedItems.filter((entry) => entry.readAt !== undefined
+        && entry.starred !== true && entry.keptUnread !== true)
+      const freedChars = doomed.reduce((sum, entry) => sum + (entry.summary?.length ?? 0), 0)
+      if (!dryRun) {
+        const ids = new Set(doomed.map((entry) => entry.id))
+        storedItems = storedItems.filter((entry) => !ids.has(entry.id))
+        overview.items = storedItems
+      }
+      return ok({ deleted: doomed.length, freedChars, cutoff: '2020-01-01T00:00:00.000Z', dryRun, unread: 0 })
+    }
     if (body.endpoint === 'viewPreferences') return ok({})
-    if (body.endpoint === 'overview' || body.endpoint === 'refresh') return ok(overview)
+    if (body.endpoint === 'overview' || body.endpoint === 'refresh') return ok({ ...overview, items: storedItems })
     if (body.endpoint === 'duplicateHints') return ok({ hints: [] })
     return failEnvelope({ code: 'unknown-endpoint', message: '桩未实现 ' + body.endpoint, details: {} })
   }
@@ -198,7 +219,9 @@ async function mount({ settings, saveSettings } = {}) {
   }
   liveCleanups.push(cleanup)
   const $ = (selector) => win.document.querySelector(selector)
-  return { win, store, requests, press, settle, waitFor, cleanup, $ }
+  /** 预演前后的条目与读态快照：C19 要求「逐条不变」，所以读态一起带上。 */
+  const itemsNow = () => storedItems.map((entry) => ({ id: entry.id, readAt: entry.readAt, starred: entry.starred === true, keptUnread: entry.keptUnread === true }))
+  return { win, store, requests, press, settle, waitFor, cleanup, $, itemsNow }
 }
 
 
@@ -492,7 +515,7 @@ async function openWith(effective) {
   return h
 }
 
-test('R11 03 三行结构：名称 + 一句帮助 + 输入框 + 单位，行内没有按钮与链接', async () => {
+test('R11 03 三行结构：名称 + 一句帮助 + 输入框 + 单位（清理天数行带「立即清理」）', async () => {
   const h = await openWith({ refreshConcurrency: 12, cleanupAfterDays: 400 })
   try {
     const expected = [
@@ -513,7 +536,13 @@ test('R11 03 三行结构：名称 + 一句帮助 + 输入框 + 单位，行内�
       assert.ok((helps[0].textContent ?? '').length > 0, entry.key + ' 的帮助不能为空')
       assert.ok((row.querySelector('.dsh-rss-settings-input')?.getAttribute('title') ?? '').length > 0,
         entry.key + ' 的详细语义必须放在 input 的 title 里')
-      assert.equal(row.querySelector('button'), null, entry.key + ' 行内不该有按钮（04 票才有清理按钮）')
+      if (entry.key === 'cleanupAfterDays') {
+        // R11 04：只有「清理天数」这一行带动作按钮（阈值与动作是同一件事，D27）。
+        assert.deepEqual([...row.querySelectorAll('button')].map((button) => button.textContent), ['立即清理'],
+          '清理天数行必须有且只有「立即清理」')
+      } else {
+        assert.equal(row.querySelector('button'), null, entry.key + ' 行内不该有按钮（清理按钮只属于清理天数行）')
+      }
       assert.equal(row.querySelector('a'), null, entry.key + ' 行内不该有链接')
       assert.doesNotMatch(row.textContent ?? '', /本页覆盖|插件配置|默认值|清除本页设置/,
         entry.key + ' 行内不许出现来源标签（D16）')
@@ -657,6 +686,201 @@ test('R11 03 三行非法值：就地红字 + 零请求 + 输入保留（范围�
     assert.equal(h.store.get().settings.effective.refreshConcurrency, 5, '本地校验失败不许改权威值')
     assert.equal(h.store.get().settings.effective.minRefreshIntervalMs, 600000)
     assert.equal(h.store.get().settings.effective.cleanupAfterDays, 30)
+  } finally {
+    h.cleanup()
+  }
+})
+
+// ── R11 04：手动清理 = 预演 → 确认 → 执行（spec D27–D27.1 / 验收 C19）─────────────
+//
+// 这一组钉的是**请求顺序与副作用边界**：点一次按钮必须先看到 dryRun 预演（一条都不删），
+// C > 0 才有确认框；取消绝不发第二次请求；确认才执行。桩件的 cleanup 分支也按同一条语义
+// 实现（见 mount 里的 dryRun 处理）—— 否则测试只能证明「发了两次请求」，证明不了「预演不删」。
+
+/** 一条最小可用条目（形状与 scroll-dom.test.mjs 的 item() 同源）。 */
+function item(overrides = {}) {
+  return {
+    id: 'item-1', feedId: 'f1', feedTitle: '源一', title: '标题',
+    link: 'https://example.com/a', readAt: undefined, starred: false,
+    fetchedAt: '2026-11-01T00:00:00.000Z', ...overrides,
+  }
+}
+
+/** 有旧已读、有受保护、有未读的一组条目：只有 old-read 该被清理。 */
+function cleanupItems() {
+  return [
+    item({ id: 'old-read', readAt: '2020-02-01T00:00:00.000Z', summary: 'x'.repeat(2048) }),
+    item({ id: 'old-starred', readAt: '2020-02-01T00:00:00.000Z', starred: true }),
+    item({ id: 'old-kept', readAt: '2020-02-01T00:00:00.000Z', keptUnread: true }),
+    item({ id: 'old-unread', title: '未读旧条目' }),
+  ]
+}
+
+/** 设置快照：清理天数可指定（确认框文案要显示当前阈值 D）。 */
+function settingsWith(cleanupAfterDays) {
+  return {
+    effective: { ...TUNABLE_DEFAULTS, cleanupAfterDays },
+    defaults: { ...TUNABLE_DEFAULTS },
+  }
+}
+
+test('R11 04 手动清理：预演只算不删，C>0 弹确认框并含条数与阈值', async () => {
+  const h = await mount({ items: cleanupItems(), settings: settingsWith(45) })
+  try {
+    await openSettings(h)
+    const before = h.itemsNow()
+    const button = h.$('[data-rss-cleanup-now]')
+    assert.ok(button !== null, '「清理天数」行右侧必须有「立即清理」按钮')
+    button.click()
+    await h.waitFor(() => h.$('[data-rss-cleanup-confirm]') !== null, { label: '清理确认框弹出' })
+
+    const cleanups = h.requests.filter((entry) => entry.endpoint === 'cleanup')
+    assert.equal(cleanups.length, 1, '点一次按钮只发一次预演请求')
+    assert.equal(cleanups[0].payload.dryRun, true, '第一次 cleanup 必须带 dryRun: true（预演）')
+    assert.deepEqual(h.itemsNow(), before, '预演前后条目数与读态必须逐条不变')
+    assert.equal(h.store.get().view, 'settings', '预演不切视图')
+
+    const text = h.$('[data-rss-cleanup-confirm]').textContent ?? ''
+    assert.match(text, /将清理 1 条旧条目/, '确认框必须说清将清理多少条')
+    assert.match(text, /45 天/, '确认框必须带上当前阈值 D 天')
+    assert.equal(h.$('[data-rss-cleanup-confirm] [role="dialog"]')?.getAttribute('aria-modal'), 'true',
+      '确认框必须是 role=dialog + aria-modal（与 MarkAllConfirm 同一约定）')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R11 04 手动清理：取消不发第二次请求、不删条目、焦点归还「立即清理」', async () => {
+  const h = await mount({ items: cleanupItems(), settings: settingsWith(30) })
+  try {
+    await openSettings(h)
+    const before = h.itemsNow()
+    const button = h.$('[data-rss-cleanup-now]')
+    button.click()
+    await h.waitFor(() => h.$('[data-rss-cleanup-confirm]') !== null, { label: '清理确认框弹出' })
+    h.$('[data-rss-cleanup-cancel]').click()
+    await h.settle()
+
+    assert.equal(h.$('[data-rss-cleanup-confirm]'), null, '取消必须关闭确认框')
+    assert.equal(h.requests.filter((entry) => entry.endpoint === 'cleanup').length, 1,
+      '取消绝不许发第二次 cleanup 请求')
+    assert.deepEqual(h.itemsNow(), before, '取消不删任何条目')
+    assert.equal(h.store.get().view, 'settings', '取消后仍在设置页')
+    assert.equal(h.win.document.activeElement, button, '确认框关闭后焦点必须回到触发它的「立即清理」')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R11 04 手动清理：确认后执行第二次请求，状态条显示实际删除与释放量，view 仍是 settings', async () => {
+  const h = await mount({ items: cleanupItems(), settings: settingsWith(30) })
+  try {
+    await openSettings(h)
+    const button = h.$('[data-rss-cleanup-now]')
+    button.click()
+    await h.waitFor(() => h.$('[data-rss-cleanup-confirm]') !== null, { label: '清理确认框弹出' })
+    h.$('[data-rss-cleanup-ok]').click()
+    await h.waitFor(() => h.requests.filter((entry) => entry.endpoint === 'cleanup').length === 2,
+      { label: '确认后的第二次 cleanup 请求' })
+
+    const cleanups = h.requests.filter((entry) => entry.endpoint === 'cleanup')
+    assert.equal(cleanups[0].payload.dryRun, true, '第一次仍是预演')
+    assert.equal('dryRun' in cleanups[1].payload, false, '第二次执行不许带 dryRun（缺省 = 执行）')
+    assert.equal(h.$('[data-rss-cleanup-confirm]'), null, '确认后确认框关闭')
+    await h.waitFor(() => (h.store.get().notice ?? '').includes('已清理 1 条旧条目'), { label: '清理结果 notice' })
+    const notice = h.store.get().notice ?? ''
+    assert.match(notice, /已清理 1 条旧条目/, '状态条必须如实报实际删除条数')
+    assert.match(notice, /释放约 2 KB/, '状态条必须带释放量（2048 字符 ≈ 2 KB）')
+    await h.waitFor(() => h.store.get().items.every((entry) => entry.id !== 'old-read'),
+      { label: '列表重载后不再有已清理条目' })
+    assert.equal(h.store.get().view, 'settings', '执行完仍在设置页（不跳走）')
+    assert.equal(h.win.document.activeElement, button, '确认后焦点回到「立即清理」')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R11 04 手动清理：0 条不弹框，直接回报「没有可清理的条目」', async () => {
+  const h = await mount({
+    items: [item({ id: 'kept', readAt: '2020-02-01T00:00:00.000Z', keptUnread: true }), item({ id: 'unread' })],
+    settings: settingsWith(30),
+  })
+  try {
+    await openSettings(h)
+    const before = h.itemsNow()
+    h.$('[data-rss-cleanup-now]').click()
+    await h.waitFor(() => (h.store.get().notice ?? '').includes('没有可清理的条目'), { label: '0 条的结果 notice' })
+    assert.match(h.store.get().notice ?? '', /没有可清理的条目/, '0 条必须直接回报，不弹框')
+    assert.equal(h.$('[data-rss-cleanup-confirm]'), null, '0 条绝不弹确认框')
+    assert.equal(h.requests.filter((entry) => entry.endpoint === 'cleanup').length, 1, '0 条只发一次预演')
+    assert.deepEqual(h.itemsNow(), before, '0 条时同样不删任何东西')
+    assert.equal(h.store.get().view, 'settings')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R11 04 手动清理：预演失败走全局 error，不弹框', async () => {
+  const h = await mount({
+    items: cleanupItems(),
+    settings: settingsWith(30),
+    cleanupStub: (payload) => payload?.dryRun === true
+      ? { error: { code: 'cleanup-failed', message: '模拟预演失败', details: {} } }
+      : undefined,
+  })
+  try {
+    await openSettings(h)
+    h.$('[data-rss-cleanup-now]').click()
+    await h.waitFor(() => h.store.get().error !== undefined, { label: '预演失败的全局 error' })
+    assert.match(h.store.get().error ?? '', /模拟预演失败/, '失败必须走全局 error 通道')
+    assert.equal(h.$('[data-rss-cleanup-confirm]'), null, '预演失败绝不弹确认框')
+    assert.equal(h.requests.filter((entry) => entry.endpoint === 'cleanup').length, 1, '失败后不重试')
+    assert.equal(h.store.get().view, 'settings')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R11 04 手动清理：清理天数正在保存时「立即清理」禁用，保存完成后恢复', async () => {
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const h = await mount({
+    items: cleanupItems(),
+    saveSettings: async (payload) => {
+      await gate
+      return {
+        settings: {
+          effective: { ...TUNABLE_DEFAULTS, ...payload.patch },
+          defaults: { ...TUNABLE_DEFAULTS },
+        },
+      }
+    },
+  })
+  try {
+    await openSettings(h)
+    const button = h.$('[data-rss-cleanup-now]')
+    assert.equal(button.disabled, false, '空闲时按钮可用')
+    const input = h.$('[data-rss-setting-input="cleanupAfterDays"]')
+    input.focus()
+    setControlValue(h.win, input, '45')
+    input.blur()
+    await h.waitFor(() => button.disabled === true, { label: '保存期间「立即清理」禁用' })
+    assert.equal(button.disabled, true, '阈值正在写盘时不许用旧阈值预演')
+    release()
+    await h.waitFor(() => button.disabled === false, { label: '保存完成后按钮恢复' })
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R11 04 工具栏：「更多」里不再有「清理旧条目」按钮', async () => {
+  const h = await mount()
+  try {
+    await h.settle()
+    assert.equal([...h.win.document.querySelectorAll('button')]
+      .some((button) => (button.textContent ?? '').includes('清理旧条目')), false,
+    '「更多」里的旧清理入口必须已删除（清理动作只住在设置页）')
+    assert.doesNotMatch(h.$('.dsh-rss-settings-panel')?.textContent ?? '', /清理旧条目/)
   } finally {
     h.cleanup()
   }

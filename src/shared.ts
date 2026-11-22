@@ -267,11 +267,18 @@ export interface ArticlePayload {
   /** 站点是否允许被 iframe 嵌入（决定能否切到「原站视图」） */
   frameable?: boolean
 }
-/** 显式清理（`cleanup` 端点）的结果：删除条数、释放字符数与阈值。 */
+/**
+ * 显式清理（`cleanup` 端点）的结果：删除条数、释放字符数与阈值。
+ *
+ * `dryRun` 是回包的自我标识（R11 04 / D27.1）：预演与执行走同一个端点，调用方必须能分辨
+ * 这次回包的 `deleted` 是「将要删」还是「已经删」—— 两者混为一谈会把预演当成已执行。
+ * 预演时 `deleted` = 如果现在执行会删多少，且一条都不删。
+ */
 export interface CleanupResult {
   deleted: number
   freedChars: number
   cutoff: string
+  dryRun: boolean
   unread: number
 }
 /** OPML 导出（`opmlExport`）的返回。 */
