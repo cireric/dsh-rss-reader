@@ -725,9 +725,8 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
   const blockKeyOf = (at: number): string => articleItemId + ':' + at
   const title = article?.title || item?.title
   const publishedAt = item?.publishedAt
-  // R12：空串与缺省同义（记录层已归一化，这里只防桩件/旧数据把空段拼进 header）。
-  const rawAuthor = item?.author
-  const author = rawAuthor === undefined || rawAuthor === '' ? undefined : rawAuthor
+  // R12：作者只由 src/author.ts 在读路径归一化；这里直接用投影值，不再加桩件守卫。
+  const author = item?.author
   // 历史行可能带脏 link（修复前落库的 javascript:）：渲染前过 shared.ts 的唯一白名单。
   // 认不出就当作「无链接」——与 item.link === '' 的既有语义一致（不渲染「打开原站」）。
   const rawLink = item?.link
