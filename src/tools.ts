@@ -279,6 +279,9 @@ function digestOf(item: SearchPage['items'][number]): Record<string, unknown> {
     ...field('title', item.title, TITLE_MAX_CHARS),
     ...field('feedTitle', item.feedTitle, LABEL_MAX_CHARS),
     publishedAt: item.publishedAt ?? null,
+    // 作者与 publishedAt 同形：缺省显式给 null（缺键会让模型以为工具不提供作者）。
+    // 超长按 label 预算截断并带 authorTruncated —— 与源标题等短标签同一条既有约定。
+    ...optionalField('author', item.author, LABEL_MAX_CHARS),
     ...field('url', item.link, URL_MAX_CHARS),
     ...field('snippet', item.summary ?? '', SNIPPET_MAX_CHARS),
     readAt: item.readAt ?? null,
@@ -297,6 +300,7 @@ function searchTool(deps: ReadToolDeps): ToolDefinition {
     name: 'rss_search',
     description:
       'Search the reader\'s locally stored RSS items and return paginated summaries with source links. '
+      + 'Keywords match titles, summaries, cached article text and authors. '
       + 'Read-only: it never contacts the original sites and never changes read state. '
       + 'Use rss_read_article to get the full cached text of one item.',
     parameters: {
@@ -451,6 +455,8 @@ function articleTool(deps: ReadToolDeps): ToolDefinition {
         ...field('url', record.link, URL_MAX_CHARS),
         feedId: record.feedId,
         publishedAt: record.publishedAt ?? null,
+        // 与摘要同一条投影：搜索里看得到作者，读正文时不能丢（模型往往先搜后读）。
+        ...optionalField('author', record.author, LABEL_MAX_CHARS),
       }
       const article = record.article
       if (article === undefined) {

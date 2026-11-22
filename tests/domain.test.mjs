@@ -7,7 +7,8 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { normalizeLegacyArticle, rebuildItem } from '../lib/domain.js'
+import { itemRecordSchema, normalizeLegacyArticle, rebuildItem } from '../lib/domain.js'
+import { normalizeAuthor } from '../lib/author.js'
 
 const ITEM = {
   feedId: 'https://ex.test/feed',
@@ -15,6 +16,7 @@ const ITEM = {
   link: 'https://ex.test/a',
   publishedAt: '2024-01-01T00:00:00.000Z',
   summary: '摘要',
+  author: '张三',
   fetchedAt: '2024-01-02T00:00:00.000Z',
   readAt: '2024-06-01T00:00:00.000Z',
   starred: true,
@@ -82,4 +84,24 @@ test('normalizeLegacyArticle：已是新形态就返回同一个对象（幂等�
 test('normalizeLegacyArticle：没有正文缓存的记录不受影响', () => {
   const bare = { ...ITEM, article: undefined }
   assert.equal(normalizeLegacyArticle(bare), bare)
+})
+
+/** R12 决策 3：作者归一化只有这一处实现（零依赖叶子，refresh / store 读侧 / 搜索 worker 共用）。 */
+test('normalizeAuthor：trim 后为空 ⇒ undefined；有值则 trim 后原样保留（不剥邮箱、不改写）', () => {
+  assert.equal(normalizeAuthor('  张三  '), '张三', '前后空白必须去掉')
+  assert.equal(normalizeAuthor(''), undefined, '空串就是「没有作者」')
+  assert.equal(normalizeAuthor('   '), undefined, '纯空白就是「没有作者」')
+  assert.equal(normalizeAuthor(undefined), undefined, '缺省保持缺省')
+  assert.equal(normalizeAuthor('张三 <a@b.c>'), '张三 <a@b.c>', '作者是 feed 原值：不剥邮箱、不改大小写、不截断')
+})
+
+/** R12 决策 1：schema 是写缝兜底 —— 绕过 normalizeAuthor 的写者也会被 trim、被拒空白。 */
+test('itemRecordSchema：author 空白/空串解析失败，前后空白被 trim（写缝兜底）', () => {
+  const base = { feedId: 'f', title: 't', link: 'l', fetchedAt: '2024-01-01T00:00:00.000Z', starred: false }
+  assert.equal(itemRecordSchema.safeParse({ ...base, author: '' }).success, false, '空串不是合法作者')
+  assert.equal(itemRecordSchema.safeParse({ ...base, author: '   ' }).success, false, '纯空白不是合法作者')
+  const parsed = itemRecordSchema.safeParse({ ...base, author: '  张三  ' })
+  assert.equal(parsed.success, true, '有值的作者必须能通过校验')
+  assert.equal(parsed.data.author, '张三', 'schema 的 .trim() 要负责去掉前后空白')
+  assert.equal(itemRecordSchema.safeParse(base).success, true, 'author 是可选的，缺省照常合法')
 })

@@ -51,14 +51,18 @@ cp -p "$DSH_HOME/storages/rss-reader/rss.db-shm"  "$DEST"/ 2>/dev/null || true
 ### 3.2 在线 `VACUUM INTO`（不停写，适合「现在就要一份」）
 
 ```bash
-DEST=~/rss-backup-$(date -u +%F); mkdir -p "$DEST"
+DEST=~/rss-backup-$(date -u +%F); mkdir -p "$DEST"; chmod 700 "$DEST"
 node -e '
   const { DatabaseSync } = require("node:sqlite");
   const db = new DatabaseSync(process.env.DSH_HOME + "/storages/rss-reader/rss.db");
   db.exec("PRAGMA busy_timeout = 5000");           // 撞上正在写的刷新就等，不直接失败
-  db.exec("VACUUM INTO \"" + process.argv[1] + "/rss.db\"");
+  // 路径必须用**单引号**：SQLite 里双引号是标识符，VACUUM INTO "…" 会报
+  // no such column（2026-11-22 R12 演练实测，node:sqlite / 新版 SQLite 上必现）。
+  db.exec("VACUUM INTO \u0027" + process.argv[1] + "/rss.db\u0027");
   db.close();
 ' "$DEST"
+# VACUUM INTO 建出的文件按 umask 走（常见 0644）；库里有阅读历史，必须收紧到 0600
+chmod 600 "$DEST/rss.db"
 # config.json 是普通文件、每次都是原子重写 ⇒ 单次 cp 拿到的一定是完整的一份
 cp -p "$DSH_HOME/storages/rss-reader/config.json" "$DEST"/
 ```
@@ -103,7 +107,7 @@ node scripts/verify-backup.mjs "$DSH_HOME/storages/rss-reader"   # 必须 EXIT=0
 2. 当天 `$DSH_HOME/storages/rss-reader/reader-$(date -u +%F).log` 里**没有**「装载失败」；
 3. 路由活着：`curl -X POST http://127.0.0.1:3080/rss-reader-api -d '{"endpoint":"overview","payload":{}}'` 回 **401**（不是 404）。
 
-> 较老的库（v1/v2/v3）会在**启动时自动升级**到当前版本 —— 升级只加表/加列并回填，不改旧行。
+> 较老的库（v1/v2/v3/v4）会在**启动时自动升级**到当前版本 —— 升级只加表/加列；v1–v3 的 `link_key` 会回填，`author` 只加列、不回填，不改旧行。
 > 升级是单向的：升级后的库**旧版插件打不开**，回滚只有「把第 2 步挪走的目录挪回来」这一条路。
 
 ## 6. 显式失败的四类副本（都不许「先试试看」）

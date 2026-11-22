@@ -107,6 +107,11 @@ const STYLE = `
 .dsh-rss-toolbar-title { min-width:0; flex:1 1 140px; overflow-wrap:anywhere; }
 .dsh-rss-toolbar-title strong { display:block; font-size:16px; line-height:1.35; }
 .dsh-rss-meta { display:block; color:var(--rss-muted); font-size:12px; line-height:1.45; }
+/* R12：作者名单行省略。inline-block 是 overflow / text-overflow 生效的前提，
+   max-width:100% 防止超长作者把后面的相对时间挤出容器；全文留在 title 里。
+   只在这里截显示，数据层保持原值（决策 15）。 */
+.dsh-rss-author { display:inline-block; max-width:100%; vertical-align:bottom;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .dsh-rss-counts { display:flex; flex-wrap:wrap; gap:2px 12px; margin-top:3px; }
 /* 时间范围档位（R1-03）：与计数同一行的原生 select。font:inherit 让它跟 .dsh-rss-meta 的
    12px 走；显式 max-width 是为了窄面板下不把「已加载 N 条」挤到第二行（值为自然日名，最长 5 字）。 */
@@ -1042,6 +1047,8 @@ export function createReader(store: ReaderStore): () => ReactNode {
             const safeLink = httpUrlOrEmpty(item.link)
             const unread = item.readAt === undefined
             const selected = state.selectedId === item.id
+            // R12：作者只由 src/author.ts 在读路径归一化；这里直接用投影值，不再加桩件守卫。
+            const author = item.author
             return (
               <div key={item.id} className="dsh-rss-row" data-rss-row={item.id}
                 data-rss-unread={unread ? '' : undefined} data-rss-selected={selected ? '' : undefined}>
@@ -1055,7 +1062,14 @@ export function createReader(store: ReaderStore): () => ReactNode {
                       {item.starred ? '★ ' : ''}{item.keptUnread === true ? '⚑ ' : ''}{item.title || item.link || '(无标题)'}
                     </span>
                     <span className="dsh-rss-meta" style={{ marginTop: 2 }}>
-                      {selectedFeed === undefined && item.feedTitle + ' · '}{relativeTime(recencyOf(item))}
+                      {selectedFeed === undefined && item.feedTitle + ' · '}
+                      {author !== undefined && (
+                        <>
+                          <span className="dsh-rss-author" data-rss-author="" title={author}>{author}</span>
+                          {' · '}
+                        </>
+                      )}
+                      {relativeTime(recencyOf(item))}
                     </span>
                     {/* 跨源重复提示（M5 03）：只提示、不合并 —— 每个源仍保留自己的 id / 已读 / 星标。
                         点击与空格都要 stopPropagation：整行是个 role=button（会选中+标读），

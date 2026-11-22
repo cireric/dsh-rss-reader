@@ -322,10 +322,10 @@ export const MUTATIONS = [
     from: "const candidates = keys.size === 0 ? [] : ctx.store.itemsByLinkKeys([...keys]);",
     to: "const candidates = visible;" },
   // 升级回填必须**归一化**：直接把 link 原样写进 link_key，老条目会因为 ?utm_/#fragment 而永远匹配不上。
-  // 判据是 v2→v4 的升级用例（夹具链接带 utm 与 fragment）。
+  // 判据是 v2→v5 的升级用例（夹具链接带 utm 与 fragment）。
   { id: 'dupes-回填不归一', file: 'lib/storage/db.js',
     judges: ['duplicates.test.mjs'],
-    judgeTests: ['v2→v4 升级：只加表与派生列，旧数据一行不动、link_key 回填到位（M5 03 的派生列）'],
+    judgeTests: ['v2→v5 升级：只加表与派生列，旧数据一行不动、link_key 回填到位（M5 03 的派生列）'],
     from: "update.run(linkKeyOf(link), id);",
     to: "update.run(link, id);" },
   // 整行是 role=button（点一下就选中 + 标读）：展开提示必须 stopPropagation，
@@ -456,8 +456,10 @@ export const MUTATIONS = [
   { id: 'refresh-正文不得降级覆盖', file: 'lib/refresh.js',
     judges: ['overview-scale.test.mjs', 'refresh.test.mjs'],
     judgeTests: ['正文回填的反面：源变短时不得用更短的正文覆盖更完整的正文'],
-    from: 'if (existing !== undefined && (summary?.length ?? 0) > (existing.summary?.length ?? 0))',
-    to: 'if (existing !== undefined)' },
+    // R12 票据 03 重锚：补全分支的判据从内联 if 提成 summaryGrows 变量（author 要与它并列），
+    // 语义不变，仍是「只要条目已存在就写 summary」= 允许更短的正文降级覆盖。
+    from: 'const summaryGrows = existing !== undefined && (summary?.length ?? 0) > (existing.summary?.length ?? 0);',
+    to: 'const summaryGrows = existing !== undefined;' },
   // 闸门必须认**现行**的 blocks 形态（2026-07 事故：只统计 paragraphs ⇒ 字符数恒为 0 ⇒ 闸门永不触发）。
   // ⚠️ 2026-10-11 修复轮 1 改写锚点：字符计数已随「清算原料」一起搬进 store-sqlite 的
   // articleCharsFromBody（原锚 `chars: articleCharsOf(record.article),` 已从 lib/refresh.js
@@ -1128,7 +1130,9 @@ export const MUTATIONS = [
   { id: 'refresh-正文回填用旧快照覆盖并发写入', file: 'lib/refresh.js',
     judges: ['refresh.test.mjs'],
     judgeTests: ['正文回填期间并发标已读：不得用旧快照整体写回（丢失更新）'],
-    from: "await store.updateItem(itemId, (current) => ({ ...current, summary }));",
+    // R12 票据 03 重锚：回填回调现在同时合并 author，原单行箭头函数变成带函数体的多行块。
+    // 语义不变 —— 退回「拿写入前快照整体 saveItem」会把窗口期内的 readAt 抹掉。
+    from: "await store.updateItem(itemId, (current) => {\n                        const next = summaryGrows ? { ...current, summary } : current;\n                        return authorMissing && next.author === undefined ? { ...next, author: parsedAuthor } : next;\n                    });",
     to: "await store.saveItem(itemId, { ...store.item(itemId), summary });" },
   // ── 快捷键帮助浮窗（2026-10-10）──────────────────────────────────────────────
   // 病象：头部一行塞满键位（读者记不住、界面也挤），而它必须与 keys.ts 逐字同步，
@@ -1260,7 +1264,31 @@ export const MUTATIONS = [
     // 「写一次就等于创建」会让调用方失去「这条还在不在」的信号（src/store.ts:29）。
     // 判据：tests/store-sqlite.test.mjs 的「对缺失键拒绝」那条。
     from: "throw new Error('updateItem 拒绝：条目 ' + itemId + ' 不在库里。",
-    to: "sql(UPSERT_ITEM).run(itemId, itemId, '', '', null, '2026-10-11T00:00:00.000Z', null, null, 0, 0, null); return; throw new Error('updateItem 拒绝：条目 ' + itemId + ' 不在库里。" },
+    to: "sql(UPSERT_ITEM).run(itemId, itemId, '', '', null, '2026-10-11T00:00:00.000Z', null, null, 0, 0, null, null, null); return; throw new Error('updateItem 拒绝：条目 ' + itemId + ' 不在库里。" },
+  // ── R12 作者元数据：存储读写映射（票据 02）────────────────────────────────────
+  // 读侧列映射漏 author：库里明明有值，读出来却是 undefined —— 症状是「作者时有时无」，
+  // 而写入路径完全正常，单看写侧断言抓不到。判据：store-sqlite 的 author 往返用例。
+  { id: 'store-作者读侧丢列', file: 'lib/store-sqlite.js',
+    judges: ['store-sqlite.test.mjs'],
+    judgeTests: ['author：saveItem 写读往返、覆写同一条目取新值、updateItem 改其他字段不丢（R12 验收 9）'],
+    from: "    const author = normalizeAuthor(optionalText(row.author, 'items.author'));\n    if (author !== undefined)\n        record.author = author;",
+    to: "    const author = normalizeAuthor(optionalText(row.author, 'items.author'));\n    if (false)\n        record.author = author;" },
+  // 写侧漏绑：INSERT 仍是 13 列，但 author 永远落 NULL（node:sqlite 对缺参按 NULL 绑定）。
+  // 症状是「作者能解析、能搜，唯独落库即丢」—— 只有 saveItem 后读回才看得见。
+  // 判据：store-sqlite 的 author 往返用例（首段 saveItem 就翻红）。
+  { id: 'store-写侧丢列', file: 'lib/store-sqlite.js',
+    judges: ['store-sqlite.test.mjs'],
+    judgeTests: ['author：saveItem 写读往返、覆写同一条目取新值、updateItem 改其他字段不丢（R12 验收 9）'],
+    from: 'record.articleFailure ?? null, record.author ?? null);',
+    to: 'record.articleFailure ?? null);' },
+  // ON CONFLICT 漏 author：首次写入能读回作者，覆写同一条目时旧作者被静默保留 ——
+  // 只有「覆写取新值」这一半会翻红，单条 saveItem 往返抓不到。
+  // 判据：store-sqlite 的 author 往返用例第二段。
+  { id: 'store-UPSERT 的 ON CONFLICT 漏 author', file: 'lib/store-sqlite.js',
+    judges: ['store-sqlite.test.mjs'],
+    judgeTests: ['author：saveItem 写读往返、覆写同一条目取新值、updateItem 改其他字段不丢（R12 验收 9）'],
+    from: '    article_failure = excluded.article_failure,\n    author          = excluded.author`',
+    to: '    article_failure = excluded.article_failure`' },
   // ⚠️ **两条「本该有」的变异实测是等价变异，按 AGENTS.md 不入门槛**（2026-10-11 差分实测）：
   //
   // ① 「写条目改用 INSERT OR REPLACE」：REPLACE 会先删旧行、触发 texts 的 ON DELETE CASCADE，
@@ -2004,18 +2032,51 @@ export const MUTATIONS = [
   // ── M2 05：标签持久化与 v1→v2 迁移 ───────────────────────────────────
   { id: 'tag-v1不升级', file: 'lib/storage/db.js',
     judges: ['tag-storage.test.mjs'],
-    judgeTests: ['v1→v4 升级：只加表与派生列，条目/正文/游标/阅读状态原样保留，且回填 link_key', '升级失败回滚：版本与新建 DDL 一起回滚，旧表数据不动，修复冲突后可重试'],
+    judgeTests: ['v1→v5 升级：只加表与派生列，条目/正文/游标/阅读状态原样保留，且回填 link_key', '升级失败回滚：版本与新建 DDL 一起回滚，旧表数据不动，修复冲突后可重试'],
     from: 'if (onDisk === 1) {', to: 'if (false) {' },
   // ⚠️ 2026-11-16（M5 02）重锚：v1 的升级从「一次 applyDdl(TAGS_DDL)」改成
   // 「一次 applyDdl(TAGS_DDL + PROGRESS_DDL)」（两步 DDL 同一事务），旧 from 会报**未应用**。
   // 语义不变：v1 升上来必须把标签表建上。
   // ⚠️ 2026-11-16（M5 03）再重锚：v4 让 v1 的升级又多了一段 LINK_KEY_DDL。
+  // ⚠️ 2026-11-22（R12）三度重锚：v5 让 v1 的升级又多了一段 AUTHOR_DDL。
   // 语义不变：v1 升上来必须把标签表建上。
   { id: 'tag-升级不建标签表', file: 'lib/storage/db.js',
     judges: ['tag-storage.test.mjs'],
-    judgeTests: ['v1→v4 升级：只加表与派生列，条目/正文/游标/阅读状态原样保留，且回填 link_key', '升级失败回滚：版本与新建 DDL 一起回滚，旧表数据不动，修复冲突后可重试'],
-    from: "applyDdl(db, 'v1→v4 升级', TAGS_DDL + PROGRESS_DDL + LINK_KEY_DDL, backfillLinkKeys);",
-    to: "applyDdl(db, 'v1→v4 升级', PROGRESS_DDL + LINK_KEY_DDL, backfillLinkKeys);" },
+    judgeTests: ['v1→v5 升级：只加表与派生列，条目/正文/游标/阅读状态原样保留，且回填 link_key', '升级失败回滚：版本与新建 DDL 一起回滚，旧表数据不动，修复冲突后可重试'],
+    from: "applyDdl(db, 'v1→v5 升级', TAGS_DDL + PROGRESS_DDL + LINK_KEY_DDL + AUTHOR_DDL, backfillLinkKeys);",
+    to: "applyDdl(db, 'v1→v5 升级', PROGRESS_DDL + LINK_KEY_DDL + AUTHOR_DDL, backfillLinkKeys);" },
+  // ── R12 票据 01：v5 的 author 列（2026-11-22）──────────────────────────────
+  // 迁移把 author 写成有默认值：旧行会被「回填」成一个编出来的作者 —— 这正是 ADR-0009 禁止的。
+  // 判据是升级路径的「旧行全 NULL」断言。v1/v2 的重复用例已按 Seam 2 删除，留下的 v3/v4 都会中招。
+  { id: 'db-迁移给 author 塞默认值', file: 'lib/storage/db.js',
+    judges: ['migration-author.test.mjs'],
+    judgeTests: [
+      '迁移 v3→v5：author 列出现、旧行全 NULL、其余列逐项相等、user_version = 5',
+      '迁移 v4→v5：author 列出现、旧行全 NULL、其余列逐项相等、user_version = 5'],
+    from: "ALTER TABLE items ADD COLUMN author TEXT;",
+    to: "ALTER TABLE items ADD COLUMN author TEXT NOT NULL DEFAULT 'x';" },
+  // 只给 v4→v5 分支加 author（初稿的写法）：v1/v2/v3 的库升到 v5 却缺列，旧库直接打不开。
+  // 这条是本项最重要的变异 —— 症状是「老库打不开」而不是「功能缺失」，单看新库测试发现不了。
+  { id: 'db-只加 v4 分支', file: 'lib/storage/db.js',
+    judges: ['migration-author.test.mjs', 'tag-storage.test.mjs', 'duplicates.test.mjs'],
+    judgeTests: [
+      '迁移 v3→v5：author 列出现、旧行全 NULL、其余列逐项相等、user_version = 5',
+      'v1→v5 升级：只加表与派生列，条目/正文/游标/阅读状态原样保留，且回填 link_key',
+      'v2→v5 升级：只加表与派生列，旧数据一行不动、link_key 回填到位（M5 03 的派生列）'],
+    from: "        applyDdl(db, 'v1→v5 升级', TAGS_DDL + PROGRESS_DDL + LINK_KEY_DDL + AUTHOR_DDL, backfillLinkKeys);\n        return;\n    }\n    if (onDisk === 2) {\n        applyDdl(db, 'v2→v5 升级', PROGRESS_DDL + LINK_KEY_DDL + AUTHOR_DDL, backfillLinkKeys);\n        return;\n    }\n    if (onDisk === 3) {\n        applyDdl(db, 'v3→v5 升级', LINK_KEY_DDL + AUTHOR_DDL, backfillLinkKeys);",
+    to: "        applyDdl(db, 'v1→v5 升级', TAGS_DDL + PROGRESS_DDL + LINK_KEY_DDL, backfillLinkKeys);\n        return;\n    }\n    if (onDisk === 2) {\n        applyDdl(db, 'v2→v5 升级', PROGRESS_DDL + LINK_KEY_DDL, backfillLinkKeys);\n        return;\n    }\n    if (onDisk === 3) {\n        applyDdl(db, 'v3→v5 升级', LINK_KEY_DDL, backfillLinkKeys);" },
+  // 只补迁移、不补新库建表（镜像错误）：新装用户从第一天起就没有 author 列。
+  { id: 'db-新建库缺 author 列', file: 'lib/storage/db.js',
+    judges: ['migration-author.test.mjs'],
+    judgeTests: ['全新库建表即含 author 列（可空、无默认值）'],
+    from: "    author          TEXT,\n",
+    to: "" },
+  // 可升级集合漏 v4：v4 库在 openDatabase 的版本闸就被拒，插件在老库上根本装不起来。
+  { id: 'db-可升级集合漏 v4', file: 'lib/storage/db.js',
+    judges: ['migration-author.test.mjs'],
+    judgeTests: ['迁移 v4→v5：author 列出现、旧行全 NULL、其余列逐项相等、user_version = 5'],
+    from: "const UPGRADABLE_VERSIONS = new Set([1, 2, 3, 4]);",
+    to: "const UPGRADABLE_VERSIONS = new Set([1, 2, 3]);" },
   { id: 'tag-升级后版本仍为1', file: 'lib/storage/db.js',
     judges: ['tag-storage.test.mjs'],
     from: 'db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);', to: "db.exec('PRAGMA user_version = 1');" },
@@ -2791,4 +2852,77 @@ export const MUTATIONS = [
     // 把 feed 范围错发成 all ⇒ 在源里按 A 会误标别的源。
     from: 'if (nav.kind === "feed") return { feedId: nav.feedId };',
     to: 'if (nav.kind === "feed") return { all: true };' },
+
+  // ── R12 票据 03：刷新落作者与合并保留（2026-11-22）────────────────────────
+  // 新建条目不带 author：解析层明明有值，落库即丢（验收 1 / 10）。判据是新条目与端到端两条。
+  { id: 'refresh-不落作者', file: 'lib/refresh.js',
+    judges: ['refresh.test.mjs'],
+    judgeTests: [
+      '作者：新条目入库时带上源给的 author（RSS 2.0 <author>）',
+      '作者端到端：RSS 2.0 dc:creator 与 Atom author.name 都经真实刷新落库'],
+    from: '                author: parsedAuthor,\n',
+    to: '' },
+  // 补全分支无条件覆盖：源改作者名会静默改写历史条目（验收 10 的「不覆盖」段翻红）。
+  // 不能只拆外层的快照判据 —— 回调里还有一道 current 判空；两处一起拆才是「无条件覆盖」。
+  { id: 'refresh-补全覆盖作者', file: 'lib/refresh.js',
+    judges: ['refresh.test.mjs'],
+    judgeTests: [
+      '作者补全：已有条目无作者、下一轮抓到作者 ⇒ 补上；第三轮换作者不覆盖',
+      '作者补全与正文回填合并成一次 updateItem，两个条件都不成立时不空写'],
+    from: "                const authorMissing = existing !== undefined && existing.author === undefined && parsedAuthor !== undefined;\n                if (summaryGrows || authorMissing) {\n                    // ⚠️ 合并进**当前**记录，不要用循环开头那份 existing 快照整体写回：抓取是长任务，\n                    // 期间用户完全可能把它标已读/加星，用旧快照写回会把这些用户数据一起抹掉。\n                    // （2026-10-10 与 article 端点同一个丢失更新类别，判据在 tests/refresh.test.mjs）\n                    //\n                    // author 在回调里还要按 current 再判一次空：快照说「没有」不等于写入那一刻还没有。\n                    // 只补空、不覆盖 —— 源改作者名不该静默改写历史条目（决策 9）。\n                    await store.updateItem(itemId, (current) => {\n                        const next = summaryGrows ? { ...current, summary } : current;\n                        return authorMissing && next.author === undefined ? { ...next, author: parsedAuthor } : next;\n                    });",
+    to: "                const authorMissing = existing !== undefined && parsedAuthor !== undefined;\n                if (summaryGrows || authorMissing) {\n                    // ⚠️ 合并进**当前**记录，不要用循环开头那份 existing 快照整体写回：抓取是长任务，\n                    // 期间用户完全可能把它标已读/加星，用旧快照写回会把这些用户数据一起抹掉。\n                    // （2026-10-10 与 article 端点同一个丢失更新类别，判据在 tests/refresh.test.mjs）\n                    //\n                    // author 在回调里还要按 current 再判一次空：快照说「没有」不等于写入那一刻还没有。\n                    // 只补空、不覆盖 —— 源改作者名不该静默改写历史条目（决策 9）。\n                    await store.updateItem(itemId, (current) => {\n                        const next = summaryGrows ? { ...current, summary } : current;\n                        return authorMissing ? { ...next, author: parsedAuthor } : next;\n                    });" },
+  // 合并丢作者：keeper 没有作者时 loser 的值不会搬到幸存者（决策 12 初稿漏掉的路径）。
+  { id: 'identity-合并丢作者', file: 'lib/identity-repair.js',
+    judges: ['identity.test.mjs'],
+    judgeTests: [
+      '身份修复：同源同链接的重复被合并，用户状态与正文一律保住',
+      '身份修复：合并保留作者，keeper 有则不被 loser 覆盖'],
+    from: '            author: keep.author ?? extra.author,\n',
+    to: '' },
+  // 合并覆盖作者：keeper 有作者时被 loser 顶掉（?? extra 语义反了）。
+  { id: 'identity-合并覆盖作者', file: 'lib/identity-repair.js',
+    judges: ['identity.test.mjs'],
+    judgeTests: ['身份修复：合并保留作者，keeper 有则不被 loser 覆盖'],
+    from: '            author: keep.author ?? extra.author,',
+    to: '            author: extra.author,' },
+
+  // ── R12 票据 04：列表行与正文 header 显示作者（2026-11-22）────────────────
+  // 无作者时写占位：缺省被替换成「未知作者」，列表行凭空多出一个作者段（验收 12 的文案断言翻红）。
+  // R12 评审修复：客户端两处「防桩件」的 `author === ''` 守卫已删（docs/pitfalls.md §2.5：
+  // 不在作品代码里加守卫容忍桩件/脏数据；归一化只在 src/author.ts 一处）。变异随之重锚到裸投影。
+  { id: 'client-无作者时显示占位', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['R12 04 列表行：跨源视图有作者三段、无作者两段，且无伪造文案与空段'],
+    from: 'const author = item.author;',
+    to: 'const author = item.author === void 0 ? "未知作者" : item.author;' },
+  // 单源视图丢作者：作者段只在 selectedFeed === undefined 分支渲染 ⇒ 点到某个源后作者整段消失（验收 12 的单源视图段翻红）。
+  { id: 'client-单源视图丢作者', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['R12 04 列表行：单源视图有作者两段、无作者只有时间，且无伪造文案与空段'],
+    from: 'author !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {',
+    to: 'selectedFeed === void 0 && author !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {' },
+
+  // R12 评审补的**第 17 条**（spec 的 16 条之外）：`endpoints.ts` 的 `author: item.author` 是
+  // **唯一**的生产 ItemView 投影，原先删掉它没有任何用例会红。判据是 overview-author.test.mjs
+  // 的「ItemView 的 author 原样带出」：投影丢了，回包里的作者就变 undefined。
+  { id: 'endpoint-overview 丢作者', file: 'lib/endpoints.js',
+    judges: ['overview-author.test.mjs'],
+    judgeTests: ['R12 overview：ItemView 的 author 原样带出（唯一生产投影）'],
+    from: '        author: item.author,\n',
+    to: '        author: void 0,\n' },
+
+  // ── R12 票据 05：按作者搜索（2026-11-22）──────────────────────────────────
+  // 作者谓词恒假：只有作者名命中的条目从结果里消失，与既有三路的并集缺行（验收 14 翻红）。
+  { id: 'search-作者谓词失效', file: 'lib/search-worker.js',
+    judges: ['search.test.mjs'],
+    judgeTests: ['搜索：作者名命中，与标题 / 摘要 / 正文混合时分页稳定（非 ASCII 大写作者）'],
+    from: '      OR (i.author IS NOT NULL AND instr(${lower}(i.author), :${key}) > 0))`;',
+    to: '      OR 0)`;' },
+  // 搜索读侧不归一化：外部改库留下的 '' 原样进 ItemView，搜索行出现空段、rss_search 输出 "" 而不是 null
+  //（验收 21 的搜索段翻红）。这是「归一化只有一处」的第二条读路径（决策 20）。
+  { id: 'search-作者读侧不归一化', file: 'lib/search-worker.js',
+    judges: ['search.test.mjs'],
+    judgeTests: ['搜索：外部改库留下的空串作者读成 undefined（与列表同一份归一化）'],
+    from: '            author: normalizeAuthor(typeof author === \'string\' ? author : undefined),',
+    to: '            author: typeof author === \'string\' ? author : undefined,' },
 ]

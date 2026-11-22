@@ -198,7 +198,7 @@ test('身份修复：同源同链接的重复被合并，用户状态与正文�
   })
   await store.saveItem('new-id', {
     feedId, title: '一篇文章', link: 'https://ex.test/1', publishedAt: '2024-01-01T00:00:00.000Z',
-    summary: '更完整的一段摘要', fetchedAt: '2024-09-01T00:00:00.000Z', starred: true,
+    summary: '更完整的一段摘要', fetchedAt: '2024-09-01T00:00:00.000Z', starred: true, author: '张三',
   })
 
   const result = await repairIdentities(store)
@@ -212,6 +212,17 @@ test('身份修复：同源同链接的重复被合并，用户状态与正文�
   assert.equal(survivor.starred, true, '星标取或：两条里任意一条星标过就得留住')
   assert.deepEqual(survivor.article, { fetchedAt: '2024-06-02T00:00:00.000Z', revision: 2, blocks: [{ kind: 'p', text: '正文' }] }, '正文缓存不能丢')
   assert.equal(survivor.summary, '更完整的一段摘要', '摘要取更完整的一份')
+  assert.equal(survivor.author, '张三', 'keeper 没有作者时必须接住 loser 的（决策 12：初稿漏掉的合并路径）')
+})
+
+test('身份修复：合并保留作者，keeper 有则不被 loser 覆盖', () => {
+  const base = { feedId: 'f', title: 't', link: 'l', fetchedAt: '2024-01-01T00:00:00.000Z', starred: false }
+
+  const fromLoser = mergeItemRecords({ ...base }, { ...base, author: '张三' })
+  assert.equal(fromLoser.author, '张三', 'keeper 无、loser 有 ⇒ 取 loser 的')
+
+  const keepOwn = mergeItemRecords({ ...base, author: '张三' }, { ...base, author: '李四' })
+  assert.equal(keepOwn.author, '张三', 'keeper 有、loser 不同 ⇒ 保留 keeper 的（?? extra 语义）')
 })
 
 test('身份修复：幂等，再跑一次无事可做（每次打开域都会跑）', async () => {

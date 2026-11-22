@@ -725,6 +725,8 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
   const blockKeyOf = (at: number): string => articleItemId + ':' + at
   const title = article?.title || item?.title
   const publishedAt = item?.publishedAt
+  // R12：作者只由 src/author.ts 在读路径归一化；这里直接用投影值，不再加桩件守卫。
+  const author = item?.author
   // 历史行可能带脏 link（修复前落库的 javascript:）：渲染前过 shared.ts 的唯一白名单。
   // 认不出就当作「无链接」——与 item.link === '' 的既有语义一致（不渲染「打开原站」）。
   const rawLink = item?.link
@@ -977,6 +979,7 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
               {item !== undefined && (
                 <div className="dsh-rss-meta" style={{ marginTop: 8 }}>
                   {item.feedTitle}
+                  {author !== undefined && <> · {author}</>}
                   {publishedAt !== undefined && (
                     <> · <time dateTime={publishedAt}>{new Date(publishedAt).toLocaleDateString('zh-CN')}</time></>
                   )}

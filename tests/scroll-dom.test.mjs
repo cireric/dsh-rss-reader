@@ -5659,3 +5659,135 @@ test('R6 07：灯箱用 role="region" + aria-label，不许用 role="dialog" / a
   await h.settle()
   assert.equal(hasLightbox(h.win.document), false, '焦点在灯箱里时 Esc 必须关得掉 —— dialog 语义会在这里静默失效')
 })
+
+/* ── R12 04：列表行与正文 header 显示作者 ─────────────────────────────────────
+ * 文案断言必须同时钉三件事，缺一条就有实现能全绿逃走（验收 12/13）：
+ *  1. 无作者时不出现「未知作者 / 佚名 / —」这类伪造文案，也不留空段；
+ *  2. 单源视图（selectedFeed !== undefined）也显示作者 —— 只钉跨源三段的话，
+ *     「作者只加在跨源分支」的变异会幸存；
+ *  3. 超长作者的行内文本仍是原值、title 给全文（省略是显示决定，数据层不截断）。
+ * 时间夹具固定用 2020-01-01：relativeTime 超过 30 天回 ISO 日期，断言与运行时钟无关。
+ */
+const AUTHOR_AT = '2020-01-01T00:00:00.000Z'
+const AUTHOR_TIME = '2020-01-01'
+
+function listMetaOf(h, id) {
+  const meta = h.win.document.querySelector('[data-rss-row="' + id + '"] .dsh-rss-meta')
+  assert.ok(meta !== null, '条目 ' + id + ' 应有列表行 meta')
+  return meta
+}
+
+/** 伪造文案与空段是两条独立失效：前者是占位符，后者是拼 undefined 拼出来的空串。 */
+function assertNoAuthorPlaceholderOrEmptySegment(meta) {
+  const text = meta.textContent ?? ''
+  assert.doesNotMatch(text, /未知作者|佚名|—/, '无作者时不许出现占位文案：' + JSON.stringify(text))
+  for (const segment of text.split(' · ')) {
+    assert.notEqual(segment.trim(), '', 'meta 不许出现空段：' + JSON.stringify(text))
+  }
+}
+
+test('R12 04 列表行：跨源视图有作者三段、无作者两段，且无伪造文案与空段', skip, async () => {
+  const h = await mountReader({
+    items: [
+      item({ id: 'with', feedId: 'f1', feedTitle: '源一', author: '张三', publishedAt: AUTHOR_AT }),
+      item({ id: 'without', feedId: 'f1', feedTitle: '源一', publishedAt: AUTHOR_AT }),
+    ],
+    feeds: [{ id: 'f1', title: '源一' }],
+  })
+  await h.store.load('overview')
+  await h.settle()
+
+  const withAuthor = listMetaOf(h, 'with')
+  assert.equal(withAuthor.textContent, '源一 · 张三 · ' + AUTHOR_TIME,
+    '跨源视图有作者时必须是「源 · 作者 · 时间」三段')
+  assertNoAuthorPlaceholderOrEmptySegment(withAuthor)
+  const authorEl = withAuthor.querySelector('[data-rss-author]')
+  assert.ok(authorEl !== null, '作者要有独立文本节点（单行省略与 title 全文挂在它上面）')
+  assert.notEqual(authorEl.tagName, 'A', '作者按纯文本渲染，不做可点链接（决策 17）')
+  assert.equal(authorEl.getAttribute('href'), null, '作者不是链接')
+
+  const withoutAuthor = listMetaOf(h, 'without')
+  assert.equal(withoutAuthor.textContent, '源一 · ' + AUTHOR_TIME,
+    '跨源视图无作者时保持现状两段，不许拼出空段')
+  assertNoAuthorPlaceholderOrEmptySegment(withoutAuthor)
+  assert.equal(withoutAuthor.querySelector('[data-rss-author]'), null, '无作者时不该有作者节点')
+})
+
+test('R12 04 列表行：单源视图有作者两段、无作者只有时间，且无伪造文案与空段', skip, async () => {
+  const h = await mountReader({
+    items: [
+      item({ id: 'with', feedId: 'f1', feedTitle: '源一', author: '李四', publishedAt: AUTHOR_AT }),
+      item({ id: 'without', feedId: 'f1', feedTitle: '源一', publishedAt: AUTHOR_AT }),
+    ],
+    feeds: [{ id: 'f1', title: '源一' }],
+  })
+  await h.store.load('overview')
+  await h.settle()
+
+  // 走真实点击：单源视图是 selectedFeed !== undefined 的那条分支，直调 store 会绕开接线。
+  h.win.document.querySelector('[data-rss-nav-row="feed:f1"]')
+    .dispatchEvent(new h.win.MouseEvent('click', { bubbles: true }))
+  await h.settle()
+  assert.deepEqual(h.store.get().navSelection, { kind: 'feed', feedId: 'f1' }, '前置：已切到单源视图')
+
+  const withAuthor = listMetaOf(h, 'with')
+  assert.equal(withAuthor.textContent, '李四 · ' + AUTHOR_TIME,
+    '单源视图有作者时必须是「作者 · 时间」两段（源名本来就不显示）')
+  assertNoAuthorPlaceholderOrEmptySegment(withAuthor)
+  assert.ok(withAuthor.querySelector('[data-rss-author]') !== null, '单源视图同样要渲染作者')
+
+  const withoutAuthor = listMetaOf(h, 'without')
+  assert.equal(withoutAuthor.textContent, AUTHOR_TIME,
+    '单源视图无作者时只有时间，不许留前导空段')
+  assertNoAuthorPlaceholderOrEmptySegment(withoutAuthor)
+})
+
+test('R12 04 列表行：超长作者显示原值，title 给全文（数据层不截断）', skip, async () => {
+  // 80 个汉字足够超过任何窄侧栏宽度；jsdom 没有排版引擎，省略号本身不做断言（口径见票据）。
+  const longAuthor = '欧'.repeat(80) + '作者'
+  const h = await mountReader({
+    items: [item({ id: 'long', feedId: 'f1', feedTitle: '源一', author: longAuthor, publishedAt: AUTHOR_AT })],
+    feeds: [{ id: 'f1', title: '源一' }],
+  })
+  await h.store.load('overview')
+  await h.settle()
+
+  const meta = listMetaOf(h, 'long')
+  const authorEl = meta.querySelector('[data-rss-author]')
+  assert.ok(authorEl !== null, '前置：作者节点存在')
+  assert.equal(authorEl.textContent, longAuthor, '行内文本必须是原值 —— 省略是 CSS 的决定，不改写数据')
+  assert.equal(authorEl.getAttribute('title'), longAuthor, 'title 必须给全文（鼠标悬停能看到完整作者名）')
+  assert.equal(meta.textContent, '源一 · ' + longAuthor + ' · ' + AUTHOR_TIME, '超长作者也不改变三段结构')
+})
+
+test('R12 04 正文 header：有作者显示「源 · 作者 · 日期 · 约 N 分钟」，无作者保持现状', skip, async () => {
+  const blocks = [{ kind: 'p', text: '中'.repeat(600) }]
+  const headerOf = (body) => {
+    const header = body.querySelector('header .dsh-rss-meta')
+    assert.ok(header !== null, '正文 header 应有 meta 行')
+    return header
+  }
+
+  const withAuthor = await mountReader({
+    items: [item({ id: 'a', feedId: 'f1', feedTitle: '源一', author: '张三', publishedAt: AUTHOR_AT })],
+    feeds: [{ id: 'f1', title: '源一' }],
+    article: { itemId: 'a', title: 'ART', blocks },
+  })
+  const withHeader = headerOf(await openArticle(withAuthor))
+  // 日期格式交给平台 locale（zh-CN），这里只钉「源 · 作者 · 日期 · 时长」的组成与顺序。
+  assert.match(withHeader.textContent ?? '', /^源一 · 张三 · .+ · 约 2 分钟（估算）$/,
+    '有作者时正文 header 必须是「源 · 作者 · 日期 · 约 N 分钟」')
+  assertNoAuthorPlaceholderOrEmptySegment(withHeader)
+  assert.equal(withHeader.querySelector('a'), null, '正文 header 的作者不做可点链接')
+
+  const withoutAuthor = await mountReader({
+    items: [item({ id: 'a', feedId: 'f1', feedTitle: '源一', publishedAt: AUTHOR_AT })],
+    feeds: [{ id: 'f1', title: '源一' }],
+    article: { itemId: 'a', title: 'ART', blocks },
+  })
+  const withoutHeader = headerOf(await openArticle(withoutAuthor))
+  assert.match(withoutHeader.textContent ?? '', /^源一 · .+ · 约 2 分钟（估算）$/,
+    '无作者时正文 header 保持现状（源 · 日期 · 时长）')
+  assert.doesNotMatch(withoutHeader.textContent ?? '', /张三|未知作者|佚名|—/, '无作者时不许出现作者或占位文案')
+  assertNoAuthorPlaceholderOrEmptySegment(withoutHeader)
+})
