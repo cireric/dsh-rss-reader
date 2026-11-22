@@ -111,6 +111,12 @@ export const itemRecordSchema = z.object({
   link: z.string(),
   publishedAt: z.string().optional(),
   summary: z.string().optional(),
+  /**
+   * feed 给的作者原名（R12）。空串与纯空白**不是合法值**：`.trim().min(1)` 是写缝兜底，
+   * 任何绕过 normalizeAuthor 的写者也会被 trim、被拒空白；读侧归一化复用同一个函数
+   * （src/author.ts），外部改库留下的 '' / 纯空白因此不会变成「有作者」。
+   */
+  author: z.string().trim().min(1).optional(),
   fetchedAt: z.string(),
   /**
    * 已读态 = 有值；未读 = 缺省（2026-10-05 定：带 readAt 时间戳粒度，

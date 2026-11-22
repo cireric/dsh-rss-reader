@@ -39,6 +39,9 @@ import {
 import { readConfigFile, writeConfigFile, type ReaderConfigFile } from './storage/config-file.js'
 // 表格的行列摊平：与 articleCharsOf / 搜索投影共用一份实现（article-text.ts 零 node 依赖）
 import { tableToText } from './article-text.js'
+// 作者归一化：读侧与 refresh 入口、搜索 worker 共用同一个零依赖叶子（R12 决策 3）。
+// store 不许自己再写一份 trim/判空 —— 那会让「有没有作者」出现第二种答案。
+import { normalizeAuthor } from './author.js'
 import { SCHEMA_VERSION } from './storage/db.js'
 import { clampReadingRatio, type TagView } from './shared.js'
 import { sanitizeViewPreferences } from './preferences.js'
@@ -128,6 +131,7 @@ const ITEM_SELECT = `
          i.published_at         AS published_at,
          i.fetched_at           AS fetched_at,
          i.summary              AS summary,
+         i.author               AS author,
          i.read_at              AS read_at,
          i.starred              AS starred,
          i.kept_unread          AS kept_unread,
@@ -364,8 +368,8 @@ const SELECT_CLEANUP_ROWS = [
  * 「取消保持未读」（saveItem + 省略该字段）静默失效。需要合并进当前记录的场景一律走 updateItem。
  */
 const UPSERT_ITEM = `
-  INSERT INTO items (id, feed_id, title, link, link_key, published_at, fetched_at, summary, read_at, starred, kept_unread, article_failure)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO items (id, feed_id, title, link, link_key, published_at, fetched_at, summary, read_at, starred, kept_unread, article_failure, author)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(id) DO UPDATE SET
     feed_id         = excluded.feed_id,
     title           = excluded.title,
@@ -377,7 +381,8 @@ const UPSERT_ITEM = `
     read_at         = excluded.read_at,
     starred         = excluded.starred,
     kept_unread     = excluded.kept_unread,
-    article_failure = excluded.article_failure`
+    article_failure = excluded.article_failure,
+    author          = excluded.author`
 
 /**
  * 写正文行。body 存 article.blocks 的 JSON 文本，另外四列各存 articleRecord 的一个字段
@@ -436,6 +441,10 @@ function toItemRecord(row: Record<string, SQLOutputValue>): ItemRecord {
   if (publishedAt !== undefined) record.publishedAt = publishedAt
   const summary = optionalText(row.summary, 'items.summary')
   if (summary !== undefined) record.summary = summary
+  // 读侧归一化与写入/搜索同源（src/author.ts）：外部改库留下的 '' / 纯空白必须读成「没有作者」，
+  // 而不是让空串一路流到列表行（拼接出空段）或 rss_search 的 digest（输出 "" 而不是 null）。
+  const author = normalizeAuthor(optionalText(row.author, 'items.author'))
+  if (author !== undefined) record.author = author
   const readAt = optionalText(row.read_at, 'items.read_at')
   if (readAt !== undefined) record.readAt = readAt
   const articleFailure = optionalText(row.article_failure, 'items.article_failure')
@@ -721,6 +730,7 @@ export function createSqliteStore(db: DatabaseSync, configPath: string): ReaderS
       record.starred ? 1 : 0,
       record.keptUnread === true ? 1 : 0,
       record.articleFailure ?? null,
+      record.author ?? null,
     )
     writeArticle(itemId, record.article)
   }
