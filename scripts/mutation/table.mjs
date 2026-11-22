@@ -322,10 +322,10 @@ export const MUTATIONS = [
     from: "const candidates = keys.size === 0 ? [] : ctx.store.itemsByLinkKeys([...keys]);",
     to: "const candidates = visible;" },
   // 升级回填必须**归一化**：直接把 link 原样写进 link_key，老条目会因为 ?utm_/#fragment 而永远匹配不上。
-  // 判据是 v2→v4 的升级用例（夹具链接带 utm 与 fragment）。
+  // 判据是 v2→v5 的升级用例（夹具链接带 utm 与 fragment）。
   { id: 'dupes-回填不归一', file: 'lib/storage/db.js',
     judges: ['duplicates.test.mjs'],
-    judgeTests: ['v2→v4 升级：只加表与派生列，旧数据一行不动、link_key 回填到位（M5 03 的派生列）'],
+    judgeTests: ['v2→v5 升级：只加表与派生列，旧数据一行不动、link_key 回填到位（M5 03 的派生列）'],
     from: "update.run(linkKeyOf(link), id);",
     to: "update.run(link, id);" },
   // 整行是 role=button（点一下就选中 + 标读）：展开提示必须 stopPropagation，
@@ -2004,18 +2004,54 @@ export const MUTATIONS = [
   // ── M2 05：标签持久化与 v1→v2 迁移 ───────────────────────────────────
   { id: 'tag-v1不升级', file: 'lib/storage/db.js',
     judges: ['tag-storage.test.mjs'],
-    judgeTests: ['v1→v4 升级：只加表与派生列，条目/正文/游标/阅读状态原样保留，且回填 link_key', '升级失败回滚：版本与新建 DDL 一起回滚，旧表数据不动，修复冲突后可重试'],
+    judgeTests: ['v1→v5 升级：只加表与派生列，条目/正文/游标/阅读状态原样保留，且回填 link_key', '升级失败回滚：版本与新建 DDL 一起回滚，旧表数据不动，修复冲突后可重试'],
     from: 'if (onDisk === 1) {', to: 'if (false) {' },
   // ⚠️ 2026-11-16（M5 02）重锚：v1 的升级从「一次 applyDdl(TAGS_DDL)」改成
   // 「一次 applyDdl(TAGS_DDL + PROGRESS_DDL)」（两步 DDL 同一事务），旧 from 会报**未应用**。
   // 语义不变：v1 升上来必须把标签表建上。
   // ⚠️ 2026-11-16（M5 03）再重锚：v4 让 v1 的升级又多了一段 LINK_KEY_DDL。
+  // ⚠️ 2026-11-22（R12）三度重锚：v5 让 v1 的升级又多了一段 AUTHOR_DDL。
   // 语义不变：v1 升上来必须把标签表建上。
   { id: 'tag-升级不建标签表', file: 'lib/storage/db.js',
     judges: ['tag-storage.test.mjs'],
-    judgeTests: ['v1→v4 升级：只加表与派生列，条目/正文/游标/阅读状态原样保留，且回填 link_key', '升级失败回滚：版本与新建 DDL 一起回滚，旧表数据不动，修复冲突后可重试'],
-    from: "applyDdl(db, 'v1→v4 升级', TAGS_DDL + PROGRESS_DDL + LINK_KEY_DDL, backfillLinkKeys);",
-    to: "applyDdl(db, 'v1→v4 升级', PROGRESS_DDL + LINK_KEY_DDL, backfillLinkKeys);" },
+    judgeTests: ['v1→v5 升级：只加表与派生列，条目/正文/游标/阅读状态原样保留，且回填 link_key', '升级失败回滚：版本与新建 DDL 一起回滚，旧表数据不动，修复冲突后可重试'],
+    from: "applyDdl(db, 'v1→v5 升级', TAGS_DDL + PROGRESS_DDL + LINK_KEY_DDL + AUTHOR_DDL, backfillLinkKeys);",
+    to: "applyDdl(db, 'v1→v5 升级', PROGRESS_DDL + LINK_KEY_DDL + AUTHOR_DDL, backfillLinkKeys);" },
+  // ── R12 票据 01：v5 的 author 列（2026-11-22）──────────────────────────────
+  // 迁移把 author 写成有默认值：旧行会被「回填」成一个编出来的作者 —— 这正是 ADR-0009 禁止的。
+  // 判据是四条升级路径的「旧行全 NULL」断言（v4 路径也会中招，所以四条都列上）。
+  { id: 'db-迁移给 author 塞默认值', file: 'lib/storage/db.js',
+    judges: ['migration-author.test.mjs'],
+    judgeTests: [
+      '迁移 v1→v5：author 列出现、旧行全 NULL、其余列逐项相等、user_version = 5',
+      '迁移 v2→v5：author 列出现、旧行全 NULL、其余列逐项相等、user_version = 5',
+      '迁移 v3→v5：author 列出现、旧行全 NULL、其余列逐项相等、user_version = 5',
+      '迁移 v4→v5：author 列出现、旧行全 NULL、其余列逐项相等、user_version = 5'],
+    from: "ALTER TABLE items ADD COLUMN author TEXT;",
+    to: "ALTER TABLE items ADD COLUMN author TEXT NOT NULL DEFAULT 'x';" },
+  // 只给 v4→v5 分支加 author（初稿的写法）：v1/v2/v3 的库升到 v5 却缺列，旧库直接打不开。
+  // 这条是本项最重要的变异 —— 症状是「老库打不开」而不是「功能缺失」，单看新库测试发现不了。
+  { id: 'db-只加 v4 分支', file: 'lib/storage/db.js',
+    judges: ['migration-author.test.mjs', 'tag-storage.test.mjs'],
+    judgeTests: [
+      '迁移 v1→v5：author 列出现、旧行全 NULL、其余列逐项相等、user_version = 5',
+      '迁移 v2→v5：author 列出现、旧行全 NULL、其余列逐项相等、user_version = 5',
+      '迁移 v3→v5：author 列出现、旧行全 NULL、其余列逐项相等、user_version = 5',
+      'v1→v5 升级：只加表与派生列，条目/正文/游标/阅读状态原样保留，且回填 link_key'],
+    from: "        applyDdl(db, 'v1→v5 升级', TAGS_DDL + PROGRESS_DDL + LINK_KEY_DDL + AUTHOR_DDL, backfillLinkKeys);\n        return;\n    }\n    if (onDisk === 2) {\n        applyDdl(db, 'v2→v5 升级', PROGRESS_DDL + LINK_KEY_DDL + AUTHOR_DDL, backfillLinkKeys);\n        return;\n    }\n    if (onDisk === 3) {\n        applyDdl(db, 'v3→v5 升级', LINK_KEY_DDL + AUTHOR_DDL, backfillLinkKeys);",
+    to: "        applyDdl(db, 'v1→v5 升级', TAGS_DDL + PROGRESS_DDL + LINK_KEY_DDL, backfillLinkKeys);\n        return;\n    }\n    if (onDisk === 2) {\n        applyDdl(db, 'v2→v5 升级', PROGRESS_DDL + LINK_KEY_DDL, backfillLinkKeys);\n        return;\n    }\n    if (onDisk === 3) {\n        applyDdl(db, 'v3→v5 升级', LINK_KEY_DDL, backfillLinkKeys);" },
+  // 只补迁移、不补新库建表（镜像错误）：新装用户从第一天起就没有 author 列。
+  { id: 'db-新建库缺 author 列', file: 'lib/storage/db.js',
+    judges: ['migration-author.test.mjs'],
+    judgeTests: ['全新库建表即含 author 列（可空、无默认值）'],
+    from: "    author          TEXT,\n",
+    to: "" },
+  // 可升级集合漏 v4：v4 库在 openDatabase 的版本闸就被拒，插件在老库上根本装不起来。
+  { id: 'db-可升级集合漏 v4', file: 'lib/storage/db.js',
+    judges: ['migration-author.test.mjs'],
+    judgeTests: ['迁移 v4→v5：author 列出现、旧行全 NULL、其余列逐项相等、user_version = 5'],
+    from: "const UPGRADABLE_VERSIONS = new Set([1, 2, 3, 4]);",
+    to: "const UPGRADABLE_VERSIONS = new Set([1, 2, 3]);" },
   { id: 'tag-升级后版本仍为1', file: 'lib/storage/db.js',
     judges: ['tag-storage.test.mjs'],
     from: 'db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);', to: "db.exec('PRAGMA user_version = 1');" },
