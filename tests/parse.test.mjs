@@ -31,6 +31,7 @@ test('RSS 2.0：字段映射、CDATA、相对链接、实体解码', () => {
 
   assert.equal(second.link, 'https://example.com/blog/rust-zig', '相对链接要按源地址补全')
   assert.equal(second.publishedAt, '2003-06-03T09:39:21.000Z')
+  assert.equal(second.author, '王五', '缺少 dc:creator 时必须回落到 RSS 2.0 的 <author>')
   assert.equal(second.summary, '相对链接 + 实体：Tom & Jerry ’s', '内置实体与数字实体都要解码')
   assert.equal(second.id, undefined, '没给 guid 时不得凭空编造 id')
 })
@@ -43,6 +44,7 @@ test('RSS 1.0 (RDF)：条目与 dc:date', () => {
   assert.equal(feed.items.length, 1)
   assert.equal(feed.items[0].link, 'https://rss1.example.net/a')
   assert.equal(feed.items[0].publishedAt, '2020-01-02T03:04:05.000Z')
+  assert.equal(feed.items[0].author, '赵六', 'RSS 1.0 的作者在 dc:creator 里')
   assert.equal(feed.items[0].summary, 'RDF 描述')
 })
 
@@ -61,6 +63,23 @@ test('Atom：link 属性取值、published 缺失时用 updated 兜底', () => {
   assert.equal(second.link, 'https://atom.example.org/posts/updated-only')
   assert.equal(second.publishedAt, '2024-05-02T00:00:00.000Z', '缺 published 必须回退到 updated')
   assert.equal(second.summary, '<p>content 兜底</p>', '缺 summary 必须回退到 content')
+  assert.equal(second.author, undefined, 'Atom 第二条没有 author：不得编造作者')
+})
+
+test('RSS 2.0：dc:creator 优先于 <author>；无作者与纯空白 author 都是 undefined', () => {
+  const xml = '<?xml version="1.0" encoding="UTF-8"?>'
+    + '<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">'
+    + '<channel><title>t</title>'
+    + '<item><title>两者都有</title><link>https://ex.test/both</link>'
+    + '<dc:creator>张三</dc:creator><author>李四</author></item>'
+    + '<item><title>空白作者</title><link>https://ex.test/blank</link><author>   </author></item>'
+    + '<item><title>没有作者</title><link>https://ex.test/none</link></item>'
+    + '</channel></rss>'
+
+  const feed = parseFeed(xml, 'https://ex.test/feed.xml')
+  assert.equal(feed.items[0].author, '张三', '同时给出时 dc:creator 优先（既有优先级不变）')
+  assert.equal(feed.items[1].author, undefined, '纯空白 <author> 不得变成空串作者')
+  assert.equal(feed.items[2].author, undefined, '没有 author 时不得编造')
 })
 
 test('正文优先：content 比 description 长时必须取 content（否则等于扔掉全文）', () => {

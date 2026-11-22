@@ -8,6 +8,7 @@
     <title>RDF 条目</title>
     <link>https://rss1.example.net/a</link>
     <dc:date>2020-01-02T03:04:05Z</dc:date>
+    <dc:creator>赵六</dc:creator>
     <description>RDF 描述</description>
   </item>
 </rdf:RDF>

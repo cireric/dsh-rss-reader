@@ -28,10 +28,27 @@ async function withServer(handler, run) {
   }
 }
 
+/** 记录条目写入次数：用来钉「一次抓取最多一次 updateItem」与「304 不写」。 */
+function watchItemWrites(store) {
+  const writes = { saves: 0, updates: 0 }
+  const saveItem = store.saveItem
+  const updateItem = store.updateItem
+  store.saveItem = async (...args) => {
+    writes.saves += 1
+    return saveItem.apply(store, args)
+  }
+  store.updateItem = async (...args) => {
+    writes.updates += 1
+    return updateItem.apply(store, args)
+  }
+  return writes
+}
+
 function rss(items) {
   const body = items.map((item) =>
     '<item><title>' + item.title + '</title><link>' + item.link + '</link><guid>' +
     item.guid + '</guid><pubDate>' + item.date + '</pubDate>' +
+    (item.author === undefined ? '' : '<author>' + item.author + '</author>') +
     (item.description === undefined ? '' : '<description><![CDATA[' + item.description + ']]></description>') +
     '</item>').join('')
   return '<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel>' +
@@ -71,6 +88,127 @@ test('首次抓取：条目入库、游标记 id、源状态记标题', async ()
     const sample = store.items.get(store.cursor(base + '/feed.xml').seen[0])
     assert.equal(sample.readAt, undefined, '新条目必须是未读')
     assert.equal(sample.starred, false)
+  })
+})
+
+test('作者：新条目入库时带上源给的 author（RSS 2.0 <author>）', async () => {
+  const store = memoryStore()
+  const items = [
+    { ...THREE_ITEMS[0], author: '张三' },
+    THREE_ITEMS[1],
+    THREE_ITEMS[2],
+  ]
+  await withServer(serveFeed(items), async (base) => {
+    await refreshFeeds([base + '/feed.xml'], store, BASE_OPTIONS)
+
+    const records = [...store.items.values()]
+    const authored = records.filter((record) => record.author !== undefined)
+    assert.equal(authored.length, 1, '只有源给了 author 的那条该带作者，不得给其余条目编造')
+    assert.equal(authored[0].link, 'https://ex.test/1')
+    assert.equal(authored[0].author, '张三')
+  })
+})
+
+test('作者端到端：RSS 2.0 dc:creator 与 Atom author.name 都经真实刷新落库', async () => {
+  const store = memoryStore()
+  const rssXml = '<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">'
+    + '<channel><title>RSS 源</title>'
+    + '<item><title>RSS 一篇</title><link>https://ex.test/e2e-rss</link><guid>e2e-rss</guid>'
+    + '<dc:creator>张三</dc:creator></item></channel></rss>'
+  const atomXml = '<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom">'
+    + '<title>Atom 源</title><entry><title>Atom 一篇</title><link href="https://ex.test/e2e-atom"/>'
+    + '<id>tag:ex.test,2024:e2e</id><author><name>李四</name></author></entry></feed>'
+
+  await withServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/xml' })
+    res.end(req.url === '/atom.xml' ? atomXml : rssXml)
+  }, async (base) => {
+    const outcomes = await refreshFeeds([base + '/rss.xml', base + '/atom.xml'], store, BASE_OPTIONS)
+    assert.deepEqual(outcomes.map((outcome) => outcome.status), ['added', 'added'])
+
+    const byLink = new Map([...store.items.values()].map((record) => [record.link, record]))
+    assert.equal(byLink.get('https://ex.test/e2e-rss').author, '张三', 'RSS 2.0 的 dc:creator 必须落库')
+    assert.equal(byLink.get('https://ex.test/e2e-atom').author, '李四', 'Atom 的 author.name 必须落库')
+  })
+})
+
+test('作者补全：已有条目无作者、下一轮抓到作者 ⇒ 补上；第三轮换作者不覆盖', async () => {
+  const store = memoryStore()
+  const item = { title: '带作者的一篇', link: 'https://ex.test/author', guid: 'g-author', date: 'Mon, 01 Jan 2024 00:00:00 GMT' }
+  let author
+  await withServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/rss+xml' })
+    res.end(rss([{ ...item, author }]))
+  }, async (base) => {
+    const first = await refreshFeeds([base + '/feed.xml'], store, BASE_OPTIONS)
+    assert.equal(first[0].added, 1)
+    const itemId = [...store.items.keys()][0]
+    assert.equal(store.items.get(itemId).author, undefined, '前置条件：第一轮源没给作者')
+
+    // 第二轮源补上了作者 ⇒ 本次响应里仍在的条目要从无到有补上
+    author = '张三'
+    const second = await refreshFeeds([base + '/feed.xml'], store, BASE_OPTIONS)
+    assert.equal(second[0].added, 0, '补全不是新增')
+    assert.equal(store.items.get(itemId).author, '张三', '老条目要从无到有补上作者')
+
+    // 第三轮源改了作者名 ⇒ 已落库的作者是历史，不许被静默改写
+    author = '李四'
+    await refreshFeeds([base + '/feed.xml'], store, BASE_OPTIONS)
+    assert.equal(store.items.get(itemId).author, '张三', '已有作者时不得被新抓取覆盖')
+  })
+})
+
+test('作者补全：304 轮一条都不写（补全范围只限本次响应里仍在的条目）', async () => {
+  const store = memoryStore()
+  const item = { title: '一篇', link: 'https://ex.test/author-304', guid: 'g-author-304', date: 'Mon, 01 Jan 2024 00:00:00 GMT', author: '张三' }
+  await withServer((req, res) => {
+    if (req.headers['if-none-match'] === '"v1"') {
+      res.writeHead(304)
+      res.end()
+      return
+    }
+    res.writeHead(200, { 'content-type': 'application/rss+xml', etag: '"v1"' })
+    res.end(rss([item]))
+  }, async (base) => {
+    await refreshFeeds([base + '/feed.xml'], store, BASE_OPTIONS)
+    const itemId = [...store.items.keys()][0]
+
+    const writes = watchItemWrites(store)
+    const again = await refreshFeeds([base + '/feed.xml'], store, BASE_OPTIONS)
+    assert.equal(again[0].status, 'not-modified')
+    assert.equal(writes.updates, 0, '304 没有响应条目，不得产生任何条目写入')
+    assert.equal(writes.saves, 0, '304 没有响应条目，不得产生任何条目写入')
+    assert.equal(store.items.get(itemId).author, '张三')
+  })
+})
+
+test('作者补全与正文回填合并成一次 updateItem，两个条件都不成立时不空写', async () => {
+  const store = memoryStore()
+  const item = { title: '一篇', link: 'https://ex.test/author-summary', guid: 'g-author-summary', date: 'Mon, 01 Jan 2024 00:00:00 GMT' }
+  let description = '短摘要'
+  let author
+  await withServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/rss+xml' })
+    res.end(rss([{ ...item, description, author }]))
+  }, async (base) => {
+    await refreshFeeds([base + '/feed.xml'], store, BASE_OPTIONS)
+    const itemId = [...store.items.keys()][0]
+    const writes = watchItemWrites(store)
+
+    // 同一轮里两个补全都成立：正文变长 + 作者从无到有
+    description = '完整正文。'.repeat(300)
+    author = '张三'
+    await refreshFeeds([base + '/feed.xml'], store, BASE_OPTIONS)
+
+    assert.equal(writes.updates, 1, 'summary 与 author 必须在同一次 updateItem 里合并（两次写会放大丢失更新面）')
+    const after = store.items.get(itemId)
+    assert.equal(after.summary, description)
+    assert.equal(after.author, '张三')
+
+    // 第三轮两个条件都不成立 ⇒ 一次也不许写
+    const before = writes.updates
+    await refreshFeeds([base + '/feed.xml'], store, BASE_OPTIONS)
+    assert.equal(writes.updates, before, '没有要补的东西时不得空写')
   })
 })
 
