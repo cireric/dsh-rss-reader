@@ -29,7 +29,7 @@
 | 正文内联语义（R5） | 已落地 · 隔离 smoke | `src/article.ts` 的内联解析（`parseInlineRuns` / `parseSegment` / `normalizeRuns`）、`src/article-text.ts` 的 `InlineRun` 与 `runsToText`、`src/client/article-pane.tsx` 的 `InlineRunsView` | `tests/article.test.mjs` 的「内联」族 16 条（五种 run / 相对与非法链接 / 嵌套取最外层 / 未知标签 / 相邻合并 / 不变量 / 归一化顺序 / 占位符 / 门槛）、`tests/scroll-dom.test.mjs` 的渲染 6 条、`tests/tools.test.mjs` 的 link 摊平；变异 `inline-*` 6 条各被抓住 |
 | 正文表格块（R5） | 已落地 · 隔离 smoke | `src/article.ts` 的 `tableBlockOf` / `layOutRow` / `alignFieldOf`、`src/article-text.ts` 的 `tableToText`、`src/client/article-pane.tsx` 的 `TableBlockView` | `tests/article.test.mjs` 的表格 9 条（三种表头 / colspan / rowspan 占位 / 畸形行 / 超表尾 / align / figure 三形态）、`tests/retention.test.mjs` 与 `tests/store-sqlite.test.mjs` 的字符口径、`tests/search.test.mjs` 的表格命中、`tests/tools.test.mjs` 的 Markdown 表格、`tests/reading.test.mjs` 的时长；变异 `table-*` / `figure-*` / `chars-*` / `align-*` 各被抓住；**窄栏观感未做真人验收** |
 | 作者元数据与作者搜索（R12） | 已落地 · **真机确认（2026-11-22）** | `src/author.ts` 的 `normalizeAuthor`（唯一归一化实现，refresh / store 读侧 / 搜索 worker 三处共用）、`items.author` 列与 `src/storage/db.ts` 的四条升级路径（v1/v2/v3/v4 → v5）、`src/store-sqlite.ts` 的 `ITEM_SELECT` / `UPSERT_ITEM` / `toItemRecord` / `writeItem`、`src/refresh.ts` 的落库与机会式补全、`src/identity-repair.ts` 的 `mergeItemRecords`、`src/search-worker.ts` 的作者谓词与 `ItemView` 组装、`src/client/index.tsx` 的列表行、`src/client/article-pane.tsx` 的正文 header、`src/tools.ts` 的 `digestOf` 与 `rss_read_article` 的 `base` | `tests/migration-author.test.mjs` 9 条（四条升级路径各自「迁移前夹具真的没有 `author` 列」+ 旧行全 NULL + 其余列逐项相等、迁移幂等、升级后 `listItems()` / `item()` 不抛 `no such column`、索引集合与 v4 相同、v5 通过 `verify-backup`）、`tests/parse.test.mjs` 的四种格式与「无作者不编造」、`tests/domain.test.mjs` 的 `normalizeAuthor` 三条边界与 schema 空白拒绝、`tests/store-sqlite.test.mjs` 3 条（往返 / `ON CONFLICT` 覆写 / 读侧空串归一化）、`tests/refresh.test.mjs` 5 条（RSS 2.0 与 Atom 落库端到端 / 补上 / 不覆盖 / 304 不写 / 只一次 `updateItem`）、`tests/identity.test.mjs` 合并保留作者、`tests/search.test.mjs` 2 条（作者命中 + NULL 安全 + 读侧归一化）、`tests/scroll-dom.test.mjs` 4 条（跨源 / 单源 / 超长 `title` / 正文 header 文案）、`tests/tools.test.mjs` 3 条（摘要 / 工具描述 / 正文元数据）；**2026-11-22 真机：库 v4→v5、reload 前后 `[active]`、日志 0 条「装载失败」、路由 401、580 条 / 34 位作者 / 438 已读 / 3 星标未变** |
-| 本地备份与恢复（F09） | 已落地 · **隔离 smoke（待真机）** | `docs/ops/backup-restore.md`、`scripts/verify-backup.mjs` | `tests/backup-verify.test.mjs` 9 条；真库副本演练（M5 04 轮）；**真灾难恢复未演练** |
+| 本地备份与恢复（F09） | 已落地 · **真机确认（取快照 + 校验，2026-11-22）** | `docs/ops/backup-restore.md`、`scripts/verify-backup.mjs` | `tests/backup-verify.test.mjs` 9 条；真库副本演练（M5 04 轮）；R12 升级前在真实库上取过快照并通过 `verify-backup`（`~/rss-backup-2026-11-22/`）；**真灾难恢复未演练** |
 | 可复现构建（F09） | 已落地 · 隔离 smoke | `scripts/build.sh`、`dsh-version.json`、`scripts/gate.sh` | `docs/ops/build-reproducibility.md` 的干净目录退出码表 |
 | CI 分层（F09） | **待拍板** | `docs/ops/build-reproducibility.md` §7.2 | 未接入任何 CI 服务；L1 已由 `scripts/gate.sh` 覆盖 |
 | 宿主定期同步（F06 调度） | **已跳过** | — | M4 03 票：用户 2026-11-13 决定不做 |
@@ -53,7 +53,7 @@
   列表行 / 正文 header / 搜索的**观感**仍待你在真机上过一遍（步骤见 `.scratch/r12-author/issues/08-*.md` 与交接说明）。
   真机快照留在 `~/rss-backup-2026-11-22/`（v4，回滚用，别删）。
 
-## 发布前要做的事（2026-11-21 状态）
+## 发布前要做的事（2026-11-22 状态）
 
 - [x] 1. `bash scripts/gate.sh`（L1：build → build:client → typecheck → test）全绿 —— R1 05 票终检实测（L1 全过、`npm test` 806/806、`npm run test:perf` 11/11）；2026-11-21 复跑 `npm test` **806/806**；**R12 终检（2026-11-22）：build / build:client / typecheck 通过、`npm test` 983/983（0 skipped）**；
 - [x] 2. `npm run mutation -- --workers 1` 全量跑完 —— R1 05 票终检实测：应用 **272/272**、0 幸存、恢复后基线仍绿；**R12 终检（2026-11-22，`--workers 2`）：应用 342/342、0 幸存、恢复后基线仍绿**；
