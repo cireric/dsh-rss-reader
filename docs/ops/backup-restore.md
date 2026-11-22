@@ -103,7 +103,7 @@ node scripts/verify-backup.mjs "$DSH_HOME/storages/rss-reader"   # 必须 EXIT=0
 2. 当天 `$DSH_HOME/storages/rss-reader/reader-$(date -u +%F).log` 里**没有**「装载失败」；
 3. 路由活着：`curl -X POST http://127.0.0.1:3080/rss-reader-api -d '{"endpoint":"overview","payload":{}}'` 回 **401**（不是 404）。
 
-> 较老的库（v1/v2/v3/v4）会在**启动时自动升级**到当前版本 —— 升级只加表/加列并回填，不改旧行。
+> 较老的库（v1/v2/v3/v4）会在**启动时自动升级**到当前版本 —— 升级只加表/加列；v1–v3 的 `link_key` 会回填，`author` 只加列、不回填，不改旧行。
 > 升级是单向的：升级后的库**旧版插件打不开**，回滚只有「把第 2 步挪走的目录挪回来」这一条路。
 
 ## 6. 显式失败的四类副本（都不许「先试试看」）

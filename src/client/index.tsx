@@ -1047,8 +1047,8 @@ export function createReader(store: ReaderStore): () => ReactNode {
             const safeLink = httpUrlOrEmpty(item.link)
             const unread = item.readAt === undefined
             const selected = state.selectedId === item.id
-            // R12：空串与缺省同义（记录层已归一化，这里只防桩件/旧数据把空段拼进界面）。
-            const author = item.author === undefined || item.author === '' ? undefined : item.author
+            // R12：作者只由 src/author.ts 在读路径归一化；这里直接用投影值，不再加桩件守卫。
+            const author = item.author
             return (
               <div key={item.id} className="dsh-rss-row" data-rss-row={item.id}
                 data-rss-unread={unread ? '' : undefined} data-rss-selected={selected ? '' : undefined}>

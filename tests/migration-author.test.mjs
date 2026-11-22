@@ -234,8 +234,8 @@ function assertUpgradePath(version) {
   }
 }
 
-test('迁移 v1→v5：author 列出现、旧行全 NULL、其余列逐项相等、user_version = 5', () => assertUpgradePath(1))
-test('迁移 v2→v5：author 列出现、旧行全 NULL、其余列逐项相等、user_version = 5', () => assertUpgradePath(2))
+// v1→v5 / v2→v5 的去重归属见 spec 测试决策 Seam 2：分别由 tag-storage.test.mjs 与
+// duplicates.test.mjs 钉住；本文件只保留没有别处覆盖的 v3 / v4 两条路径。
 test('迁移 v3→v5：author 列出现、旧行全 NULL、其余列逐项相等、user_version = 5', () => assertUpgradePath(3))
 test('迁移 v4→v5：author 列出现、旧行全 NULL、其余列逐项相等、user_version = 5', () => assertUpgradePath(4))
 

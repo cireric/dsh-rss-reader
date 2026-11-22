@@ -2047,12 +2047,10 @@ export const MUTATIONS = [
     to: "applyDdl(db, 'v1→v5 升级', PROGRESS_DDL + LINK_KEY_DDL + AUTHOR_DDL, backfillLinkKeys);" },
   // ── R12 票据 01：v5 的 author 列（2026-11-22）──────────────────────────────
   // 迁移把 author 写成有默认值：旧行会被「回填」成一个编出来的作者 —— 这正是 ADR-0009 禁止的。
-  // 判据是四条升级路径的「旧行全 NULL」断言（v4 路径也会中招，所以四条都列上）。
+  // 判据是升级路径的「旧行全 NULL」断言。v1/v2 的重复用例已按 Seam 2 删除，留下的 v3/v4 都会中招。
   { id: 'db-迁移给 author 塞默认值', file: 'lib/storage/db.js',
     judges: ['migration-author.test.mjs'],
     judgeTests: [
-      '迁移 v1→v5：author 列出现、旧行全 NULL、其余列逐项相等、user_version = 5',
-      '迁移 v2→v5：author 列出现、旧行全 NULL、其余列逐项相等、user_version = 5',
       '迁移 v3→v5：author 列出现、旧行全 NULL、其余列逐项相等、user_version = 5',
       '迁移 v4→v5：author 列出现、旧行全 NULL、其余列逐项相等、user_version = 5'],
     from: "ALTER TABLE items ADD COLUMN author TEXT;",
@@ -2060,12 +2058,11 @@ export const MUTATIONS = [
   // 只给 v4→v5 分支加 author（初稿的写法）：v1/v2/v3 的库升到 v5 却缺列，旧库直接打不开。
   // 这条是本项最重要的变异 —— 症状是「老库打不开」而不是「功能缺失」，单看新库测试发现不了。
   { id: 'db-只加 v4 分支', file: 'lib/storage/db.js',
-    judges: ['migration-author.test.mjs', 'tag-storage.test.mjs'],
+    judges: ['migration-author.test.mjs', 'tag-storage.test.mjs', 'duplicates.test.mjs'],
     judgeTests: [
-      '迁移 v1→v5：author 列出现、旧行全 NULL、其余列逐项相等、user_version = 5',
-      '迁移 v2→v5：author 列出现、旧行全 NULL、其余列逐项相等、user_version = 5',
       '迁移 v3→v5：author 列出现、旧行全 NULL、其余列逐项相等、user_version = 5',
-      'v1→v5 升级：只加表与派生列，条目/正文/游标/阅读状态原样保留，且回填 link_key'],
+      'v1→v5 升级：只加表与派生列，条目/正文/游标/阅读状态原样保留，且回填 link_key',
+      'v2→v5 升级：只加表与派生列，旧数据一行不动、link_key 回填到位（M5 03 的派生列）'],
     from: "        applyDdl(db, 'v1→v5 升级', TAGS_DDL + PROGRESS_DDL + LINK_KEY_DDL + AUTHOR_DDL, backfillLinkKeys);\n        return;\n    }\n    if (onDisk === 2) {\n        applyDdl(db, 'v2→v5 升级', PROGRESS_DDL + LINK_KEY_DDL + AUTHOR_DDL, backfillLinkKeys);\n        return;\n    }\n    if (onDisk === 3) {\n        applyDdl(db, 'v3→v5 升级', LINK_KEY_DDL + AUTHOR_DDL, backfillLinkKeys);",
     to: "        applyDdl(db, 'v1→v5 升级', TAGS_DDL + PROGRESS_DDL + LINK_KEY_DDL, backfillLinkKeys);\n        return;\n    }\n    if (onDisk === 2) {\n        applyDdl(db, 'v2→v5 升级', PROGRESS_DDL + LINK_KEY_DDL, backfillLinkKeys);\n        return;\n    }\n    if (onDisk === 3) {\n        applyDdl(db, 'v3→v5 升级', LINK_KEY_DDL, backfillLinkKeys);" },
   // 只补迁移、不补新库建表（镜像错误）：新装用户从第一天起就没有 author 列。
@@ -2890,18 +2887,29 @@ export const MUTATIONS = [
     to: '            author: extra.author,' },
 
   // ── R12 票据 04：列表行与正文 header 显示作者（2026-11-22）────────────────
-  // 无作者时写占位：缺省/空串被替换成「未知作者」，列表行凭空多出一个作者段（验收 12 的文案断言翻红）。
+  // 无作者时写占位：缺省被替换成「未知作者」，列表行凭空多出一个作者段（验收 12 的文案断言翻红）。
+  // R12 评审修复：客户端两处「防桩件」的 `author === ''` 守卫已删（docs/pitfalls.md §2.5：
+  // 不在作品代码里加守卫容忍桩件/脏数据；归一化只在 src/author.ts 一处）。变异随之重锚到裸投影。
   { id: 'client-无作者时显示占位', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
     judgeTests: ['R12 04 列表行：跨源视图有作者三段、无作者两段，且无伪造文案与空段'],
-    from: 'const author = item.author === void 0 || item.author === "" ? void 0 : item.author;',
-    to: 'const author = item.author === void 0 || item.author === "" ? "未知作者" : item.author;' },
+    from: 'const author = item.author;',
+    to: 'const author = item.author === void 0 ? "未知作者" : item.author;' },
   // 单源视图丢作者：作者段只在 selectedFeed === undefined 分支渲染 ⇒ 点到某个源后作者整段消失（验收 12 的单源视图段翻红）。
   { id: 'client-单源视图丢作者', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
     judgeTests: ['R12 04 列表行：单源视图有作者两段、无作者只有时间，且无伪造文案与空段'],
     from: 'author !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {',
     to: 'selectedFeed === void 0 && author !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {' },
+
+  // R12 评审补的**第 17 条**（spec 的 16 条之外）：`endpoints.ts` 的 `author: item.author` 是
+  // **唯一**的生产 ItemView 投影，原先删掉它没有任何用例会红。判据是 overview-author.test.mjs
+  // 的「ItemView 的 author 原样带出」：投影丢了，回包里的作者就变 undefined。
+  { id: 'endpoint-overview 丢作者', file: 'lib/endpoints.js',
+    judges: ['overview-author.test.mjs'],
+    judgeTests: ['R12 overview：ItemView 的 author 原样带出（唯一生产投影）'],
+    from: '        author: item.author,\n',
+    to: '        author: void 0,\n' },
 
   // ── R12 票据 05：按作者搜索（2026-11-22）──────────────────────────────────
   // 作者谓词恒假：只有作者名命中的条目从结果里消失，与既有三路的并集缺行（验收 14 翻红）。

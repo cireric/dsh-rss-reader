@@ -9,6 +9,9 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { refreshFeeds, selectStalestFeeds } from '../lib/refresh.js'
+import { openDatabase, migrateSchema } from '../lib/storage/db.js'
+import { writeConfigFile } from '../lib/storage/config-file.js'
+import { createSqliteStore } from '../lib/store-sqlite.js'
 import { memoryStore, strictMemoryStore, armConcurrentRead } from './helpers/reader-store-memory.mjs'
 import { Config, apply } from '../lib/index.js'
 
@@ -130,6 +133,59 @@ test('作者端到端：RSS 2.0 dc:creator 与 Atom author.name 都经真实刷�
     assert.equal(byLink.get('https://ex.test/e2e-rss').author, '张三', 'RSS 2.0 的 dc:creator 必须落库')
     assert.equal(byLink.get('https://ex.test/e2e-atom').author, '李四', 'Atom 的 author.name 必须落库')
   })
+})
+
+test('作者端到端（SQLite 真库）：解析 → refreshFeeds → items.author 落库与夹具一致', async () => {
+  // memory store 的端到端只证明「编排把 author 传下去了」；它没有 schema、没有 SQL 列绑定，
+  // 写侧漏列（UPSERT_ITEM / writeItem）在它那里永远绿。这条用真库把验收 1 的「落库端到端」补齐。
+  const dir = mkdtempSync(join(tmpdir(), 'rss-refresh-author-db-'))
+  const rssXml = '<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">'
+    + '<channel><title>RSS 源</title>'
+    + '<item><title>RSS 一篇</title><link>https://ex.test/e2e-rss</link><guid>e2e-rss</guid>'
+    + '<dc:creator>张三</dc:creator></item></channel></rss>'
+  const atomXml = '<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom">'
+    + '<title>Atom 源</title><entry><title>Atom 一篇</title><link href="https://ex.test/e2e-atom"/>'
+    + '<id>tag:ex.test,2024:e2e</id><author><name>李四</name></author></entry></feed>'
+  try {
+    await withServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/xml' })
+      res.end(req.url === '/atom.xml' ? atomXml : rssXml)
+    }, async (base) => {
+      const rssUrl = base + '/rss.xml'
+      const atomUrl = base + '/atom.xml'
+      const configPath = join(dir, 'config.json')
+      // 真库的 updateFeed 要求源先在配置里（创建只走 upsert）：先写订阅真相，再开库。
+      writeConfigFile(configPath, {
+        version: 1,
+        feeds: {
+          [rssUrl]: { url: rssUrl, title: 'RSS 源' },
+          [atomUrl]: { url: atomUrl, title: 'Atom 源' },
+        },
+      })
+      const db = openDatabase(join(dir, 'rss.db'))
+      try {
+        migrateSchema(db)
+        const store = createSqliteStore(db, configPath)
+        const outcomes = await refreshFeeds([rssUrl, atomUrl], store, BASE_OPTIONS)
+        assert.deepEqual(outcomes.map((outcome) => outcome.status), ['added', 'added'])
+
+        const rssItemId = store.listItems(outcomes[0].feedId)[0][0]
+        const atomItemId = store.listItems(outcomes[1].feedId)[0][0]
+        const rssItem = store.item(rssItemId)
+        const atomItem = store.item(atomItemId)
+        assert.ok(rssItem !== undefined && atomItem !== undefined, '两条条目都必须能从 SQLite 读回')
+        assert.equal(rssItem.author, '张三', 'RSS 2.0 的 dc:creator 必须落进 items.author')
+        assert.equal(atomItem.author, '李四', 'Atom 的 author.name 必须落进 items.author')
+        // 再绕过 store 读一次原始列：store 读侧的 normalizeAuthor 不能把「没写进去」掩盖成有值。
+        assert.equal(db.prepare('SELECT author FROM items WHERE id = ?').get(rssItemId).author, '张三')
+        assert.equal(db.prepare('SELECT author FROM items WHERE id = ?').get(atomItemId).author, '李四')
+      } finally {
+        db.close()
+      }
+    })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('作者补全：已有条目无作者、下一轮抓到作者 ⇒ 补上；第三轮换作者不覆盖', async () => {
