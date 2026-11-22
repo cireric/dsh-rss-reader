@@ -147,6 +147,13 @@ const STYLE = `
 .dsh-rss-settings-value { font-size:13px; font-weight:600; font-variant-numeric:tabular-nums; }
 .dsh-rss-settings-unit { font-size:12px; color:var(--rss-muted); }
 .dsh-rss-settings-help { flex-basis:100%; margin:0; font-size:12px; color:var(--rss-muted); line-height:1.45; }
+/* R11 02 数值输入与就地反馈：只在本分区内新增，别的设置页样式不动。 */
+.dsh-rss-settings-input { font:inherit; font-size:13px; width:6.5em; padding:2px 6px;
+  border-radius:4px; color:inherit; background:var(--rss-bg); border:1px solid var(--rss-line);
+  font-variant-numeric:tabular-nums; }
+.dsh-rss-settings-input:disabled { opacity:.55; }
+.dsh-rss-settings-saved { font-size:12px; color:var(--rss-accent); }
+.dsh-rss-settings-error { flex-basis:100%; margin:0; font-size:12px; color:var(--rss-error); line-height:1.45; }
 @media (max-width: 460px) {
   .dsh-rss-settings-row { flex-direction:column; align-items:flex-start; }
 }
@@ -1034,6 +1041,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
             warningDismissed={state.settingsWarningDismissed}
             onClose={() => store.closeSettings()}
             onDismissWarning={() => store.dismissSettingsWarning()}
+            onSave={(key, value) => store.saveSetting(key, value)}
           />
         )}
 

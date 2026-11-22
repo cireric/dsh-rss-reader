@@ -39,8 +39,8 @@ export const ENDPOINT_NAMES = [
   'viewPreferences', 'saveViewPreferences', 'saveReadingProgress', 'duplicateHints', 'searchItems',
   'listFolders', 'createFolder', 'renameFolder', 'deleteFolder', 'moveFeedToFolder', 'reorderFeeds',
   'listTags', 'createTag', 'renameTag', 'deleteTag', 'setItemTags',
-  // R11 01：设置页的读端点（写端点是 02 票的 saveSettings）。
-  'settings',
+  // R11 01 / 02：设置页的读端点与写端点（写路径先落盘再改内存，见 settings-control.ts）。
+  'settings', 'saveSettings',
 ] as const
 export type Endpoint = (typeof ENDPOINT_NAMES)[number]
 

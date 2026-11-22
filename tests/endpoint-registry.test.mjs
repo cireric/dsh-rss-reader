@@ -26,10 +26,10 @@ const ITEM_ID = 'item-0001'
 const ROUND = '2026-10-11T09:00:00.000Z'
 
 test('端点名字表非空、无重复、全为非空字符串', () => {
-  // R3 02 新增 reorderFeeds 端点：28 → 29；R11 01 新增 settings：29 → 30。
-  // 这个数字是「端点表变更必须显形」的判据本身。
-  assert.equal(ENDPOINT_NAMES.length, 30)
-  assert.equal(new Set(ENDPOINT_NAMES).size, 30)
+  // R3 02 新增 reorderFeeds 端点：28 → 29；R11 01 新增 settings：29 → 30；
+  // R11 02 新增写端点 saveSettings：30 → 31。这个数字是「端点表变更必须显形」的判据本身。
+  assert.equal(ENDPOINT_NAMES.length, 31)
+  assert.equal(new Set(ENDPOINT_NAMES).size, 31)
   for (const name of ENDPOINT_NAMES) assert.equal(typeof name, 'string')
 })
 

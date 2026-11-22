@@ -14,8 +14,8 @@
 import { closeSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { parseTunableValue, TUNABLE_KEYS } from '../settings-schema.js'
-import type { TunableKey, TunableOverrides } from '../settings-schema.js'
+import { isTunableKey, parseTunableValue, TUNABLE_KEYS } from '../settings-schema.js'
+import type { TunableOverrides } from '../settings-schema.js'
 
 /** 本版只认 1；版本不是 1 与「不是合法 JSON」走同一条隔离路（D2 的闸门语义）。 */
 export const SETTINGS_VERSION = 1
@@ -135,10 +135,6 @@ function corrupt(path: string, reason: string): SettingsReadOutcome {
     // 隔离失败不能吞成「什么都没发生」：把原因带回调用方，页面警示条会说明这一情况。
     return { status: 'corrupt', reason, quarantineError: String(error) }
   }
-}
-
-function isTunableKey(key: string): key is TunableKey {
-  return (TUNABLE_KEYS as readonly string[]).includes(key)
 }
 
 function isErrno(error: unknown, code: string): boolean {

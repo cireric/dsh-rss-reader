@@ -14,6 +14,8 @@
  * 失败回统一的 bad-request 信封，成功才把已解析的值交给 handler。
  */
 import { z } from 'zod'
+import { isTunableKey, parseTunableValue } from './settings-schema.js'
+import type { TunableOverrides } from './settings-schema.js'
 
 /** 零入参端点：接受并忽略 payload（与阶段 5 之前的语义一致）。 */
 export const noPayload = z.unknown()
@@ -236,3 +238,51 @@ export const searchQueryPayload = z.object({
   to: searchDay,
   cursor: z.string().max(2048).optional(),
 }).refine(({ from, to }) => !from || !to || from <= to)
+
+/**
+ * `saveSettings` 的逐键 patch（R11 02，spec D4.1 / D5 / D9）。
+ *
+ * 形状（record）在这里判，**每个值仍走 `parseTunableValue`** —— 范围判据只有
+ * `settings-schema.ts` 一份。用 `superRefine` 而不是给四个键各写一遍 `.min().max()`：
+ * 后者就是第二份范围表，改一处漏一处时表现为「存得下却读不回」。
+ *
+ * 空 patch 是坏入参：它既不是「保存某一项」，也不该悄悄写一次盘。
+ */
+const tunablePatch = z.record(z.string(), z.unknown()).superRefine((patch, ctx) => {
+  if (Object.keys(patch).length === 0) {
+    ctx.addIssue({ code: 'custom', path: [], message: 'patch 不能为空' })
+    return
+  }
+  for (const [key, value] of Object.entries(patch)) {
+    if (!isTunableKey(key)) {
+      ctx.addIssue({ code: 'custom', path: [key], message: '不是可设置的键' })
+      continue
+    }
+    if (parseTunableValue(key, value) === undefined) {
+      ctx.addIssue({ code: 'custom', path: [key], message: '值不合法' })
+    }
+  }
+}).transform((patch): TunableOverrides => {
+  // superRefine 通过后才跑到这里：此时每个键都是白名单键、每个值都能被同一判据解析成整数。
+  // 仍然复用 isTunableKey / parseTunableValue 做收窄与取值，不 cast、不另写一套判断。
+  const overrides: TunableOverrides = {}
+  for (const [key, value] of Object.entries(patch)) {
+    if (!isTunableKey(key)) continue
+    const parsed = parseTunableValue(key, value)
+    if (parsed !== undefined) overrides[key] = parsed
+  }
+  return overrides
+})
+
+/**
+ * `saveSettings` 入参（R11 02，spec D4.1）：`{ patch }` 与 `{ resetToDefaults: true }` **二选一**。
+ *
+ * 为什么用 union 而不是一个可选字段对象 + refine：union 让 handler 能按分支窄化类型，
+ * 不必再写一个「patch 可能缺席」的死分支。`resetToDefaults` 的实现是 07 票，但**形状先定死**，
+ * 07 只接实现；本票对它的处理是明确的「未实现」错误，绝不当成空操作（静默成功会让界面
+ * 以为已经恢复默认）。
+ */
+export const saveSettingsPayload = z.union([
+  z.strictObject({ patch: tunablePatch }),
+  z.strictObject({ resetToDefaults: z.literal(true) }),
+])

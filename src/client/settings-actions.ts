@@ -1,14 +1,23 @@
 /**
- * 设置页的动作域（R11 01）：打开 / 关闭 / 取一次快照 / 关掉读侧告警。
+ * 设置页的动作域（R11 01 读 / 02 写）：打开 / 关闭 / 取一次快照 / 关掉读侧告警 / 逐项保存。
  *
  * 为什么单独成文件：store 的四个域已经按「谁写谁的 state」切分（见 store.ts 顶部的边界表），
  * 设置页的 state（快照、取数错误、告警是否已关）不属于列表 / 搜索 / 订阅 / 标签任何一块。
  * 放进任一既有域都会让那块同时管两种数据来源（端点的 settings 与条目数据）。
- *
- * 本票只读：写路径（saveSettings）是 02 票的事。
  */
 import type { SettingsSnapshot } from '../shared.js'
+import type { TunableKey } from '../settings-schema.js'
 import type { ReaderState, ReaderStoreDeps } from './store.js'
+
+/**
+ * 一次保存的结果（给设置页组件渲染就地反馈）。
+ *
+ * `current` 是失败时**当下真正生效**的值：失败提示必须写成「保存失败：… 当前生效值仍是 N」，
+ * 否则用户不知道该信输入框里的数字还是列表里的行为（spec D12）。
+ */
+export type SaveSettingResult =
+  | { readonly ok: true; readonly settings: SettingsSnapshot }
+  | { readonly ok: false; readonly message: string; readonly current: number | undefined }
 
 export interface SettingsActionHost {
   get: () => ReaderState
@@ -45,6 +54,40 @@ export function createSettingsActions(host: SettingsActionHost) {
     return inFlight
   }
 
+  /**
+   * 保存串行链（风险 3）：四个参数各是一个输入框，用户可能连续改两项。
+   *
+   * 两条规则缺一不可：
+   *  ① **串行**：一次只有一个保存在飞，后提交的排在前一个回包之后 —— 否则两次写盘可能乱序，
+   *     后改的值被先改的写回；
+   *  ② **只认最新一次回包**：链上更早的回包即使成功，也不许把 `settings` 快照改回旧值
+   *     （编号在提交时取，回包时比对）。界面上的数字只有一个权威来源：最后一次提交的回包。
+   */
+  let saveChain: Promise<unknown> = Promise.resolve()
+  let latestSave = 0
+
+  const saveSetting = (key: TunableKey, value: number): Promise<SaveSettingResult> => {
+    const ticket = ++latestSave
+    const run = saveChain.then(async (): Promise<SaveSettingResult> => {
+      try {
+        const result = await rpc<{ settings?: SettingsSnapshot }>('saveSettings', { patch: { [key]: value } })
+        const snapshot = result?.settings
+        if (snapshot === undefined) throw new Error('saveSettings 回包缺少 settings 字段')
+        if (ticket === latestSave) set({ settings: snapshot, settingsError: undefined })
+        return { ok: true, settings: snapshot }
+      } catch (failure) {
+        const message = failure instanceof Error ? failure.message : String(failure)
+        // 顶部状态条也留一句（设置页之外看得见），就地红字负责细节（D12）。
+        set({ error: '保存设置失败：' + message })
+        log('warn', '[rss-reader] 保存设置失败', failure)
+        return { ok: false, message, current: get().settings?.effective[key] }
+      }
+    })
+    // 链本身永不 reject：一次失败不该让后续保存永远排在一条断掉的 Promise 后面。
+    saveChain = run.then(() => undefined, () => undefined)
+    return run
+  }
+
   /** 进入设置页并取一次快照。返回固定回列表（D20：不记 prevView）。 */
   const openSettings = (): void => {
     set({ view: 'settings' })
@@ -62,5 +105,5 @@ export function createSettingsActions(host: SettingsActionHost) {
   /** 关闭警示条只影响本次会话的显示（D17：警示不阻断任何功能）。 */
   const dismissSettingsWarning = (): void => { set({ settingsWarningDismissed: true }) }
 
-  return { loadSettings, openSettings, closeSettings, toggleSettings, dismissSettingsWarning }
+  return { loadSettings, openSettings, closeSettings, toggleSettings, dismissSettingsWarning, saveSetting }
 }
