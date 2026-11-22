@@ -882,16 +882,8 @@ export function createReader(store: ReaderStore): () => ReactNode {
               <label>显示未读计数
                 <input type="checkbox" checked={state.showUnread} onChange={(event) => store.setShowUnread(event.target.checked)} />
               </label>
-              {/* 「A 键范围」2026-11-21 搬进 A 的确认框（用户拍板）：范围是**这次动作**的一部分，
-                  摆在这里会让读者先改设置、再按 A，而改完下拉框焦点留在控件上、快捷键全被吞掉
-                  （就是本轮那条「按 A 无反应」的现场）。现在它只在确认框里出现，一个控件一处。 */}
-              <button type="button" className="dsh-rss-btn" disabled={state.loading}
-                title="删除「已读且未星标」的旧条目（阈值可在 Config.cleanupAfterDays 调，默认 30 天）"
-                onClick={() => {
-                  if (window.confirm('清理已读的旧条目？\n\n只删除「已读 + 未星标 + 早于阈值」的条目，星标与未读的都会保留。此操作不可撤销。')) {
-                    void store.cleanup()
-                  }
-                }}>清理旧条目</button>
+              {/* 「清理旧条目」R11 04 起搬进设置页「清理天数」行（预演 → 确认 → 执行，D27）：
+                  同一个动作不能有两个入口，否则两边的阈值与确认语义迟早分家。 */}
             </div>
           </details>
           {/* 设置入口（R11 01，D19）：放在「刷新」与「?」之间；再点一次回列表（与 F 的 toggle 同型）。
@@ -1048,6 +1040,8 @@ export function createReader(store: ReaderStore): () => ReactNode {
             onClose={() => store.closeSettings()}
             onDismissWarning={() => store.dismissSettingsWarning()}
             onSave={(key, value) => store.saveSetting(key, value)}
+            onCleanupPreview={() => store.cleanupPreview()}
+            onCleanup={() => store.cleanup()}
           />
         )}
 
