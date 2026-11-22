@@ -24,7 +24,9 @@ import { classify, crashName, judgesFromFails, runSuite } from './suite.mjs'
 export function seedWorkerCopy(workerRoot) {
   // .gitignore 也在清单里：tests/mutation-runner.test.mjs 会读它（P2 的缓存文件必须不入 VCS），
   // 副本少这一份 ⇒ 副本基线红 ⇒ 全部门槛记「判定无效」（2026-11-15 实测踩到）。
-  for (const entry of ['lib', 'tests', 'scripts', 'src', 'node_modules', 'package.json', '.gitignore']) {
+  // 为什么有 README.md：R11 06 的 README 单源测试读它（D24「README 只留一行指针」）。
+  // 副本缺这份 ⇒ 该用例在每条变异下都红 ⇒ 基线卫兵把所有条目判成「判定无效」。
+  for (const entry of ['lib', 'tests', 'scripts', 'src', 'node_modules', 'package.json', '.gitignore', 'README.md']) {
     cpSync(path.join(ROOT, entry), path.join(workerRoot, entry), { recursive: true, preserveTimestamps: true })
   }
 }

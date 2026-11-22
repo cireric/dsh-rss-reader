@@ -2982,4 +2982,12 @@ export const MUTATIONS = [
     judgeTests: ['saveSettings 接受 0：0 合法，且「抓全部源」由既有 selectStalestFeeds 判据给出'],
     from: '    refreshFeedsPerRound: { min: 0, max: 999 },',
     to: '    refreshFeedsPerRound: { min: 1, max: 999 },' },
+  // ── R11 06：Agent 说明与关于区（2026-11-22）──────────────────────────────
+  // 页面少渲染一条 Agent 说明：常量仍是 4、页面只画 3 ⇒ D24 的「条目数 == 常量长度」失效。
+  // 判据是 DOM 用例里对渲染条目数与顺序的断言（直接测常量会自证，抓不到这条）。
+  { id: 'settings-agent 条目数', file: 'lib/client.js',
+    judges: ['settings-agent-help.test.mjs'],
+    judgeTests: ['R11 06 Agent 说明：按 AGENT_HELP 固定顺序渲染全部条目，末尾是审批提示'],
+    from: 'children: [AGENT_HELP.map((entry) =>',
+    to: 'children: [AGENT_HELP.slice(0, -1).map((entry) =>' },
 ]

@@ -51,16 +51,41 @@ export type RpcResult<T> =
   | { ok: false; error: { code: string; message: string; details: object } }
 
 /**
- * 设置页的 wire 形状（R11 01）。
+ * 「关于」区里一行只读参数（R11 06，spec D14.1）。
  *
- * 只带界面真正用到的两样：生效值与默认值 —— 来源层（overrides / inherited / explicit）
- * 刻意不下发（spec D16：界面不显示来源）。`warning` 是启动时读 `settings.json` 的告警
+ * 名单与顺序由**宿主**决定（Config 减去 `feeds` 与四个可调键），客户端只按回包顺序画。
+ * 值原样下发（数字 / 布尔 / 字符串），展示格式归客户端 —— 这样加字段或改展示不需要
+ * 在客户端抄一份当前值。
+ */
+export interface ReadOnlySettingView {
+  /** Config 字段名。 */
+  key: string
+  /** 当前生效值。 */
+  value: string | number | boolean
+}
+
+/**
+ * 设置页的 wire 形状（R11 01 / 06）。
+ *
+ * 只带界面真正用到的部分：生效值与默认值（来源层 overrides / inherited / explicit
+ * 刻意不下发，spec D16：界面不显示来源）；`warning` 是启动时读 `settings.json` 的告警
  * （坏文件已隔离 / 坏值已忽略），正常态缺席，不阻断任何功能（D17）。
+ *
+ * 06 票追加的「关于」区数据同样只由宿主下发：版本在装载时读 package.json，路径来自
+ * settings 控制器，12 个只读参数来自同一份 Config —— 客户端不硬编码任何一项。
  */
 export interface SettingsSnapshot {
   effective: Record<TunableKey, number>
   defaults: Record<TunableKey, number>
   warning?: string
+  /** 插件版本（运行时读 package.json）。 */
+  version: string
+  /** 插件自持存储根：`$DSH_HOME/storages/rss-reader`。 */
+  dataDir: string
+  /** `settings.json` 的绝对路径。 */
+  settingsPath: string
+  /** 「其余 12 个参数（只读）」：名称 + 当前值，顺序由宿主白名单固定。 */
+  readOnly: ReadonlyArray<ReadOnlySettingView>
 }
 
 /** 文件夹目录的一条：名称 + 成员订阅 id（成员按 config.json 的订阅顺序）。 */
