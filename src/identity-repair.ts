@@ -72,6 +72,9 @@ export function mergeItemRecords(keep: ItemRecord, extra: ItemRecord): ItemRecor
       title: keep.title.trim() === '' ? extra.title : keep.title,
       publishedAt: keep.publishedAt ?? extra.publishedAt,
       summary,
+      // 作者与 publishedAt 同形：有就用 keeper 的，没有才接住 loser 的。
+      // 这条路径不在刷新流程里，平时不会出现在「新字段要改哪几处」的直觉清单上（决策 12）。
+      author: keep.author ?? extra.author,
       readAt: keep.readAt ?? extra.readAt,
       starred: keep.starred || extra.starred,
       keptUnread: keep.keptUnread === true || extra.keptUnread === true ? true : undefined,

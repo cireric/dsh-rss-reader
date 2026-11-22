@@ -456,8 +456,10 @@ export const MUTATIONS = [
   { id: 'refresh-正文不得降级覆盖', file: 'lib/refresh.js',
     judges: ['overview-scale.test.mjs', 'refresh.test.mjs'],
     judgeTests: ['正文回填的反面：源变短时不得用更短的正文覆盖更完整的正文'],
-    from: 'if (existing !== undefined && (summary?.length ?? 0) > (existing.summary?.length ?? 0))',
-    to: 'if (existing !== undefined)' },
+    // R12 票据 03 重锚：补全分支的判据从内联 if 提成 summaryGrows 变量（author 要与它并列），
+    // 语义不变，仍是「只要条目已存在就写 summary」= 允许更短的正文降级覆盖。
+    from: 'const summaryGrows = existing !== undefined && (summary?.length ?? 0) > (existing.summary?.length ?? 0);',
+    to: 'const summaryGrows = existing !== undefined;' },
   // 闸门必须认**现行**的 blocks 形态（2026-07 事故：只统计 paragraphs ⇒ 字符数恒为 0 ⇒ 闸门永不触发）。
   // ⚠️ 2026-10-11 修复轮 1 改写锚点：字符计数已随「清算原料」一起搬进 store-sqlite 的
   // articleCharsFromBody（原锚 `chars: articleCharsOf(record.article),` 已从 lib/refresh.js
@@ -1128,7 +1130,9 @@ export const MUTATIONS = [
   { id: 'refresh-正文回填用旧快照覆盖并发写入', file: 'lib/refresh.js',
     judges: ['refresh.test.mjs'],
     judgeTests: ['正文回填期间并发标已读：不得用旧快照整体写回（丢失更新）'],
-    from: "await store.updateItem(itemId, (current) => ({ ...current, summary }));",
+    // R12 票据 03 重锚：回填回调现在同时合并 author，原单行箭头函数变成带函数体的多行块。
+    // 语义不变 —— 退回「拿写入前快照整体 saveItem」会把窗口期内的 readAt 抹掉。
+    from: "await store.updateItem(itemId, (current) => {\n                        const next = summaryGrows ? { ...current, summary } : current;\n                        return authorMissing && next.author === undefined ? { ...next, author: parsedAuthor } : next;\n                    });",
     to: "await store.saveItem(itemId, { ...store.item(itemId), summary });" },
   // ── 快捷键帮助浮窗（2026-10-10）──────────────────────────────────────────────
   // 病象：头部一行塞满键位（读者记不住、界面也挤），而它必须与 keys.ts 逐字同步，
@@ -2851,4 +2855,37 @@ export const MUTATIONS = [
     // 把 feed 范围错发成 all ⇒ 在源里按 A 会误标别的源。
     from: 'if (nav.kind === "feed") return { feedId: nav.feedId };',
     to: 'if (nav.kind === "feed") return { all: true };' },
+
+  // ── R12 票据 03：刷新落作者与合并保留（2026-11-22）────────────────────────
+  // 新建条目不带 author：解析层明明有值，落库即丢（验收 1 / 10）。判据是新条目与端到端两条。
+  { id: 'refresh-不落作者', file: 'lib/refresh.js',
+    judges: ['refresh.test.mjs'],
+    judgeTests: [
+      '作者：新条目入库时带上源给的 author（RSS 2.0 <author>）',
+      '作者端到端：RSS 2.0 dc:creator 与 Atom author.name 都经真实刷新落库'],
+    from: '                author: parsedAuthor,\n',
+    to: '' },
+  // 补全分支无条件覆盖：源改作者名会静默改写历史条目（验收 10 的「不覆盖」段翻红）。
+  // 不能只拆外层的快照判据 —— 回调里还有一道 current 判空；两处一起拆才是「无条件覆盖」。
+  { id: 'refresh-补全覆盖作者', file: 'lib/refresh.js',
+    judges: ['refresh.test.mjs'],
+    judgeTests: [
+      '作者补全：已有条目无作者、下一轮抓到作者 ⇒ 补上；第三轮换作者不覆盖',
+      '作者补全与正文回填合并成一次 updateItem，两个条件都不成立时不空写'],
+    from: "                const authorMissing = existing !== undefined && existing.author === undefined && parsedAuthor !== undefined;\n                if (summaryGrows || authorMissing) {\n                    // ⚠️ 合并进**当前**记录，不要用循环开头那份 existing 快照整体写回：抓取是长任务，\n                    // 期间用户完全可能把它标已读/加星，用旧快照写回会把这些用户数据一起抹掉。\n                    // （2026-10-10 与 article 端点同一个丢失更新类别，判据在 tests/refresh.test.mjs）\n                    //\n                    // author 在回调里还要按 current 再判一次空：快照说「没有」不等于写入那一刻还没有。\n                    // 只补空、不覆盖 —— 源改作者名不该静默改写历史条目（决策 9）。\n                    await store.updateItem(itemId, (current) => {\n                        const next = summaryGrows ? { ...current, summary } : current;\n                        return authorMissing && next.author === undefined ? { ...next, author: parsedAuthor } : next;\n                    });",
+    to: "                const authorMissing = existing !== undefined && parsedAuthor !== undefined;\n                if (summaryGrows || authorMissing) {\n                    // ⚠️ 合并进**当前**记录，不要用循环开头那份 existing 快照整体写回：抓取是长任务，\n                    // 期间用户完全可能把它标已读/加星，用旧快照写回会把这些用户数据一起抹掉。\n                    // （2026-10-10 与 article 端点同一个丢失更新类别，判据在 tests/refresh.test.mjs）\n                    //\n                    // author 在回调里还要按 current 再判一次空：快照说「没有」不等于写入那一刻还没有。\n                    // 只补空、不覆盖 —— 源改作者名不该静默改写历史条目（决策 9）。\n                    await store.updateItem(itemId, (current) => {\n                        const next = summaryGrows ? { ...current, summary } : current;\n                        return authorMissing ? { ...next, author: parsedAuthor } : next;\n                    });" },
+  // 合并丢作者：keeper 没有作者时 loser 的值不会搬到幸存者（决策 12 初稿漏掉的路径）。
+  { id: 'identity-合并丢作者', file: 'lib/identity-repair.js',
+    judges: ['identity.test.mjs'],
+    judgeTests: [
+      '身份修复：同源同链接的重复被合并，用户状态与正文一律保住',
+      '身份修复：合并保留作者，keeper 有则不被 loser 覆盖'],
+    from: '            author: keep.author ?? extra.author,\n',
+    to: '' },
+  // 合并覆盖作者：keeper 有作者时被 loser 顶掉（?? extra 语义反了）。
+  { id: 'identity-合并覆盖作者', file: 'lib/identity-repair.js',
+    judges: ['identity.test.mjs'],
+    judgeTests: ['身份修复：合并保留作者，keeper 有则不被 loser 覆盖'],
+    from: '            author: keep.author ?? extra.author,',
+    to: '            author: extra.author,' },
 ]

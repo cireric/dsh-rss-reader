@@ -7,6 +7,7 @@
  *   ③ 去重窗口（maxSeenPerFeed）与条目保留量（maxItemsPerFeed）是两件事，
  *      前者必须远大于后者，否则老条目会借「滚出去重窗口」重新变成未读。
  */
+import { normalizeAuthor } from './author.js'
 import { mapConcurrent } from './concurrency.js'
 import { recencyOf } from './cursor.js'
 import { rebuildItem, type FeedRecord } from './domain.js'
@@ -356,16 +357,28 @@ async function refreshOne(
     for (const [index, item] of parsed.items.entries()) {
       const itemId = resolved.ids[index]
       const summary = truncateContent(item.summary, options.maxContentChars)
+      const parsedAuthor = normalizeAuthor(item.author)
       const existing = store.item(itemId)
 
       if (existing !== undefined || seenSet.has(itemId)) {
-        // 已见过：只补「更完整的正文」，绝不碰 readAt / starred（已读与星标是用户数据）。
+        // 已见过：只补「更完整的正文」与「从无到有的作者」，绝不碰 readAt / starred（已读与星标是用户数据）。
         // 这条同时承担回填：解析优先级修好后，老条目在下一次抓取里就能拿到全文。
-        if (existing !== undefined && (summary?.length ?? 0) > (existing.summary?.length ?? 0)) {
+        //
+        // 要不要写的判据用循环开头那份 existing 快照（决策 9）：summary 变长、或作者从无到有。
+        // 两个条件都不成立就**不调用** updateItem —— 空写会在每轮刷新里无谓地压写链。
+        const summaryGrows = existing !== undefined && (summary?.length ?? 0) > (existing.summary?.length ?? 0)
+        const authorMissing = existing !== undefined && existing.author === undefined && parsedAuthor !== undefined
+        if (summaryGrows || authorMissing) {
           // ⚠️ 合并进**当前**记录，不要用循环开头那份 existing 快照整体写回：抓取是长任务，
           // 期间用户完全可能把它标已读/加星，用旧快照写回会把这些用户数据一起抹掉。
           // （2026-10-10 与 article 端点同一个丢失更新类别，判据在 tests/refresh.test.mjs）
-          await store.updateItem(itemId, (current) => ({ ...current, summary }))
+          //
+          // author 在回调里还要按 current 再判一次空：快照说「没有」不等于写入那一刻还没有。
+          // 只补空、不覆盖 —— 源改作者名不该静默改写历史条目（决策 9）。
+          await store.updateItem(itemId, (current) => {
+            const next = summaryGrows ? { ...current, summary } : current
+            return authorMissing && next.author === undefined ? { ...next, author: parsedAuthor } : next
+          })
         }
         continue
       }
@@ -378,6 +391,8 @@ async function refreshOne(
         link: item.link,
         publishedAt: item.publishedAt,
         summary,
+        // 作者的归一化只有 src/author.ts 一处口径（决策 3）：空白值不得落库成「有作者」。
+        author: parsedAuthor,
         fetchedAt: stamp,
         starred: false,
       })
