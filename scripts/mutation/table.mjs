@@ -2888,4 +2888,18 @@ export const MUTATIONS = [
     judgeTests: ['身份修复：合并保留作者，keeper 有则不被 loser 覆盖'],
     from: '            author: keep.author ?? extra.author,',
     to: '            author: extra.author,' },
+
+  // ── R12 票据 04：列表行与正文 header 显示作者（2026-11-22）────────────────
+  // 无作者时写占位：缺省/空串被替换成「未知作者」，列表行凭空多出一个作者段（验收 12 的文案断言翻红）。
+  { id: 'client-无作者时显示占位', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['R12 04 列表行：跨源视图有作者三段、无作者两段，且无伪造文案与空段'],
+    from: 'const author = item.author === void 0 || item.author === "" ? void 0 : item.author;',
+    to: 'const author = item.author === void 0 || item.author === "" ? "未知作者" : item.author;' },
+  // 单源视图丢作者：作者段只在 selectedFeed === undefined 分支渲染 ⇒ 点到某个源后作者整段消失（验收 12 的单源视图段翻红）。
+  { id: 'client-单源视图丢作者', file: 'lib/client.js',
+    judges: ['scroll-dom.test.mjs'],
+    judgeTests: ['R12 04 列表行：单源视图有作者两段、无作者只有时间，且无伪造文案与空段'],
+    from: 'author !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {',
+    to: 'selectedFeed === void 0 && author !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {' },
 ]

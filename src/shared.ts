@@ -144,6 +144,8 @@ export interface ItemView {
   feedId: string
   feedTitle: string
   title: string
+  /** feed 供给的原始署名；缺省 = 无作者。界面不显示占位，也不做任何推断（R12）。 */
+  author?: string
   link: string
   publishedAt?: string
   fetchedAt: string

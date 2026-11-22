@@ -417,6 +417,7 @@ const buildOverview = (
     feedId: item.feedId,
     feedTitle: feedTitleOf(item.feedId),
     title: item.title,
+    author: item.author,
     link: item.link,
     publishedAt: item.publishedAt,
     fetchedAt: item.fetchedAt,
