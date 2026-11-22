@@ -1,9 +1,9 @@
 /**
- * 设置页（R11 01 骨架 / 02 第一个可写参数 / 06 Agent 说明与关于区）。
+ * 设置页（R11 01 骨架 / 02 第一个可写参数 / 03 其余三个参数 / 06 Agent 说明与关于区）。
  *
- * 五个分区按 spec D13 的顺序全部占位；①「抓取与清理」的第一行是**可写**的数值输入框
- * （`refreshFeedsPerRound`），其余三行、显示开关在 03–05 票填入；06 票填 ④ Agent 说明与
- * ⑤ 关于（版本 / 路径 / 12 个只读参数）。这里刻意不预埋假控件。
+ * 五个分区按 spec D13 的顺序全部占位；①「抓取与清理」的四行都是**可写**的数值输入框
+ * （03 票补齐并发 / 自动刷新间隔 / 清理天数；显示开关在 04–05 票填入）；06 票填
+ * ④ Agent 说明与 ⑤ 关于（版本 / 路径 / 12 个只读参数）。这里刻意不预埋假控件。
  *
  * 为什么容器自己 `tabIndex={0}` 并在挂载时聚焦：设置页要承接**浏览器原生**的空格 / d 翻页
  * （spec D22 明确要求这些键不被 preventDefault）。原生滚动的前提是焦点在可滚容器上；
@@ -13,6 +13,11 @@
  * （`settings-schema.ts`），非法值零请求、就地红字；成功后输入框旁「已保存 ✓」约 1.4 秒。
  * 输入框的值是组件本地草稿（draft），只在用户没有未提交输入时跟随宿主回包 —— 保存成功后的
  * 重新渲染不许冲掉另一个框里正在打的字。
+ *
+ * 两种单位（D11）：整理数的键（源数 / 并发 / 天数）沿用整数解析；`minRefreshIntervalMs`
+ * 在界面上以**分钟**编辑，所以行有 `mode: 'minutes'`。分钟只是显示单位，真正的权威值仍是
+ * 毫秒：展示取 `String(ms / 60000)`（最短精确表示，不四舍五入、不补零），保存取
+ * `Math.round(分钟 × 60000)`；范围仍由 `parseTunableValue` 按**毫秒**判定，客户端不另写一套。
  */
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { AGENT_APPROVAL_NOTE, AGENT_HELP } from '../agent-help.js'
@@ -22,6 +27,15 @@ import type { SaveSettingResult } from './settings-actions.js'
 
 /** 成功反馈的停留时间：短到不挡视线，长到能看见（spec D14.2 定稿「约 1.4 秒」）。 */
 const SAVED_FEEDBACK_MS = 1400
+
+/** 一分钟的毫秒数。毫秒是 `minRefreshIntervalMs` 的唯一真单位，分钟只是输入框的显示单位。 */
+const MINUTE_MS = 60_000
+
+/**
+ * 一行的解析模式：`integer` = 输入即目标值；`minutes` = 输入是分钟，转成毫秒再校验。
+ * 不复制第二个行组件 —— 两种模式只差「怎么读草稿 / 怎么显示权威值」两处。
+ */
+type RowMode = 'integer' | 'minutes'
 
 export interface SettingsViewProps {
   /** 最近一次成功取到的快照；undefined = 还在取 / 取失败。 */
@@ -55,8 +69,40 @@ interface NumberSettingRowProps {
   readonly help: string
   /** 更细的语义放 title，不铺在页面上（D14.2）。 */
   readonly hint: string
+  readonly mode?: RowMode
   readonly value: number | undefined
   readonly onSave: SettingsViewProps['onSave']
+}
+
+/** 权威值 → 输入框展示文本。分钟模式不做四舍五入：1.50205 就是 1.50205（D11）。 */
+function displayOf(mode: RowMode, value: number): string {
+  return mode === 'minutes' ? String(value / MINUTE_MS) : String(value)
+}
+
+/**
+ * 草稿文本 → 要提交的值（`undefined` = 不合法）。
+ *
+ * 分钟模式先按分钟解析、按 D11 取整成毫秒，再用**宿主同一份** `parseTunableValue`
+ * 复核范围。这样 1440.1 分钟会被毫秒上限挡下，且错误文案仍能说「分钟」。
+ */
+function parseDraft(mode: RowMode, key: TunableKey, text: string): number | undefined {
+  if (mode === 'minutes') {
+    // 只认十进制小数：'1e2' / '0x10' 会被 Number() 收下，但用户输入的不是他看到的那个数。
+    if (!/^-?\d+(\.\d+)?$/.test(text)) return undefined
+    return parseTunableValue(key, Math.round(Number(text) * MINUTE_MS))
+  }
+  // 整数模式只认十进制整数：小数（1.5）不是「四舍五入后合法」，而是非法输入。
+  if (!/^-?\d+$/.test(text)) return undefined
+  return parseTunableValue(key, Number(text))
+}
+
+/** 就地红字的范围文案：数值从 `TUNABLE_RANGES` 现取，不在 UI 里再抄一份 min/max。 */
+function rangeErrorText(mode: RowMode, key: TunableKey): string {
+  const range = TUNABLE_RANGES[key]
+  if (mode === 'minutes') {
+    return '请输入 ' + range.min / MINUTE_MS + '–' + range.max / MINUTE_MS + ' 的分钟数（可带小数）'
+  }
+  return '请输入 ' + range.min + '–' + range.max + ' 的整数'
 }
 
 /**
@@ -66,10 +112,10 @@ interface NumberSettingRowProps {
  * 提交逻辑只有 `commit` 一份，两条路径不会漂移。
  */
 function NumberSettingRow(props: NumberSettingRowProps): ReactNode {
-  const { settingKey, label, unit, help, hint, value, onSave } = props
+  const { settingKey, label, unit, help, hint, mode = 'integer', value, onSave } = props
   const inputId = useId()
   const helpId = useId()
-  const effectiveText = value === undefined ? '' : String(value)
+  const effectiveText = value === undefined ? '' : displayOf(mode, value)
   const [draft, setDraft] = useState(effectiveText)
   const [error, setError] = useState<string | undefined>(undefined)
   const [saved, setSaved] = useState(false)
@@ -89,18 +135,19 @@ function NumberSettingRow(props: NumberSettingRowProps): ReactNode {
   const commit = async (): Promise<void> => {
     // 快照还没到（仍在取 / 取失败）：没有「当前生效值」可对照，不提交。
     if (value === undefined) return
-    const text = draft.trim()
-    // 只认十进制整数：'1e3' / '0x10' 会被 Number() 收下，但用户输入的不是他看到的那个数。
-    const parsed = /^-?\d+$/.test(text) ? Number(text) : undefined
-    const next = parsed === undefined ? undefined : parseTunableValue(settingKey, parsed)
+    // 用户没编辑过这一项（只是聚焦又失焦）：直接跳过，不发请求、不写覆盖。
+    // 用「是否被编辑」而不是「文本是否等于生效值」作主判据，聚焦本身永远不会变成一次写盘。
+    if (!dirty.current) return
+    const next = parseDraft(mode, settingKey, draft.trim())
     if (next === undefined) {
-      const range = TUNABLE_RANGES[settingKey]
-      setError('请输入 ' + range.min + '–' + range.max + ' 的整数')
+      setError(rangeErrorText(mode, settingKey))
       setSaved(false)
       return
     }
-    // 没改过就不发请求：点进输入框再点走不该凭空写一条覆盖（稀疏覆盖的前提）。
-    if (next === value && text === effectiveText) {
+    // 编辑过但数值没变（如 10 → 10.0）：同样不写盘，并把输入框归位成权威值的展示形式。
+    if (next === value) {
+      dirty.current = false
+      setDraft(effectiveText)
       setError(undefined)
       return
     }
@@ -123,7 +170,7 @@ function NumberSettingRow(props: NumberSettingRowProps): ReactNode {
     <div className="dsh-rss-settings-row" data-rss-setting={settingKey}>
       <label className="dsh-rss-settings-label" htmlFor={inputId}>{label}</label>
       <input id={inputId} className="dsh-rss-settings-input" data-rss-setting-input={settingKey}
-        type="text" inputMode="numeric" autoComplete="off" spellCheck={false}
+        type="text" inputMode={mode === 'minutes' ? 'decimal' : 'numeric'} autoComplete="off" spellCheck={false}
         title={hint} aria-describedby={helpId} aria-invalid={error !== undefined}
         value={draft} disabled={value === undefined}
         onChange={(event) => {
@@ -141,6 +188,10 @@ function NumberSettingRow(props: NumberSettingRowProps): ReactNode {
       <span className="dsh-rss-settings-unit">{unit}</span>
       {saved && (
         <span className="dsh-rss-settings-saved" data-rss-setting-saved={settingKey} role="status">已保存 ✓</span>
+      )}
+      {/* D11 / D14.2：只有非整分钟才显示真实毫秒；600000 这种整分钟不显示「= 600000 ms」的噪音。 */}
+      {mode === 'minutes' && value !== undefined && value % MINUTE_MS !== 0 && (
+        <p className="dsh-rss-settings-hint" data-rss-setting-ms-hint={settingKey}>{'= ' + value + ' ms'}</p>
       )}
       <p className="dsh-rss-settings-help" id={helpId}>{help}</p>
       {error !== undefined && (
@@ -192,15 +243,45 @@ export function SettingsView(props: SettingsViewProps): ReactNode {
           data-rss-settings-section={section.key}>
           <h3 className="dsh-rss-settings-section-title">{section.title}</h3>
           {section.key === 'fetch' && (
-            <NumberSettingRow
-              settingKey="refreshFeedsPerRound"
-              label="每次刷新抓取源数"
-              unit="源"
-              help="0 = 抓全部源（源多时一轮会很慢）"
-              hint="一轮只抓一批，不是全部源"
-              value={settings?.effective.refreshFeedsPerRound}
-              onSave={onSave}
-            />
+            <>
+              <NumberSettingRow
+                settingKey="refreshFeedsPerRound"
+                label="每次刷新抓取源数"
+                unit="源"
+                help="0 = 抓全部源（源多时一轮会很慢）"
+                hint="一轮只抓一批，不是全部源"
+                value={settings?.effective.refreshFeedsPerRound}
+                onSave={onSave}
+              />
+              <NumberSettingRow
+                settingKey="refreshConcurrency"
+                label="抓取并发"
+                unit="个"
+                help="一轮里同时抓几个源"
+                hint="同时进行的抓取请求数；调大更快，也更占带宽与内存"
+                value={settings?.effective.refreshConcurrency}
+                onSave={onSave}
+              />
+              <NumberSettingRow
+                settingKey="minRefreshIntervalMs"
+                mode="minutes"
+                label="自动刷新间隔"
+                unit="分钟"
+                help="0 = 不节流（手点刷新不受它限制）"
+                hint="两次自动刷新之间的最短间隔；以分钟编辑，保存时按毫秒取整"
+                value={settings?.effective.minRefreshIntervalMs}
+                onSave={onSave}
+              />
+              <NumberSettingRow
+                settingKey="cleanupAfterDays"
+                label="清理天数"
+                unit="天"
+                help="只清理早于这个天数的已读条目（未星标、未保持未读）"
+                hint="清理判据：已读、未星标、未保持未读，且发布时间早于该天数；0 会清光已读条目，所以非法"
+                value={settings?.effective.cleanupAfterDays}
+                onSave={onSave}
+              />
+            </>
           )}
           {section.key === 'agent' && (
             // 文案逐字来自 AGENT_HELP（D24 单一来源）；这里只负责排版，不改写、不补签名。

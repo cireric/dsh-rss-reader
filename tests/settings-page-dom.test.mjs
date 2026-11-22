@@ -467,3 +467,197 @@ test('R11 02 保存串行化：第二次保存等第一次回包，且只接受�
   assert.equal(results[1].ok, true)
   assert.equal(h.store.get().settings.effective.refreshFeedsPerRound, 9, '最新一次回包才是权威')
 })
+
+// ── R11 03：其余三个参数（spec §4.1 / D9–D11 / D14.2，验收 A1–A2、A6–A7、C14、C16）─────
+//
+// 这一组钉三件事：①三行都必须是「名称 + 一句帮助 + 输入框 + 单位」；
+// ②毫秒 ↔ 分钟不做假换算 —— 展示值是 `String(ms / 60000)`，只有非整分钟才显示真实毫秒；
+// ③三个键的本地校验与 02 同一条路（零请求、红字、输入保留），范围来自 settings-schema。
+
+/** 取一个设置行（顺带断言存在，缺行时给出可读的失败原因）。 */
+function rowOf(h, key) {
+  const row = h.$('[data-rss-setting="' + key + '"]')
+  assert.ok(row !== null, '设置页必须有 ' + key + ' 这一行')
+  return row
+}
+
+/** 打开设置页并断言三行的标签 / 单位 / 输入框初值。 */
+async function openWith(effective) {
+  const settings = {
+    effective: { ...TUNABLE_DEFAULTS, ...effective },
+    defaults: { ...TUNABLE_DEFAULTS },
+  }
+  const h = await mount({ settings })
+  await openSettings(h)
+  return h
+}
+
+test('R11 03 三行结构：名称 + 一句帮助 + 输入框 + 单位，行内没有按钮与链接', async () => {
+  const h = await openWith({ refreshConcurrency: 12, cleanupAfterDays: 400 })
+  try {
+    const expected = [
+      { key: 'refreshConcurrency', label: '抓取并发', unit: '个', value: '12' },
+      { key: 'minRefreshIntervalMs', label: '自动刷新间隔', unit: '分钟', value: '10' },
+      { key: 'cleanupAfterDays', label: '清理天数', unit: '天', value: '400' },
+    ]
+    for (const entry of expected) {
+      const row = rowOf(h, entry.key)
+      assert.equal(row.querySelector('.dsh-rss-settings-label')?.textContent, entry.label,
+        entry.key + ' 的名称')
+      assert.equal(row.querySelector('.dsh-rss-settings-input')?.value, entry.value,
+        entry.key + ' 的输入框初值必须是宿主下发的生效值')
+      assert.equal(row.querySelector('.dsh-rss-settings-unit')?.textContent, entry.unit,
+        entry.key + ' 的单位')
+      const helps = [...row.querySelectorAll('.dsh-rss-settings-help')]
+      assert.equal(helps.length, 1, entry.key + ' 行内只保留一句帮助（D14.2）')
+      assert.ok((helps[0].textContent ?? '').length > 0, entry.key + ' 的帮助不能为空')
+      assert.ok((row.querySelector('.dsh-rss-settings-input')?.getAttribute('title') ?? '').length > 0,
+        entry.key + ' 的详细语义必须放在 input 的 title 里')
+      assert.equal(row.querySelector('button'), null, entry.key + ' 行内不该有按钮（04 票才有清理按钮）')
+      assert.equal(row.querySelector('a'), null, entry.key + ' 行内不该有链接')
+      assert.doesNotMatch(row.textContent ?? '', /本页覆盖|插件配置|默认值|清除本页设置/,
+        entry.key + ' 行内不许出现来源标签（D16）')
+    }
+    // 票据指定文案（逐字）。
+    assert.equal(h.$('[data-rss-setting="refreshFeedsPerRound"] .dsh-rss-settings-help')?.textContent,
+      '0 = 抓全部源（源多时一轮会很慢）', '第一行的帮助文案是验收项')
+    assert.match(h.$('[data-rss-setting="cleanupAfterDays"]')?.textContent ?? '',
+      /只清理早于这个天数的已读条目（未星标、未保持未读）/, '清理天数的帮助文案是验收项')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R11 03 分钟展示：String(ms/60000) 最短精确表示，只有非整分钟才显示真实毫秒', async () => {
+  // 600000 = 10 分钟整：显示 "10"，不显示「= 600000 ms」的噪音。
+  const whole = await openWith({ minRefreshIntervalMs: 600000 })
+  assert.equal(whole.$('[data-rss-setting-input="minRefreshIntervalMs"]')?.value, '10')
+  assert.equal(whole.$('[data-rss-setting-ms-hint="minRefreshIntervalMs"]'), null,
+    '整分钟不许显示毫秒提示')
+  whole.cleanup()
+
+  // 90000 = 1.5 分钟：显示 "1.5"，并在输入框下给出真实毫秒。
+  const half = await openWith({ minRefreshIntervalMs: 90000 })
+  assert.equal(half.$('[data-rss-setting-input="minRefreshIntervalMs"]')?.value, '1.5')
+  assert.equal(half.$('[data-rss-setting-ms-hint="minRefreshIntervalMs"]')?.textContent, '= 90000 ms',
+    '非整分钟必须显示真实毫秒')
+  half.cleanup()
+
+  // 90123 ms：不四舍五入、不补齐（String(90123/60000) 的最短精确表示），毫秒提示用原值。
+  const odd = await openWith({ minRefreshIntervalMs: 90123 })
+  assert.equal(odd.$('[data-rss-setting-input="minRefreshIntervalMs"]')?.value, '1.50205')
+  assert.equal(odd.$('[data-rss-setting-ms-hint="minRefreshIntervalMs"]')?.textContent, '= 90123 ms')
+  odd.cleanup()
+})
+
+test('R11 03 分钟保存：Math.round(分钟 × 60000)，0 = 不节流，且 10 分钟不会被存成别的数', async () => {
+  const h = await openWith({ minRefreshIntervalMs: 600000 })
+  try {
+    const input = h.$('[data-rss-setting-input="minRefreshIntervalMs"]')
+    input.focus()
+    setControlValue(h.win, input, '1.5')
+    input.blur()
+    await waitForSaved(h, 'minRefreshIntervalMs')
+    assert.deepEqual(h.requests.filter((entry) => entry.endpoint === 'saveSettings').map((entry) => entry.payload),
+      [{ patch: { minRefreshIntervalMs: 90000 } }], '1.5 分钟必须保存成 90000 ms')
+
+    input.focus()
+    setControlValue(h.win, input, '0')
+    input.blur()
+    await h.waitFor(() => h.store.get().settings?.effective.minRefreshIntervalMs === 0,
+      { label: '0 分钟保存为 0 ms' })
+    assert.deepEqual(h.requests.filter((entry) => entry.endpoint === 'saveSettings').map((entry) => entry.payload),
+      [{ patch: { minRefreshIntervalMs: 90000 } }, { patch: { minRefreshIntervalMs: 0 } }],
+      '0 = 不节流，必须原样存 0')
+    assert.equal(h.$('[data-rss-setting-ms-hint="minRefreshIntervalMs"]'), null,
+      '0 是整分钟，不该出现毫秒提示')
+
+    // 上限 1440 分钟 = 86400000 ms：分钟换算在边界上也要精确。
+    input.focus()
+    setControlValue(h.win, input, '1440')
+    input.blur()
+    await h.waitFor(() => h.store.get().settings?.effective.minRefreshIntervalMs === 86400000,
+      { label: '1440 分钟保存为 86400000 ms' })
+    assert.deepEqual(h.requests.filter((entry) => entry.endpoint === 'saveSettings').map((entry) => entry.payload).at(-1),
+      { patch: { minRefreshIntervalMs: 86400000 } }, '1440 分钟必须保存成 86400000 ms')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R11 03 未编辑不重写：聚焦又失焦不发请求，改写成等价写法（10 → 10.0）也不写盘', async () => {
+  const h = await openWith({})
+  try {
+    for (const key of ['refreshFeedsPerRound', 'refreshConcurrency', 'minRefreshIntervalMs', 'cleanupAfterDays']) {
+      const input = h.$('[data-rss-setting-input="' + key + '"]')
+      input.focus()
+      input.blur()
+    }
+    const minutes = h.$('[data-rss-setting-input="minRefreshIntervalMs"]')
+    minutes.focus()
+    setControlValue(h.win, minutes, '10.0')
+    minutes.blur()
+    await h.settle()
+    assert.equal(h.requests.filter((entry) => entry.endpoint === 'saveSettings').length, 0,
+      '没有真正改变数值时不许凭空写一条覆盖（稀疏覆盖的前提）')
+    assert.equal(h.store.get().settings.effective.minRefreshIntervalMs, 600000)
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R11 03 并发与清理天数保存：各发一次只带该键的 patch', async () => {
+  const h = await openWith({})
+  try {
+    const concurrency = h.$('[data-rss-setting-input="refreshConcurrency"]')
+    concurrency.focus()
+    setControlValue(h.win, concurrency, '12')
+    concurrency.blur()
+    await waitForSaved(h, 'refreshConcurrency')
+
+    const days = h.$('[data-rss-setting-input="cleanupAfterDays"]')
+    days.focus()
+    setControlValue(h.win, days, '400')
+    days.blur()
+    await waitForSaved(h, 'cleanupAfterDays')
+
+    assert.deepEqual(h.requests.filter((entry) => entry.endpoint === 'saveSettings').map((entry) => entry.payload),
+      [{ patch: { refreshConcurrency: 12 } }, { patch: { cleanupAfterDays: 400 } }],
+      '每次提交只带被改的那一个键（与 02 同一条串行保存路径）')
+    assert.equal(h.store.get().settings.effective.refreshConcurrency, 12)
+    assert.equal(h.store.get().settings.effective.cleanupAfterDays, 400)
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R11 03 三行非法值：就地红字 + 零请求 + 输入保留（范围读 settings-schema）', async () => {
+  const h = await openWith({})
+  try {
+    const cases = [
+      { key: 'refreshConcurrency', bad: ['0', '33', '1.5'], pattern: /1–32 的整数/ },
+      { key: 'minRefreshIntervalMs', bad: ['-1', '1440.1', 'abc'], pattern: /0–1440 的分钟数/ },
+      { key: 'cleanupAfterDays', bad: ['0', '-1', '3651', '1.5'], pattern: /1–3650 的整数/ },
+    ]
+    for (const entry of cases) {
+      const input = h.$('[data-rss-setting-input="' + entry.key + '"]')
+      for (const bad of entry.bad) {
+        input.focus()
+        setControlValue(h.win, input, bad)
+        input.blur()
+        await h.waitFor(() => h.$('[data-rss-setting-error="' + entry.key + '"]') !== null,
+          { label: entry.key + ' 对 ' + bad + ' 的就地红字' })
+        assert.match(h.$('[data-rss-setting-error="' + entry.key + '"]').textContent, entry.pattern,
+          entry.key + ' 的错误文案要按该键自己的单位说清范围')
+        assert.equal(h.requests.filter((request) => request.endpoint === 'saveSettings').length, 0,
+          '非法值必须零请求：' + entry.key + '=' + bad)
+        assert.equal(input.value, bad, '非法输入必须保留，不许悄悄改值：' + bad)
+      }
+    }
+    assert.equal(h.store.get().settings.effective.refreshConcurrency, 5, '本地校验失败不许改权威值')
+    assert.equal(h.store.get().settings.effective.minRefreshIntervalMs, 600000)
+    assert.equal(h.store.get().settings.effective.cleanupAfterDays, 30)
+  } finally {
+    h.cleanup()
+  }
+})

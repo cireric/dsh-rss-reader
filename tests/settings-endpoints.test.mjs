@@ -32,6 +32,7 @@ function harness(options = {}) {
   const logs = []
   // 记录每次 refreshNow 开跑时读到的「每轮源数」：保存是否真的对**下一次刷新**生效，靠它证明。
   const refreshReads = []
+  const concurrencyReads = []
   const config = Config(options.patch ?? {})
   const settings = createSettingsControl({ config, settingsPath, log: (line) => logs.push(line) })
   const store = createMemoryStore()
@@ -41,6 +42,7 @@ function harness(options = {}) {
     ready: () => store,
     refreshNow: async () => {
       refreshReads.push(config.refreshFeedsPerRound)
+      concurrencyReads.push(config.refreshConcurrency)
       return { outcome: 'not-ready', attempted: 0, total: 0 }
     },
     lastRefreshCompletedAt: () => undefined,
@@ -48,7 +50,7 @@ function harness(options = {}) {
     settings,
   })
   return {
-    config, settings, dispatch, dir, settingsPath, logs, refreshReads,
+    config, settings, dispatch, dir, settingsPath, logs, refreshReads, concurrencyReads,
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
   }
 }
@@ -266,6 +268,83 @@ test('saveSettings 入参二选一：resetToDefaults 本票明确回「未实现
     assert.equal(result.error.code, 'not-implemented')
     assert.match(result.error.message, /恢复默认/)
     assert.equal(fileText(h), undefined, '未实现的分支不许写盘')
+  } finally {
+    h.cleanup()
+  }
+})
+
+// ── R11 03：其余三个参数（spec §4.1 / D9，验收 A1–A3、A6）───────────────────────────
+//
+// 三个键与 02 的 refreshFeedsPerRound 走同一条保存路径，不需要第二套端点逻辑；
+// 这一组证明「都能写 / 都稀疏 / 重启都在」，以及边界值一个都不许落盘。
+
+test('saveSettings 其余三项：并发 / 自动刷新间隔 / 清理天数都能写、稀疏、重启保持', async () => {
+  const h = harness({ patch: { cleanupAfterDays: 45 } })
+  try {
+    const concurrency = await h.dispatch('saveSettings', { patch: { refreshConcurrency: 12 } })
+    assert.equal(concurrency.ok, true, '并发 12 是合法值')
+    assert.equal(concurrency.value.settings.effective.refreshConcurrency, 12, '回包里的生效值必须是 12')
+    assert.equal(h.config.refreshConcurrency, 12, '写盘成功后必须改同一个 config 对象（下一轮刷新读它）')
+    await h.dispatch('refresh', {})
+    assert.deepEqual(h.concurrencyReads, [12], '下一轮 refreshNow 开跑时读到的并发必须是新值')
+
+    // 自动刷新间隔的权威值始终是毫秒：客户端把「1.5 分钟」换算成 90000 再提交，端点只验毫秒范围。
+    const interval = await h.dispatch('saveSettings', { patch: { minRefreshIntervalMs: 90000 } })
+    assert.equal(interval.ok, true, '90000 ms（1.5 分钟）是合法值')
+    assert.equal(interval.value.settings.effective.minRefreshIntervalMs, 90000)
+    assert.equal(h.config.minRefreshIntervalMs, 90000)
+
+    const cleanup = await h.dispatch('saveSettings', { patch: { cleanupAfterDays: 400 } })
+    assert.equal(cleanup.ok, true, '清理天数 400 是合法值')
+    assert.equal(cleanup.value.settings.effective.cleanupAfterDays, 400)
+    assert.equal(h.config.cleanupAfterDays, 400)
+
+    assert.deepEqual(JSON.parse(fileText(h)), {
+      version: 1,
+      overrides: { refreshConcurrency: 12, minRefreshIntervalMs: 90000, cleanupAfterDays: 400 },
+    }, '三次保存只写被点名的三个键（稀疏覆盖），patch 基线不落盘')
+
+    // 模拟重启：同一份 $DSH_HOME、全新的 Config 与控制器（apply 的创建顺序）。
+    const restartedConfig = Config({ cleanupAfterDays: 45 })
+    const restarted = createSettingsControl({
+      config: restartedConfig,
+      settingsPath: h.settingsPath,
+      log: () => {},
+    })
+    assert.equal(restarted.snapshot().effective.refreshConcurrency, 12, '重启后并发仍是 12')
+    assert.equal(restarted.snapshot().effective.minRefreshIntervalMs, 90000, '重启后间隔仍是 90000 ms')
+    assert.equal(restarted.snapshot().effective.cleanupAfterDays, 400, '重启后清理天数仍是 400（覆盖赢过 patch）')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('saveSettings 其余三项的非法边界：0 / 负数 / 超上限 / 小数都回 bad-request，文件与内存都不变', async () => {
+  const h = harness({
+    patch: { refreshConcurrency: 6, minRefreshIntervalMs: 600000, cleanupAfterDays: 45 },
+    file: JSON.stringify({ version: 1, overrides: { refreshFeedsPerRound: 7 } }),
+  })
+  const beforeFile = fileText(h)
+  const beforeEffective = h.settings.snapshot().effective
+  try {
+    const cases = [
+      // 并发：没有「零并发」这种调度；1–32，且必须是整数。
+      ['refreshConcurrency', [0, 33, 1.5]],
+      // 毫秒：0 合法（不节流），但负数与超过一天（86400000）都不行；毫秒也必须是整数。
+      ['minRefreshIntervalMs', [-1, 86_400_001, 60_000.5]],
+      // 清理天数：0 会清光已读条目（数据事故），负数与超上限 3650 天同样非法。
+      ['cleanupAfterDays', [0, -1, 3651, 1.5]],
+    ]
+    for (const [key, values] of cases) {
+      for (const bad of values) {
+        const result = await h.dispatch('saveSettings', { patch: { [key]: bad } })
+        assert.equal(result.ok, false, key + '=' + bad + ' 必须被拒')
+        assert.equal(result.error.code, 'bad-request', key + '=' + bad + ' 走统一坏入参信封')
+        assert.equal(fileText(h), beforeFile, '被拒的保存不许动设置文件：' + key + '=' + bad)
+        assert.equal(h.config[key], beforeEffective[key], '被拒的保存不许改内存：' + key + '=' + bad)
+      }
+    }
+    assert.deepEqual(h.settings.snapshot().effective, beforeEffective, '端点快照也必须保持旧值')
   } finally {
     h.cleanup()
   }

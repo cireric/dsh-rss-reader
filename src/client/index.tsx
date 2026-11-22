@@ -154,6 +154,9 @@ const STYLE = `
 .dsh-rss-settings-input:disabled { opacity:.55; }
 .dsh-rss-settings-saved { font-size:12px; color:var(--rss-accent); }
 .dsh-rss-settings-error { flex-basis:100%; margin:0; font-size:12px; color:var(--rss-error); line-height:1.45; }
+/* R11 03：非整分钟的「= 90123 ms」只在这个前提下出现（整分钟不显示，D14.2）。 */
+.dsh-rss-settings-hint { flex-basis:100%; margin:0; font-size:12px; color:var(--rss-muted);
+  font-variant-numeric:tabular-nums; }
 @media (max-width: 460px) {
   .dsh-rss-settings-row { flex-direction:column; align-items:flex-start; }
 }
