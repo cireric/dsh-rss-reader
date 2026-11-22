@@ -150,6 +150,9 @@ const STYLE = `
 @media (max-width: 460px) {
   .dsh-rss-settings-row { flex-direction:column; align-items:flex-start; }
 }
+/* R11 06 关于区：绝对路径很长，窄面板里必须能断行，否则会横向溢出（只作用于本票新增节点）。 */
+.dsh-rss-about-value { overflow-wrap:anywhere; }
+.dsh-rss-about-summary { cursor:pointer; font-size:13px; margin-top:6px; }
 .dsh-rss-row { border-bottom:1px solid var(--rss-line); }
 .dsh-rss-row:hover, [data-rss-nav-row]:hover { background:var(--rss-hover); }
 .dsh-rss-row[data-rss-selected], [data-rss-nav-selected] { background:var(--rss-selected); }
