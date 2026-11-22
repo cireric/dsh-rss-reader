@@ -7,7 +7,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { readSettingsFile, writeSettingsFile } from '../lib/storage/settings-file.js'
@@ -62,6 +62,20 @@ test('坏 JSON 与认不出的版本：整份隔离为 .corrupt-<时间戳>，�
       assert.ok(result.quarantinedTo?.endsWith(quarantined[0]), '回执要告诉调用方隔离到哪儿了')
       rmSync(join(dir, quarantined[0]))
     }
+  })
+})
+
+test('读失败（EISDIR）是 I/O 错误，不是坏文件：返回 unreadable 且不做隔离改名', async () => {
+  await withDir((dir) => {
+    const path = join(dir, 'settings.json')
+    // 用「同名目录」稳定造一个 EISDIR：不需要伪造权限，跨平台/跨用户都成立。
+    mkdirSync(path)
+    const result = readSettingsFile(path)
+    assert.equal(result.status, 'unreadable', '读失败必须是独立的 unreadable，不许冒名 corrupt')
+    assert.match(result.reason ?? '', /EISDIR|目录|directory/i, '原因要能看出这是读失败')
+    assert.equal(existsSync(path), true, 'I/O 错误不许隔离改名：原路径必须还在')
+    assert.equal(statSync(path).isDirectory(), true, '原目录不能被搬走')
+    assert.deepEqual(readdirSync(dir), ['settings.json'], '目录里不该出现 .corrupt-* 隔离文件')
   })
 })
 

@@ -6,7 +6,7 @@
  * 放进任一既有域都会让那块同时管两种数据来源（端点的 settings 与条目数据）。
  */
 import type { SettingsSnapshot } from '../shared.js'
-import { TUNABLE_KEYS, type TunableKey } from '../settings-schema.js'
+import { changedTunableKeys, type TunableKey } from '../settings-schema.js'
 import type { ReaderState, ReaderStoreDeps } from './store.js'
 
 /**
@@ -104,9 +104,8 @@ export function createSettingsActions(host: SettingsActionHost) {
     const ticket = ++latestSave
     const run = saveChain.then(async (): Promise<ResetSettingsResult> => {
       const before = get().settings
-      const changed = before === undefined
-        ? []
-        : TUNABLE_KEYS.filter((key) => before.effective[key] !== before.defaults[key])
+      // 与恢复默认确认框同一份判据（S5）：变化的项只算一次，不在这里另写一个过滤。
+      const changed = before === undefined ? [] : changedTunableKeys(before.effective, before.defaults)
       try {
         const result = await rpc<{ settings?: SettingsSnapshot }>('saveSettings', { resetToDefaults: true })
         const snapshot = result?.settings

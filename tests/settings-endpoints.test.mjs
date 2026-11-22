@@ -7,13 +7,14 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Config } from '../lib/config.js'
 import { createDispatch } from '../lib/endpoints.js'
 import { createMemoryStore } from '../lib/memory-store.js'
 import { createSettingsControl } from '../lib/settings-control.js'
+import { createLifecycle } from '../lib/lifecycle.js'
 import { selectStalestFeeds } from '../lib/refresh.js'
 
 const TUNABLE = ['refreshFeedsPerRound', 'refreshConcurrency', 'minRefreshIntervalMs', 'cleanupAfterDays']
@@ -24,11 +25,13 @@ const TUNABLE = ['refreshFeedsPerRound', 'refreshConcurrency', 'minRefreshInterv
  * 刻意不经过 apply：apply 要整个宿主 ctx，而这条链的语义全在控制器与 dispatch 之间。
  * @param options.patch 插件配置（模拟 profile patch 的显式值）
  * @param options.file  settings.json 的原文；不给 = 文件不存在
+ * @param options.settingsPathIsDirectory 在 settings.json 的位置放一个同名目录（稳定造 EISDIR）
  */
 function harness(options = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'rss-settings-endpoint-'))
   const settingsPath = join(dir, 'settings.json')
-  if (options.file !== undefined) writeFileSync(settingsPath, options.file)
+  if (options.settingsPathIsDirectory === true) mkdirSync(settingsPath)
+  else if (options.file !== undefined) writeFileSync(settingsPath, options.file)
   const logs = []
   // 记录每次 refreshNow 开跑时读到的「每轮源数」：保存是否真的对**下一次刷新**生效，靠它证明。
   const refreshReads = []
@@ -114,6 +117,24 @@ test('坏 JSON：原文件隔离、生效值回继承值、回包带可展示的
   }
 })
 
+test('读失败（EISDIR）：继承值继续 + 警示条 + 日志，且不隔离改名（D6 之外的 I/O 错误）', async () => {
+  const h = harness({ patch: { refreshConcurrency: 6 }, settingsPathIsDirectory: true })
+  try {
+    const settings = await settingsOf(h)
+    assert.equal(settings.effective.refreshConcurrency, 6, '读不出来时用继承值继续，不阻断启动')
+    assert.match(settings.warning ?? '', /设置文件无法读取（.*），当前使用继承值/,
+      '警示条要说明「无法读取」且当前用继承值；实际：' + JSON.stringify(settings.warning))
+    assert.doesNotMatch(settings.warning ?? '', /已隔离为/, 'I/O 错误不是坏文件，文案不许说已隔离')
+    assert.ok(h.logs.some((line) => line.includes('设置文件无法读取')),
+      '读失败必须留一行日志：实际日志 ' + JSON.stringify(h.logs))
+    assert.equal(statSync(h.settingsPath).isDirectory(), true, '原路径必须还在（没有被 rename 隔离）')
+    assert.equal(readdirSync(h.dir).filter((name) => name.startsWith('settings.json.corrupt-')).length, 0,
+      'I/O 错误不该产生隔离文件')
+  } finally {
+    h.cleanup()
+  }
+})
+
 test('坏值逐键丢：合法的照用、非法的只报数量，文件不被重写', async () => {
   const file = JSON.stringify({
     version: 1,
@@ -164,6 +185,33 @@ test('saveSettings 稀疏写：只改一项就只写这一个键，形状 { vers
     assert.deepEqual(h.refreshReads, [7], '下一次 refreshNow 开跑时读到的必须是 7')
     assert.ok(h.logs.includes('设置：refreshFeedsPerRound 20 → 7'),
       '每次成功保存要留一行「旧 → 新」（D8）；实际日志：' + JSON.stringify(h.logs))
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('saveSettings 空 patch：无操作成功（返回当前快照、不写盘、不改内存），未知键仍 rejected（D4.1）', async () => {
+  const h = harness({
+    patch: { refreshConcurrency: 6 },
+    file: JSON.stringify({ version: 1, overrides: { cleanupAfterDays: 45 } }),
+  })
+  const beforeText = fileText(h)
+  const beforeMtimeNs = statSync(h.settingsPath, { bigint: true }).mtimeNs
+  const beforeEffective = h.settings.snapshot().effective
+  try {
+    const empty = await h.dispatch('saveSettings', { patch: {} })
+    assert.equal(empty.ok, true, '空 patch 是合法的空操作（D4.1 的 Partial 允许空对象）')
+    assert.deepEqual(empty.value.settings.effective, beforeEffective, '空 patch 的回包就是当前快照')
+    assert.equal(fileText(h), beforeText, '空 patch 不写盘')
+    assert.equal(statSync(h.settingsPath, { bigint: true }).mtimeNs, beforeMtimeNs, '空 patch 连 mtime 都不许碰')
+    assert.deepEqual(h.logs.filter((line) => line.startsWith('设置：')), [], '空 patch 不该留下保存日志')
+
+    // D5 的白名单没有放宽：空对象是「没改」，未知键仍是「不许改」。
+    const unknown = await h.dispatch('saveSettings', { patch: { rsshubBase: 'https://rsshub.example' } })
+    assert.equal(unknown.ok, false, '未知键必须 rejected，不能被当成空操作静默接受')
+    assert.equal(unknown.error.code, 'bad-request', '未知键走统一坏入参信封')
+    assert.equal(fileText(h), beforeText, '被拒的未知键同样不写盘')
+    assert.deepEqual(h.settings.snapshot().effective, beforeEffective, '被拒的未知键同样不改内存')
   } finally {
     h.cleanup()
   }
@@ -461,5 +509,146 @@ test('saveSettings 其余三项的非法边界：0 / 负数 / 超上限 / 小数
     assert.deepEqual(h.settings.snapshot().effective, beforeEffective, '端点快照也必须保持旧值')
   } finally {
     h.cleanup()
+  }
+})
+
+// ── R11 评审补测：A8（config.json 不被污染）与 A1 后半（在途刷新不受新值影响）────────────
+
+test('A8：保存四个参数前后 config.json 逐字节不变，feeds / folders / feedOrder / viewPreferences 逐字段相等', async () => {
+  const h = harness()
+  // 一份形状与生产 config.json 同族的原文：订阅真相、文件夹、排序、视图偏好都在里面。
+  const configPath = join(h.dir, 'config.json')
+  const original = JSON.stringify({
+    version: 1,
+    feeds: {
+      'https://a.example/feed.xml': { url: 'https://a.example/feed.xml', title: 'A' },
+      'https://b.example/feed.xml': { url: 'https://b.example/feed.xml', title: 'B' },
+    },
+    folders: [{ name: '技术', feedIds: ['https://a.example/feed.xml'] }],
+    feedOrder: ['https://b.example/feed.xml', 'https://a.example/feed.xml'],
+    viewPreferences: {
+      navSelection: { kind: 'virtual' }, filter: 'unread', navVisible: true, showUnread: false,
+      reading: { fontSize: 18, lineWidth: 680, theme: 'dark', expandImages: false },
+      lastItemId: 'item-1', lastListScrollTop: 120,
+    },
+  }, null, 2) + '\n'
+  writeFileSync(configPath, original)
+  const beforeBytes = readFileSync(configPath)
+  const beforeMtimeNs = statSync(configPath, { bigint: true }).mtimeNs
+  const before = JSON.parse(original)
+  try {
+    const result = await h.dispatch('saveSettings', {
+      patch: {
+        refreshFeedsPerRound: 7,
+        refreshConcurrency: 8,
+        minRefreshIntervalMs: 90000,
+        cleanupAfterDays: 45,
+      },
+    })
+    assert.equal(result.ok, true, '四个参数一起保存必须成功')
+
+    // 保存设置根本不经过 config.json：字节级不变（不是「解析后等价」）。
+    assert.deepEqual(readFileSync(configPath), beforeBytes, 'config.json 必须逐字节不变')
+    assert.equal(statSync(configPath, { bigint: true }).mtimeNs, beforeMtimeNs, 'config.json 连 mtime 都不许动')
+    const after = JSON.parse(readFileSync(configPath, 'utf8'))
+    for (const key of ['feeds', 'folders', 'feedOrder', 'viewPreferences']) {
+      assert.deepEqual(after[key], before[key], key + ' 必须逐字段相等（设置页不写订阅 / 偏好）')
+    }
+  } finally {
+    h.cleanup()
+  }
+})
+
+/** 等 predicate 为真；固定 sleep 是在赌机器速度。 */
+async function waitUntil(predicate, label, { timeout = 3000, interval = 5 } = {}) {
+  const deadline = Date.now() + timeout
+  for (;;) {
+    if (predicate()) return
+    if (Date.now() >= deadline) throw new Error('等待超时（' + timeout + 'ms）：' + label)
+    await new Promise((resolve) => setTimeout(resolve, interval))
+  }
+}
+
+test('A1 后半：抓取途中保存新值，进行中的这一轮仍是旧批次；下一轮才用新值', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rss-settings-inflight-'))
+  // 用公网 IP 字面量当源地址：DNS 判定跳过解析（fetch.ts 对字面量地址不查 DNS），
+  // 而真正的网络调用被下面的全局 fetch 桩扣住 —— 测试不发一个真实请求。
+  const urls = [1, 2, 3, 4].map((index) => 'http://93.184.216.34/feed' + index + '.xml')
+  const config = Config({
+    feeds: urls,
+    refreshOnStart: false,
+    refreshFeedsPerRound: 2,
+    refreshConcurrency: 1,
+    minRefreshIntervalMs: 0,
+  })
+  const logs = []
+  const settings = createSettingsControl({
+    config,
+    settingsPath: join(dir, 'settings.json'),
+    log: (line) => logs.push(line),
+  })
+  const lifecycle = createLifecycle({
+    config,
+    storagesRoot: dir,
+    configFile: join(dir, 'config.json'),
+    log: () => {},
+    summarize: () => '刷新完成',
+  })
+  const originalFetch = globalThis.fetch
+  const started = []
+  const releases = []
+  /**
+   * 扣住响应的闸门。旧并发是 1：第一轮一次只会有一个 fetch 在飞，所以「已开抓」的判据是
+   * started.length === 1，而不是 2（等两个才放行会死锁 —— 第二个要等第一个让出并发额度）。
+   */
+  let gated = true
+  const feedXml = (url) => '<?xml version="1.0"?><rss version="2.0"><channel><title>F</title>'
+    + '<item><title>item ' + url + '</title><link>' + url + '/item</link></item>'
+    + '</channel></rss>'
+  const releaseAll = () => { while (releases.length > 0) releases.shift()() }
+  try {
+    await lifecycle.start()
+    assert.notEqual(lifecycle.ready(), undefined, '前置：lifecycle 已就绪')
+    assert.equal(config.refreshFeedsPerRound, 2, '前置：旧上限是 2')
+
+    globalThis.fetch = async (input) => {
+      const url = String(input)
+      started.push(url)
+      // 扣住响应，制造「一轮还在抓」的窗口；测试在窗口里保存新值。
+      if (gated) await new Promise((resolve) => { releases.push(resolve) })
+      return new Response(feedXml(url), { status: 200, headers: { 'content-type': 'application/rss+xml' } })
+    }
+
+    const firstRun = lifecycle.refreshNow({ force: true })
+    await waitUntil(() => started.length === 1, '旧批次已开抓（并发 1：第一个源在飞）')
+    const saved = settings.save({ refreshFeedsPerRound: 4 })
+    assert.equal(saved.ok, true, '抓取途中保存必须成功')
+    assert.equal(config.refreshFeedsPerRound, 4, '保存成功后内存立即是新值（下一轮会读它）')
+
+    // 放行当前在飞的源；后续旧批次内的源不再扣住（gate 关闭），让这一轮自然跑完。
+    gated = false
+    releaseAll()
+    const first = await firstRun
+    assert.equal(first.outcome, 'ran')
+    assert.equal(first.attempted, 2, '进行中的这一轮 attempted 仍是旧值 2（不许按新值扩到 4）')
+    assert.equal(started.length, 2, '进行中的这一轮不许追加抓取源')
+    assert.deepEqual([...new Set(started)].sort(), [...urls.slice(0, 2)].sort(),
+      '这一轮抓的仍是旧选源批次（前两个源）')
+
+    // 下一轮：新上限 4 ⇒ 选源批次与 attempted 都变成新值。
+    const beforeSecond = started.length
+    const secondRun = lifecycle.refreshNow({ force: true })
+    const second = await secondRun
+    assert.equal(second.outcome, 'ran')
+    assert.equal(second.attempted, 4, '下一轮才用新值（attempted = 4）')
+    assert.equal(started.length - beforeSecond, 4, '下一轮抓了全部四个源（增量 4，不是累计）')
+    assert.ok(logs.some((line) => line === '设置：refreshFeedsPerRound 2 → 4'),
+      '保存留痕（D8）：实际日志 ' + JSON.stringify(logs))
+  } finally {
+    // 失败路径也要放掉被扣住的响应，否则 stop() 会等一轮永远不会落定的抓取（测试挂死）。
+    releaseAll()
+    globalThis.fetch = originalFetch
+    await lifecycle.stop()
+    rmSync(dir, { recursive: true, force: true })
   }
 })

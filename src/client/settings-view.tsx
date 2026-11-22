@@ -29,9 +29,10 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { AGENT_APPROVAL_NOTE, AGENT_HELP } from '../agent-help.js'
 import type { CleanupResult, ReadOnlySettingView, SettingsSnapshot } from '../shared.js'
-import { parseTunableValue, TUNABLE_RANGES, type TunableKey } from '../settings-schema.js'
+import { changedTunableKeys, parseTunableValue, TUNABLE_RANGES, type TunableKey } from '../settings-schema.js'
 import type { ReadingPreferences } from '../preferences.js'
 import type { ResetSettingsResult, SaveSettingResult } from './settings-actions.js'
+import { ConfirmDialog } from './confirm-dialog.js'
 
 /** 成功反馈的停留时间：短到不挡视线，长到能看见（spec D14.2 定稿「约 1.4 秒」）。 */
 const SAVED_FEEDBACK_MS = 1400
@@ -66,6 +67,8 @@ export interface SettingsViewProps {
   onSave: (key: TunableKey, value: number) => Promise<SaveSettingResult>
   /** 页面级恢复默认：走同一条保存串行链，一次请求把四项恢复成默认值。 */
   onReset: () => Promise<ResetSettingsResult>
+  /** 「去订阅管理页」：走既有 toggleFeeds，设置页不复制排序控件（D15）。 */
+  onManageFeeds: () => void
   /**
    * 清理预演（D27.1）：只取「如果现在执行会删多少」，不删任何条目。
    * 返回 undefined = 失败（全局 error 已由 store 设置），设置页不弹确认框。
@@ -88,15 +91,98 @@ const SECTIONS = [
 ] as const
 
 /**
- * 恢复默认的四个键与界面文案（D28）。顺序与上面的输入行一致；`mode` 决定「15 → 10」这种
- * 展示用分钟还是原值，**不复制第二套单位判断**。
+ * 每种输入模式的三个操作（S7）：展示 / 解析 / 就地红字。
+ *
+ * 为什么用一张表而不是三处各自 `if (mode === ...)`：新增一种单位（将来比如「小时」）时，
+ * 三处分改很容易只改两处 —— 存得下、显示不对、报错说错单位。表让「加一种模式」变成一处补全，
+ * tsc 会在 `satisfies Record<RowMode, RowModeOps>` 处检查遗漏。
  */
-const RESET_ROWS = [
-  { key: 'refreshFeedsPerRound', label: '每次刷新抓取源数', mode: 'integer' },
-  { key: 'refreshConcurrency', label: '抓取并发', mode: 'integer' },
-  { key: 'minRefreshIntervalMs', label: '自动刷新间隔', mode: 'minutes' },
-  { key: 'cleanupAfterDays', label: '清理天数', mode: 'integer' },
-] as const satisfies ReadonlyArray<{ readonly key: TunableKey; readonly label: string; readonly mode: RowMode }>
+interface RowModeOps {
+  readonly inputMode: 'numeric' | 'decimal'
+  /** 权威值 → 输入框展示文本。 */
+  readonly format: (value: number) => string
+  /** 草稿文本 → 权威单位的整数（未做范围校验；`undefined` = 不是十进制数）。 */
+  readonly parse: (text: string) => number | undefined
+  /** 就地红字的范围文案：数值从 `TUNABLE_RANGES` 现取，不在 UI 里再抄一份 min/max。 */
+  readonly errorText: (key: TunableKey) => string
+}
+
+const ROW_MODES = {
+  integer: {
+    inputMode: 'numeric',
+    format: (value) => String(value),
+    // 整数模式只认十进制整数：小数（1.5）不是「四舍五入后合法」，而是非法输入。
+    parse: (text) => (/^-?\d+$/.test(text) ? Number(text) : undefined),
+    errorText: (key) => {
+      const range = TUNABLE_RANGES[key]
+      return '请输入 ' + range.min + '–' + range.max + ' 的整数'
+    },
+  },
+  minutes: {
+    inputMode: 'decimal',
+    // 分钟模式不做四舍五入：1.50205 就是 1.50205（D11）。
+    format: (value) => String(value / MINUTE_MS),
+    // 只认十进制小数，且整数位/小数位都可省略（.5 / 10. 都是正常人会写的分钟数，D11 允许小数）。
+    // 拆成两条分支（有整数位 / 只有小数位）是为了同时接受 "10." 与 ".5"；单独的 "." 仍不合法。
+    // '1e2' / '0x10' 会被挡掉：Number() 收得下，但用户输入的不是他看到的那个数。
+    // 负号交给下面的 parseTunableValue 范围判据（minRefreshIntervalMs ≥ 0），不另写符号规则。
+    parse: (text) => (/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(text)
+      ? Math.round(Number(text) * MINUTE_MS)
+      : undefined),
+    errorText: (key) => {
+      const range = TUNABLE_RANGES[key]
+      return '请输入 ' + range.min / MINUTE_MS + '–' + range.max / MINUTE_MS + ' 的分钟数（可带小数）'
+    },
+  },
+} satisfies Record<RowMode, RowModeOps>
+
+/**
+ * 四个数值行的**唯一描述表**（S4）：输入行与「恢复默认」确认框都从它派生。
+ * label / unit / help / hint / mode 只在这里写一遍 —— 两处各抄一份时，改文案必然漏一处。
+ */
+interface SettingRowDescription {
+  readonly key: TunableKey
+  readonly label: string
+  readonly unit: string
+  readonly help: string
+  readonly hint: string
+  readonly mode: RowMode
+}
+
+const SETTING_ROWS = [
+  {
+    key: 'refreshFeedsPerRound',
+    label: '每次刷新抓取源数',
+    unit: '源',
+    help: '0 = 抓全部源（源多时一轮会很慢）',
+    hint: '一轮只抓一批，不是全部源',
+    mode: 'integer',
+  },
+  {
+    key: 'refreshConcurrency',
+    label: '抓取并发',
+    unit: '个',
+    help: '一轮里同时抓几个源',
+    hint: '同时进行的抓取请求数；调大更快，也更占带宽与内存',
+    mode: 'integer',
+  },
+  {
+    key: 'minRefreshIntervalMs',
+    label: '自动刷新间隔',
+    unit: '分钟',
+    help: '0 = 不节流（手点刷新不受它限制）',
+    hint: '两次自动刷新之间的最短间隔；以分钟编辑，保存时按毫秒取整',
+    mode: 'minutes',
+  },
+  {
+    key: 'cleanupAfterDays',
+    label: '清理天数',
+    unit: '天',
+    help: '只清理早于这个天数的已读条目（未星标、未保持未读）',
+    hint: '清理判据：已读、未星标、未保持未读，且发布时间早于该天数；0 会清光已读条目，所以非法',
+    mode: 'integer',
+  },
+] as const satisfies ReadonlyArray<SettingRowDescription>
 
 interface ResetChange {
   readonly key: TunableKey
@@ -106,16 +192,20 @@ interface ResetChange {
 /**
  * 确认框里「将变化的项与目标值」。判据与宿主 D28 同源：**当前生效值 ≠ 默认值**的项，
  * 恢复默认后必然变化；相等的项不在列表里，也是按钮 N = 0 的判据。
+ *
+ * `changedTunableKeys` 同时供 `settings-actions` 的成功提示计数使用 —— 两处各算一遍
+ * 会在「哪些项算变化」上漂移（S5）。
  */
 function resetChangesOf(settings: SettingsSnapshot | undefined): ResetChange[] {
   if (settings === undefined) return []
-  return RESET_ROWS.flatMap((row) => {
-    const current = settings.effective[row.key]
-    const target = settings.defaults[row.key]
-    if (current === target) return []
+  const changed = new Set(changedTunableKeys(settings.effective, settings.defaults))
+  // 按 SETTING_ROWS 的顺序展开（= 页面顺序），不按对象键序 —— 确认框的阅读顺序与输入行一致。
+  return SETTING_ROWS.flatMap((row) => {
+    if (!changed.has(row.key)) return []
+    const format = ROW_MODES[row.mode].format
     return [{
       key: row.key,
-      text: row.label + ' ' + displayOf(row.mode, current) + ' → ' + displayOf(row.mode, target),
+      text: row.label + ' ' + format(settings.effective[row.key]) + ' → ' + format(settings.defaults[row.key]),
     }]
   })
 }
@@ -139,37 +229,6 @@ interface NumberSettingRowProps {
   readonly onSavingChange?: (saving: boolean) => void
 }
 
-/** 权威值 → 输入框展示文本。分钟模式不做四舍五入：1.50205 就是 1.50205（D11）。 */
-function displayOf(mode: RowMode, value: number): string {
-  return mode === 'minutes' ? String(value / MINUTE_MS) : String(value)
-}
-
-/**
- * 草稿文本 → 要提交的值（`undefined` = 不合法）。
- *
- * 分钟模式先按分钟解析、按 D11 取整成毫秒，再用**宿主同一份** `parseTunableValue`
- * 复核范围。这样 1440.1 分钟会被毫秒上限挡下，且错误文案仍能说「分钟」。
- */
-function parseDraft(mode: RowMode, key: TunableKey, text: string): number | undefined {
-  if (mode === 'minutes') {
-    // 只认十进制小数：'1e2' / '0x10' 会被 Number() 收下，但用户输入的不是他看到的那个数。
-    if (!/^-?\d+(\.\d+)?$/.test(text)) return undefined
-    return parseTunableValue(key, Math.round(Number(text) * MINUTE_MS))
-  }
-  // 整数模式只认十进制整数：小数（1.5）不是「四舍五入后合法」，而是非法输入。
-  if (!/^-?\d+$/.test(text)) return undefined
-  return parseTunableValue(key, Number(text))
-}
-
-/** 就地红字的范围文案：数值从 `TUNABLE_RANGES` 现取，不在 UI 里再抄一份 min/max。 */
-function rangeErrorText(mode: RowMode, key: TunableKey): string {
-  const range = TUNABLE_RANGES[key]
-  if (mode === 'minutes') {
-    return '请输入 ' + range.min / MINUTE_MS + '–' + range.max / MINUTE_MS + ' 的分钟数（可带小数）'
-  }
-  return '请输入 ' + range.min + '–' + range.max + ' 的整数'
-}
-
 /**
  * 一个数值设置行：名称 + 输入框 + 单位 + 一句帮助。
  *
@@ -180,7 +239,8 @@ function NumberSettingRow(props: NumberSettingRowProps): ReactNode {
   const { settingKey, label, unit, help, hint, mode = 'integer', value, onSave, action, onSavingChange } = props
   const inputId = useId()
   const helpId = useId()
-  const effectiveText = value === undefined ? '' : displayOf(mode, value)
+  const modeOps = ROW_MODES[mode]
+  const effectiveText = value === undefined ? '' : modeOps.format(value)
   const [draft, setDraft] = useState(effectiveText)
   const [error, setError] = useState<string | undefined>(undefined)
   const [saved, setSaved] = useState(false)
@@ -203,9 +263,10 @@ function NumberSettingRow(props: NumberSettingRowProps): ReactNode {
     // 用户没编辑过这一项（只是聚焦又失焦）：直接跳过，不发请求、不写覆盖。
     // 用「是否被编辑」而不是「文本是否等于生效值」作主判据，聚焦本身永远不会变成一次写盘。
     if (!dirty.current) return
-    const next = parseDraft(mode, settingKey, draft.trim())
+    const parsed = modeOps.parse(draft.trim())
+    const next = parsed === undefined ? undefined : parseTunableValue(settingKey, parsed)
     if (next === undefined) {
-      setError(rangeErrorText(mode, settingKey))
+      setError(modeOps.errorText(settingKey))
       setSaved(false)
       return
     }
@@ -242,7 +303,7 @@ function NumberSettingRow(props: NumberSettingRowProps): ReactNode {
     <div className="dsh-rss-settings-row" data-rss-setting={settingKey}>
       <label className="dsh-rss-settings-label" htmlFor={inputId}>{label}</label>
       <input id={inputId} className="dsh-rss-settings-input" data-rss-setting-input={settingKey}
-        type="text" inputMode={mode === 'minutes' ? 'decimal' : 'numeric'} autoComplete="off" spellCheck={false}
+        type="text" inputMode={modeOps.inputMode} autoComplete="off" spellCheck={false}
         title={hint} aria-describedby={helpId} aria-invalid={error !== undefined}
         value={draft} disabled={value === undefined}
         onChange={(event) => {
@@ -320,18 +381,15 @@ export function SettingsView(props: SettingsViewProps): ReactNode {
   const {
     settings, error, warningDismissed, onClose, onDismissWarning,
     reading, onReading, showUnread, onShowUnread,
-    onSave, onReset, onCleanupPreview, onCleanup,
+    onSave, onReset, onCleanupPreview, onCleanup, onManageFeeds,
   } = props
   const box = useRef<HTMLDivElement | null>(null)
   const resetButton = useRef<HTMLButtonElement | null>(null)
-  const resetConfirmButton = useRef<HTMLButtonElement | null>(null)
   const [resetOpen, setResetOpen] = useState(false)
   const [resetting, setResetting] = useState(false)
   const [resetError, setResetError] = useState<string | undefined>(undefined)
   // 进入即聚焦滚动容器（见文件头注释）。依赖空数组：只在挂载时做一次，重新渲染不该抢焦点。
   useEffect(() => { box.current?.focus() }, [])
-  // 恢复默认的确认框打开即聚焦确认键：键盘流不用先摸方向键（与 MarkAllConfirm 同一约定）。
-  useEffect(() => { if (resetOpen) resetConfirmButton.current?.focus() }, [resetOpen])
   /**
    * 清理按钮的三种瞬时状态：
    *  - `cleanupDaysSaving`：阈值正在写盘 —— 按钮禁用，避免用旧阈值预演（D14.2）；
@@ -342,16 +400,16 @@ export function SettingsView(props: SettingsViewProps): ReactNode {
   const [cleanupBusy, setCleanupBusy] = useState(false)
   const [cleanupConfirm, setCleanupConfirm] = useState<{ count: number; days: number } | undefined>(undefined)
   const cleanupButton = useRef<HTMLButtonElement | null>(null)
-  const cleanupConfirmButton = useRef<HTMLButtonElement | null>(null)
-  // 打开即聚焦「清理」：Enter 直接确认，Tab 到取消（与 MarkAllConfirm 同一条键盘流）。
-  useEffect(() => {
-    if (cleanupConfirm !== undefined) cleanupConfirmButton.current?.focus()
-  }, [cleanupConfirm])
+  // 打开确认框后的键盘流（聚焦确认键 / Esc / 焦点归还）归共享 ConfirmDialog —— 两处确认框
+  // 与 A 的 MarkAllConfirm 是同一形状，不再各写一份。
 
-  /** 关框并把焦点还给触发它的「立即清理」：不还焦点，之后的 Esc / j 会落到 body（既有约定）。 */
-  const closeCleanupConfirm = (): void => {
-    setCleanupConfirm(undefined)
-    cleanupButton.current?.focus()
+  /** 关框只改状态；焦点归还在 ConfirmDialog 卸载时执行（见 focusAfterCleanup）。 */
+  const closeCleanupConfirm = (): void => { setCleanupConfirm(undefined) }
+
+  /** 焦点还给触发它的「立即清理」；设置页已卸载时不碰一个脱离文档的节点。 */
+  const focusAfterCleanup = (): void => {
+    const button = cleanupButton.current
+    if (button !== null && button.isConnected) button.focus()
   }
 
   const startCleanup = async (): Promise<void> => {
@@ -383,16 +441,22 @@ export function SettingsView(props: SettingsViewProps): ReactNode {
   const resetChanges = resetChangesOf(settings)
 
   /**
-   * 关闭确认框并把焦点还给「恢复默认」按钮（D14.2）。
-   *
-   * 成功恢复后四项全是默认值，按钮随即变成禁用态；浏览器不会把焦点留在一个禁用按钮上，
-   * 这时退回设置页容器 —— 至少 Esc / 原生滚动仍然落在设置页，而不是掉到 body。
+   * 关闭确认框只改状态；焦点归还在 ConfirmDialog 卸载时执行（见 focusAfterReset）。
    */
   const closeReset = (): void => {
     setResetOpen(false)
     setResetError(undefined)
+  }
+
+  /**
+   * 焦点还给「恢复默认」按钮（D14.2）。
+   *
+   * 成功恢复后四项全是默认值，按钮随即变成禁用态；浏览器不会把焦点留在一个禁用按钮上，
+   * 这时退回设置页容器 —— 至少 Esc / 原生滚动仍然落在设置页，而不是掉到 body。
+   */
+  const focusAfterReset = (): void => {
     const button = resetButton.current
-    if (button !== null && !button.disabled) button.focus()
+    if (button !== null && !button.disabled && button.isConnected) button.focus()
     else box.current?.focus()
   }
 
@@ -431,53 +495,33 @@ export function SettingsView(props: SettingsViewProps): ReactNode {
           <h3 className="dsh-rss-settings-section-title">{section.title}</h3>
           {section.key === 'fetch' && (
             <>
-              <NumberSettingRow
-                settingKey="refreshFeedsPerRound"
-                label="每次刷新抓取源数"
-                unit="源"
-                help="0 = 抓全部源（源多时一轮会很慢）"
-                hint="一轮只抓一批，不是全部源"
-                value={settings?.effective.refreshFeedsPerRound}
-                onSave={onSave}
-              />
-              <NumberSettingRow
-                settingKey="refreshConcurrency"
-                label="抓取并发"
-                unit="个"
-                help="一轮里同时抓几个源"
-                hint="同时进行的抓取请求数；调大更快，也更占带宽与内存"
-                value={settings?.effective.refreshConcurrency}
-                onSave={onSave}
-              />
-              <NumberSettingRow
-                settingKey="minRefreshIntervalMs"
-                mode="minutes"
-                label="自动刷新间隔"
-                unit="分钟"
-                help="0 = 不节流（手点刷新不受它限制）"
-                hint="两次自动刷新之间的最短间隔；以分钟编辑，保存时按毫秒取整"
-                value={settings?.effective.minRefreshIntervalMs}
-                onSave={onSave}
-              />
-              <NumberSettingRow
-                settingKey="cleanupAfterDays"
-                label="清理天数"
-                unit="天"
-                help="只清理早于这个天数的已读条目（未星标、未保持未读）"
-                hint="清理判据：已读、未星标、未保持未读，且发布时间早于该天数；0 会清光已读条目，所以非法"
-                value={settings?.effective.cleanupAfterDays}
-                onSave={onSave}
-                onSavingChange={setCleanupDaysSaving}
-                action={(
-                  // D27：阈值与动作是同一件事，所以按钮就在这一行右侧。次级按钮（ghost）
-                  // 不与「保存」抢主次；点在输入框失焦之后也能用（按钮在行内、不是行的提交入口）。
-                  <button ref={cleanupButton} type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
-                    data-rss-cleanup-now=""
-                    title="先预演将清理多少条，再确认执行；只删已读、未星标、未保持未读的旧条目"
-                    disabled={cleanupBusy || cleanupDaysSaving || settings === undefined}
-                    onClick={() => { void startCleanup() }}>立即清理</button>
-                )}
-              />
+              {/* S4：四行全部由 SETTING_ROWS 派生，label / unit / help / hint / mode 只有一份。
+                  「立即清理」只挂在清理天数那一行（D27：阈值与动作是同一件事）。 */}
+              {SETTING_ROWS.map((row) => (
+                <NumberSettingRow
+                  key={row.key}
+                  settingKey={row.key}
+                  label={row.label}
+                  unit={row.unit}
+                  help={row.help}
+                  hint={row.hint}
+                  mode={row.mode}
+                  value={settings?.effective[row.key]}
+                  onSave={onSave}
+                  onSavingChange={row.key === 'cleanupAfterDays' ? setCleanupDaysSaving : undefined}
+                  action={row.key === 'cleanupAfterDays'
+                    ? (
+                      // D27：阈值与动作是同一件事，所以按钮就在这一行右侧。次级按钮（ghost）
+                      // 不与「保存」抢主次；点在输入框失焦之后也能用（按钮在行内、不是行的提交入口）。
+                      <button ref={cleanupButton} type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
+                        data-rss-cleanup-now=""
+                        title="先预演将清理多少条，再确认执行；只删已读、未星标、未保持未读的旧条目"
+                        disabled={cleanupBusy || cleanupDaysSaving || settings === undefined}
+                        onClick={() => { void startCleanup() }}>立即清理</button>
+                    )
+                    : undefined}
+                />
+              ))}
               {/* D14.2 / D28：恢复默认影响整组，用一条分隔线与上面的单项参数区隔开。 */}
               <div className="dsh-rss-settings-reset" data-rss-reset-row="">
                 <button ref={resetButton} type="button" className="dsh-rss-btn" data-rss-reset-defaults=""
@@ -517,6 +561,16 @@ export function SettingsView(props: SettingsViewProps): ReactNode {
                 字号 / 栏宽 / 主题在正文页的 Aa 面板调整
               </p>
             </>
+          )}
+          {section.key === 'feedOrder' && (
+            // D15 / D14③：排序控件已经在订阅管理页（↑/↓），这里只放指针 + 跳转按钮。
+            // 不渲染第二套列表、不在设置页存任何排序状态 —— 同一状态两套控件必然各说各话。
+            <div data-rss-feed-order-pointer="">
+              <p className="dsh-rss-settings-help">订阅源的先后顺序在订阅管理页调整</p>
+              <button type="button" className="dsh-rss-btn" data-rss-go-feeds="" onClick={onManageFeeds}>
+                去订阅管理页
+              </button>
+            </div>
           )}
           {section.key === 'agent' && (
             // 文案逐字来自 AGENT_HELP（D24 单一来源）；这里只负责排版，不改写、不补签名。
@@ -562,63 +616,48 @@ export function SettingsView(props: SettingsViewProps): ReactNode {
           )}
         </section>
       ))}
+      {/* 两处确认框都复用共享 ConfirmDialog（S6/P7）：Esc 在焦点还没进框时也只能关框，
+          不会冒泡到设置页的「Esc 回列表」。测试锚点原样传入，DOM 标记不变。 */}
       {resetOpen && (
-        <div className="dsh-rss-confirm">
-          <div className="dsh-rss-confirm-card" role="dialog" aria-modal="true"
-            aria-labelledby="dsh-rss-reset-title" data-rss-reset-confirm=""
-            onKeyDown={(event) => {
-              // Esc 只关确认框，不能冒泡到设置页的「Esc 回列表」（与 MarkAllConfirm 同一条）。
-              if (event.key !== 'Escape') return
-              event.preventDefault()
-              event.stopPropagation()
-              if (!resetting) closeReset()
-            }}>
-            <div className="dsh-rss-confirm-title" id="dsh-rss-reset-title">恢复默认设置？</div>
-            <div className="dsh-rss-confirm-note" data-rss-reset-changes="">
-              将变化的项：{resetChanges.map((change) => change.text).join('；')}
-            </div>
-            {resetError !== undefined && (
-              <p className="dsh-rss-settings-error" role="alert" data-rss-reset-error="">{resetError}</p>
-            )}
-            <div className="dsh-rss-confirm-actions">
-              <button type="button" className="dsh-rss-btn" data-rss-reset-cancel=""
-                disabled={resetting} onClick={closeReset}>取消</button>
-              <button ref={resetConfirmButton} type="button" className="dsh-rss-btn dsh-rss-btn--primary"
-                data-rss-reset-ok="" disabled={resetting} onClick={() => { void confirmReset() }}>
-                {resetting ? '恢复中…' : '恢复默认'}
-              </button>
-            </div>
+        <ConfirmDialog
+          titleId="dsh-rss-reset-title"
+          title="恢复默认设置？"
+          cardAttrs={{ 'data-rss-reset-confirm': '' }}
+          cancelAttrs={{ 'data-rss-reset-cancel': '' }}
+          confirmAttrs={{ 'data-rss-reset-ok': '' }}
+          confirmLabel={resetting ? '恢复中…' : '恢复默认'}
+          busy={resetting}
+          returnFocus={focusAfterReset}
+          onCancel={closeReset}
+          onConfirm={() => { void confirmReset() }}
+          error={resetError === undefined
+            ? undefined
+            : <p className="dsh-rss-settings-error" role="alert" data-rss-reset-error="">{resetError}</p>}
+        >
+          <div className="dsh-rss-confirm-note" data-rss-reset-changes="">
+            将变化的项：{resetChanges.map((change) => change.text).join('；')}
           </div>
-        </div>
+        </ConfirmDialog>
       )}
       {/* 清理确认框（D27.1）：N 来自刚才那次 dryRun，D 是当前生效阈值。挂在设置页根内 ——
-          面板卸载 / 离开设置页时随视图一起消失；Esc 由卡片自己处理，免得穿透去关设置页。 */}
+          面板卸载 / 离开设置页时随视图一起消失；Esc 由 ConfirmDialog 统一处理。 */}
       {cleanupConfirm !== undefined && (
-        <div className="dsh-rss-confirm" data-rss-cleanup-confirm="">
-          <div className="dsh-rss-confirm-card" role="dialog" aria-modal="true"
-            aria-labelledby="dsh-rss-cleanup-title"
-            onKeyDown={(event) => {
-              if (event.key !== 'Escape') return
-              event.preventDefault()
-              event.stopPropagation()
-              closeCleanupConfirm()
-            }}>
-            <div className="dsh-rss-confirm-title" id="dsh-rss-cleanup-title"
-              data-rss-cleanup-count={cleanupConfirm.count}>
-              {'将清理 ' + cleanupConfirm.count + ' 条旧条目（早于 ' + cleanupConfirm.days + ' 天）'}
-            </div>
-            <div className="dsh-rss-confirm-note">
-              只删除「已读 + 未星标 + 未保持未读」且早于阈值的条目。此操作不可撤销。
-            </div>
-            <div className="dsh-rss-confirm-actions">
-              <button type="button" className="dsh-rss-btn" data-rss-cleanup-cancel=""
-                onClick={closeCleanupConfirm}>取消</button>
-              <button ref={cleanupConfirmButton} type="button"
-                className="dsh-rss-btn dsh-rss-btn--primary" data-rss-cleanup-ok=""
-                onClick={confirmCleanup}>清理</button>
-            </div>
+        <ConfirmDialog
+          titleId="dsh-rss-cleanup-title"
+          title={'将清理 ' + cleanupConfirm.count + ' 条旧条目（早于 ' + cleanupConfirm.days + ' 天）'}
+          titleAttrs={{ 'data-rss-cleanup-count': String(cleanupConfirm.count) }}
+          rootAttrs={{ 'data-rss-cleanup-confirm': '' }}
+          cancelAttrs={{ 'data-rss-cleanup-cancel': '' }}
+          confirmAttrs={{ 'data-rss-cleanup-ok': '' }}
+          confirmLabel="清理"
+          returnFocus={focusAfterCleanup}
+          onCancel={closeCleanupConfirm}
+          onConfirm={confirmCleanup}
+        >
+          <div className="dsh-rss-confirm-note">
+            只删除「已读 + 未星标 + 未保持未读」且早于阈值的条目。此操作不可撤销。
           </div>
-        </div>
+        </ConfirmDialog>
       )}
     </div>
   )

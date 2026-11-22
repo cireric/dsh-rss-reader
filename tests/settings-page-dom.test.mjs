@@ -275,6 +275,42 @@ async function mount({ settings, saveSettings, items, cleanupStub, article, pref
 }
 
 
+/**
+ * 数值行的**结构判据**（S3）：只按节点种类断言，不用词表。
+ *
+ * 原因：D16 撤掉的是「来源层」，不是某些词。旧断言 `/本页覆盖|插件配置|默认值|清除本页设置/`
+ * 会把合法帮助文案（例如以后写「默认值」三个字）一起误杀，却抓不到一个换了措辞的来源标签。
+ * 这里改为：行内每个元素必须是白名单里的一类（名称 / 输入 / 单位 / 帮助 / 反馈），且没有
+ * 链接与来源/单项清除锚点。动作按钮只允许出现在调用方明确允许的行（清理天数）。
+ */
+const SETTING_ROW_ALLOWED_CLASSES = new Set([
+  'dsh-rss-settings-label',   // 名称
+  'dsh-rss-settings-input',   // 输入
+  'dsh-rss-settings-unit',    // 单位
+  'dsh-rss-settings-help',    // 帮助
+  'dsh-rss-settings-hint',    // 帮助（毫秒旁注）
+  'dsh-rss-settings-saved',   // 反馈（已保存 ✓）
+  'dsh-rss-settings-error',   // 反馈（就地红字）
+])
+
+function assertNumberRowShape(row, { key, allowAction = false } = {}) {
+  const label = row.querySelector('.dsh-rss-settings-label')
+  assert.ok(label !== null, key + ' 行必须有名称节点')
+  assert.equal(label.children.length, 0, key + ' 的名称节点里不许再嵌来源标签 / 控件')
+  assert.equal(row.querySelector('a'), null, key + ' 行内不许有链接')
+  assert.equal(row.querySelector('[data-rss-setting-source]'), null, key + ' 行内不许有来源标签')
+  assert.equal(row.querySelector('[data-rss-setting-clear]'), null, key + ' 行内不许有单项清除控件')
+  for (const child of [...row.children]) {
+    if (child.tagName === 'BUTTON') {
+      assert.equal(allowAction, true, key + ' 行内不该有按钮（只有清理天数行带动作）')
+      continue
+    }
+    const classes = [...child.classList]
+    assert.equal(classes.some((name) => SETTING_ROW_ALLOWED_CLASSES.has(name)), true,
+      key + ' 行内出现非白名单节点：<' + child.tagName.toLowerCase() + ' class="' + child.className + '">')
+  }
+}
+
 /** 把受控 input 的值设进去并派发 React 认的 input 事件（原生 setter 绕过 React 的 value tracker）。 */
 function setControlValue(win, element, value) {
   const setter = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value')?.set
@@ -323,10 +359,31 @@ test('R11 01 设置页骨架：工具栏进入、标题与返回按钮、五分�
   const input = row.querySelector('[data-rss-setting-input="refreshFeedsPerRound"]')
   assert.ok(input !== null, '第一个参数必须有输入框（02 票把只读改成可写）')
   assert.equal(input.value, '7', '输入框初值必须是宿主下发的生效值')
-  // D16：行内没有来源标签、没有「清除本页设置」这类小链接。
-  assert.doesNotMatch(row.textContent ?? '', /本页覆盖|插件配置|默认值|清除本页设置/)
-  assert.equal(row.querySelector('a'), null, '行内不许有链接')
-  assert.equal(row.querySelector('button'), null, '这一行不需要按钮（失焦 / 回车提交）')
+  // D16：行内只有名称 / 输入 / 单位 / 帮助 / 反馈这几类节点（结构判据，不用词表）。
+  assertNumberRowShape(row, { key: 'refreshFeedsPerRound' })
+})
+
+test('R11 D14③ 订阅源顺序：只有说明与「去订阅管理页」，不复制排序控件（D15）', skip, async () => {
+  const h = await mount()
+  try {
+    await openSettings(h)
+    const section = h.$('[data-rss-settings-section="feedOrder"]')
+    assert.ok(section !== null, '「订阅源顺序」分区必须存在')
+    assert.match(section.textContent ?? '', /订阅源的先后顺序在订阅管理页调整/, '分区必须有一行说明指针')
+    const button = section.querySelector('[data-rss-go-feeds]')
+    assert.ok(button !== null, '分区必须有「去订阅管理页」按钮')
+    assert.equal((button.textContent ?? '').trim(), '去订阅管理页', '按钮文案是验收项')
+    // D15：设置页不复制 ↑/↓ 控件，也不另存排序状态。
+    assert.equal(section.querySelector('[data-rss-feed-order-up]'), null, '设置页不该有上移按钮')
+    assert.equal(section.querySelector('[data-rss-feed-order-down]'), null, '设置页不该有下移按钮')
+    assert.equal(section.querySelector('[data-rss-feed-order-list]'), null, '设置页不该渲染可排序列表')
+    assert.deepEqual([...section.querySelectorAll('ul, ol')].map((node) => node.tagName), [], '不该出现列表容器')
+    button.click()
+    await h.settle()
+    assert.equal(h.store.get().view, 'feeds', '按钮必须走既有 toggleFeeds 进入订阅管理页')
+  } finally {
+    h.cleanup()
+  }
 })
 
 test('R11 01 退出设置页：Esc / 返回按钮 / 再点一次设置都回列表', skip, async () => {
@@ -593,9 +650,7 @@ test('R11 03 三行结构：名称 + 一句帮助 + 输入框 + 单位（清理�
       } else {
         assert.equal(row.querySelector('button'), null, entry.key + ' 行内不该有按钮（清理按钮只属于清理天数行）')
       }
-      assert.equal(row.querySelector('a'), null, entry.key + ' 行内不该有链接')
-      assert.doesNotMatch(row.textContent ?? '', /本页覆盖|插件配置|默认值|清除本页设置/,
-        entry.key + ' 行内不许出现来源标签（D16）')
+      assertNumberRowShape(row, { key: entry.key, allowAction: entry.key === 'cleanupAfterDays' })
     }
     // 票据指定文案（逐字）。
     assert.equal(h.$('[data-rss-setting="refreshFeedsPerRound"] .dsh-rss-settings-help')?.textContent,
@@ -659,6 +714,29 @@ test('R11 03 分钟保存：Math.round(分钟 × 60000)，0 = 不节流，且 10
       { label: '1440 分钟保存为 86400000 ms' })
     assert.deepEqual(h.requests.filter((entry) => entry.endpoint === 'saveSettings').map((entry) => entry.payload).at(-1),
       { patch: { minRefreshIntervalMs: 86400000 } }, '1440 分钟必须保存成 86400000 ms')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R11 03 分钟输入允许省略整数位/小数位：.5 → 30000 ms，10. → 600000 ms（D11）', async () => {
+  const h = await openWith({ minRefreshIntervalMs: 600000 })
+  try {
+    const input = h.$('[data-rss-setting-input="minRefreshIntervalMs"]')
+    input.focus()
+    setControlValue(h.win, input, '.5')
+    input.blur()
+    await waitForSaved(h, 'minRefreshIntervalMs')
+    assert.deepEqual(h.requests.filter((entry) => entry.endpoint === 'saveSettings').map((entry) => entry.payload),
+      [{ patch: { minRefreshIntervalMs: 30000 } }], '.5 分钟必须保存成 30000 ms')
+
+    input.focus()
+    setControlValue(h.win, input, '10.')
+    input.blur()
+    await h.waitFor(() => h.store.get().settings?.effective.minRefreshIntervalMs === 600000,
+      { label: '10. 分钟保存为 600000 ms' })
+    assert.deepEqual(h.requests.filter((entry) => entry.endpoint === 'saveSettings').map((entry) => entry.payload).at(-1),
+      { patch: { minRefreshIntervalMs: 600000 } }, '10. 分钟必须保存成 600000 ms')
   } finally {
     h.cleanup()
   }
@@ -1033,6 +1111,35 @@ test('R11 04 手动清理：清理天数正在保存时「立即清理」禁用�
     assert.equal(button.disabled, true, '阈值正在写盘时不许用旧阈值预演')
     release()
     await h.waitFor(() => button.disabled === false, { label: '保存完成后按钮恢复' })
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R11 P7 确认框 Esc：焦点不在框内时 document 上的 Esc 只关确认框，不退设置页', skip, async () => {
+  const h = await mount({ items: cleanupItems(), settings: settingsWith(45) })
+  try {
+    await openSettings(h)
+
+    // ① 清理确认框：焦点留在触发按钮上（模拟「刚打开、焦点还没进框」的一瞬）。
+    h.$('[data-rss-cleanup-now]').click()
+    await h.waitFor(() => h.$('[data-rss-cleanup-confirm]') !== null, { label: '清理确认框打开' })
+    h.$('[data-rss-cleanup-now]').focus()
+    h.win.document.dispatchEvent(new h.win.KeyboardEvent('keydown', {
+      key: 'Escape', bubbles: true, cancelable: true,
+    }))
+    await h.waitFor(() => h.$('[data-rss-cleanup-confirm]') === null, { label: '清理确认框被 Esc 关闭' })
+    assert.equal(h.store.get().view, 'settings', '关清理确认框不许顺带退出设置页')
+
+    // ② 恢复默认确认框：同一条窄窗口。
+    h.$('[data-rss-reset-defaults]').click()
+    await h.waitFor(() => h.$('[data-rss-reset-confirm]') !== null, { label: '恢复默认确认框打开' })
+    h.$('[data-rss-reset-defaults]').focus()
+    h.win.document.dispatchEvent(new h.win.KeyboardEvent('keydown', {
+      key: 'Escape', bubbles: true, cancelable: true,
+    }))
+    await h.waitFor(() => h.$('[data-rss-reset-confirm]') === null, { label: '恢复默认确认框被 Esc 关闭' })
+    assert.equal(h.store.get().view, 'settings', '关恢复默认确认框不许顺带退出设置页')
   } finally {
     h.cleanup()
   }

@@ -53,6 +53,21 @@ export function isTunableKey(key: string): key is TunableKey {
 }
 
 /**
+ * 「恢复默认会变几项」的**唯一判据**（S5）：生效值 ≠ 默认值的可调键，按白名单顺序。
+ *
+ * 客户端两处要用它 —— 恢复默认确认框列出的变化项（settings-view）与成功提示「已恢复 N 项」
+ * （settings-actions）。两处各写一遍 `filter(...)` 时，判据一旦改动（例如将来允许某项
+ * 带容差）就可能一边算 2 项、一边说 3 项。宿主 D28 的逐键删/写规则看的是基线，不看生效值；
+ * 这里只回答「界面上会看到哪几项变化」，两者职责不同但口径必须一致。
+ */
+export function changedTunableKeys(
+  effective: TunableSettings,
+  defaults: TunableSettings,
+): TunableKey[] {
+  return TUNABLE_KEYS.filter((key) => effective[key] !== defaults[key])
+}
+
+/**
  * 校验一个可调值；认不出返回 `undefined`（**不编造**一个夹取后的值）。
  *
  * 读侧、写侧、客户端共用这一份：`settings.json` 的坏值靠它逐键丢弃，保存靠它拒绝非法入参，

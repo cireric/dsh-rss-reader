@@ -11,7 +11,7 @@
 ## 这个仓库是什么
 
 - **两半**：host 半 `src/`（Node ESM，tsc → `lib/`）；client 半 `src/client/`（React，tsdown → 单文件 `lib/client.js`）。入口是侧栏图标 → 主栏阅读器。
-- **自持存储**：`$DSH_HOME/storages/rss-reader/` 下的 `rss.db` 是条目库（DDL 在 `src/storage/db.ts`），`config.json` 放订阅与视图偏好，`reader-YYYY-MM-DD.log` 是刷新日志。
+- **自持存储**：`$DSH_HOME/storages/rss-reader/` 下的 `rss.db` 是条目库（DDL 在 `src/storage/db.ts`），`config.json` 放订阅与视图偏好，`settings.json` 是设置页四个可调参数的稀疏覆盖层（只存改过的键，权限 0600），`reader-YYYY-MM-DD.log` 是刷新日志。
 - **唯一真相**：订阅在 `config.json`；`src/domain.ts` 持有库与 config 共用的 zod 记录 schema，但不声明落盘方案。
 - **已下线**：存储域年代的 `storages/rss_reader.json` 与一次性迁移均已删除，代码里没有任何路径再读它。
 
