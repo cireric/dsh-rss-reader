@@ -163,19 +163,42 @@ export function FeedsView({
               没有发现可订阅的源。可以继续用上面的输入框手动添加 feed 地址。
             </div>
           )}
-          {discovery.candidates.map((candidate) => (
-            <div key={candidate.url} data-rss-candidate={candidate.url}
-              style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderTop: '1px solid color-mix(in srgb, currentColor 8%, transparent)' }}>
-              <span style={{ flex: 1, minWidth: 0 }}>
-                <span style={{ display: 'block' }}>{candidate.title ?? candidate.url}</span>
-                <span style={{ display: 'block', fontSize: 11, opacity: 0.6, wordBreak: 'break-all' }}>
-                  {candidate.url} · {candidate.format} · {candidate.itemCount} 条
+          {discovery.candidates.map((candidate) => {
+            // 两类候选混排（spec D9）：来源徽标 + 第二行措辞不同。Radar 候选**没有抓取校验**
+            // （ADR-0010），所以只写「站点名 · 未验证」而不编造 format / 条数；真正的校验在
+            // 「添加」时由 addFeed 做。页面候选仍显示原有的「地址 · 格式 · N 条」。
+            const isRadar = candidate.source === 'rsshub'
+            return (
+              <div key={candidate.url} data-rss-candidate={candidate.url} title={candidate.url}
+                style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderTop: '1px solid color-mix(in srgb, currentColor 8%, transparent)' }}>
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span style={{ display: 'block' }}>
+                    {candidate.title !== undefined && candidate.title !== '' ? candidate.title : candidate.url}
+                    <span data-rss-candidate-source={candidate.source ?? 'page'}
+                      style={{
+                        marginLeft: 6, padding: '0 5px', borderRadius: 3, border: '1px solid currentColor',
+                        fontSize: 10, opacity: 0.65, whiteSpace: 'nowrap',
+                      }}>{isRadar ? 'RSSHub' : '页面声明'}</span>
+                  </span>
+                  <span style={{ display: 'block', fontSize: 11, opacity: 0.6, wordBreak: 'break-all' }}>
+                    {isRadar ? (
+                      <>
+                        {candidate.siteName !== undefined && candidate.siteName !== '' ? candidate.siteName + ' · ' : ''}未验证
+                      </>
+                    ) : (
+                      <>
+                        {candidate.url}
+                        {candidate.format !== undefined ? ' · ' + candidate.format : ''}
+                        {candidate.itemCount !== undefined ? ' · ' + candidate.itemCount + ' 条' : ''}
+                      </>
+                    )}
+                  </span>
                 </span>
-              </span>
-              <button type="button" className="dsh-rss-btn" data-rss-candidate-add={candidate.url}
-                disabled={busy} onClick={() => { onAdd(candidate.url) }}>添加</button>
-            </div>
-          ))}
+                <button type="button" className="dsh-rss-btn" data-rss-candidate-add={candidate.url}
+                  disabled={busy} onClick={() => { onAdd(candidate.url) }}>添加</button>
+              </div>
+            )
+          })}
           {discovery.warnings.length > 0 && (
             <div style={{ fontSize: 12, color: '#c0392b', marginTop: 4 }}>
               {discovery.warnings.map((warning, index) => (

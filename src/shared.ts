@@ -119,14 +119,25 @@ export interface TagView {
 }
 
 /**
- * 发现阶段的一条候选（**已验证**可订阅）。订阅身份就是 url 本身，用户选中后原样交给 addFeed。
+ * 发现阶段的一条候选。订阅身份就是 url 本身，用户选中后原样交给 addFeed。
+ *
+ * 两种来源（R8a 03）：
+ *  - `page`：页面自己声明的 feed，发现时**抓过一遍**确认能解析 ⇒ format / itemCount 有值；
+ *  - `rsshub`：从实例的 Radar 规则拼出来的地址，**没有**抓取校验（ADR-0010）⇒ 两个字段缺省，
+ *    界面标「未验证」，真正的校验推迟到「添加」时由 addFeed 执行。
+ *
+ * `source` 允许缺省是为了不把旧回包当成坏数据：缺省按页面候选渲染（见 feeds-view.tsx）。
  */
 export interface FeedCandidate {
   url: string
   title?: string
-  /** 'rss2' | 'rss1' | 'atom' —— 解析器认出的格式，界面据此标注 */
-  format: string
-  itemCount: number
+  /** 'rss2' | 'rss1' | 'atom' —— 解析器认出的格式，界面据此标注；Radar 候选没有 */
+  format?: string
+  itemCount?: number
+  /** 候选来源（R8a 03）：页面声明 / RSSHub Radar */
+  source?: 'page' | 'rsshub'
+  /** Radar 规则表的 `_name`（站点名）：界面第二行要显示「站点名 · 未验证」；页面候选不填 */
+  siteName?: string
 }
 
 /**
