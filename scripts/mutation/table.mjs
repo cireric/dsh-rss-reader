@@ -3064,4 +3064,15 @@ export const MUTATIONS = [
     judgeTests: ['R11 D14③ 订阅源顺序：只有说明与「去订阅管理页」，不复制排序控件（D15）'],
     from: '\t\t\t\t\t\t\t\t\tonClick: onManageFeeds,',
     to: '\t\t\t\t\t\t\t\t\tonClick: () => {},' },
+
+  // ── R8a 02：Radar 规则引擎（2026-11-23）──────────────────────────────────
+  // 缺参也出现：去掉「必填参数缺失即跳过」。`encodeURIComponent(undefined)` 会拼出字面量
+  // `/36kr/hot-list/undefined` —— A6 的样本从「0 条候选 + 1 条缺参」变成一条指向不存在分类的
+  // 订阅地址，用户点「添加」之后才在 addFeed 里看到失败，警告区的「跳过 1 条」也归零。
+  // from 照构建产物 lib/rsshub.js 的实际字节写（pitfalls 一、1.4），独立实测 OCCURRENCES=1。
+  { id: 'rsshub-缺参也出现', file: 'lib/rsshub.js',
+    judges: ['rsshub.test.mjs'],
+    judgeTests: ['36kr：唯一规则缺 :category，不产生候选且计 1 条缺参跳过（A6）'],
+    from: "            if (value === undefined || value === '')\n                return { kind: 'missing' };",
+    to: '' },
 ]
