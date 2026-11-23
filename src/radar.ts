@@ -15,6 +15,7 @@
 
 import { fetchFeed, type FetchLimits } from './feed/fetch.js'
 import { domainCandidates, type RadarRules } from './rsshub.js'
+import { parseRsshubBase } from './settings-schema.js'
 
 /** 成功（含「该域名没有规则」）缓存 6 小时。 */
 const CACHE_SUCCESS_MS = 6 * 60 * 60 * 1000
@@ -55,13 +56,36 @@ export interface RadarLookupOptions {
   now?: () => number
 }
 
-/** 一次 Radar 查询的结果：命中某个注册域，或什么都没命中，或实例级失败。 */
-export interface RadarRulesLookup {
-  /** 命中的注册域（`domainCandidates` 里的那一个）；没有规则时为 undefined */
-  domain?: string
-  rules?: RadarRules
-  /** 实例级失败的可读原因；有它时 domain / rules 必缺省 */
-  failure?: string
+/**
+ * 一次 Radar 查询的结果：命中某个注册域 / 确认没有规则 / 实例级失败。
+ *
+ * 三态用联合而不是三个可选字段：可选字段允许「既没有规则也没有失败」这种第四个状态，
+ * 调用方必须自己约定「都缺省 = 没规则」，两处理解一漂就分不清「查空」与「没查」。
+ */
+export type RadarRulesLookup =
+  | { readonly kind: 'rules'; readonly domain: string; readonly rules: RadarRules }
+  | { readonly kind: 'empty' }
+  | { readonly kind: 'failure'; readonly reason: string }
+
+/**
+ * 实例的规则地址：`{base}/api/radar/rules/{domain}`。
+ *
+ * 这是**唯一**拼法：`testRsshub` 探活与发现流程的取规则都调它，否则两处各自拼字符串，
+ * 一处加尾斜杠处理、一处忘了，就会出现「测试通过但发现请求打到别的路径」。
+ */
+export function radarRulesUrl(base: string, domain: string): string {
+  return base + '/api/radar/rules/' + domain
+}
+
+/**
+ * 这份 JSON 是不是一份**可用**的 Radar 规则表：非 null、非数组对象，且至少有一个数组桶。
+ *
+ * 为什么不能只判 `JSON.parse` 成功：`[]` / `null` / `{}` / 只有 `_name` 的空壳都会通过，
+ * 一个返回任意 JSON 的网关就会被 testRsshub 判成 RSSHub。发现流程与 testRsshub 共用这一份判据。
+ */
+export function isRadarRules(value: unknown): value is RadarRules {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  return hasRuleBuckets(value as Record<string, unknown>)
 }
 
 /**
@@ -82,7 +106,14 @@ export async function lookupRadarRules(
   fetchImpl: typeof fetchFeed = fetchFeed,
   options: RadarLookupOptions = {},
 ): Promise<RadarRulesLookup> {
-  const origin = base.replace(/\/+$/, '')
+  // 归一化只认 parseRsshubBase 这一份（settings 面与这里共用）：profile patch 直接塞
+  // `https://x/api` 时在这里就被判非法，既不会拼出 `…/api/api/radar/…`，也不会发出请求。
+  // 空串是「未配置」，由发现流程早退；这里不替调用方兜底 —— 漏判应该以一次可见的请求暴露，
+  // 而不是被本层悄悄吞成一条失败警告。
+  const origin = base === '' ? '' : parseRsshubBase(base)
+  if (origin === undefined) {
+    return { kind: 'failure', reason: '实例地址不合法（只支持 http(s) 源站，不能带路径 / 查询 / 参数）' }
+  }
   // 每次调用都重建：白名单式只带超时与体积，调用方的 trustedTarget 永远不进 Radar 请求，
   // 也不进缓存（缓存里只有 DomainOutcome）。
   const radarLimits: FetchLimits = { timeoutMs: limits.timeoutMs, maxBytes: limits.maxBytes }
@@ -92,13 +123,13 @@ export async function lookupRadarRules(
     const key = origin + '\n' + domain
     const cached = readCached(key, now())
     if (cached !== undefined) {
-      if (cached.kind === 'failure') return { failure: cached.reason }
-      if (cached.kind === 'rules') return { domain, rules: cached.rules }
+      if (cached.kind === 'failure') return { kind: 'failure', reason: cached.reason }
+      if (cached.kind === 'rules') return { kind: 'rules', domain, rules: cached.rules }
       // 空结果 = 这个域名没有规则，继续回退到下一个候选。
       continue
     }
 
-    const fetched = await fetchImpl(origin + '/api/radar/rules/' + domain, {}, radarLimits)
+    const fetched = await fetchImpl(radarRulesUrl(origin, domain), {}, radarLimits)
     if (fetched.kind === 'not-modified') {
       // 发现请求不带条件头，正常不该出现 304；出现了当实例故障上报，不静默当成「没有规则」
       return cacheFailure(key, '实例返回了 304（发现请求不应带条件头）', now())
@@ -115,19 +146,19 @@ export async function lookupRadarRules(
     } catch {
       return cacheFailure(key, '响应不是 Radar 规则 JSON', now())
     }
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return cacheFailure(key, '响应不是 Radar 规则对象', now())
+    if (isRadarRules(parsed)) {
+      writeCached(key, { kind: 'rules', rules: parsed }, CACHE_SUCCESS_MS, now())
+      return { kind: 'rules', domain, rules: parsed }
     }
-    const rules = parsed as RadarRules
-    // 「非空规则」= 除 `_name` 外至少有一个数组桶。只有 `_name` 的对象等于没规则，继续回退 ——
-    // 否则一个域名的空壳会把更具体的域名候选（可能真有规则）挡在后面。
-    if (hasRuleBuckets(rules)) {
-      writeCached(key, { kind: 'rules', rules }, CACHE_SUCCESS_MS, now())
-      return { domain, rules }
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      // 是对象但没有规则桶（如只有 `_name` 的空壳）⇒ 这个域名没有规则，继续回退 ——
+      // 否则一个域名的空壳会把更具体的域名候选（可能真有规则）挡在后面。
+      writeCached(key, { kind: 'empty' }, CACHE_SUCCESS_MS, now())
+      continue
     }
-    writeCached(key, { kind: 'empty' }, CACHE_SUCCESS_MS, now())
+    return cacheFailure(key, '响应不是 Radar 规则对象', now())
   }
-  return {}
+  return { kind: 'empty' }
 }
 
 /** 命中才返回；过期条目顺手删掉（下次写回会排到插入序末尾）。 */
@@ -154,10 +185,10 @@ function writeCached(key: string, value: DomainOutcome, ttlMs: number, now: numb
 /** 失败结果统一按短 TTL 缓存，并把原因原样交给调用方。 */
 function cacheFailure(key: string, reason: string, now: number): RadarRulesLookup {
   writeCached(key, { kind: 'failure', reason }, CACHE_FAILURE_MS, now)
-  return { failure: reason }
+  return { kind: 'failure', reason }
 }
 
 /** 规则表里是否至少有一个桶（`_name` 与桶共用一层键，不能假设「非 _name 即数组」）。 */
-function hasRuleBuckets(rules: RadarRules): boolean {
+function hasRuleBuckets(rules: Record<string, unknown>): boolean {
   return Object.keys(rules).some((key) => key !== '_name' && Array.isArray(rules[key]))
 }

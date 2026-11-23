@@ -967,6 +967,20 @@ test('R8a 01 RSSHub 分区：地址输入 + 测试连接 + 恢复默认；未配
   assert.equal(reset.disabled, true, '草稿不算已保存值，清空按钮仍禁用')
 })
 
+test('R8a 01 RSSHub 分区：官方实例列表链接指向 docs.rsshub.app，新窗口打开且断开 opener，并说明公共实例可能失效', async () => {
+  const h = await mount()
+  await openSettings(h)
+  const note = h.$('[data-rss-rsshub-instances]')
+  assert.ok(note !== null, 'RSSHub 分区必须有官方实例列表的说明行（D1）')
+  const link = note.querySelector('a')
+  assert.ok(link !== null, '说明行里必须有「官方实例列表」链接')
+  assert.equal(link.getAttribute('href'), 'https://docs.rsshub.app/guide/instances', 'href 必须是官方实例文档')
+  assert.equal(link.getAttribute('target'), '_blank', '列表在文档站，新窗口打开')
+  assert.match(link.getAttribute('rel') ?? '', /noopener/, 'target=_blank 必须带 noopener（rel 里含 noopener）')
+  assert.match(note.textContent ?? '', /社区维护/, '必须说明公共实例由社区维护')
+  assert.match(note.textContent ?? '', /可能失效/, '必须说明公共实例可能失效')
+})
+
 test('R8a 01 RSSHub 保存：失焦提交合法地址，走 saveSettings 串行链并显示「已保存 ✓」', async () => {
   const h = await mount()
   await openSettings(h)

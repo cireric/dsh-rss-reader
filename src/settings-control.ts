@@ -18,7 +18,7 @@ import { Config } from './config.js'
 import type { Config as ConfigShape } from './config.js'
 import { readSettingsFile, writeSettingsFile } from './storage/settings-file.js'
 import type { NumberTunableKey, TunableKey, TunableSettings, TunableOverrides } from './settings-schema.js'
-import { NUMBER_TUNABLE_KEYS } from './settings-schema.js'
+import { NUMBER_TUNABLE_KEYS, TUNABLE_KEYS, assignTunableValue } from './settings-schema.js'
 import type { ReadOnlySettingView, SettingsSnapshot } from './shared.js'
 
 /** 一次保存的结果：成功带回与读端点同形的快照，失败只带一句可展示的原因。 */
@@ -129,13 +129,12 @@ export function createSettingsControl(deps: SettingsControlDeps): SettingsContro
     }
     overrides = { ...outcome.overrides }
     // D3：只覆盖文件点名的键；其余键保持 patch / schema 默认给的值。
-    // 数字键与字符串键分开写，只为让 TS 的索引写入收窄；判据仍是同一份 parseTunableValue。
-    for (const key of NUMBER_TUNABLE_KEYS) {
+    // 键表是唯一的遍历来源：字符串键与数字键走同一段，不再另写一句 `rsshubBase`。
+    for (const key of TUNABLE_KEYS) {
       const value = overrides[key]
       if (value === undefined) continue
-      config[key] = value
+      assignTunableValue(config, key, value)
     }
-    if (overrides.rsshubBase !== undefined) config.rsshubBase = overrides.rsshubBase
   }
 
   const snapshot = (): SettingsSnapshot => ({
@@ -163,16 +162,12 @@ export function createSettingsControl(deps: SettingsControlDeps): SettingsContro
     }
     // ② 落盘成功后才认这份覆盖：之后即使本进程崩掉，重启读到的也是刚写下的值。
     overrides = next
-    for (const key of NUMBER_TUNABLE_KEYS) {
+    for (const key of TUNABLE_KEYS) {
       const value = patch[key]
       if (value === undefined) continue
-      config[key] = value
+      assignTunableValue(config, key, value)
       // D8：每次成功保存留一行「旧 → 新」。设置页没有来源标签，日志是唯一的复盘凭据。
       log('设置：' + key + ' ' + before[key] + ' → ' + value)
-    }
-    if (patch.rsshubBase !== undefined) {
-      config.rsshubBase = patch.rsshubBase
-      log('设置：rsshubBase ' + before.rsshubBase + ' → ' + patch.rsshubBase)
     }
     return { ok: true, snapshot: snapshot() }
   }

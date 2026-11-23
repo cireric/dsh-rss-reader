@@ -70,8 +70,10 @@ test('testRsshub 超时：把 fetch 层的超时原因原样带给人看', async
   assert.match(result.value.message, /超时/, '超时要有可读原因')
 })
 
-test('testRsshub 非 JSON / 空 body：都不算通过', async () => {
-  for (const body of ['<html>not json</html>', '   ', '']) {
+test('testRsshub 非 JSON / 空 body / 非规则表：都不算通过', async () => {
+  // [] / null / {} / 只有 _name 的空壳都不是规则表：探活判据与发现流程共用 `isRadarRules`，
+  // 不能只看「JSON.parse 成功了」——否则一个返回任意 JSON 的网关也会被当成 RSSHub。
+  for (const body of ['<html>not json</html>', '   ', '', '[]', 'null', '{}', '{"_name":"知乎"}', '"ok"']) {
     const stub = stubFetch({ kind: 'ok', body, finalUrl: 'https://rsshub.example/api/radar/rules/zhihu.com' })
     const h = harness(stub.impl)
     const result = await h.dispatch('testRsshub', { base: 'https://rsshub.example' })

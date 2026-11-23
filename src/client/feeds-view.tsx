@@ -174,7 +174,7 @@ export function FeedsView({
                 <span style={{ flex: 1, minWidth: 0 }}>
                   <span style={{ display: 'block' }}>
                     {candidate.title !== undefined && candidate.title !== '' ? candidate.title : candidate.url}
-                    <span data-rss-candidate-source={candidate.source ?? 'page'}
+                    <span data-rss-candidate-source={candidate.source}
                       style={{
                         marginLeft: 6, padding: '0 5px', borderRadius: 3, border: '1px solid currentColor',
                         fontSize: 10, opacity: 0.65, whiteSpace: 'nowrap',
