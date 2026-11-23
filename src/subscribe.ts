@@ -262,7 +262,7 @@ async function radarBranch(
  *
  * 上限：页面候选由 discover.ts 的 MAX_CANDIDATES 封顶（5），与 Radar 合并后再统一裁到 5；
  * 体积与超时走 options.limits（每个候选各一份）⇒ 最坏一轮 = 1 次页面 + 5 次候选抓取，
- * 外加 Radar 的最多 4 次域名回退查询（04 票会加缓存）。
+ * 外加 Radar 的最多 4 次域名回退查询（04 票已在 radar.ts 里按「实例 + 域名」缓存 6h / 失败 60s）。
  */
 export async function discoverCandidates(
   raw: string,

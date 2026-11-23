@@ -6,13 +6,17 @@
  *
  * 出网全部用桩（`fetchImpl`）——除了 A9：那一条刻意把 Radar 请求**转交给真实 fetchFeed**，
  * 因为「私网被拒」是 fetch 层的行为，桩掉它就等于把安全边界换成断言一句注释。
+ *
+ * 04 票加了进程内缓存后，本文件的用例共用同一个 `BASE`：每个用例前必须清缓存，否则同一
+ * 「实例 + 域名」的规则（或失败）会跨用例串味。缓存语义本身在 tests/radar-cache.test.mjs。
  */
-import { test } from 'node:test'
+import { test, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { Config } from '../lib/config.js'
 import { createDispatch } from '../lib/endpoints.js'
 import { fetchFeed } from '../lib/feed/fetch.js'
 import { createMemoryStore } from '../lib/memory-store.js'
+import { clearRadarCache } from '../lib/radar.js'
 import { discoverCandidates } from '../lib/subscribe.js'
 
 const LIMITS = { timeoutMs: 1000, maxBytes: 1024 * 1024, trustedTarget: true }
@@ -38,6 +42,8 @@ function stubFetch(map) {
 }
 
 const radarUrl = (domain) => BASE + '/api/radar/rules/' + domain
+
+beforeEach(() => clearRadarCache())
 
 const GITHUB_RULES = JSON.stringify({
   _name: 'GitHub',
@@ -217,6 +223,8 @@ test('实例返回非 JSON / 非 2xx：一条警告（url = 实例地址），�
     { kind: 'ok', body: '<html>not json</html>' },
     { kind: 'failed', reason: 'HTTP 503' },
   ]) {
+    // 两种失败共用同一个 BASE + site.test，缓存会串味：每轮先清。
+    clearRadarCache()
     const fetchImpl = stubFetch({
       'https://site.test/': { kind: 'ok', body: htmlPage(feedLink('/a.xml')) },
       'https://site.test/a.xml': { kind: 'ok', body: RSS },
