@@ -3132,4 +3132,28 @@ export const MUTATIONS = [
     judgeTests: ['失败只缓存 60s：网络错误 / 非 JSON / 非对象都不钉死长 TTL'],
     from: 'writeCached(key, { kind: \'failure\', reason }, CACHE_FAILURE_MS, now);',
     to: 'writeCached(key, { kind: \'failure\', reason }, CACHE_SUCCESS_MS, now);' },
+
+  // ── R9 01：回溯纯函数层（2026-11-23）──────────────────────────────────────
+  // 形态过滤器恒真：月份索引 / 分类页 / 社交链接全部变成「文章候选」，A1 的 20→17 与 A2 的
+  // 「月份索引被滤掉」当场翻红。这是回溯最危险的退化——它不报错，只会把垃圾抓进库。
+  // from 照构建产物 lib/history.js 的实际字节写（pitfalls 一、1.4），独立实测 OCCURRENCES=1。
+  { id: 'history-形态恒真', file: 'lib/history.js',
+    judges: ['history.test.mjs'],
+    judgeTests: ['形态规则：整路径形状（数字→#）或「目录形状 + 扩展名」任一命中即算文章；host 必须一致、协议忽略'],
+    from: "        return samples.some((sample) => sample.host === shape.host && (sample.path === shape.path\n            || (shape.extension !== '' && sample.directory === shape.directory && sample.extension === shape.extension)));",
+    to: '        return true;' },
+  // 同文键带上协议：归档页的 https 与 atom 的 http 判成两篇，A1 里已在 feed 的 3 篇会被再抓一遍
+  //（真实样本的全部收益归零）。A4 的四种写法与「只差协议」的派生断言都会翻红。
+  { id: 'history-同文键分协议', file: 'lib/duplicates.js',
+    judges: ['history.test.mjs'],
+    judgeTests: ['A4 同文键：http/https、锚点、utm 四种写法判同一篇；路径大小写不同判两篇'],
+    from: "    const key = linkKeyOf(link);\n    const separator = key.indexOf('://');\n    return separator === -1 ? key : key.slice(separator + 3);",
+    to: '    return linkKeyOf(link);' },
+  // 月级补日：只有年月的页面 / URL 被写成当月 1 日——那是编出来的日期，回溯条目会排到错误位置。
+  // A5 的「只有年月不产生日期」是唯一判据。
+  { id: 'history-月级补日', file: 'lib/article-date.js',
+    judges: ['history.test.mjs'],
+    judgeTests: ['A5 日期：abbr.published / 可见中文 / 可见英文都得真实 ISO；只有年月的 URL 不产生日期'],
+    from: '    if (parts.day === undefined)\n        return undefined;',
+    to: '    if (parts.day === undefined)\n        parts.day = 1;' },
 ]

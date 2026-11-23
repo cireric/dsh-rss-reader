@@ -9,6 +9,12 @@
  *   ① 同源条目不算（同一链接在同一源里重复是 identity-repair 的活，这里再报一次只会重复报警）；
  *   ② 缺链接的条目不算（空链接会把一堆不相干的文章连成一组）；
  *   ③ 仅标题相同不算（标题相似只是线索，不是同一份原文的证据）。
+ *
+ * **两个键，不是一套口径，不许合并**（ADR-0011）：
+ *   - `linkKeyOf` / `link_key` 回答「两个源是不是在说同一篇」——跨源重复提示用，刻意把 http 与
+ *     https 当成不同文章（已存的派生列，改规则要整库重算）；
+ *   - `sameArticleKeyOf` 回答「这条链接是不是同一篇原文（回溯在同一源内判重）」——由 `linkKeyOf`
+ *     派生、只去掉协议，因为归档页与 atom 常把同一篇写成两种协议（实测 3 篇会被重复抓取）。
  */
 
 /**
@@ -64,6 +70,20 @@ export function linkKeyOf(link: string): string {
     ? ''
     : '?' + params.map(([key, value]) => key + '=' + value).join('&')
   return url.protocol + '//' + url.host + path + query
+}
+
+/**
+ * 回溯专用**同文键**：`linkKeyOf` 的结果去掉协议前缀（`https://x/a` ⇒ `x/a`）。
+ *
+ * 规则不复制，直接派生——这是 ADR-0011 的缓解措施：两边将来只会一起变，唯一差别永远是协议。
+ * 为什么需要它：归档页写 `https://`、atom 写 `http://` 时，`linkKeyOf` 判成两篇文章，回溯会把
+ * 已在库里的 3 篇再抓一遍（实测样本）；而 `link_key` 是跨源重复提示的口径，不能为回溯改它。
+ * **它只用于回溯在同一订阅源内的「这篇是不是已经在库里」**；跨源重复仍由 `link_key` 负责。
+ */
+export function sameArticleKeyOf(link: string): string {
+  const key = linkKeyOf(link)
+  const separator = key.indexOf('://')
+  return separator === -1 ? key : key.slice(separator + 3)
 }
 
 /** 参与重复判定的最小信息：一条条目在「一个源里」的身份。 */
