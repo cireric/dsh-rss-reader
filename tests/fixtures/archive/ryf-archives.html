@@ -1,0 +1,461 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" id="sixapart-standard" lang="zh-CN">
+<head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+<meta name="generator" content="Movable Type  5.2.2" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<!--link rel="stylesheet" href="http://www.ruanyifeng.com/blog/styles.css" type="text/css" /-->
+<link rel="start" href="https://www.ruanyifeng.com/blog/" title="Home" />
+<link rel="alternate" type="application/atom+xml" title="Recent Entries" href="https://feeds.feedburner.com/ruanyifeng" />
+
+
+<!--
+<rdf:RDF xmlns="http://web.resource.org/cc/"
+         xmlns:dc="http://purl.org/dc/elements/1.1/"
+         xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+<Work rdf:about="http://www.ruanyifeng.com/blog/2016/01/babel.html">
+<dc:title>Babel 入门教程</dc:title>
+<dc:description>（说明：本文选自我的新书《ES6 标准入门（第二版）》的第一章《ECMAScript 6简介》）...</dc:description>
+<dc:creator>阮一峰</dc:creator>
+<dc:date>2016-01-25T21:33:15+08:00</dc:date>
+<license rdf:resource="http://creativecommons.org/licenses/by-nc-nd/3.0/" />
+</Work>
+<License rdf:about="http://creativecommons.org/licenses/by-nc-nd/3.0/">
+</License>
+</rdf:RDF>
+-->
+
+
+
+    <title>阮一峰的网络日志  ： 全部文章（按分类查看）</title>
+</head>
+<body id="scrapbook" class="mt-archive-index two-columns">
+
+    <div id="container">
+        <div id="container-inner">
+
+
+            <div id="header">
+    <div id="header-inner">
+        <div id="header-content">
+
+
+            <div id="header-name">阮一峰的网络日志 <span id="site_location"> » <a href="https://www.ruanyifeng.com/blog/" accesskey="1">首页</a></span><span id="site_archive"> » <a href="https://www.ruanyifeng.com/blog/archives.html">档案</a></span>
+</div>
+
+<div id="google_search">
+<!-- SiteSearch Google -->
+<form action="https://www.baidu.com/s" target="_blank" method="get" id="cse-search-box">
+  <div>
+  <input type="text" size="20" name="origin" class="searchbox" id="sbi" value="" />
+  <input type="hidden" name="wd" value="" />
+  <!--input type="image" src="/static/themes/theme_scrapbook/images/top_search_submit.gif" class="searchbox_submit" value="" alt="搜索" name="sa" onclick="this.form.wd.value = this.form.origin.value + ' inurl:www.ruanyifeng.com/blog'" /-->
+  <input type="image" src="/static/themes/theme_scrapbook/images/top_search_submit.gif" class="searchbox_submit" value="" alt="搜索" name="sa" onclick="this.form.wd.value = this.form.origin.value + ' 阮一峰'" />
+</div>
+</form>
+
+<!-- SiteSearch Google -->
+</div>
+<div id="feed_icon">
+<a href="/feed.html?utm_source=" title="订阅Feed">
+<!--img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAABGdBTUEAAK/INwWK6QAAABl0RVh0U29mdHdhcmUAQWRvYmUgSW1hZ2VSZWFkeXHJZTwAAAUzSURBVHjavFdbbFRVFF3nPjoz7dTWTittaW0jUDRAUqaNojyqREnEQKgfUj9MqqAmhqRt/OCD4CuY+Kckoh+aiGKC+gMJbdHoRysJ8dkhhmJLNdDKtJU+6GMK87j3Hs85d2Z6HzNtMYWb3Dn3NWftvfba+5xNYDl+e6Fkj6yqb/oDRbWq14vlPBLRKCITkxf0ROLt+hNjp1PPSRK4kA3vF1dXNRcWlyA2OQU9eos9opAkAiKxD+XkKO6t15aRWO7J/MgmAZU8MEgexgZHMX518Dh72sYMmVKShnxWuWHdHtxKIDIYTgMuDzgfmSOIQkYMpdUF8OY92Hytt4/jvkg47czzU16iQovM3QFwmNck+Yyduu7D6NA0Z6JR4THntFs9V4tWQg6Ui3s6MwKDncsFTnXKLJhDSeUK3AgPtyhccDzmVs999buRt/1Vm4i0od+hX7+MRG87jPGB/w1u8FPj9xEw7McVrnYuOCvtpjTth3J/nTg99c8LRhKhr6D3dTB5R24bXFwbMXBsyZzeoXaycEpJ95TB09AGX/NpqLVNtw8urnVzLvHjFNxiFqRy2OOHuqUVnue+ACkoWzo4O6lGzTmuHq6nPvY2m9rVqjrIK2rMEKxqyG5NPAKt+wjo0LklgfNxJkZMA3KJvqRUk3z5UFY3QH14P0h+WUY79HPvgv7VuSg4ZRGY1YgZgqXmORccF17sy2ehnf9AeO085K2HQFbtXBScj0LcpgF2cN+WV+DZ/LJQu6gD4R7oV7pBJwbSgtMvfiPoVp56DySwxm7EtkMs1WdAB7qzggsDJKQYsHucSkOudrkiCPWR/fA2nYCn8SNIK4NptSMyAu3sAdDRkIsJdfth0LzSrODUoPNZ4KI9SxJI5UHk7D4GdQfz2us31c7CoHMjRkKuDPHseCMrONVhNcDJwMJpKFVvg9L4OaTiNWm1x789KCqkrXhVBiEz0WYCT2nAzQAD1/vaETv1GrRfP4Vx5cfMNcDPwvP0h0DhanPym7OIf/+O67vcJ1/PCJ4KgdzaUP6Wz+dU+5yIL6fV+PsHGAOdwlPpvvUOyeeAVGyCdqkDNB6DPjsBSrnndfOGevOh3RhGItxvA+fX1CtbGFhgYUFkFMZPR6F1HnClHq8HyubWtJexX06CRmdt33hrd7nA7SFY4qoGpnYuOKcRykPPgDCBcsHx9Iv+fNL2PueBehCWUfYQIIMGLOCcOmXDXsh1+yCt35tUPfvzGFuSvzvoinXOxqa02qOhM6733nVP2MAdaej2XN11DPKjLZCD+yBvahGCo7JfTKAN9UD7s8Oe9zUNIhz8fWI8DG2k38WCFdxugANcXrvTVd1IEbuv3Jour7Hzn7jLMBNfKs7R3i67gRVrbeCOEDhinmWhAatsqdquM2XzHZINhK2cqTjHr/XZdVJUbgN3MWAVXKbSyg9jesRW2xP9di+lwrL5ojM3m2H/kG9hwcIA37c71W6wJdW2J2S5nrjYbq/t1AHAhJsKQeyfPvf6IMJgghPJhFZ4x0KlfLFvt22du45Au/A1SOlGc0P672XXwhLtOcM0kTTEMMd0qkVmMNXxMd/tsedUjInr4SQDgOfeXMSiN0FCL5WHah4L1qqYXPJOJlttd+a5M+YpcG5poLYKQ5f+6JJ4r8bbJYP47hq4r7QAs9PjYNhHJd4o8l5taiwuOpa7AS4XKqI/5NjJbTnaWK92nLdLuhQAJayRNMiygXPBeQN+Qbvu0zDc3y+aUzhbkGR73sI7ljvUnndx2q3t+X8CDAD66FtrIL864AAAAABJRU5ErkJggg==" alt="" style="border: 0pt none;" /-->
+
+</a></div>
+
+        </div>
+    </div>
+</div>
+
+
+
+            <div id="content">
+                <div id="content-inner">
+
+
+                    <div id="alpha">
+                        <div id="alpha-inner">
+
+                            <h1 id="page-title" class="archive-title">文章存档</h1>
+<div class="content-nav"><p><a href="/blog/2026/11/">按日期排列</a></p></div>
+
+<div id="entry-2564" class="entry-asset asset hentry">
+    <div class="asset-header">
+        <h2 class="asset-name entry-title"><a href="https://www.ruanyifeng.com/blog/2026/11/weekly-issue-420.html" rel="bookmark">科技爱好者周刊（第 420 期）：最分心的一年</a></h2>
+<p id="asset-tags">
+
+
+分类<span class="delimiter">：</span>
+<a href="https://www.ruanyifeng.com/blog/weekly/" rel="tag">周刊</a>
+
+
+
+</p>     
+</div>
+    <div class="asset-content entry-content">
+
+        <div class="asset-body">
+            <p>这里记录每周值得分享的科技内容，周五发布。</p>
+
+        </div>
+
+
+
+        <div class="asset-more-link">
+            <p><a href="https://www.ruanyifeng.com/blog/2026/11/weekly-issue-420.html" rel="bookmark">继续阅读全文 »</a></p>
+        </div>
+
+    </div>
+    <div class="asset-footer">
+<div class="asset-meta">
+           <p> <span class="byline">
+
+           <abbr class="published" title="2026-11-20T08:07:30+08:00">2026年11月20日 08:07</abbr>
+            </span>
+
+            <span class="separator">|</span> <a href="https://www.ruanyifeng.com/blog/2026/11/weekly-issue-420.html#comments">留言（39）</a>
+            
+
+        </p></div>
+</div>
+</div>
+
+
+<div class="module-categories module">
+      <h2 class="module-header">最近的20篇文章（共2259篇）</h2>
+      <div class="module-content">
+        <ul class="module-list">
+
+
+<li class="module-list-item">2026.11.13：<a href="https://www.ruanyifeng.com/blog/2026/11/weekly-issue-419.html">科技爱好者周刊（第 419 期）：机房来了，写字楼走了</a><span class="hint">（39条评论）</span>
+</li>
+                     
+
+<li class="module-list-item">2026.11.06：<a href="https://www.ruanyifeng.com/blog/2026/11/weekly-issue-418.html">科技爱好者周刊（第 418 期）：如果科技停止在21世纪初</a><span class="hint">（50条评论）</span>
+</li>
+                     
+
+<li class="module-list-item">2026.10.30：<a href="https://www.ruanyifeng.com/blog/2026/10/weekly-issue-417.html">科技爱好者周刊（第 417 期）：不要让 AI 代表你</a><span class="hint">（55条评论）</span>
+</li>
+                     
+
+<li class="module-list-item">2026.10.23：<a href="https://www.ruanyifeng.com/blog/2026/10/weekly-issue-416.html">科技爱好者周刊（第 416 期）：编程已经面目全非</a><span class="hint">（37条评论）</span>
+</li>
+                     
+
+<li class="module-list-item">2026.10.16：<a href="https://www.ruanyifeng.com/blog/2026/10/weekly-issue-415.html">科技爱好者周刊（第 415 期）：3D 版《看不见的城市》</a><span class="hint">（24条评论）</span>
+</li>
+                     
+
+<li class="module-list-item">2026.10.08：<a href="https://www.ruanyifeng.com/blog/2026/10/weekly-issue-414.html">科技爱好者周刊（第 414 期）：Jev 决策模型有什么用</a><span class="hint">（36条评论）</span>
+</li>
+                     
+
+<li class="module-list-item">2026.09.18：<a href="https://www.ruanyifeng.com/blog/2026/09/weekly-issue-413.html">科技爱好者周刊（第 413 期）：再见了，React Native</a><span class="hint">（54条评论）</span>
+</li>
+                     
+
+<li class="module-list-item">2026.09.11：<a href="https://www.ruanyifeng.com/blog/2026/09/weekly-issue-412.html">科技爱好者周刊（第 412 期）：禁止 issue，只用 PR</a><span class="hint">（41条评论）</span>
+</li>
+                     
+
+<li class="module-list-item">2026.09.04：<a href="https://www.ruanyifeng.com/blog/2026/09/weekly-issue-411.html">科技爱好者周刊（第 411 期）：OpenClaw 2.0 是一个缩影</a><span class="hint">（30条评论）</span>
+</li>
+                     
+
+<li class="module-list-item">2026.08.28：<a href="https://www.ruanyifeng.com/blog/2026/08/weekly-issue-410.html">科技爱好者周刊（第 410 期）：你需要知道的 AI 三种机制</a><span class="hint">（45条评论）</span>
+</li>
+                     
+
+<li class="module-list-item">2026.08.21：<a href="https://www.ruanyifeng.com/blog/2026/08/weekly-issue-409.html">科技爱好者周刊（第 409 期）：程序员的职业未来</a><span class="hint">（56条评论）</span>
+</li>
+                     
+
+<li class="module-list-item">2026.08.14：<a href="https://www.ruanyifeng.com/blog/2026/08/weekly-issue-408.html">科技爱好者周刊（第 408 期）：你需要知道的 AI 缓存知识</a><span class="hint">（49条评论）</span>
+</li>
+                     
+
+<li class="module-list-item">2026.08.07：<a href="https://www.ruanyifeng.com/blog/2026/08/weekly-issue-407.html">科技爱好者周刊（第 407 期）：国家为什么需要开源软件？</a><span class="hint">（57条评论）</span>
+</li>
+                     
+
+<li class="module-list-item">2026.07.31：<a href="https://www.ruanyifeng.com/blog/2026/07/weekly-issue-406.html">科技爱好者周刊（第 406 期）：道可，道非，常道</a><span class="hint">（65条评论）</span>
+</li>
+                     
+
+<li class="module-list-item">2026.07.24：<a href="https://www.ruanyifeng.com/blog/2026/07/weekly-issue-405.html">科技爱好者周刊（第 405 期）：资源，社会公平与算力</a><span class="hint">（70条评论）</span>
+</li>
+                     
+
+<li class="module-list-item">2026.07.17：<a href="https://www.ruanyifeng.com/blog/2026/07/weekly-issue-404.html">科技爱好者周刊（第 404 期）：你需要知道的 AI 内存知识</a><span class="hint">（32条评论）</span>
+</li>
+                     
+
+<li class="module-list-item">2026.07.10：<a href="https://www.ruanyifeng.com/blog/2026/07/weekly-issue-403.html">科技爱好者周刊（第 403 期）：为什么 Dropbox 不成功</a><span class="hint">（39条评论）</span>
+</li>
+                     
+
+<li class="module-list-item">2026.07.03：<a href="https://www.ruanyifeng.com/blog/2026/07/weekly-issue-402.html">科技爱好者周刊（第 402 期）：我在智念 AI 的日子（小说）</a><span class="hint">（35条评论）</span>
+</li>
+                     
+
+<li class="module-list-item">2026.06.30：<a href="https://www.ruanyifeng.com/blog/2026/06/anthropic.html">Dario Amodei：AI 开源是伪命题</a><span class="hint">（90条评论）</span>
+</li>
+                     
+ </ul>
+      </div>
+    </div>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                        </div>
+                    </div>
+
+
+                    <div id="beta">
+    <div id="beta-inner">
+<div class="module-categories module">
+      <h2 class="module-header">分类</h2>
+      <div class="module-content">
+ 
+  <ul class="module-list">
+   
+    <li class="module-list-item"><a href="https://www.ruanyifeng.com/blog/algorithm/" title="算法与数学">算法与数学</a>（32）
+     
+          
+      
+     </li>
+    
+   
+  
+   
+    <li class="module-list-item"><a href="https://www.ruanyifeng.com/blog/clipboard/" title="剪贴板">剪贴板</a>（162）
+     
+          
+      
+     </li>
+    
+   
+  
+   
+    <li class="module-list-item"><a href="https://www.ruanyifeng.com/blog/computer/" title="理解计算机">理解计算机</a>（63）
+     
+          
+      
+     </li>
+    
+   
+  
+   
+    <li class="module-list-item"><a href="https://www.ruanyifeng.com/blog/developer/" title="开发者手册">开发者手册</a>（241）
+     
+          
+      
+     </li>
+    
+   
+  
+   
+    <li class="module-list-item"><a href="https://www.ruanyifeng.com/blog/english/" title="英语爱好者">英语爱好者</a>（66）
+     
+          
+      
+     </li>
+    
+   
+  
+   
+    <li class="module-list-item"><a href="https://www.ruanyifeng.com/blog/essays/" title="散文">散文</a>（160）
+     
+          
+      
+     </li>
+    
+   
+  
+   
+    <li class="module-list-item"><a href="https://www.ruanyifeng.com/blog/industry/" title="计算机行业历史">计算机行业历史</a>（39）
+     
+          
+      
+     </li>
+    
+   
+  
+   
+    <li class="module-list-item"><a href="https://www.ruanyifeng.com/blog/javascript/" title="JavaScript">JavaScript</a>（100）
+     
+          
+      
+     </li>
+    
+   
+  
+   
+    <li class="module-list-item"><a href="https://www.ruanyifeng.com/blog/literature/" title="文学爱好者">文学爱好者</a>（36）
+     
+          
+      
+     </li>
+    
+   
+  
+   
+    <li class="module-list-item"><a href="https://www.ruanyifeng.com/blog/misc/" title="杂物间">杂物间</a>（288）
+     
+          
+      
+     </li>
+    
+   
+  
+   
+    <li class="module-list-item"><a href="https://www.ruanyifeng.com/blog/mjos/" title="Joel谈软件">Joel谈软件</a>（14）
+     
+          
+      
+     </li>
+    
+   
+  
+   
+    <li class="module-list-item"><a href="https://www.ruanyifeng.com/blog/notes/" title="笔记本">笔记本</a>（179）
+     
+          
+      
+     </li>
+    
+   
+  
+   
+    <li class="module-list-item"><a href="https://www.ruanyifeng.com/blog/opinions/" title="观点与感想">观点与感想</a>（196）
+     
+          
+      
+     </li>
+    
+   
+  
+   
+    <li class="module-list-item"><a href="https://www.ruanyifeng.com/blog/sci-tech/" title="科技爱好者">科技爱好者</a>（149）
+     
+          
+      
+     </li>
+    
+   
+  
+   
+    <li class="module-list-item"><a href="https://www.ruanyifeng.com/blog/startup/" title="创业">创业</a>（58）
+     
+          
+      
+     </li>
+    
+   
+  
+   
+    <li class="module-list-item"><a href="https://www.ruanyifeng.com/blog/translations/" title="译文集">译文集</a>（46）
+     
+          
+      
+     </li>
+    
+   
+  
+   
+    <li class="module-list-item"><a href="https://www.ruanyifeng.com/blog/usenet/" title="USENET">USENET</a>（7）
+     
+          
+      
+     </li>
+    
+   
+  
+   
+    <li class="module-list-item"><a href="https://www.ruanyifeng.com/blog/weekly/" title="周刊">周刊</a>（420）
+     
+          
+      
+     </li>
+    </ul>
+   
+    
+      </div>
+    </div>
+</div>
+</div>
+
+
+                </div>
+            </div>
+
+
+            <div id="footer">
+<div id="footer-inner">
+  <div id="footer-content">
+
+      
+<!--
+      <section> 
+     </section>
+  <p><a title="Instagram" target="_blank" href="http://instagram.com/ruanyf">Instagram</a></p>
+       <p><a title="订阅" href="https://app.feedblitz.com/f/f.fbz?Sub=348868" target="_blank">邮件订阅</a></p>
+  
+       <h2>Feed</h2>
+       <p><a title="FeedBurner" href="http://feeds.feedburner.com/ruanyifeng" target="_blank">FeedBurner</a></p>
+       <p><a title="atom.xml" href="http://www.ruanyifeng.com/blog/atom.xml" target="_blank">atom.xml</a></p>
+     
+      <p>支付宝：<a title="支付宝" href="alipays://platformapi/startapp?appId=20000067&url=http%3A%2F%2Fwww.ruanyifeng.com%2Fblog" target="_blank">yifeng.ruan@gmail.com</a></p>
+-->
+
+     <section>
+<!--
+       <h2>授权方式</h2>
+       <p><a title="许可证" href="http://creativecommons.org/licenses/by-nc-nd/3.0/deed.zh" target="_blank">自由转载-非商用-非衍生-保持署名</a></p>
+       <h2>微信公号</h2>
+       <h2>社交帐号</h2>
+       <h2>联系方式</h2>
+     -->
+       <p></p>
+       <p>
+         <a title="微博" href="http://weibo.com/ruanyf" target="_blank">Weibo</a> | 
+         <a title="Twitter" target="_blank" href="https://twitter.com/ruanyf">Twitter</a> |
+         <a title="GitHub" target="_blank" href="https://github.com/ruanyf">GitHub</a>
+       </p>
+     
+     <p>Email: <a title="电子邮件" href="/cdn-cgi/l/email-protection#5e2737383b3039702c2b3f301e39333f3732703d3133" target="_blank"><span class="__cf_email__" data-cfemail="2c55454a49424b025e594d426c4b414d4540024f4341">[email&#160;protected]</span></a></p>
+     </section>
+  
+  
+
+
+  </div>
+</div>
+</div>
+                                                                                                                                                                                                                                                                                                                                                                                                                                                     
+
+
+
+
+
+
+
+        </div>
+    </div>
+</body>
+</html>

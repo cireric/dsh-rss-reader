@@ -1,0 +1,269 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" id="sixapart-standard" lang="zh-CN">
+<head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+<meta name="generator" content="Movable Type  5.2.2" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<!--link rel="stylesheet" href="http://www.ruanyifeng.com/blog/styles.css" type="text/css" /-->
+<link rel="start" href="https://www.ruanyifeng.com/blog/" title="Home" />
+<link rel="alternate" type="application/atom+xml" title="Recent Entries" href="https://feeds.feedburner.com/ruanyifeng" />
+
+
+<!--
+<rdf:RDF xmlns="http://web.resource.org/cc/"
+         xmlns:dc="http://purl.org/dc/elements/1.1/"
+         xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+<Work rdf:about="http://www.ruanyifeng.com/blog/2022/09/weekly-issue-222.html">
+<dc:title>科技爱好者周刊（第 222 期）：四十年编程感想</dc:title>
+<dc:description>这里记录每周值得分享的科技内容，周五发布。...</dc:description>
+<dc:creator>阮一峰</dc:creator>
+<dc:date>2022-09-09T08:11:00+08:00</dc:date>
+<license rdf:resource="http://creativecommons.org/licenses/by-nc-nd/3.0/" />
+</Work>
+<License rdf:about="http://creativecommons.org/licenses/by-nc-nd/3.0/">
+</License>
+</rdf:RDF>
+-->
+
+
+
+    <title>阮一峰的网络日志: January 2020 文章存档</title>
+
+
+    <link rel="prev" href="https://www.ruanyifeng.com/blog/2019/12/" title="December 2019" />
+    <link rel="next" href="https://www.ruanyifeng.com/blog/2020/02/" title="February 2020" />
+
+</head>
+<body id="scrapbook" class="mt-archive-listing mt-datebased-monthly-archive two-columns">
+
+    <div id="container">
+        <div id="container-inner">
+
+
+            <div id="header">
+    <div id="header-inner">
+        <div id="header-content">
+
+
+            <div id="header-name">阮一峰的网络日志 <span id="site_location"> » <a href="https://www.ruanyifeng.com/blog/" accesskey="1">首页</a></span><span id="site_archive"> » <a href="https://www.ruanyifeng.com/blog/archives.html">档案</a></span>
+</div>
+
+<div id="google_search">
+<!-- SiteSearch Google -->
+<form action="https://www.baidu.com/s" target="_blank" method="get" id="cse-search-box">
+  <div>
+  <input type="text" size="20" name="origin" class="searchbox" id="sbi" value="" />
+  <input type="hidden" name="wd" value="" />
+  <!--input type="image" src="/static/themes/theme_scrapbook/images/top_search_submit.gif" class="searchbox_submit" value="" alt="搜索" name="sa" onclick="this.form.wd.value = this.form.origin.value + ' inurl:www.ruanyifeng.com/blog'" /-->
+  <input type="image" src="/static/themes/theme_scrapbook/images/top_search_submit.gif" class="searchbox_submit" value="" alt="搜索" name="sa" onclick="this.form.wd.value = this.form.origin.value + ' 阮一峰'" />
+</div>
+</form>
+
+<!-- SiteSearch Google -->
+</div>
+<div id="feed_icon">
+<a href="/feed.html?utm_source=" title="订阅Feed">
+<!--img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAABGdBTUEAAK/INwWK6QAAABl0RVh0U29mdHdhcmUAQWRvYmUgSW1hZ2VSZWFkeXHJZTwAAAUzSURBVHjavFdbbFRVFF3nPjoz7dTWTittaW0jUDRAUqaNojyqREnEQKgfUj9MqqAmhqRt/OCD4CuY+Kckoh+aiGKC+gMJbdHoRysJ8dkhhmJLNdDKtJU+6GMK87j3Hs85d2Z6HzNtMYWb3Dn3NWftvfba+5xNYDl+e6Fkj6yqb/oDRbWq14vlPBLRKCITkxf0ROLt+hNjp1PPSRK4kA3vF1dXNRcWlyA2OQU9eos9opAkAiKxD+XkKO6t15aRWO7J/MgmAZU8MEgexgZHMX518Dh72sYMmVKShnxWuWHdHtxKIDIYTgMuDzgfmSOIQkYMpdUF8OY92Hytt4/jvkg47czzU16iQovM3QFwmNck+Yyduu7D6NA0Z6JR4THntFs9V4tWQg6Ui3s6MwKDncsFTnXKLJhDSeUK3AgPtyhccDzmVs999buRt/1Vm4i0od+hX7+MRG87jPGB/w1u8FPj9xEw7McVrnYuOCvtpjTth3J/nTg99c8LRhKhr6D3dTB5R24bXFwbMXBsyZzeoXaycEpJ95TB09AGX/NpqLVNtw8urnVzLvHjFNxiFqRy2OOHuqUVnue+ACkoWzo4O6lGzTmuHq6nPvY2m9rVqjrIK2rMEKxqyG5NPAKt+wjo0LklgfNxJkZMA3KJvqRUk3z5UFY3QH14P0h+WUY79HPvgv7VuSg4ZRGY1YgZgqXmORccF17sy2ehnf9AeO085K2HQFbtXBScj0LcpgF2cN+WV+DZ/LJQu6gD4R7oV7pBJwbSgtMvfiPoVp56DySwxm7EtkMs1WdAB7qzggsDJKQYsHucSkOudrkiCPWR/fA2nYCn8SNIK4NptSMyAu3sAdDRkIsJdfth0LzSrODUoPNZ4KI9SxJI5UHk7D4GdQfz2us31c7CoHMjRkKuDPHseCMrONVhNcDJwMJpKFVvg9L4OaTiNWm1x789KCqkrXhVBiEz0WYCT2nAzQAD1/vaETv1GrRfP4Vx5cfMNcDPwvP0h0DhanPym7OIf/+O67vcJ1/PCJ4KgdzaUP6Wz+dU+5yIL6fV+PsHGAOdwlPpvvUOyeeAVGyCdqkDNB6DPjsBSrnndfOGevOh3RhGItxvA+fX1CtbGFhgYUFkFMZPR6F1HnClHq8HyubWtJexX06CRmdt33hrd7nA7SFY4qoGpnYuOKcRykPPgDCBcsHx9Iv+fNL2PueBehCWUfYQIIMGLOCcOmXDXsh1+yCt35tUPfvzGFuSvzvoinXOxqa02qOhM6733nVP2MAdaej2XN11DPKjLZCD+yBvahGCo7JfTKAN9UD7s8Oe9zUNIhz8fWI8DG2k38WCFdxugANcXrvTVd1IEbuv3Jour7Hzn7jLMBNfKs7R3i67gRVrbeCOEDhinmWhAatsqdquM2XzHZINhK2cqTjHr/XZdVJUbgN3MWAVXKbSyg9jesRW2xP9di+lwrL5ojM3m2H/kG9hwcIA37c71W6wJdW2J2S5nrjYbq/t1AHAhJsKQeyfPvf6IMJgghPJhFZ4x0KlfLFvt22du45Au/A1SOlGc0P672XXwhLtOcM0kTTEMMd0qkVmMNXxMd/tsedUjInr4SQDgOfeXMSiN0FCL5WHah4L1qqYXPJOJlttd+a5M+YpcG5poLYKQ5f+6JJ4r8bbJYP47hq4r7QAs9PjYNhHJd4o8l5taiwuOpa7AS4XKqI/5NjJbTnaWK92nLdLuhQAJayRNMiygXPBeQN+Qbvu0zDc3y+aUzhbkGR73sI7ljvUnndx2q3t+X8CDAD66FtrIL864AAAAABJRU5ErkJggg==" alt="" style="border: 0pt none;" /-->
+
+</a></div>
+
+        </div>
+    </div>
+</div>
+
+
+
+            <div id="content">
+                <div id="content-inner">
+
+
+                    <div id="alpha">
+                        <div id="alpha-inner">
+
+
+                            <h1 id="page-title" class="archive-title">January 2020 文章存档</h1>
+                            <div class="content-nav">
+<p>
+                                <a href="https://www.ruanyifeng.com/blog/2019/12/">&laquo; 上月</a>
+                                | 
+                                <a href="https://www.ruanyifeng.com/blog/2020/02/">下月 &raquo;</a>
+</p>                            
+</div>
+
+
+
+
+                            
+                            <div id="entry-2156" class="entry-asset asset hentry">
+    <div class="asset-header">
+        <h2 class="asset-name entry-title"><a href="https://www.ruanyifeng.com/blog/2020/01/weekly-issue-92.html" rel="bookmark">科技爱好者周刊：第 92 期</a></h2>
+<p id="asset-tags">
+
+
+分类<span class="delimiter">：</span>
+<a href="https://www.ruanyifeng.com/blog/weekly/" rel="tag">周刊</a>
+
+
+
+</p>     
+</div>
+    <div class="asset-content entry-content">
+
+        <div class="asset-body">
+            <p>这里记录每周值得分享的科技内容，周五发布。</p>
+
+        </div>
+
+
+
+        <div class="asset-more-link">
+            <p><a href="https://www.ruanyifeng.com/blog/2020/01/weekly-issue-92.html" rel="bookmark">继续阅读全文 »</a></p>
+        </div>
+
+    </div>
+    <div class="asset-footer">
+<div class="asset-meta">
+           <p> <span class="byline">
+
+           <abbr class="published" title="2020-01-31T11:07:04+08:00">2020年1月31日 11:07</abbr>
+            </span>
+
+            <span class="separator">|</span> <a href="https://www.ruanyifeng.com/blog/2020/01/weekly-issue-92.html#comments">留言（21）</a>
+            
+
+        </p></div>
+</div>
+</div>
+
+
+
+
+
+<div class="module-categories module">
+      <h2 class="module-header">January 2020的所有文章（共8篇）</h2>
+      <div class="module-content">
+        <ul class="module-list">
+
+
+<li class="module-list-item">2020.01.26：<a href="https://www.ruanyifeng.com/blog/2020/01/deno-intro.html">Deno 运行时入门教程：Node.js 的替代品</a><span class="hint">（88条评论）</span>
+</li>
+                     
+
+<li class="module-list-item">2020.01.17：<a href="https://www.ruanyifeng.com/blog/2020/01/weekly-issue-91.html">科技爱好者周刊：第 91 期</a><span class="hint">（43条评论）</span>
+</li>
+                     
+
+<li class="module-list-item">2020.01.16：<a href="https://www.ruanyifeng.com/blog/2020/01/china-technology-review.html">我对中国科技行业的看法（译文）</a><span class="hint">（52条评论）</span>
+</li>
+                     
+
+<li class="module-list-item">2020.01.14：<a href="https://www.ruanyifeng.com/blog/2020/01/ffmpeg.html">FFmpeg 视频处理入门教程</a><span class="hint">（62条评论）</span>
+</li>
+                     
+
+<li class="module-list-item">2020.01.10：<a href="https://www.ruanyifeng.com/blog/2020/01/weekly-issue-90.html">科技爱好者周刊：第 90 期</a><span class="hint">（34条评论）</span>
+</li>
+                     
+
+<li class="module-list-item">2020.01.08：<a href="https://www.ruanyifeng.com/blog/2020/01/technical-resume.html">如何写一份有效的技术简历？</a><span class="hint">（31条评论）</span>
+</li>
+                     
+
+<li class="module-list-item">2020.01.03：<a href="https://www.ruanyifeng.com/blog/2020/01/weekly-issue-89.html">科技爱好者周刊：第 89 期</a><span class="hint">（40条评论）</span>
+</li>
+                     
+ </ul>
+      </div>
+    </div>
+
+                        </div>
+                    </div>
+
+<div id="beta">
+<div id="beta-inner">
+                    <div class="module-categories module">
+      <h2 class="module-header">日期</h2>
+      <div class="module-content">
+
+<form name="archiveList">
+
+<p>请选择月份：</p>
+<p><select name="year" onchange="monthChange()"></select>
+<select name="month" onchange="urlChange()"></select></p>
+<p><button type="button" onclick="urlChange()">Go</button></p>
+</form>
+
+
+      </div>
+    </div>
+ <div class="module-categories module">
+      <h2 class="module-header">导航</h2>
+      <div class="module-content">
+        <ul class="module-list">
+<li class="module-list-item">上月：<a href="https://www.ruanyifeng.com/blog/2019/12/">December 2019</a></li>
+<li class="module-list-item">下月：<a href="https://www.ruanyifeng.com/blog/2020/02/">February 2020</a></li>
+
+ </ul>
+      </div>
+    </div>
+</div>
+</div>
+                </div>
+            </div>
+
+
+            <div id="footer">
+<div id="footer-inner">
+  <div id="footer-content">
+
+      
+<!--
+      <section> 
+     </section>
+  <p><a title="Instagram" target="_blank" href="http://instagram.com/ruanyf">Instagram</a></p>
+       <p><a title="订阅" href="https://app.feedblitz.com/f/f.fbz?Sub=348868" target="_blank">邮件订阅</a></p>
+  
+       <h2>Feed</h2>
+       <p><a title="FeedBurner" href="http://feeds.feedburner.com/ruanyifeng" target="_blank">FeedBurner</a></p>
+       <p><a title="atom.xml" href="http://www.ruanyifeng.com/blog/atom.xml" target="_blank">atom.xml</a></p>
+     
+      <p>支付宝：<a title="支付宝" href="alipays://platformapi/startapp?appId=20000067&url=http%3A%2F%2Fwww.ruanyifeng.com%2Fblog" target="_blank">yifeng.ruan@gmail.com</a></p>
+-->
+
+     <section>
+<!--
+       <h2>授权方式</h2>
+       <p><a title="许可证" href="http://creativecommons.org/licenses/by-nc-nd/3.0/deed.zh" target="_blank">自由转载-非商用-非衍生-保持署名</a></p>
+       <h2>微信公号</h2>
+       <h2>社交帐号</h2>
+       <h2>联系方式</h2>
+     -->
+       <p></p>
+       <p>
+         <a title="微博" href="http://weibo.com/ruanyf" target="_blank">Weibo</a> | 
+         <a title="Twitter" target="_blank" href="https://twitter.com/ruanyf">Twitter</a> |
+         <a title="GitHub" target="_blank" href="https://github.com/ruanyf">GitHub</a>
+       </p>
+     
+     <p>Email: <a title="电子邮件" href="/cdn-cgi/l/email-protection#cab3a3acafa4ade4b8bfaba48aada7aba3a6e4a9a5a7" target="_blank"><span class="__cf_email__" data-cfemail="e990808f8c878ec79b9c8887a98e84888085c78a8684">[email&#160;protected]</span></a></p>
+     </section>
+  
+  
+
+
+  </div>
+</div>
+</div>
+                                                                                                                                                                                                                                                                                                                                                                                                                                                     
+
+
+
+
+
+
+
+        </div>
+    </div>
+</body>
+</html>
