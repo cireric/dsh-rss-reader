@@ -43,6 +43,8 @@ export const ENDPOINT_NAMES = [
   'settings', 'saveSettings',
   // R8a 01：RSSHub 实例的「测试连接」探活（宿主出网，浏览器不直连实例）。
   'testRsshub',
+  // R9 02：归档页回溯（宿主读归档页、逐篇抓正文与日期、写入条目库）。
+  'backfillHistory',
 ] as const
 export type Endpoint = (typeof ENDPOINT_NAMES)[number]
 

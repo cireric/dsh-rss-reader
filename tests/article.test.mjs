@@ -842,3 +842,28 @@ test('表格：单元格里嵌的块不许漏出内部占位符', () => {
     assert.ok(!cell.includes('\u0000'), '表头里不许出现内部占位符：' + JSON.stringify(cell))
   }
 })
+
+test('fetchArticle：ok 回包带 publishedAt（同一份 HTML 解析一次）；解析不出时是 undefined', async () => {
+  const body = (extra) => '<!doctype html><html><body><article><h1>标题</h1>'
+    + '<p>' + '这是一段足够长的正文，用来通过四十字符的内容门槛，并确保抽取器能认出正文容器。'.repeat(2) + '</p>'
+    + extra
+    + '</article></body></html>'
+
+  const dated = await fetchArticle(
+    'https://origin.example/post',
+    { timeoutMs: 1000, maxBytes: 1_000_000 },
+    undefined,
+    async () => ({ kind: 'ok', body: body('<abbr class="published" title="2020-01-31T11:07:04+08:00">2020年1月31日</abbr>'), finalUrl: 'https://final.example/post' }),
+  )
+  assert.equal(dated.kind, 'ok')
+  assert.equal(dated.publishedAt, '2020-01-31T03:07:04.000Z', '发布日期与正文同源：带上时区按原样归一成 UTC')
+
+  const undated = await fetchArticle(
+    'https://origin.example/post',
+    { timeoutMs: 1000, maxBytes: 1_000_000 },
+    undefined,
+    async () => ({ kind: 'ok', body: body(''), finalUrl: 'https://final.example/post' }),
+  )
+  assert.equal(undated.kind, 'ok')
+  assert.equal(undated.publishedAt, undefined, '认不出日期就是 undefined，不拿抓取时间冒充')
+})
