@@ -65,6 +65,7 @@ const TUNABLE_DEFAULTS = {
   refreshConcurrency: 5,
   minRefreshIntervalMs: 600000,
   cleanupAfterDays: 30,
+  rsshubBase: '',
 }
 
 /** 本轮 mount 的收尾函数登记表：afterEach 统一清（未决 handle 会拖死变异判定）。 */
@@ -84,7 +85,7 @@ async function waitFor(predicate, { timeout = 2000, interval = 5, label = '条�
  * 起一个 DOM 环境 + 渲染真实 Reader。返回的对象与 scroll-dom.test.mjs 的同名夹具同形
  * （press / settle / waitFor / store），但只桩本票会碰到的端点。
  */
-async function mount({ settings, saveSettings, items, cleanupStub, article, prefs = { value: undefined, writes: [] } } = {}) {
+async function mount({ settings, saveSettings, testRsshub, items, cleanupStub, article, prefs = { value: undefined, writes: [] } } = {}) {
   const { JSDOM } = STACK
   const globalSnapshot = {}
   for (const key of ['window', 'document', 'HTMLElement', 'Element', 'Node', 'KeyboardEvent', 'ResizeObserver', 'fetch']) {
@@ -155,6 +156,11 @@ async function mount({ settings, saveSettings, items, cleanupStub, article, pref
       const patch = body.payload?.patch ?? {}
       settingsState = { ...settingsState, effective: { ...settingsState.effective, ...patch } }
       return ok({ settings: settingsState })
+    }
+    // R8a 01：RSSHub 探活端点。默认桩回「通过」；用例可整体改写回包。
+    if (body.endpoint === 'testRsshub') {
+      if (testRsshub !== undefined) return ok(await testRsshub(body.payload))
+      return ok({ passed: true, message: '测试通过：实例返回了 Radar 规则 JSON' })
     }
     // R11 04：cleanup 桩件必须支持 dryRun —— 预演只算不删，执行才删（C19 第一条）。
     if (body.endpoint === 'cleanup') {
@@ -351,7 +357,8 @@ test('R11 01 设置页骨架：工具栏进入、标题与返回按钮、五分�
   assert.equal(h.$('[data-rss-settings-back]')?.textContent, '← 返回列表（Esc）', '返回按钮文案是验收项')
   const sections = [...h.win.document.querySelectorAll('[data-rss-settings-section]')]
     .map((node) => node.getAttribute('data-rss-settings-section'))
-  assert.deepEqual(sections, ['fetch', 'display', 'feedOrder', 'agent', 'about'], '五分区必须按 D13 顺序')
+  assert.deepEqual(sections, ['fetch', 'display', 'rsshub', 'feedOrder', 'agent', 'about'],
+    '六分区必须按 D13 + R8a 的顺序（RSSHub 在「显示」之后、「Agent 说明」之前）')
   const row = h.$('[data-rss-setting="refreshFeedsPerRound"]')
   assert.ok(row !== null, '第一个分区里必须有「每次刷新抓取源数」这一行')
   assert.equal(row.querySelector('.dsh-rss-settings-label')?.textContent, '每次刷新抓取源数')
@@ -932,6 +939,116 @@ test('R11 07 恢复默认失败：确认框保留并显示错误，生效值不�
   } finally {
     h.cleanup()
   }
+})
+
+// ── R8a 01：RSSHub 分区（spec §4.1 / D1–D3）──────────────────────────────────
+
+test('R8a 01 RSSHub 分区：地址输入 + 测试连接 + 恢复默认；未配置时测试按钮禁用并说明候选不出现', async () => {
+  const h = await mount()
+  await openSettings(h)
+  const section = h.$('[data-rss-settings-section="rsshub"]')
+  assert.ok(section !== null, '「RSSHub」分区必须存在')
+  const input = section.querySelector('[data-rss-setting-input="rsshubBase"]')
+  assert.ok(input !== null, '分区必须有地址输入框')
+  assert.equal(input.value, '', '未配置时输入框为空（默认空串 = 功能关闭）')
+  const testButton = section.querySelector('[data-rss-rsshub-test]')
+  assert.ok(testButton !== null, '分区必须有「测试连接」按钮')
+  assert.equal(testButton.disabled, true, '未配置时测试按钮必须禁用')
+  assert.match(section.textContent ?? '', /未配置时 RSSHub 候选不出现/, '必须说明未配置时的后果')
+  const reset = section.querySelector('[data-rss-rsshub-reset]')
+  assert.ok(reset !== null, '分区必须有「恢复默认（清空）」')
+  assert.equal(reset.disabled, true, '没有可清空的地址时恢复默认禁用')
+
+  // 测试按钮跟随草稿：输入一个合法地址即可测试，不必先保存；清空按钮仍只跟随已保存值。
+  const inputElement = section.querySelector('[data-rss-setting-input="rsshubBase"]')
+  setControlValue(h.win, inputElement, 'https://rsshub.example')
+  await h.settle()
+  assert.equal(testButton.disabled, false, '草稿是合法地址时测试按钮启用（不必先保存）')
+  assert.equal(reset.disabled, true, '草稿不算已保存值，清空按钮仍禁用')
+})
+
+test('R8a 01 RSSHub 保存：失焦提交合法地址，走 saveSettings 串行链并显示「已保存 ✓」', async () => {
+  const h = await mount()
+  await openSettings(h)
+  const input = h.$('[data-rss-setting-input="rsshubBase"]')
+  input.focus()
+  setControlValue(h.win, input, ' https://rsshub.example/ ')
+  input.blur()
+  await waitForSaved(h, 'rsshubBase')
+  const saves = h.requests.filter((entry) => entry.endpoint === 'saveSettings')
+  assert.deepEqual(saves.map((entry) => entry.payload), [{ patch: { rsshubBase: 'https://rsshub.example' } }],
+    '保存的是归一后的地址（trim / 去尾斜杠），且只有这一个键')
+  assert.equal(h.store.get().settings.effective.rsshubBase, 'https://rsshub.example',
+    '成功后用回包覆盖权威值')
+  assert.equal(h.$('[data-rss-setting-saved="rsshubBase"]').textContent, '已保存 ✓')
+})
+
+test('R8a 01 RSSHub 非法地址：就地红字 + 零请求 + 输入保留', async () => {
+  const h = await mount()
+  await openSettings(h)
+  const input = h.$('[data-rss-setting-input="rsshubBase"]')
+  for (const bad of ['https://rsshub.example/api', 'ftp://rsshub.example', 'not a url']) {
+    input.focus()
+    setControlValue(h.win, input, bad)
+    input.blur()
+    await h.waitFor(() => h.$('[data-rss-setting-error="rsshubBase"]') !== null,
+      { label: bad + ' 的就地红字' })
+    assert.equal(h.requests.filter((entry) => entry.endpoint === 'saveSettings').length, 0,
+      '非法地址必须零请求：' + bad)
+    assert.equal(input.value, bad, '非法输入必须保留')
+  }
+  assert.equal(h.store.get().settings.effective.rsshubBase, '', '本地校验失败不许改权威值')
+})
+
+test('R8a 01 测试连接：配置后按钮可用，请求 testRsshub {base} 并在原地显示结果', async () => {
+  const h = await mount({
+    settings: {
+      effective: { ...TUNABLE_DEFAULTS, rsshubBase: 'https://rsshub.example' },
+      defaults: { ...TUNABLE_DEFAULTS },
+    },
+  })
+  await openSettings(h)
+  const section = h.$('[data-rss-settings-section="rsshub"]')
+  const button = section.querySelector('[data-rss-rsshub-test]')
+  assert.equal(button.disabled, false, '已配置时测试按钮必须可用')
+  button.click()
+  await h.waitFor(() => h.$('[data-rss-rsshub-result]') !== null, { label: '测试结果上屏' })
+  const calls = h.requests.filter((entry) => entry.endpoint === 'testRsshub')
+  assert.deepEqual(calls.map((entry) => entry.payload), [{ base: 'https://rsshub.example' }],
+    '探活只把地址交给宿主，浏览器不直连实例')
+  assert.match(h.$('[data-rss-rsshub-result]').textContent, /测试通过/, '通过时显示宿主回包文案')
+})
+
+test('R8a 01 测试连接失败：把宿主的可读原因原地展示，不改保存值', async () => {
+  const h = await mount({
+    settings: {
+      effective: { ...TUNABLE_DEFAULTS, rsshubBase: 'https://rsshub.example' },
+      defaults: { ...TUNABLE_DEFAULTS },
+    },
+    testRsshub: async () => ({ passed: false, message: '连接失败：HTTP 500' }),
+  })
+  await openSettings(h)
+  h.$('[data-rss-rsshub-test]').click()
+  await h.waitFor(() => h.$('[data-rss-rsshub-result]') !== null, { label: '失败结果上屏' })
+  assert.match(h.$('[data-rss-rsshub-result]').textContent, /HTTP 500/, '失败原因必须可读')
+  assert.equal(h.store.get().settings.effective.rsshubBase, 'https://rsshub.example', '探活不改配置')
+})
+
+test('R8a 01 恢复默认（清空）：发一次 patch rsshubBase（空串），不另写保存路径', async () => {
+  const h = await mount({
+    settings: {
+      effective: { ...TUNABLE_DEFAULTS, rsshubBase: 'https://rsshub.example' },
+      defaults: { ...TUNABLE_DEFAULTS },
+    },
+  })
+  await openSettings(h)
+  h.$('[data-rss-rsshub-reset]').click()
+  await h.waitFor(() => h.store.get().settings.effective.rsshubBase === '', { label: '清空生效' })
+  const saves = h.requests.filter((entry) => entry.endpoint === 'saveSettings')
+  assert.deepEqual(saves.map((entry) => entry.payload), [{ patch: { rsshubBase: '' } }],
+    '清空复用同一条 saveSettings 写路径')
+  assert.equal(h.$('[data-rss-setting-input="rsshubBase"]').value, '', '输入框跟随权威值清空')
+  assert.equal(h.$('[data-rss-rsshub-reset]').disabled, true, '清空后恢复默认按钮变禁用')
 })
 
 // ── R11 04：手动清理 = 预演 → 确认 → 执行（spec D27–D27.1 / 验收 C19）─────────────

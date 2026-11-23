@@ -200,6 +200,15 @@ export const removeFeedPayload = z.object({ url: z.string().min(1) })
 /** `discoverFeeds`：直接给出去空白后的地址（旧行为是 handler 里 trim）。 */
 export const discoverFeedsPayload = z.object({ url: z.string().trim().min(1) })
 
+/**
+ * `testRsshub`（R8a 01）：只声明「base 是字符串」。
+ *
+ * 地址形状（http/https、无 path / query / hash）仍由 handler 用 `parseTunableValue` 判 ——
+ * 与保存 / 读取是同一份判据；这里若再抄一份，就会出现「测试连接通过、保存被拒」的分家。
+ * 空串是合法形状：handler 回一条「未配置」的可展示原因，而不是坏入参。
+ */
+export const testRsshubPayload = z.object({ base: z.string() })
+
 /** `saveViewPreferences`：preferences 是必需键 —— 缺键会把默认视图静默写盘。值本身仍由 store 归一。 */
 export const saveViewPreferencesPayload = z.object({ preferences: z.unknown() })
 
@@ -271,6 +280,12 @@ const tunablePatch = z.record(z.string(), z.unknown()).superRefine((patch, ctx) 
   const overrides: TunableOverrides = {}
   for (const [key, value] of Object.entries(patch)) {
     if (!isTunableKey(key)) continue
+    // 数字键与字符串键分开写只为让 TS 的索引写入收窄；取值仍来自同一个 parseTunableValue。
+    if (key === 'rsshubBase') {
+      const parsed = parseTunableValue('rsshubBase', value)
+      if (parsed !== undefined) overrides.rsshubBase = parsed
+      continue
+    }
     const parsed = parseTunableValue(key, value)
     if (parsed !== undefined) overrides[key] = parsed
   }

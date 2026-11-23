@@ -103,6 +103,13 @@ export interface Config {
   maxItemsShown: number
   /** 刷新日志路径；空串 = 仅走 ctx.logger */
   logFile: string
+  /**
+   * RSSHub 实例源站（R8a 01，spec §4.1）：如 `https://rsshub.example`，空串 = 关闭。
+   *
+   * 默认不猜任何公共实例（D1）：把用户粘的每个网址送给第三方是静默外发。校验 / 归一在
+   * `settings-schema.ts` 的 `parseTunableValue`；这里只声明默认值与类型。
+   */
+  rsshubBase: string
 }
 
 export const Config: z<Config> = z.object({
@@ -125,4 +132,5 @@ export const Config: z<Config> = z.object({
   minRefreshIntervalMs: z.number().default(10 * 60 * 1000),
   maxItemsShown: z.number().default(300),
   logFile: z.string().default(''),
+  rsshubBase: z.string().default(''),
 })

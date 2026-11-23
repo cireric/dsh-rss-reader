@@ -19,7 +19,7 @@
  * `ctx.connection.requestRejection(req)` 套用同一套 Host/Origin 与浏览器鉴权。
  */
 import type { UnreadAccount } from './unread.js'
-import type { TunableKey } from './settings-schema.js'
+import type { TunableSettings } from './settings-schema.js'
 // 表格块没有 text / items，只有它能摊出可读文字。article-text.ts 零 node 依赖（本文件要进 client
 // bundle），行列摊平也只有那一份实现 —— 不在这里再写一遍遍历（spec 决策 9 / 10）。
 import { tableToText } from './article-text.js'
@@ -41,6 +41,8 @@ export const ENDPOINT_NAMES = [
   'listTags', 'createTag', 'renameTag', 'deleteTag', 'setItemTags',
   // R11 01 / 02：设置页的读端点与写端点（写路径先落盘再改内存，见 settings-control.ts）。
   'settings', 'saveSettings',
+  // R8a 01：RSSHub 实例的「测试连接」探活（宿主出网，浏览器不直连实例）。
+  'testRsshub',
 ] as const
 export type Endpoint = (typeof ENDPOINT_NAMES)[number]
 
@@ -53,7 +55,7 @@ export type RpcResult<T> =
 /**
  * 「关于」区里一行只读参数（R11 06，spec D14.1）。
  *
- * 名单与顺序由**宿主**决定（Config 减去 `feeds` 与四个可调键），客户端只按回包顺序画。
+ * 名单与顺序由**宿主**决定（Config 减去 `feeds` 与可调键），客户端只按回包顺序画。
  * 值原样下发（数字 / 布尔 / 字符串），展示格式归客户端 —— 这样加字段或改展示不需要
  * 在客户端抄一份当前值。
  */
@@ -62,6 +64,17 @@ export interface ReadOnlySettingView {
   key: string
   /** 当前生效值。 */
   value: string | number | boolean
+}
+
+/**
+ * RSSHub「测试连接」的结果（R8a 01，spec §4.1）。
+ *
+ * 探活只是**启发式**：200 + body 是非空 JSON 说明这个实例会回 Radar 规则；`message` 直接
+ * 展示给人，所以失败原因（超时 / HTTP 状态 / 非 JSON）由宿主拼成人话，客户端不再改写。
+ */
+export interface RsshubTestResult {
+  readonly passed: boolean
+  readonly message: string
 }
 
 /**
@@ -75,8 +88,8 @@ export interface ReadOnlySettingView {
  * settings 控制器，12 个只读参数来自同一份 Config —— 客户端不硬编码任何一项。
  */
 export interface SettingsSnapshot {
-  effective: Record<TunableKey, number>
-  defaults: Record<TunableKey, number>
+  effective: TunableSettings
+  defaults: TunableSettings
   warning?: string
   /** 插件版本（运行时读 package.json）。 */
   version: string

@@ -3075,4 +3075,13 @@ export const MUTATIONS = [
     judgeTests: ['36kr：唯一规则缺 :category，不产生候选且计 1 条缺参跳过（A6）'],
     from: "            if (value === undefined || value === '')\n                return { kind: 'missing' };",
     to: '' },
+  // ── R8a 01：rsshubBase 配置面（2026-11-23）───────────────────────────────
+  // 去掉 URL 的 path / query / hash 形状校验：`https://x/api` 这类地址会被存成 `https://x`，
+  // 用户以为配的是带路径的实例、实际拼出来的候选地址却是另一个东西（A11 要当场拒绝）。
+  // 判据是 saveSettings 的非法地址用例（ftp / 带 path / query / hash 都必须 bad-request 且文件不动）。
+  { id: 'rsshub-非法地址写盘', file: 'lib/settings-schema.js',
+    judges: ['settings-endpoints.test.mjs'],
+    judgeTests: ['saveSettings rsshubBase 非法地址：ftp / 带 path / 带 query / javascript / 非 URL 都回 bad-request，文件与内存不变（A11）'],
+    from: '    if (url.pathname !== \'/\' || url.search !== \'\' || url.hash !== \'\')\n        return undefined;',
+    to: '' },
 ]

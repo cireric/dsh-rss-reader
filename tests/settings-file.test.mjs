@@ -33,13 +33,45 @@ test('settings.json 读取：只认白名单键，未知键读时忽略且不算
     const path = join(dir, 'settings.json')
     writeFileSync(path, JSON.stringify({
       version: 1,
-      // rsshubBase 是「将来版本加过的键」的替身：本版不认，读时忽略、不报警。
-      overrides: { refreshConcurrency: 8, rsshubBase: 'https://rsshub.example' },
+      // futureKey 是「将来版本加过的键」的替身：本版不认，读时忽略、不报警。
+      overrides: { refreshConcurrency: 8, futureKey: 'whatever' },
     }))
     const result = readSettingsFile(path)
     assert.equal(result.status, 'ok', '合法文件必须读出 ok')
     assert.deepEqual(result.overrides, { refreshConcurrency: 8 })
     assert.equal(result.dropped, 0, '未知键不是坏值，不该计入「无法识别」')
+  })
+})
+
+test('settings.json 读取：字符串键 rsshubBase 正常读出（版本仍是 1，不触发隔离）', async () => {
+  await withDir((dir) => {
+    const path = join(dir, 'settings.json')
+    const text = JSON.stringify({
+      version: 1,
+      overrides: { refreshConcurrency: 8, rsshubBase: 'https://rsshub.example' },
+    })
+    writeFileSync(path, text)
+    const result = readSettingsFile(path)
+    assert.equal(result.status, 'ok', '含字符串键的版本 1 文件仍是合法文件')
+    assert.deepEqual(result.overrides,
+      { refreshConcurrency: 8, rsshubBase: 'https://rsshub.example' },
+      '字符串键必须与其他键一起读出')
+    assert.equal(result.dropped, 0)
+    assert.equal(readFileSync(path, 'utf8'), text, '读路径不得改写文件')
+  })
+})
+
+test('settings.json 读取：rsshubBase 坏形状只丢该键，其余合法项照用', async () => {
+  await withDir((dir) => {
+    const path = join(dir, 'settings.json')
+    writeFileSync(path, JSON.stringify({
+      version: 1,
+      overrides: { refreshConcurrency: 8, rsshubBase: 'https://rsshub.example/api' },
+    }))
+    const result = readSettingsFile(path)
+    assert.equal(result.status, 'ok', '坏字符串值不许把整份文件判死')
+    assert.deepEqual(result.overrides, { refreshConcurrency: 8 }, '带 path 的地址只该丢它自己')
+    assert.equal(result.dropped, 1)
   })
 })
 
@@ -124,5 +156,21 @@ test('原子写：非法值当场拒绝，且不留下半个文件', async () =>
     assert.throws(() => writeSettingsFile(path, { cleanupAfterDays: 0 }), /不合法/)
     assert.equal(readFileSync(path, 'utf8'), before, '写失败时原文件不动')
     assert.deepEqual(readdirSync(dir), ['settings.json'], '失败路径也要清掉临时文件')
+  })
+})
+
+test('原子写：rsshubBase 按判据归一后落盘（去尾斜杠），非法形状当场拒绝', async () => {
+  await withDir((dir) => {
+    const path = join(dir, 'settings.json')
+    writeSettingsFile(path, { rsshubBase: ' https://rsshub.example/ ' })
+    assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), {
+      version: 1,
+      overrides: { rsshubBase: 'https://rsshub.example' },
+    }, '写盘的是判据归一后的形态（下一个读者拿到同一个值）')
+
+    const before = readFileSync(path, 'utf8')
+    assert.throws(() => writeSettingsFile(path, { rsshubBase: 'https://rsshub.example/api' }), /不合法/)
+    assert.equal(readFileSync(path, 'utf8'), before, '非法地址不许把文件改坏')
+    assert.deepEqual(readdirSync(dir), ['settings.json'], '失败路径不残留临时文件')
   })
 })

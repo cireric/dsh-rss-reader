@@ -51,6 +51,7 @@ const TUNABLE_DEFAULTS = {
   refreshConcurrency: 5,
   minRefreshIntervalMs: 600000,
   cleanupAfterDays: 30,
+  rsshubBase: '',
 }
 
 const ABOUT_VERSION = '9.9.9-test'
