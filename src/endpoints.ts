@@ -823,6 +823,12 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       const result = await discoverCandidates(raw, {
         limits: { timeoutMs: ctx.config.timeoutMs, maxBytes: ctx.config.maxBytes, trustedTarget: true },
         concurrency: 1,
+        // R8a 03：实例地址每次现读 ctx.config（settings 保存后直接改内存，不需要重启）。
+        rsshubBase: ctx.config.rsshubBase,
+        // fetchImpl 与 testRsshub 同一手法：端点测要能桩住页面与实例两组出网。
+        fetchImpl: ctx.fetchImpl,
+        // Radar 的「命中/跳过」明细要能出现在宿主日志里；只走日志，不进回包（spec §6）。
+        log: ctx.log,
       })
       ctx.log('发现结果：' + raw + ' → 已验证 ' + result.candidates.length + ' 个候选，' + result.warnings.length + ' 条警告')
       return ok(result)

@@ -3084,4 +3084,28 @@ export const MUTATIONS = [
     judgeTests: ['saveSettings rsshubBase 非法地址：ftp / 带 path / 带 query / javascript / 非 URL 都回 bad-request，文件与内存不变（A11）'],
     from: '    if (url.pathname !== \'/\' || url.search !== \'\' || url.hash !== \'\')\n        return undefined;',
     to: '' },
+
+  // ── R8a 03：Radar 接进发现流程（2026-11-23）──────────────────────────────
+  // 合并顺序反过来：Radar 候选（未验证）排到页面声明前面。A1 的顺序断言会翻红；
+  // 去重用例也会跟着红 —— 同一个地址变成 Radar 那条胜出（页面优先被逆转）。
+  { id: 'rsshub-页面候选被覆盖', file: 'lib/subscribe.js',
+    judges: ['radar-discovery.test.mjs'],
+    judgeTests: ['A1 顺序：页面候选在前、Radar 在后，两类各带来源标记'],
+    from: 'for (const candidate of [...page, ...radar]) {',
+    to: 'for (const candidate of [...radar, ...page]) {' },
+  // 去掉「未配置即返回」：空实例地址也会被拼成 `/api/radar/rules/...` 发出去（相对地址），
+  // 默认状态下每次发现都多一次无谓出网，还会把「未配置」报成实例故障。A5 的零请求断言抓它。
+  { id: 'rsshub-未配置也请求', file: 'lib/subscribe.js',
+    judges: ['radar-discovery.test.mjs'],
+    judgeTests: ['A5：未配置实例 → 零 Radar 请求、零 Radar 警告'],
+    from: "if (base === '')",
+    to: "if (base === '__never_configured__')" },
+  // Radar 请求继承页面的 trustedTarget：私网实例（A9 的 http://127.0.0.1:1200）会被放行，
+  // SSRF 边界从「实例地址一律按不可信」退化成「随页面请求一起可信」。
+  // 判据是 A9 的「内网被拒」警告与「limits 不带 trustedTarget」的显式断言。
+  { id: 'rsshub-私网放行', file: 'lib/radar.js',
+    judges: ['radar-discovery.test.mjs'],
+    judgeTests: ['A9：私网实例被 fetch 层拒绝 → 一条警告（url = 实例地址），页面候选不受影响'],
+    from: 'const radarLimits = { timeoutMs: limits.timeoutMs, maxBytes: limits.maxBytes };',
+    to: 'const radarLimits = { timeoutMs: limits.timeoutMs, maxBytes: limits.maxBytes, trustedTarget: true };' },
 ]
