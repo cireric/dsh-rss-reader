@@ -5,7 +5,7 @@
  * 用桩抓取函数就能完整覆盖，不必起宿主也不必真的出网。
  */
 import { mapConcurrent } from './concurrency.js'
-import { fetchFeed, type FetchLimits } from './feed/fetch.js'
+import { blockedReason, fetchFeed, type FetchLimits } from './feed/fetch.js'
 import { parseFeed } from './feed/parse.js'
 import { normalizeFeedUrl } from './refresh.js'
 import { discoverFeedUrls, isSameOrigin, MAX_CANDIDATES } from './feed/discover.js'
@@ -214,15 +214,24 @@ async function radarBranch(
   if (base === '') return { candidates: [], warnings: [] }
 
   const page = new URL(pageUrl)
+  // 页面主机是私网 / 回环 ⇒ 这段查询会把内网主机名发给第三方实例（R8a 评审 #6）。
+  // 复用 fetch.ts 的唯一地址判据（`http://` + host 是构造出来的合法 URL，不会走到 DNS）；
+  // 跳过不是错误：既不产候选，也不报警告，只在日志里说明原因。
+  const privateReason = blockedReason('http://' + page.hostname)
+  if (privateReason !== undefined) {
+    options.log?.('Radar：' + page.hostname + ' → ' + privateReason + '，跳过 Radar（不把内网主机名发给第三方实例）')
+    return { candidates: [], warnings: [] }
+  }
   // 与设置面同一个纯函数：profile patch 可以绕过 saveSettings 的入参校验，发现流程必须
   // 再验一次；非法值只产一条可读警告，零请求，绝不拼出 `…/api/api/radar/…`。
   const origin = parseRsshubBase(base)
   if (origin === undefined) {
     options.log?.('Radar：' + page.hostname + ' → 实例地址不合法，跳过')
+    // 警告**不回显原值**（R8a 评审 #6）：profile patch 里可能写着带凭据的地址，
+    // 原样回显会把密码送进界面与日志。只有固定原因，不带任何用户输入。
     return {
       candidates: [],
       warnings: [{
-        url: base,
         reason: 'RSSHub 实例地址不合法（只支持 http(s) 源站，不能带路径 / 查询 / 参数），已跳过 Radar 查询',
       }],
     }
@@ -244,22 +253,20 @@ async function radarBranch(
 
   const found = candidatesFromRules(lookup.rules, page, origin, lookup.domain)
   const skipped = found.skipped.missingParam + found.skipped.wildcard + found.skipped.regex
+  // 坏条目（形状都看不懂）与「拼不出来」分开计数，但都算这次查询里被跳过的规则。
   // 命中数是规则引擎的产出（合并前的口径）：日志要回答的是「这家实例对这个站给了什么」，
   // 不是「最后界面上剩几行」—— 后者还受去重与上限影响，合并结果由端点另一行日志报告。
-  options.log?.('Radar：' + lookup.domain + ' → 命中 ' + found.candidates.length + ' 条，跳过 ' + skipped + ' 条')
-  const warnings: DiscoveryWarning[] = skipped > 0
+  options.log?.('Radar：' + lookup.domain + ' → 命中 ' + found.candidates.length + ' 条，跳过 '
+    + (skipped + found.invalid) + ' 条')
+  const reasons: string[] = []
+  if (skipped > 0) reasons.push(skipped + ' 条规则无法拼出完整地址')
+  if (found.invalid > 0) reasons.push(found.invalid + ' 条规则形状不合法（已跳过）')
+  const warnings: DiscoveryWarning[] = reasons.length > 0
     // §4.3：跳过计数汇总成**一条**警告，不逐条刷屏。
-    ? [{ url: lookup.domain, reason: skipped + ' 条规则无法拼出完整地址' }]
+    ? [{ url: lookup.domain, reason: reasons.join('；') }]
     : []
-  return {
-    candidates: found.candidates.map((candidate) => ({
-      url: candidate.url,
-      title: candidate.title,
-      siteName: candidate.siteName,
-      source: 'rsshub',
-    })),
-    warnings,
-  }
+  // RadarCandidate 与 FeedCandidate 结构兼容，直接交出：逐字段转写只是把同一份形状维护两次。
+  return { candidates: found.candidates, warnings }
 }
 
 /**
@@ -275,9 +282,10 @@ async function radarBranch(
  * 顺序固定（R8a 03 / spec §4.2）：① 页面抓取与声明发现（现状）② Radar 规则查询 ③ 合并。
  * 用户给的就是 feed 时提前返回，**不查 Radar**（A10）—— 那是最快路径，也没有「发现」可言。
  *
- * 上限：页面候选由 discover.ts 的 MAX_CANDIDATES 封顶（5），与 Radar 合并后再统一裁到 5；
- * 体积与超时走 options.limits（每个候选各一份）⇒ 最坏一轮 = 1 次页面 + 5 次候选抓取，
- * 外加 Radar 的最多 4 次域名回退查询（04 票已在 radar.ts 里按「实例 + 域名」缓存 6h / 失败 60s）。
+ * 上限：页面候选由 discover.ts 的 MAX_CANDIDATES 封顶（5），与 Radar 合并后再统一裁到 5。
+ * 页面候选已满时**整段 Radar 直接跳过**（Radar 候选进不了列表，查了也是白花出网预算）。
+ * 体积与超时走 options.limits（每个候选各一份）；Radar 的 4 次域名回退共用**一个**
+ * timeoutMs 总预算（radar.ts 里按剩余时间递减），不是每次各给满额。
  */
 export async function discoverCandidates(
   raw: string,
@@ -331,7 +339,18 @@ export async function discoverCandidates(
     }
   }
 
-  const radar = await radarBranch(page.kind === 'ok' ? page.finalUrl : userUrl, options, fetchImpl)
+  const radarPageUrl = page.kind === 'ok' ? page.finalUrl : userUrl
+  let radar: RadarBranch
+  if (pageCandidates.length >= MAX_CANDIDATES) {
+    // 性能（R8a 评审 #5）：页面候选已经占满合并上限，Radar 候选**永远进不了**最终列表
+    //（mergeCandidates 先放页面、页面优先），这时再查实例纯属浪费一次到四次出网。
+    // 早退不产警告：界面结果与「查了但被上限裁掉」完全一样，警告只会让人以为出了故障。
+    options.log?.('Radar：' + new URL(radarPageUrl).hostname + ' → 页面候选已满 '
+      + MAX_CANDIDATES + ' 条，跳过 Radar')
+    radar = { candidates: [], warnings: [] }
+  } else {
+    radar = await radarBranch(radarPageUrl, options, fetchImpl)
+  }
   return {
     url: userUrl,
     candidates: mergeCandidates(pageCandidates, radar.candidates),

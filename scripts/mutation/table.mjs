@@ -3075,6 +3075,14 @@ export const MUTATIONS = [
     judgeTests: ['36kr：唯一规则缺 :category，不产生候选且计 1 条缺参跳过（A6）'],
     from: "            if (value === undefined || value === '')\n                return { kind: 'missing' };",
     to: '' },
+  // 坏条目照收：去掉逐条形状校验（R8a 评审 Critical）。`{".":[null]}` 会在 `rule.source` 上抛
+  // TypeError，整个 discoverFeeds 回 internal —— 同页面的合法候选也一起消失；`{source:42}` /
+  // `{target:5}` 同理。判据是引擎单测里的坏条目样本（不只是「有没有警告」，而是根本不许抛）。
+  { id: 'rsshub-坏条目照收', file: 'lib/rsshub.js',
+    judges: ['rsshub.test.mjs'],
+    judgeTests: ['坏条目：null / source 非数组 / target 非字符串 / _name 非字符串 ⇒ 不抛、不产候选'],
+    from: "            if (!isUsableRule(rule)) {\n                invalid += 1;\n                continue;\n            }",
+    to: '' },
   // ── R8a 01：rsshubBase 配置面（2026-11-23）───────────────────────────────
   // 去掉 URL 的 path / query / hash 形状校验：`https://x/api` 这类地址会被存成 `https://x`，
   // 用户以为配的是带路径的实例、实际拼出来的候选地址却是另一个东西（A11 要当场拒绝）。
@@ -3106,8 +3114,9 @@ export const MUTATIONS = [
   { id: 'rsshub-私网放行', file: 'lib/radar.js',
     judges: ['radar-discovery.test.mjs'],
     judgeTests: ['A9：私网实例被 fetch 层拒绝 → 一条警告（url = 实例地址），页面候选不受影响'],
-    from: 'const radarLimits = { timeoutMs: limits.timeoutMs, maxBytes: limits.maxBytes };',
-    to: 'const radarLimits = { timeoutMs: limits.timeoutMs, maxBytes: limits.maxBytes, trustedTarget: true };' },
+    // from 按当前产物重取（预算改造后 timeout 是剩余时间）：OCCURRENCES=1。
+    from: 'const radarLimits = { timeoutMs: remainingMs, maxBytes: limits.maxBytes };',
+    to: 'const radarLimits = { timeoutMs: remainingMs, maxBytes: limits.maxBytes, trustedTarget: true };' },
   // ── R8a 04：Radar 规则缓存（2026-11-23）─────────────────────────────────
   // 缓存键去掉实例地址：换实例后同一域名仍命中旧实例的规则，候选会被拼到新实例上，
   // 而规则内容其实来自旧实例（A7）。判据是「换 base ⇒ 旧条目不被复用」。

@@ -212,6 +212,13 @@ export interface SkippedRules {
 export interface RadarCandidatesResult {
   candidates: RadarCandidate[]
   skipped: SkippedRules
+  /**
+   * 形状不合法（不是对象 / `source` 不是字符串数组 / `target` 不是字符串）的条目数。
+   *
+   * 为什么不并进 `skipped`：那三个桶回答的是「规则能匹配但拼不出地址」，这里是「这条规则
+   * 根本看不懂」。分开计，警告文案才能告诉用户是规则表漂移而不是本站没有可用路由。
+   */
+  invalid: number
 }
 
 /** 默认上限，与 spec §4.3 / discover.ts 的 MAX_CANDIDATES 一致。 */
@@ -241,12 +248,16 @@ export function candidatesFromRules(
   limit: number = DEFAULT_CANDIDATE_LIMIT,
 ): RadarCandidatesResult {
   const page = typeof url === 'string' ? new URL(url) : url
-  const siteName = rules._name ?? ''
+  // 规则表是外部数据（社区维护、会随实例版本漂）：`_name` / `title` 不是字符串时按空处理。
+  // 不这么做的话，一个对象会原样进入 `candidate.title`，React 渲染时直接崩 —— 形状漂移
+  // 只该表现为「这条规则/这个站点名不好看」，绝不能变成整次发现失败。
+  const siteName = typeof rules._name === 'string' ? rules._name : ''
   const path = page.pathname
   const pathname = path.length > 1 && path.endsWith('/') ? path.slice(0, -1) : path
   const candidates: RadarCandidate[] = []
   const seen = new Set<string>()
   const skipped: SkippedRules = { missingParam: 0, wildcard: 0, regex: 0 }
+  let invalid = 0
   // 实例地址末尾常带 `/`：先削掉，避免拼出 `//github/...`（逐条规则削一次纯属浪费）
   const origin = base.replace(/\/+$/, '')
 
@@ -255,6 +266,12 @@ export function candidatesFromRules(
     // `_name` 与桶数组共用一层键：不是数组的键（含缺失的桶）跳过，不假设「非 _name 即数组」
     if (!Array.isArray(bucketRules)) continue
     for (const rule of bucketRules) {
+      // 逐条校验后**跳过坏条目**，绝不抛出：`{".":[null]}` / `{source:42}` / `{target:5}` 这类
+      // 漂移在实测规则表里出现过，一条坏规则不能把同一页面合法的候选全部带走（评审 Critical）。
+      if (!isUsableRule(rule)) {
+        invalid += 1
+        continue
+      }
       let failure: Exclude<RouteBuild['kind'], 'ok'> | undefined
       let produced = false
       for (const source of rule.source) {
@@ -270,7 +287,8 @@ export function candidatesFromRules(
         const candidateUrl = origin + built.url
         if (!seen.has(candidateUrl) && candidates.length < limit) {
           seen.add(candidateUrl)
-          candidates.push({ url: candidateUrl, title: rule.title ?? siteName, siteName, source: 'rsshub' })
+          const title = typeof rule.title === 'string' ? rule.title : siteName
+          candidates.push({ url: candidateUrl, title, siteName, source: 'rsshub' })
         }
         break
       }
@@ -280,5 +298,16 @@ export function candidatesFromRules(
       else skipped.regex += 1
     }
   }
-  return { candidates, skipped }
+  return { candidates, skipped, invalid }
+}
+
+/** 规则条目的**运行时**形状判据：实例回包是外部数据，类型声明管不住它的实际内容。 */
+function isUsableRule(rule: unknown): rule is RadarRule {
+  if (rule === null || typeof rule !== 'object' || Array.isArray(rule)) return false
+  const record = rule as Record<string, unknown>
+  // `source` 必须是字符串数组：直接 `for...of` 非数组会抛 TypeError（评审实测 `source:42`）
+  if (!Array.isArray(record['source'])) return false
+  if (!record['source'].every((source) => typeof source === 'string')) return false
+  // `target` 非字符串会在 `target.includes('*')` 处抛错
+  return typeof record['target'] === 'string'
 }

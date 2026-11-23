@@ -48,7 +48,7 @@ import { FolderError } from './folders.js'
 import { duplicateHintsOf, linkKeyOf, type DuplicateRow } from './duplicates.js'
 import { TagError } from './tags.js'
 import { discoverCandidates, validateSubscriptions } from './subscribe.js'
-import { isRadarRules, radarRulesUrl } from './radar.js'
+import { decodeRadarResponse, radarRulesUrl } from './radar.js'
 import { fetchFeed } from './feed/fetch.js'
 import { parseTunableValue } from './settings-schema.js'
 import type { ReaderStore, UnreadStore } from './store.js'
@@ -831,7 +831,12 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         // Radar 的「命中/跳过」明细要能出现在宿主日志里；只走日志，不进回包（spec §6）。
         log: ctx.log,
       })
-      ctx.log('发现结果：' + raw + ' → 已验证 ' + result.candidates.length + ' 个候选，' + result.warnings.length + ' 条警告')
+      // 口径按来源分计（R8a 评审 #7）：Radar 候选**没有**抓取校验（ADR-0010），把它们算进
+      // 「已验证」会让人以为界面上每条都收过一遍。总数仍报，但拆成页面 / RSSHub 两段。
+      const rsshubCount = result.candidates.filter((candidate) => candidate.source === 'rsshub').length
+      const pageCount = result.candidates.length - rsshubCount
+      ctx.log('发现结果：' + raw + ' → 候选 ' + result.candidates.length + ' 条（页面 ' + pageCount
+        + ' / RSSHub ' + rsshubCount + '），' + result.warnings.length + ' 条警告')
       return ok(result)
     },
   }),
@@ -1047,19 +1052,17 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       if (fetched.kind === 'not-modified') {
         return ok({ passed: false, message: '实例返回了 304（探活请求不应带条件头）' })
       }
-      if (fetched.body.trim() === '') return ok({ passed: false, message: '实例返回了空响应（不是 Radar 规则 JSON）' })
-      let parsed: unknown
-      try {
-        parsed = JSON.parse(fetched.body)
-      } catch {
-        return ok({ passed: false, message: '响应不是 JSON（这个地址可能不是 RSSHub 实例）' })
+      // 「取 body → 判空 → JSON.parse → 是不是规则表」只有一份实现（radar.ts 的
+      // decodeRadarResponse）：与发现流程各写一遍，就会出现「测试通过但发现报实例故障」
+      // 这类互斥结论（R8a 评审 #2）。这里只把解码结果翻译成探活话术。
+      const decoded = decodeRadarResponse(fetched)
+      if (decoded.kind === 'rules') {
+        return ok({ passed: true, message: '测试通过：实例返回了 Radar 规则 JSON（探活是启发式，不代表每个站点都有规则）' })
       }
-      // 「是不是规则表」只认 isRadarRules：JSON.parse 成功只说明它是 JSON，`[]` / `null` /
-      // 任意对象的网关不该被判成 RSSHub（与发现流程共用同一份判据）。
-      if (!isRadarRules(parsed)) {
-        return ok({ passed: false, message: '响应不是 Radar 规则对象（这个地址可能不是 RSSHub 实例）' })
+      if (decoded.kind === 'empty') {
+        return ok({ passed: false, message: '响应里没有可用的 Radar 规则（空响应或只有站点名的空壳）' })
       }
-      return ok({ passed: true, message: '测试通过：实例返回了 Radar 规则 JSON（探活是启发式，不代表每个站点都有规则）' })
+      return ok({ passed: false, message: decoded.reason + '（这个地址可能不是 RSSHub 实例）' })
     },
   }),
 

@@ -262,3 +262,38 @@ test('跳过只统计「命中了 source 但拼不出来」的规则，路径不
   assert.deepEqual(result.candidates.map((candidate) => candidate.url), ['https://hub.test/site/post/9'])
   assert.deepEqual(result.skipped, { missingParam: 1, wildcard: 0, regex: 0 })
 })
+
+// ── 规则表漂移（R8a 评审 #1）：坏条目只跳过自己，绝不让整次发现抛 TypeError ──────
+test('坏条目：null / source 非数组 / target 非字符串 / _name 非字符串 ⇒ 不抛、不产候选', () => {
+  const cases = [
+    ['null 条目', { '.': [null] }],
+    ['source 非数组', { '.': [{ source: 42, target: '/x' }] }],
+    ['target 非字符串', { '.': [{ source: [], target: 5 }] }],
+    ['_name 非字符串', { _name: { name: '站点' } }],
+  ]
+  for (const [label, rules] of cases) {
+    let result
+    assert.doesNotThrow(() => {
+      result = candidatesFromRules(rules, 'https://example.com/', 'https://hub.test', 'example.com')
+    }, label + ' 不许抛出：一条坏规则不能炸掉整次发现')
+    assert.deepEqual(result.candidates, [], label + ' 不许产出候选')
+  }
+})
+
+test('坏条目只跳过自己：同桶合法规则照常产出；非字符串 title / _name 按空，不流进渲染层', () => {
+  const rules = {
+    _name: { wrong: 'shape' },
+    '.': [
+      null,
+      { source: 42, target: '/bad' },
+      { source: [], target: 5 },
+      { title: { wrong: 'shape' }, source: ['/'], target: '/good' },
+    ],
+  }
+  const result = candidatesFromRules(rules, 'https://example.com/', 'https://hub.test', 'example.com')
+  assert.deepEqual(result.candidates.map((candidate) => candidate.url), ['https://hub.test/good'],
+    '合法条目不受同桶坏条目影响')
+  assert.equal(result.candidates[0].siteName, '', '_name 不是字符串时按空，不能把对象交给界面')
+  assert.equal(result.candidates[0].title, '', 'title 不是字符串时回落到空的站点名')
+  assert.equal(result.invalid, 3, 'null / source 非数组 / target 非字符串各计一条')
+})
