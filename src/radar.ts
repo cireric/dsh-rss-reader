@@ -89,6 +89,42 @@ export function isRadarRules(value: unknown): value is RadarRules {
 }
 
 /**
+ * 一次规则响应的解码结果：规则表 / 「该域名没有规则」 / 形状不合法。
+ *
+ * `empty` 与 `invalid` 必须分开：空 body（实测实例对未收录域名回 200 + 空 body）和只有
+ * `_name` 的空壳只说明「这家实例没这个域名的规则」，应当继续域名回退；非 JSON / 数组则是
+ * 实例故障，继续查只会把同一个故障重复四次。
+ */
+export type RadarResponseDecode =
+  | { readonly kind: 'rules'; readonly rules: RadarRules }
+  | { readonly kind: 'empty' }
+  | { readonly kind: 'invalid'; readonly reason: string }
+
+/**
+ * 把一次抓取回包解码成规则表 —— **发现流程与 testRsshub 探活共用这一份**。
+ *
+ * 为什么必须共用（R8a 评审 #2）：两边各写一遍「判空 → JSON.parse → isRadarRules」，只要一处
+ * 漏判，就会出现「测试连接通过、发现却报实例故障」这类互斥结论。解码只回答「这份 body 是什么」，
+ * 空 body / 只有 `_name` 的空壳都算「该域名没有规则」，由调用方决定继续回退还是提示探活失败。
+ */
+export function decodeRadarResponse(fetched: { readonly body: string }): RadarResponseDecode {
+  if (fetched.body.trim() === '') return { kind: 'empty' }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(fetched.body)
+  } catch {
+    return { kind: 'invalid', reason: '响应不是 Radar 规则 JSON' }
+  }
+  if (isRadarRules(parsed)) return { kind: 'rules', rules: parsed }
+  if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    // 是对象但没有规则桶（如只有 `_name` 的空壳）⇒ 这个域名没有规则，继续回退 ——
+    // 否则一个域名的空壳会把更具体的域名候选（可能真有规则）挡在后面。
+    return { kind: 'empty' }
+  }
+  return { kind: 'invalid', reason: '响应不是 Radar 规则对象' }
+}
+
+/**
  * 逐级回退取规则：`{base}/api/radar/rules/{domain}`，最短域名优先，**第一个非空规则表胜出即停**。
  *
  * 为什么最短优先：实例端不做子域回退（实测 `www.zhihu.com` → 空、`zhihu.com` → 2.9KB），
@@ -114,10 +150,11 @@ export async function lookupRadarRules(
   if (origin === undefined) {
     return { kind: 'failure', reason: '实例地址不合法（只支持 http(s) 源站，不能带路径 / 查询 / 参数）' }
   }
-  // 每次调用都重建：白名单式只带超时与体积，调用方的 trustedTarget 永远不进 Radar 请求，
-  // 也不进缓存（缓存里只有 DomainOutcome）。
-  const radarLimits: FetchLimits = { timeoutMs: limits.timeoutMs, maxBytes: limits.maxBytes }
   const now = options.now ?? Date.now
+  // 整段 Radar 支路只有**一个**总预算（R8a 评审 #5）：4 次域名回退若各给满额 timeoutMs，
+  // 最坏耗时就是 4×timeoutMs，叠上页面与候选校验能到分钟级。每次尝试只拿「剩余时间」，
+  // 用尽即停；这里不把预算耗尽写进缓存 —— 那是本次调用的时间问题，不是实例对域名的答案。
+  const deadline = now() + limits.timeoutMs
 
   for (const domain of domainCandidates(hostname)) {
     const key = origin + '\n' + domain
@@ -129,34 +166,30 @@ export async function lookupRadarRules(
       continue
     }
 
+    const remainingMs = deadline - now()
+    if (remainingMs <= 0) {
+      return { kind: 'failure', reason: 'Radar 查询总预算（' + limits.timeoutMs + 'ms）已用尽' }
+    }
+    // 每次请求都重建：白名单式只带超时与体积，调用方的 trustedTarget 永远不进 Radar 请求，
+    // 也不进缓存（缓存里只有 DomainOutcome）。本次尝试的 timeout 只能是剩余预算。
+    const radarLimits: FetchLimits = { timeoutMs: remainingMs, maxBytes: limits.maxBytes }
     const fetched = await fetchImpl(radarRulesUrl(origin, domain), {}, radarLimits)
     if (fetched.kind === 'not-modified') {
       // 发现请求不带条件头，正常不该出现 304；出现了当实例故障上报，不静默当成「没有规则」
       return cacheFailure(key, '实例返回了 304（发现请求不应带条件头）', now())
     }
     if (fetched.kind === 'failed') return cacheFailure(key, fetched.reason, now())
-    if (fetched.body.trim() === '') {
-      writeCached(key, { kind: 'empty' }, CACHE_SUCCESS_MS, now())
-      continue
-    }
 
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(fetched.body)
-    } catch {
-      return cacheFailure(key, '响应不是 Radar 规则 JSON', now())
-    }
-    if (isRadarRules(parsed)) {
-      writeCached(key, { kind: 'rules', rules: parsed }, CACHE_SUCCESS_MS, now())
-      return { kind: 'rules', domain, rules: parsed }
-    }
-    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      // 是对象但没有规则桶（如只有 `_name` 的空壳）⇒ 这个域名没有规则，继续回退 ——
-      // 否则一个域名的空壳会把更具体的域名候选（可能真有规则）挡在后面。
+    const decoded = decodeRadarResponse(fetched)
+    if (decoded.kind === 'empty') {
       writeCached(key, { kind: 'empty' }, CACHE_SUCCESS_MS, now())
       continue
     }
-    return cacheFailure(key, '响应不是 Radar 规则对象', now())
+    if (decoded.kind === 'rules') {
+      writeCached(key, { kind: 'rules', rules: decoded.rules }, CACHE_SUCCESS_MS, now())
+      return { kind: 'rules', domain, rules: decoded.rules }
+    }
+    return cacheFailure(key, decoded.reason, now())
   }
   return { kind: 'empty' }
 }

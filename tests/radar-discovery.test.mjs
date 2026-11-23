@@ -368,5 +368,142 @@ test('端点：config 里塞了带 path 的非法实例地址 → 零 Radar 请�
     '非法地址必须零 Radar 请求；实际请求：' + JSON.stringify(fetchImpl.calls.map((call) => call.url)))
   const radarWarnings = result.value.warnings.filter((warning) => /实例地址不合法/.test(warning.reason))
   assert.equal(radarWarnings.length, 1, '必须有一条说明「实例地址不合法」的警告')
-  assert.equal(radarWarnings[0].url, 'https://hub.test/api', '警告要指回被拒的原始地址')
+  // R8a 评审 #6：原始地址可能带凭据（profile patch 不受保存校验），警告只留固定原因。
+  assert.equal(radarWarnings[0].url, undefined, '警告不许回显被拒的原始地址')
+})
+
+/* ───────────── R8a 评审修复：坏规则表 / 满员早退 / 私网页面 / 回归锚点 ───────────── */
+
+test('坏规则表：条目形状漂移只跳过坏条目，页面候选与合并结果照常（端点是 ok，不是 internal）', async () => {
+  const fetchImpl = stubFetch({
+    'https://site.test/': { kind: 'ok', body: htmlPage(feedLink('/a.xml')) },
+    'https://site.test/a.xml': { kind: 'ok', body: RSS },
+    [radarUrl('site.test')]: {
+      kind: 'ok',
+      body: JSON.stringify({ '.': [null, { source: 42, target: '/x' }, { source: [], target: 5 }] }),
+    },
+  })
+  const h = endpointHarness(fetchImpl, { rsshubBase: BASE })
+  const result = await h.dispatch('discoverFeeds', { url: 'https://site.test/' })
+
+  assert.equal(result.ok, true, '坏规则表不许把整次发现打成 internal')
+  assert.deepEqual(result.value.candidates.map((candidate) => candidate.url), ['https://site.test/a.xml'],
+    '页面候选必须照常返回')
+  assert.equal(result.value.warnings.length, 1, '坏条目只汇总成一条警告')
+  assert.match(result.value.warnings[0].reason, /规则形状不合法|规则.*已跳过/,
+    '警告要说清是规则表漂移，不是实例故障')
+})
+
+test('页面候选已满 5 条：Radar 一次都不请求、零警告，日志说明满员', async () => {
+  const links = ['/f0.xml', '/f1.xml', '/f2.xml', '/f3.xml', '/f4.xml']
+  const map = { 'https://site.test/': { kind: 'ok', body: htmlPage(...links.map((href) => feedLink(href))) } }
+  for (const href of links) map['https://site.test' + href] = { kind: 'ok', body: RSS }
+  const fetchImpl = stubFetch(map)
+  const lines = []
+  const result = await discoverCandidates('https://site.test/', {
+    limits: LIMITS, concurrency: 1, fetchImpl, rsshubBase: BASE, log: (line) => lines.push(line),
+  })
+
+  assert.deepEqual(fetchImpl.calls.map((call) => call.url), ['https://site.test/', ...links.map((href) => 'https://site.test' + href)],
+    '页面候选满员时 Radar 零请求（否则最坏再花 4 次域名回退）')
+  assert.equal(result.candidates.length, 5)
+  assert.deepEqual(result.warnings, [], '满员早退不是错误，不产警告')
+  assert.ok(lines.some((line) => /满/.test(line)), '日志要说明为什么没查 Radar；实际：' + JSON.stringify(lines))
+})
+
+test('私网页面主机：即使配置了实例也零 Radar 请求，不把内网主机名发给第三方', async () => {
+  const fetchImpl = stubFetch({
+    'http://192.168.1.10/': { kind: 'ok', body: htmlPage(feedLink('/a.xml')) },
+    'http://192.168.1.10/a.xml': { kind: 'ok', body: RSS },
+  })
+  const lines = []
+  const result = await discoverCandidates('http://192.168.1.10/', {
+    limits: LIMITS, concurrency: 1, fetchImpl, rsshubBase: BASE, log: (line) => lines.push(line),
+  })
+
+  assert.deepEqual(fetchImpl.calls.map((call) => call.url), ['http://192.168.1.10/', 'http://192.168.1.10/a.xml'],
+    '私网页面的发现只该有页面自己的两次请求')
+  assert.deepEqual(result.candidates.map((candidate) => candidate.source), ['page'])
+  assert.deepEqual(result.warnings, [], '私网跳过不是错误，零警告')
+  assert.ok(lines.some((line) => /私网|内网/.test(line)), '日志要说明跳过原因；实际：' + JSON.stringify(lines))
+})
+
+test('域名回退：短域只回 `_name` 空壳（没有桶）⇒ 继续查更具体的域', async () => {
+  const rules = JSON.stringify({
+    _name: '知乎',
+    '.': [{ title: '问题', source: ['/question/:id'], target: '/zhihu/question/:id' }],
+  })
+  const fetchImpl = stubFetch({
+    'https://www.zhihu.com/question/1': { kind: 'ok', body: htmlPage() },
+    [radarUrl('zhihu.com')]: { kind: 'ok', body: '{"_name":"x"}' },
+    [radarUrl('www.zhihu.com')]: { kind: 'ok', body: rules },
+  })
+  const result = await discoverCandidates('https://www.zhihu.com/question/1', {
+    limits: LIMITS, concurrency: 1, fetchImpl, rsshubBase: BASE,
+  })
+
+  assert.deepEqual(fetchImpl.calls.slice(1).map((call) => call.url),
+    [radarUrl('zhihu.com'), radarUrl('www.zhihu.com')],
+    '「只有名字没有桶」等于该域没有规则，必须继续回退而不是当成命中')
+  assert.deepEqual(result.candidates.map((candidate) => candidate.url), [BASE + '/zhihu/question/1'])
+})
+
+test('重定向：页面 301 到另一个域后，Radar 按 finalUrl 的域名查（不是用户给的域名）', async () => {
+  const rules = JSON.stringify({
+    _name: '落地站',
+    '.': [{ title: '文章', source: ['/post/:id'], target: '/landed/post/:id' }],
+  })
+  const fetchImpl = stubFetch({
+    'https://start.test/post/1': { kind: 'ok', body: htmlPage(), finalUrl: 'https://landed.test/post/1' },
+    [radarUrl('landed.test')]: { kind: 'ok', body: rules },
+  })
+  const result = await discoverCandidates('https://start.test/post/1', {
+    limits: LIMITS, concurrency: 1, fetchImpl, rsshubBase: BASE,
+  })
+
+  assert.deepEqual(fetchImpl.calls.map((call) => call.url),
+    ['https://start.test/post/1', radarUrl('landed.test')],
+    'Radar 必须查重定向落点的域名')
+  assert.deepEqual(result.candidates.map((candidate) => candidate.url), [BASE + '/landed/post/1'])
+})
+
+test('非法实例地址的警告不回显原始串（可能带凭据）', async () => {
+  const secretBase = 'https://user:secret@hub.test/api?token=abc'
+  const fetchImpl = stubFetch({
+    'https://site.test/': { kind: 'ok', body: htmlPage(feedLink('/a.xml')) },
+    'https://site.test/a.xml': { kind: 'ok', body: RSS },
+  })
+  const h = endpointHarness(fetchImpl, { rsshubBase: secretBase })
+  const result = await h.dispatch('discoverFeeds', { url: 'https://site.test/' })
+
+  assert.equal(result.ok, true)
+  assert.equal(result.value.warnings.length, 1)
+  const warningText = JSON.stringify(result.value.warnings)
+  assert.equal(warningText.includes('secret'), false, '警告文本不许带凭据；实际：' + warningText)
+  assert.equal(warningText.includes(secretBase), false, '警告文本不许回显原始地址')
+  assert.match(result.value.warnings[0].reason, /实例地址不合法/)
+})
+
+test('发现日志按来源分计候选，不把未校验的 Radar 候选算成「已验证」', async () => {
+  const fetchImpl = stubFetch({
+    'https://site.test/': { kind: 'ok', body: htmlPage(feedLink('/a.xml')) },
+    'https://site.test/a.xml': { kind: 'ok', body: RSS },
+    [radarUrl('site.test')]: {
+      kind: 'ok',
+      body: JSON.stringify({
+        _name: '示例站',
+        '.': [
+          { title: '甲', source: ['/'], target: '/a' },
+          { title: '乙', source: ['/'], target: '/b' },
+        ],
+      }),
+    },
+  })
+  const h = endpointHarness(fetchImpl, { rsshubBase: BASE })
+  await h.dispatch('discoverFeeds', { url: 'https://site.test/' })
+
+  assert.ok(h.lines.some((line) => line.includes('页面 1') && line.includes('RSSHub 2')),
+    '日志要按来源分计；实际：' + JSON.stringify(h.lines))
+  assert.equal(h.lines.some((line) => line.includes('已验证')), false,
+    'Radar 候选没有抓取校验，不能写「已验证」')
 })

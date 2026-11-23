@@ -184,3 +184,22 @@ test('缓存不携带 limits：过期后重查按本次调用重建请求参数�
 test('radarRulesUrl：`{base}/api/radar/rules/{domain}` 只有这一处拼法', () => {
   assert.equal(radarRulesUrl('https://hub.test', 'zhihu.com'), 'https://hub.test/api/radar/rules/zhihu.com')
 })
+
+test('总预算 = limits.timeoutMs：每次尝试只用剩余时间，用尽即停（不再发下一次）', async () => {
+  const time = clock()
+  const calls = []
+  const fetchImpl = async (url, validators, limits) => {
+    calls.push({ url, limits })
+    time.advance(600)
+    return { kind: 'ok', body: '', finalUrl: url }
+  }
+  // 4 个域名候选：d.test → c.d.test → b.c.d.test → a.b.c.d.test；1000ms 预算只够前两次。
+  const lookup = await lookupRadarRules(BASE, 'a.b.c.d.test', { timeoutMs: 1000, maxBytes: 999 },
+    fetchImpl, { now: time.now })
+
+  assert.equal(lookup.kind, 'failure', '预算用尽不能假装「这个域名没有规则」')
+  assert.match(lookup.reason, /预算/)
+  assert.equal(calls.length, 2, '第 3 次开始时预算已用尽，必须停')
+  assert.equal(calls[0].limits.timeoutMs, 1000, '第一次可以用满预算')
+  assert.equal(calls[1].limits.timeoutMs, 400, '第二次只能用剩余 400ms，不是再给满额')
+})
