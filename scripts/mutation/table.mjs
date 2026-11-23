@@ -3108,4 +3108,19 @@ export const MUTATIONS = [
     judgeTests: ['A9：私网实例被 fetch 层拒绝 → 一条警告（url = 实例地址），页面候选不受影响'],
     from: 'const radarLimits = { timeoutMs: limits.timeoutMs, maxBytes: limits.maxBytes };',
     to: 'const radarLimits = { timeoutMs: limits.timeoutMs, maxBytes: limits.maxBytes, trustedTarget: true };' },
+  // ── R8a 04：Radar 规则缓存（2026-11-23）─────────────────────────────────
+  // 缓存键去掉实例地址：换实例后同一域名仍命中旧实例的规则，候选会被拼到新实例上，
+  // 而规则内容其实来自旧实例（A7）。判据是「换 base ⇒ 旧条目不被复用」。
+  { id: 'rsshub-换实例仍用旧缓存', file: 'lib/radar.js',
+    judges: ['radar-cache.test.mjs'],
+    judgeTests: ['换 base ⇒ 旧条目不被复用，旧实例的规则不进入新实例结果'],
+    from: "        const key = origin + '\\n' + domain;",
+    to: '        const key = domain;' },
+  // 失败也走成功的长 TTL：实例抖一下（503 / 非 JSON）会被钉死六小时，期间用户怎么重试都
+  // 只会拿到缓存里的失败（A8）。判据是「61s 后必须重试」。
+  { id: 'rsshub-失败缓存 6h', file: 'lib/radar.js',
+    judges: ['radar-cache.test.mjs'],
+    judgeTests: ['失败只缓存 60s：网络错误 / 非 JSON / 非对象都不钉死长 TTL'],
+    from: 'writeCached(key, { kind: \'failure\', reason }, CACHE_FAILURE_MS, now);',
+    to: 'writeCached(key, { kind: \'failure\', reason }, CACHE_SUCCESS_MS, now);' },
 ]
