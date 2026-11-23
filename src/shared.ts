@@ -324,6 +324,45 @@ export interface DuplicateHintView {
   others: Array<{ itemId: string; feedId: string; feedTitle: string; title: string; link: string; readAt?: string }>
 }
 
+/**
+ * 回溯报告里的单条失败（R9 03，spec §4.8）。
+ *
+ * 放在 shared.ts 而不是 `backfill.ts`：后者 import `node:crypto` 一族的宿主模块，客户端
+ * 只能安全 import 纯 wire 类型；类型若留宿主编排文件，客户端要么 import 宿主实现（bundle 里
+ * 出现 node 内建，见 docs/pitfalls.md §1.7b），要么抄第二份形状（下一次漂移）。
+ */
+export interface BackfillFailure {
+  readonly url: string
+  readonly reason: string
+}
+
+/**
+ * 一次归档页回溯的报告（R9 02 的宿主回包，spec §4.8 的 wire 形状）。
+ *
+ * `remaining = 候选总数 − attempted`：候选是形态命中、按请求篇数截断之后的那批；
+ * 它回答「这次没发起抓取的有多少」，原因看 `stoppedBy`（或每源上限的说明）。
+ * 客户端只展示这份报告，不从中派生条目——条目仍以 reload 后的宿主快照为准。
+ */
+export interface BackfillReport {
+  readonly feedId: string
+  readonly archiveUrl: string
+  /** 该源现有条目提供的形态样本数。 */
+  readonly sampleCount: number
+  /** 归档页抽到的 http(s) 链接数。 */
+  readonly archiveLinks: number
+  /** 形态命中数（含已被同文键排除的）。 */
+  readonly matched: number
+  /** 同文键判定已存在而跳过的条数（含本次运行内新入库后撞上的）。 */
+  readonly existing: number
+  /** 真正发起抓取的篇数（失败也计入）。 */
+  readonly attempted: number
+  /** 成功入库的篇数。 */
+  readonly added: number
+  readonly failures: BackfillFailure[]
+  readonly stoppedBy?: 'deadline' | 'limit'
+  readonly remaining: number
+}
+
 /** OPML 导入（`opmlImport`）的返回：逐源结果 + 汇总，坏源单独列出（§3.1）。 */
 export interface OpmlImportResult {
   /** 新增（此前不在订阅里）的源数 */

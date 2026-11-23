@@ -3192,4 +3192,14 @@ export const MUTATIONS = [
     judgeTests: ['A12 私网：归档页按可信目标放行，文章页 127.0.0.1 被真实抓取层拒绝并进失败清单'],
     from: '            maxBytes: config.articleMaxBytes,\n        });',
     to: '            maxBytes: config.articleMaxBytes,\n            trustedTarget: true,\n        });' },
+
+  // ── R9 03：订阅管理的回溯行内表单（2026-11-23）────────────────────────────
+  // 报告里的失败条目不再渲染（数组换成空数组）：行内只剩「失败 N 篇」的标题、看不到任何
+  // {url, reason}，用户无法判断哪一篇坏了。DOM 用例逐条断言两条失败可见，改空即当场翻红。
+  // from 照构建产物 lib/client.js 的实际字节写（pitfalls 一、1.4），独立实测 OCCURRENCES=1。
+  { id: 'history-报告丢失败', file: 'lib/client.js',
+    judges: ['backfill-dom.test.mjs'],
+    judgeTests: ['R9 03 回溯结果：新增 / 已存在 / 形态命中与技术性失败逐条渲染，失败为空时不显示空列表'],
+    from: 'backfillReport.failures.map((failure, failureIndex) =>',
+    to: '[].map((failure, failureIndex) =>' },
 ]
