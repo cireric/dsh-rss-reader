@@ -10,14 +10,19 @@
  *
  * 依赖方向：本模块只 import 纯函数与抓取层，不 import endpoints —— 在途闸门与信封映射是端点
  * 的职责，这里只负责「一次运行」本身的语义。
+ *
+ * 命名说明：`backfillHistory` / `BackfillReport` 的 backfill 对应 spec 的 `history backfill`
+ * （中文文档统一叫「回溯」），是这一功能的英文标识；它不是另一个叫「回填」的概念，
+ * 所以不做重命名（评审把它当词义问题的结论不采纳）。
  */
 import { EXTRACTOR_REVISION, fetchArticle } from './article.js'
 import type { Config } from './config.js'
 import { sameArticleKeyOf } from './duplicates.js'
 import { fetchFeed } from './feed/fetch.js'
 import { deriveItemId } from './feed/item-id.js'
-import { deriveLinkFilter, extractArchiveLinks, selectBackfillCandidates } from './history.js'
+import { articleKeysOf, deriveLinkFilter, extractArchiveLinks, selectBackfillCandidates, validSampleLinksOf } from './history.js'
 import type { BackfillFailure, BackfillReport } from './shared.js'
+import { effectiveLimitOf } from './shared.js'
 import type { ReaderStore } from './store.js'
 
 /** 串行抓取的固定间隔（spec §4.3）：礼貌承诺，不进设置页。 */
@@ -67,18 +72,6 @@ export class BackfillError extends Error {
   }
 }
 
-/** 每源保留上限：非法 / 未配置 ⇒ 不限（与 refresh 的 prune 同一条纪律）。 */
-function maxItemsOf(config: Config): number {
-  const value = config.maxItemsPerFeed
-  return Number.isFinite(value) && value > 0 ? Math.floor(value) : Number.POSITIVE_INFINITY
-}
-
-/** 去重窗口上限：非法 / 未配置 ⇒ 不截断（与 refresh 写 seen 的规则逐字一致）。 */
-function seenLimitOf(config: Config): number {
-  const value = config.maxSeenPerFeed
-  return Number.isFinite(value) && value > 0 ? Math.floor(value) : Number.POSITIVE_INFINITY
-}
-
 /** 默认等待实现；单独一个小函数是为了让 `sleep` 的注入点只有一处。 */
 function defaultSleep(ms: number): Promise<void> {
   return new Promise<void>((resolve) => { setTimeout(resolve, ms) })
@@ -107,12 +100,15 @@ export async function backfillHistory(input: BackfillInput, deps: BackfillDeps):
 
   const currentItems = store.listItems(input.feedId)
   const sampleLinks = currentItems.map(([, record]) => record.link)
+  // 报告里的样本数必须是**有效样本**数（能 new URL 且 http(s)）：与过滤器的下限同一个口径。
+  const sampleCount = validSampleLinksOf(sampleLinks).length
   const filter = deriveLinkFilter(sampleLinks)
   if (filter === undefined) {
-    throw new BackfillError('bad-request', '样本不足，无法判断文章链接形态（至少需要 3 条已有条目）')
+    throw new BackfillError('bad-request', '样本不足，无法判断文章链接形态（至少需要 3 条 http(s) 的已有条目）')
   }
 
-  const maxItems = maxItemsOf(config)
+  // 每源保留上限：非法 / 未配置 ⇒ 不限。判据与 refresh 的 prune / seen 窗口共用 effectiveLimitOf。
+  const maxItems = effectiveLimitOf(config.maxItemsPerFeed)
   const headroom = Number.isFinite(maxItems) ? Math.max(0, maxItems - currentItems.length) : Number.POSITIVE_INFINITY
   if (headroom === 0) {
     throw new BackfillError('conflict', '该源已达每源保留上限（' + maxItems + ' 条），请先调大上限或清理条目')
@@ -136,12 +132,8 @@ export async function backfillHistory(input: BackfillInput, deps: BackfillDeps):
   const links = extractArchiveLinks(archive.body, archive.finalUrl)
   const matchedLinks = links.filter(filter)
 
-  // 已知同文键：只为报告里的 existing 计数预演一次；判重规则本身仍只在 sameArticleKeyOf 一处。
-  const knownKeys = new Set<string>()
-  for (const link of sampleLinks) {
-    const key = sameArticleKeyOf(link)
-    if (key !== '') knownKeys.add(key)
-  }
+  // 已知同文键：只为报告里的 existing 计数预演一次；建集合的循环只在 history.ts 的 articleKeysOf 一处。
+  const knownKeys = articleKeysOf(sampleLinks)
   let existing = 0
   for (const link of matchedLinks) {
     const key = sameArticleKeyOf(link)
@@ -160,7 +152,7 @@ export async function backfillHistory(input: BackfillInput, deps: BackfillDeps):
   let added = 0
   let stoppedBy: 'deadline' | 'limit' | undefined
 
-  log('回溯开始：' + input.feedId + ' ← ' + input.archiveUrl + '（样本 ' + sampleLinks.length + ' 条，候选 ' + candidates.length + ' 条）')
+  log('回溯开始：' + input.feedId + ' ← ' + input.archiveUrl + '（有效样本 ' + sampleCount + ' 条，候选 ' + candidates.length + ' 条）')
 
   let index = 0
   for (const url of candidates) {
@@ -227,24 +219,30 @@ export async function backfillHistory(input: BackfillInput, deps: BackfillDeps):
   }
 
   if (newIds.length > 0) {
-    // 去重窗口的写入规则与 refresh 完全一致：本次新增在前（批次内保持归档页文档顺序），
-    // 历史窗口在后，只截断最老的那批。非法上限 ⇒ 不截断。
-    const seenLimit = seenLimitOf(config)
+    // 去重窗口的截断规则与 refresh 一致：本次新增在前（批次内保持归档页文档顺序），
+    // 历史窗口在后，只截断最老的那批。非法上限 ⇒ 不截断。与 refresh 唯一的差别是写入时机：
+    // 回溯只写 seen，不碰 cursorAt（见下）。
+    const seenLimit = effectiveLimitOf(config.maxSeenPerFeed)
     const nextSeen = [...newIds, ...previousSeen]
     await store.saveCursor(input.feedId, {
       seen: Number.isFinite(seenLimit) ? nextSeen.slice(0, seenLimit) : nextSeen,
-      ...(cursor?.cursorAt === undefined ? { cursorAt: stamp } : { cursorAt: cursor.cursorAt }),
+      // 只写 seen：cursorAt 是刷新自己的进度（上一次 feed 抓到哪儿）。回溯没读它就不写，
+      // 拿本次开始时间冒充等于把刷新游标推到现在（spec §4.5「没有就不写，不自造抓取时间」）。
+      ...(cursor?.cursorAt === undefined ? {} : { cursorAt: cursor.cursorAt }),
     })
   }
 
-  const remaining = candidates.length - attempted
+  // remaining 的口径：**全部可用候选**（形态命中 − 已存在）里这次没发起抓取的条数。
+  // 被请求篇数截断的、被每源余量挡下的、被 deadline 拦下的都要算进来；用 candidates.length
+  // 会把「limit 截掉的那一批」丢掉，于是 limit=1、10 条候选时反而报 remaining=0。
+  const remaining = Math.max(0, matchedLinks.length - existing - attempted)
   if (remaining === 0) stoppedBy = undefined
   log('回溯结束：' + input.feedId + ' 新增 ' + added + ' 篇，失败 ' + failures.length + ' 篇，剩余 ' + remaining + ' 篇')
 
   return {
     feedId: input.feedId,
     archiveUrl: input.archiveUrl,
-    sampleCount: sampleLinks.length,
+    sampleCount,
     archiveLinks: links.length,
     matched: matchedLinks.length,
     existing,

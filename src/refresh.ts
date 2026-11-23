@@ -15,6 +15,7 @@ import { resolveItemIds, type KnownIdentities } from './feed/item-id.js'
 import { fetchFeed, type FetchLimits } from './feed/fetch.js'
 import { selectPrunable, selectArticleEvictions, type RetentionRow } from './retention.js'
 import { parseFeed } from './feed/parse.js'
+import { effectiveLimitOf } from './shared.js'
 import type { ReaderStore } from './store.js'
 
 /**
@@ -174,10 +175,10 @@ function truncateContent(text: string | undefined, limit: number): string | unde
  * 星标永不自动删**。改动前这里是「无差别删最旧」，实测会连星标条目一起删掉。
  */
 async function prune(store: ReaderStore, feedId: string, maxItems: number): Promise<void> {
-  // 非法上限（0 / 负数 / NaN）一律视为「未配置」⇒ 不裁剪。与 selectArticleEvictions、
-  // selectStalestFeeds、truncateContent 同一条纪律：非法值回落到**不制造破坏**的一边。
+  // 非法上限（0 / 负数 / NaN / ±Infinity）一律视为「未配置」⇒ 不裁剪，判据在
+  // shared.ts 的 effectiveLimitOf（与去重窗口、回溯的每源余量共用同一份）。
   // 不这么写的话 maxItems=0 会把未星标、未保持未读的条目全部删光（2026-11-15 实测）。
-  const limit = Number.isFinite(maxItems) && maxItems > 0 ? Math.floor(maxItems) : Number.POSITIVE_INFINITY
+  const limit = effectiveLimitOf(maxItems)
   const rows: RetentionRow[] = store.listItems(feedId).map(([itemId, record]) => ({
     id: itemId,
     starred: record.starred,
@@ -399,11 +400,9 @@ async function refreshOne(
       added += 1
     }
 
-    // 去重窗口的非法上限同理：0 / 负数 / NaN = 未配置 ⇒ 不截断。
+    // 去重窗口的非法上限同理：0 / 负数 / NaN = 未配置 ⇒ 不截断（同一个判据：effectiveLimitOf）。
     // 清空 seen 会让下一轮把整份 feed 当成新内容重新导入成未读（条目暴增 + 已读态错位）。
-    const seenLimit = Number.isFinite(options.maxSeenPerFeed) && options.maxSeenPerFeed > 0
-      ? Math.floor(options.maxSeenPerFeed)
-      : Number.POSITIVE_INFINITY
+    const seenLimit = effectiveLimitOf(options.maxSeenPerFeed)
     const nextSeen = [...freshIds, ...seen]
     await store.saveCursor(feedId, {
       seen: seenLimit === Number.POSITIVE_INFINITY ? nextSeen : nextSeen.slice(0, seenLimit),

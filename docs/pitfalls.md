@@ -1040,4 +1040,10 @@ K=1 的四轮 `hits` 序列 `['broken', 1, 2, 'broken']`）。判据在 `tests/r
   测量结果）。实验与「什么算证据」写在 `src/config.ts` 该字段的注释里（扫
   {1,2,4,5,8,12} → 一张 (并发, 中位墙钟, 超时数) 表，拐点即合理上限）。
   同一轮定下的 `refreshFeedsPerRound`（每轮抓最旧的 K 个）默认 20 同理是**起点值不是最优值**。
-- **回溯的日期规则有两条没有真实样本**（2026-11-23，R9）：`<meta property="article:published_time">` 与「URL 里完整的 `YYYY/MM/DD`」是按通用约定加的，**没有**实测到哪家站点真的靠它们才解析出日期（阮一峰用 `abbr.published`、云风用可见文本）。真机上若遇到「明明有日期却被跳过」，先确认该站写的是哪一种，再决定是否扩规则——不要凭印象加 JSON-LD 之类的新解析。
+- **回溯的日期规则：哪几级有真实样本、哪几级没有**（2026-11-23，R9）。五级来源里只有两级实测过：
+  `abbr.published`（阮一峰）与可见文本（云风「提交于 October 11, 2026 07:30 PM」）。
+  **以下三级没有任何真实站点样本**，是按通用约定加的，不能当成已验证：
+  ① `<time datetime>`；
+  ② `<meta property="article:published_time">` / `<meta name="date">` / `<meta itemprop="datePublished">`；
+  ③ URL 里完整的 `YYYY/MM/DD` 或 `YYYY-MM-DD`。
+  真机上若遇到「明明有日期却被跳过」，先确认该站写的是哪一种，再决定是否扩规则——不要凭印象加 JSON-LD 之类的新解析。

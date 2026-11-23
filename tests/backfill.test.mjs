@@ -12,7 +12,7 @@ import { createServer } from 'node:http'
 import { createMemoryStore } from '../lib/memory-store.js'
 import { Config } from '../lib/config.js'
 import { backfillHistory, BackfillError } from '../lib/backfill.js'
-import { deriveItemId } from '../lib/feed/item-id.js'
+import { deriveItemId, itemIdCandidates } from '../lib/feed/item-id.js'
 import { EXTRACTOR_REVISION } from '../lib/article.js'
 
 const FEED_ID = 'https://feed.example.com/atom.xml'
@@ -175,6 +175,56 @@ test('A13 入库字段：未读、未星标、无 summary/author，正文缓存 
   assert.deepEqual(articles.calls[0].limits, { timeoutMs: 1234, maxBytes: 5678 })
 })
 
+/* ==================== D：cursor 写入 ==================== */
+
+test('cursor：回溯只写 seen，没有 cursorAt 就不写；原有的 cursorAt 原样保留', async () => {
+  const store = makeStore()
+  const url = 'https://feed.example.com/blog/2020/01/cursor.html'
+  const articles = articleStub({ [url]: okArticle('游标文章', '2020-01-01T00:00:00.000Z') })
+
+  await backfillHistory(
+    { feedId: FEED_ID, archiveUrl: ARCHIVE_URL, limit: 10 },
+    { store, config: config(), fetchFeedImpl: archiveStub([url]), fetchArticleImpl: articles },
+  )
+  const itemId = deriveItemId(FEED_ID, { link: url })
+  assert.deepEqual(store.cursor(FEED_ID), { seen: [itemId] },
+    '没有 cursorAt 时只写 seen；用本次开始时间冒充等于把刷新游标推到现在')
+
+  // 已有 cursorAt 的源：seen 追加新 id，cursorAt 原样保留（不许被回溯覆盖）。
+  const url2 = 'https://feed.example.com/blog/2020/02/cursor-2.html'
+  store.cursors.set(FEED_ID, { seen: [itemId, 'old-id'], cursorAt: '2020-01-01T00:00:00.000Z' })
+  const articles2 = articleStub({ [url2]: okArticle('游标文章二', '2020-02-01T00:00:00.000Z') })
+  await backfillHistory(
+    { feedId: FEED_ID, archiveUrl: ARCHIVE_URL, limit: 10 },
+    { store, config: config(), fetchFeedImpl: archiveStub([url2]), fetchArticleImpl: articles2 },
+  )
+  const itemId2 = deriveItemId(FEED_ID, { link: url2 })
+  assert.deepEqual(store.cursor(FEED_ID), {
+    seen: [itemId2, itemId, 'old-id'],
+    cursorAt: '2020-01-01T00:00:00.000Z',
+  }, '原有 cursorAt 是刷新自己的进度，回溯必须原样保留')
+})
+
+/* ==================== H：身份与刷新侧一致 ==================== */
+
+test('身份：回溯写入的 id 必须出现在 itemIdCandidates(feedId, { link }) 里（刷新侧认得它）', async () => {
+  const store = makeStore()
+  const url = 'https://feed.example.com/blog/2020/01/identity.html'
+  const articles = articleStub({ [url]: okArticle('身份文章', '2020-01-01T00:00:00.000Z') })
+
+  await backfillHistory(
+    { feedId: FEED_ID, archiveUrl: ARCHIVE_URL, limit: 10 },
+    { store, config: config(), fetchFeedImpl: archiveStub([url]), fetchArticleImpl: articles },
+  )
+
+  const itemId = deriveItemId(FEED_ID, { link: url })
+  assert.ok(store.item(itemId) !== undefined, '回溯必须真的写入了这条条目')
+  assert.ok(
+    itemIdCandidates(FEED_ID, { link: url }).includes(itemId),
+    '回溯写入的 id 必须出现在刷新侧的身份候选里——否则同一篇文章会以两个 id 进库',
+  )
+})
+
 /* ==================== A7：重复执行 ==================== */
 
 test('A7 重复执行：第二次 added=0、attempted=0，文章抓取次数不增加', async () => {
@@ -286,7 +336,9 @@ test('A10 headroom：余量 H < 请求篇数 ⇒ 只抓 H 篇，stoppedBy=limit 
   assert.equal(report.attempted, 2, '余量 = 5 − 3 = 2')
   assert.equal(report.added, 2)
   assert.equal(report.stoppedBy, 'limit')
-  assert.equal(report.remaining, 3)
+  assert.equal(report.matched, 5)
+  assert.equal(report.existing, 0)
+  assert.equal(report.remaining, 3, 'remaining = matched(5) − existing(0) − attempted(2)')
   assert.equal(articles.calls.length, 2)
 })
 
@@ -339,8 +391,32 @@ test('A11 deadline：假时钟推进到 120s 后不再发起新请求，stoppedB
 
   assert.equal(report.attempted, 3, '第 4 篇在 deadline 检查处被拦下')
   assert.equal(report.stoppedBy, 'deadline')
-  assert.ok(report.remaining > 0)
-  assert.equal(report.remaining, 2)
+  assert.equal(report.matched, 5)
+  assert.equal(report.existing, 0)
+  assert.equal(report.remaining, 2, 'remaining = matched(5) − existing(0) − attempted(3)')
+})
+
+test('remaining 口径：limit 小于可用候选 ⇒ remaining > 0 且 stoppedBy 缺省（limit 截断不算停止原因）', async () => {
+  const store = makeStore()
+  const urls = [
+    'https://feed.example.com/blog/2020/01/a.html',
+    'https://feed.example.com/blog/2020/02/b.html',
+    'https://feed.example.com/blog/2020/03/c.html',
+  ]
+  const articles = articleStub(Object.fromEntries(urls.map((url, index) =>
+    [url, okArticle('文章 ' + index, '2020-01-0' + (index + 1) + 'T00:00:00.000Z')])))
+
+  const report = await backfillHistory(
+    { feedId: FEED_ID, archiveUrl: ARCHIVE_URL, limit: 1 },
+    { store, config: config(), fetchFeedImpl: archiveStub(urls), fetchArticleImpl: articles },
+  )
+
+  assert.equal(report.matched, 3)
+  assert.equal(report.existing, 0)
+  assert.equal(report.attempted, 1)
+  assert.equal(report.remaining, 2, '被请求篇数截下的 2 条必须计入 remaining（不是 0）')
+  assert.equal(Object.hasOwn(report, 'stoppedBy'), false, 'limit 截断不是宿主停止原因：没被余量/deadline 挡下')
+  assert.equal(articles.calls.length, 1)
 })
 
 /* ==================== A3：样本不足 ==================== */
@@ -377,6 +453,39 @@ test('A3 样本不足：少于 3 条已有条目 ⇒ bad-request，零归档请�
   assert.equal(store.items.size, 2)
 })
 
+test('A3 有效样本：3 条已有条目里 2 条 http(s)、1 条空 ⇒ 拒绝并零请求零写入', async () => {
+  const store = createMemoryStore()
+  store.feeds.set(FEED_ID, { url: FEED_ID, title: '半坏样本源' })
+  const links = [SAMPLE_LINKS[0], SAMPLE_LINKS[1], '']
+  for (const [index, link] of links.entries()) {
+    store.items.set('seed-' + index, {
+      feedId: FEED_ID,
+      title: '已有 ' + index,
+      link,
+      fetchedAt: '2026-11-01T00:00:00.000Z',
+      starred: false,
+    })
+  }
+  const archive = archiveStub(['https://feed.example.com/blog/2020/01/a.html'])
+  const articles = articleStub({})
+
+  await assert.rejects(
+    backfillHistory(
+      { feedId: FEED_ID, archiveUrl: ARCHIVE_URL, limit: 10 },
+      { store, config: config(), fetchFeedImpl: archive, fetchArticleImpl: articles },
+    ),
+    (error) => {
+      assert.ok(error instanceof BackfillError)
+      assert.equal(error.code, 'bad-request')
+      assert.match(error.message, /样本不足/)
+      return true
+    },
+  )
+  assert.equal(archive.calls.length, 0, '有效样本只有 2 条：连归档页都不许读')
+  assert.equal(articles.calls.length, 0)
+  assert.equal(store.items.size, 3, '零写入')
+})
+
 /* ==================== 归档页读取失败 ==================== */
 
 test('归档页读取失败 ⇒ bad-request 可读原因，且零文章请求', async () => {
@@ -397,6 +506,28 @@ test('归档页读取失败 ⇒ bad-request 可读原因，且零文章请求', 
     },
   )
   assert.equal(articles.calls.length, 0)
+})
+
+test('归档页 304（not-modified）⇒ bad-request 可读原因，零文章请求、零写入', async () => {
+  const store = makeStore()
+  const articles = articleStub({})
+  const archive = async () => ({ kind: 'not-modified' })
+
+  await assert.rejects(
+    backfillHistory(
+      { feedId: FEED_ID, archiveUrl: ARCHIVE_URL, limit: 10 },
+      { store, config: config(), fetchFeedImpl: archive, fetchArticleImpl: articles },
+    ),
+    (error) => {
+      assert.ok(error instanceof BackfillError)
+      assert.equal(error.code, 'bad-request')
+      assert.match(error.message, /304/)
+      return true
+    },
+  )
+  assert.equal(articles.calls.length, 0, '304 不是「没有链接」：一篇文章都不许抓')
+  assert.equal(store.items.size, 3, '零写入')
+  assert.equal(store.cursor(FEED_ID), undefined, '没有新增就没有 seen 写入')
 })
 
 /* ==================== A12：文章页私网拒绝（真实抓取层） ==================== */
