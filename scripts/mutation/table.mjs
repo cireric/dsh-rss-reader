@@ -3064,4 +3064,72 @@ export const MUTATIONS = [
     judgeTests: ['R11 D14③ 订阅源顺序：只有说明与「去订阅管理页」，不复制排序控件（D15）'],
     from: '\t\t\t\t\t\t\t\t\tonClick: onManageFeeds,',
     to: '\t\t\t\t\t\t\t\t\tonClick: () => {},' },
+
+  // ── R8a 02：Radar 规则引擎（2026-11-23）──────────────────────────────────
+  // 缺参也出现：去掉「必填参数缺失即跳过」。`encodeURIComponent(undefined)` 会拼出字面量
+  // `/36kr/hot-list/undefined` —— A6 的样本从「0 条候选 + 1 条缺参」变成一条指向不存在分类的
+  // 订阅地址，用户点「添加」之后才在 addFeed 里看到失败，警告区的「跳过 1 条」也归零。
+  // from 照构建产物 lib/rsshub.js 的实际字节写（pitfalls 一、1.4），独立实测 OCCURRENCES=1。
+  { id: 'rsshub-缺参也出现', file: 'lib/rsshub.js',
+    judges: ['rsshub.test.mjs'],
+    judgeTests: ['36kr：唯一规则缺 :category，不产生候选且计 1 条缺参跳过（A6）'],
+    from: "            if (value === undefined || value === '')\n                return { kind: 'missing' };",
+    to: '' },
+  // 坏条目照收：去掉逐条形状校验（R8a 评审 Critical）。`{".":[null]}` 会在 `rule.source` 上抛
+  // TypeError，整个 discoverFeeds 回 internal —— 同页面的合法候选也一起消失；`{source:42}` /
+  // `{target:5}` 同理。判据是引擎单测里的坏条目样本（不只是「有没有警告」，而是根本不许抛）。
+  { id: 'rsshub-坏条目照收', file: 'lib/rsshub.js',
+    judges: ['rsshub.test.mjs'],
+    judgeTests: ['坏条目：null / source 非数组 / target 非字符串 / _name 非字符串 ⇒ 不抛、不产候选'],
+    from: "            if (!isUsableRule(rule)) {\n                invalid += 1;\n                continue;\n            }",
+    to: '' },
+  // ── R8a 01：rsshubBase 配置面（2026-11-23）───────────────────────────────
+  // 去掉 URL 的 path / query / hash 形状校验：`https://x/api` 这类地址会被存成 `https://x`，
+  // 用户以为配的是带路径的实例、实际拼出来的候选地址却是另一个东西（A11 要当场拒绝）。
+  // 判据是 saveSettings 的非法地址用例（ftp / 带 path / query / hash 都必须 bad-request 且文件不动）。
+  { id: 'rsshub-非法地址写盘', file: 'lib/settings-schema.js',
+    judges: ['settings-endpoints.test.mjs'],
+    judgeTests: ['saveSettings rsshubBase 非法地址：ftp / 带 path / 带 query / javascript / 非 URL 都回 bad-request，文件与内存不变（A11）'],
+    from: '    if (url.pathname !== \'/\' || url.search !== \'\' || url.hash !== \'\')\n        return undefined;',
+    to: '' },
+
+  // ── R8a 03：Radar 接进发现流程（2026-11-23）──────────────────────────────
+  // 合并顺序反过来：Radar 候选（未验证）排到页面声明前面。A1 的顺序断言会翻红；
+  // 去重用例也会跟着红 —— 同一个地址变成 Radar 那条胜出（页面优先被逆转）。
+  { id: 'rsshub-页面候选被覆盖', file: 'lib/subscribe.js',
+    judges: ['radar-discovery.test.mjs'],
+    judgeTests: ['A1 顺序：页面候选在前、Radar 在后，两类各带来源标记'],
+    from: 'for (const candidate of [...page, ...radar]) {',
+    to: 'for (const candidate of [...radar, ...page]) {' },
+  // 去掉「未配置即返回」：空实例地址也会被拼成 `/api/radar/rules/...` 发出去（相对地址），
+  // 默认状态下每次发现都多一次无谓出网，还会把「未配置」报成实例故障。A5 的零请求断言抓它。
+  { id: 'rsshub-未配置也请求', file: 'lib/subscribe.js',
+    judges: ['radar-discovery.test.mjs'],
+    judgeTests: ['A5：未配置实例 → 零 Radar 请求、零 Radar 警告'],
+    from: "if (base === '')",
+    to: "if (base === '__never_configured__')" },
+  // Radar 请求继承页面的 trustedTarget：私网实例（A9 的 http://127.0.0.1:1200）会被放行，
+  // SSRF 边界从「实例地址一律按不可信」退化成「随页面请求一起可信」。
+  // 判据是 A9 的「内网被拒」警告与「limits 不带 trustedTarget」的显式断言。
+  { id: 'rsshub-私网放行', file: 'lib/radar.js',
+    judges: ['radar-discovery.test.mjs'],
+    judgeTests: ['A9：私网实例被 fetch 层拒绝 → 一条警告（url = 实例地址），页面候选不受影响'],
+    // from 按当前产物重取（预算改造后 timeout 是剩余时间）：OCCURRENCES=1。
+    from: 'const radarLimits = { timeoutMs: remainingMs, maxBytes: limits.maxBytes };',
+    to: 'const radarLimits = { timeoutMs: remainingMs, maxBytes: limits.maxBytes, trustedTarget: true };' },
+  // ── R8a 04：Radar 规则缓存（2026-11-23）─────────────────────────────────
+  // 缓存键去掉实例地址：换实例后同一域名仍命中旧实例的规则，候选会被拼到新实例上，
+  // 而规则内容其实来自旧实例（A7）。判据是「换 base ⇒ 旧条目不被复用」。
+  { id: 'rsshub-换实例仍用旧缓存', file: 'lib/radar.js',
+    judges: ['radar-cache.test.mjs'],
+    judgeTests: ['换 base ⇒ 旧条目不被复用，旧实例的规则不进入新实例结果'],
+    from: "        const key = origin + '\\n' + domain;",
+    to: '        const key = domain;' },
+  // 失败也走成功的长 TTL：实例抖一下（503 / 非 JSON）会被钉死六小时，期间用户怎么重试都
+  // 只会拿到缓存里的失败（A8）。判据是「61s 后必须重试」。
+  { id: 'rsshub-失败缓存 6h', file: 'lib/radar.js',
+    judges: ['radar-cache.test.mjs'],
+    judgeTests: ['失败只缓存 60s：网络错误 / 非 JSON / 非对象都不钉死长 TTL'],
+    from: 'writeCached(key, { kind: \'failure\', reason }, CACHE_FAILURE_MS, now);',
+    to: 'writeCached(key, { kind: \'failure\', reason }, CACHE_SUCCESS_MS, now);' },
 ]

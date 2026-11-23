@@ -155,6 +155,9 @@ const STYLE = `
   border-radius:4px; color:inherit; background:var(--rss-bg); border:1px solid var(--rss-line);
   font-variant-numeric:tabular-nums; }
 .dsh-rss-settings-input:disabled { opacity:.55; }
+/* R8a：实例地址是整条 URL，数值行的 6.5em 只够显示到 https://rsshub。
+   仍允许在窄面板里收缩（max-width），否则整行会横向溢出。 */
+.dsh-rss-settings-input--url { width:20em; max-width:100%; }
 .dsh-rss-settings-saved { font-size:12px; color:var(--rss-accent); }
 .dsh-rss-settings-error { flex-basis:100%; margin:0; font-size:12px; color:var(--rss-error); line-height:1.45; }
 /* R11 03：非整分钟的「= 90123 ms」只在这个前提下出现（整分钟不显示，D14.2）。 */
@@ -1037,6 +1040,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
             onDismissWarning={() => store.dismissSettingsWarning()}
             onSave={(key, value) => store.saveSetting(key, value)}
             onReset={() => store.resetSettings()}
+            onTestRsshub={(base) => store.testRsshub(base)}
             onCleanupPreview={() => store.cleanupPreview()}
             onCleanup={() => store.cleanup()}
             onManageFeeds={() => store.toggleFeeds()}

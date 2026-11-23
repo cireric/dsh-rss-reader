@@ -19,14 +19,14 @@
 | R6 | 图片折叠与灯箱 | 已完成 | 8/8 `resolved` | 门槛/真机三步已过；图片观感、灯箱尺寸、Referer 实发三项未验 |
 | R12 | 作者元数据与作者搜索 | 已完成 | 8/8 `resolved` | v4→v5 真机升级；GUI 观感未走查 |
 | R11 v1 | RSS 设置页 v1（入口 B） | 已完成 | 7/7 `resolved` | `settings.json` 稀疏覆盖 + `settings` / `saveSettings` 端点 + 五分区设置页；1054/1054、变异 360/360、真机三步；用户人工验收可用（2026-11-22）。遗留：`<460px` 观感、真实 0600 权限位、真实重启保持未单独复核 |
-| R8a | RSSHub Radar 发现（公共实例） | 未开工 | 0/0 | 前置：公共实例可达性 spike |
+| R8a | RSSHub Radar 发现（公共实例） | 已完成 | 5/5 `resolved` | 1142/1142、全量变异 368/368 · 0 幸存、真机三步；真实实例验收（GitHub 端到端 / B 站 / 36kr 缺参 / 私网拒绝 / 缓存）。遗留：GUI 走查（playwright target crashed）、添加未落真实订阅列表、settings 真实重启未验 |
 | R9 | 归档页回溯更早文章 | 未开工 | 0/0 | 前置：真实归档页样本 |
 | R8b | RSSHub 路由表探索 | 未开工 | 0/0 | 前置：R8a 稳定（R11 已交付，设置页可承载实例配置） |
 | R7 | 一键翻译 | 待拍板 | — | 模型/成本/隐私；R11 设置承载已就绪，仍缺模型目录接线 |
 | R10 | 右侧边栏单栏 | 暂缓 | — | 第二套 UI；现有 `u` 已收左栏 |
 | R13 | `/rss` 命令 | 暂缓 | — | 与 4 个 Agent 工具重复 |
 
-**进度**：已交付 8 个阶段、43 张票（R1–R6、R11、R12）；待开发 3 个阶段（R8a → R9 → R8b，票待建）；R7 等拍板，R10/R13 暂缓。**下一张开工票：R8a。**
+**进度**：已交付 9 个阶段、48 张票（R1–R6、R11、R12、R8a）；待开发 2 个阶段（R9、R8b，票待建）；R7 等拍板，R10/R13 暂缓。**下一张开工票：R9。**
 
 ## 已完成阶段（留作上下文）
 
@@ -86,19 +86,22 @@
 - **证据**：`settings-file.test.mjs`、`settings-endpoints.test.mjs`（含 A8 `config.json` 逐字节不变、A1 在途刷新不受新值影响）、`settings-page-dom.test.mjs`、`settings-agent-help.test.mjs`；`npm test` 1054/1054、全量变异 360/360 应用 · 0 幸存；真机三步（reload 前后 `[active]` / 当日日志 0 条「装载失败」/ `POST /rss-reader-api` 401）；用户人工验收可用（2026-11-22）。
 - **遗留**：`<460px` 容器查询的实际堆叠观感、真实 `$DSH_HOME` 上 `settings.json` 的 0600 权限位、真实重启插件后的保持未单独复核；界面不显示来源层、v1 无单项清除（spec 已知边界）。
 
-## 待开发阶段（第三批）
+## 第三批（R8a 已完成；R9 / R8b 未开工）
 
 > R11 已交付（见上）；本批剩余三项按原编号保留（`第三批 2/3/4`），避免 spec 与历史引用的编号漂移。
 
 ### 第三批 2 — R8a：RSSHub Radar 发现（公共实例）
 
-- **状态**：未开工。
+- **状态**：**已完成**（`.scratch/r8a-radar/` 5/5 `resolved`；集成分支 `feat/r8a-radar`，17 个提交 / 37 文件 / +3042 −179）。
+- **交付**：`src/rsshub.ts`（纯规则引擎：域名候选 / 桶 / 匹配 / 拼地址）、`src/radar.ts`（取规则 + 缓存 + `radarRulesUrl` / `isRadarRules` 的单一判据）、`src/subscribe.ts` 的 Radar 支路、`settings.json` 的 `rsshubBase`（`parseRsshubBase` 唯一校验）、端点 `testRsshub`（31 → 32）、设置页 RSSHub 分区（含 `cfd2d8a` 的实例地址输入框宽度修复）、候选来源徽标。
+- **证据**：`tests/rsshub.test.mjs` 30 条、`radar-discovery.test.mjs`、`radar-cache.test.mjs` 8 条、settings 三件套、`scroll-dom.test.mjs` 1 条；`npm test` **1142/1142**；全量变异 **368/368 应用 · 0 幸存**（R8a 新增 8 条 `rsshub-*`）；真机三步（reload 前后 `[active]` / 当日日志 0 条「装载失败」/ 路由 401）；真实实例（经代理，2026-11-23）—— GitHub 页面出 5 条 rsshub 候选、`github/branches/DIYgod/RSSHub` 校验 `rss2` 14 条；B 站空间页出 `/bilibili/user/dynamic/2`；36kr 缺参跳过；私网实例被拒；未配置零请求；同域第二次零请求。
+- **遗留**：真实 GUI 走查未做（playwright 在本沙箱 target crashed）；「添加」只验到 `addFeed` 之前的校验层，未在真实订阅列表落一条；`settings.json` 真实重启保持未单独复核。
 - **目标**：在「粘贴网页 → 列出可订阅源」里补上 RSSHub 这一路；没有 RSS 的站点也能给出候选。
-- **前置（第 0 步，0.5–1 天）**：验证公共实例可达性、Radar 规则接口、`/api/namespace` 的体积 / 延迟；不可达则本阶段暂缓，不硬写。
+- **前置（第 0 步，0.5–1 天）**：**已完成**（2026-11-23 实测）。公共实例三家可用（`rsshub.rssforever.com` / `hub.slarker.me` / `rsshub.isrss.com`），**`rsshub.app` 对程序化访问 403**（官方限流页 + Cloudflare 挑战）⇒ 默认实例改为「空 = 关闭」。规则接口形态、规则表统计、校验成本见 spec §1.1；`/api/namespace` 未测（属 R8b 前置）。
 - **范围**：
-  1. 配置 `rsshubBase`：只用公共实例，默认 `https://rsshub.app`（可在设置页改 / 清空）；不做自建 / 私网实例，不开口子网 SSRF 例外。
-  2. `discoverFeeds` 返回两组候选：页面自身声明（权威，排前）+ RSSHub Radar（补充，带来源标签）；用户手动选择，不自动订阅。
-  3. 域名逐级回退（含 `co.uk` / `com.cn` 多段后缀）；规则缓存 6h，失败约 1min。
+  1. 配置 `rsshubBase`：只用公共实例，**默认空 = 功能关闭**（设置页填 / 清空，带测试连接）；不做自建 / 私网实例，不开口子网 SSRF 例外。
+  2. `discoverFeeds` 返回两组候选：页面自身声明（权威，排前）+ RSSHub Radar（补充，带来源标签、**不做取回校验**）；用户手动选择，不自动订阅。
+  3. 域名逐级回退（短优先，不引多段后缀表 —— 实测 1310 个规则 key 全是注册域）；规则缓存 6h，失败 60s。
   4. 只推荐能拼出的地址；缺参路由跳过并警告，绝不返回带 `:param` 的模板。
   5. 实例不可达时页面自身声明仍正常返回；错误作为 warning，不把发现判失败。
   6. 出网走现有 `normalizeFeedUrl` / SSRF 策略。
@@ -162,6 +165,7 @@
 | 日期 | 事项 | 结论 |
 |---|---|---|
 | 2026-11-22 | RSSHub 实例 | 只用公共实例，不自建；不开口子网 SSRF 例外 |
+| 2026-11-23 | R8a 默认实例 | 空 = 关闭，不写死公共实例（`rsshub.app` 实测 403）；Radar 候选不做取回校验（ADR-0010） |
 | 2026-11-22 | 设置页入口 | B：独立 `view: 'settings'` 视图 |
 | 2026-11-22 | R12 基线 | R12 已完成，作为 v0.2.0 基线 |
 | 2026-11-21 | R6 图片默认值 | `expandImages` 默认 `true`，`i` 键切换整篇 |

@@ -99,7 +99,7 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
   }
 
   // R11 01 / 02：本机设置的稀疏覆盖层（settings.json，读 + 写）。必须在 lifecycle / dispatch 拿到 config **之前**
-  // 完成合并 —— 四个可调键都是「调用时现读」，合并进同一个对象后下一次刷新就是新值。
+  // 完成合并 —— 全部可调键都是「调用时现读」，合并进同一个对象后下一次刷新就是新值。
   // 读失败在这里只会变成设置页的警示条，不抛错：坏设置文件不该让阅读器打不开（spec D6）。
   const settings = createSettingsControl({
     config,

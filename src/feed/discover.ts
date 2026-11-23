@@ -23,8 +23,12 @@ const FEED_TYPE = /(?:rss|atom)\+xml/i
 /** §3.1 的官方兜底词表 */
 const FEED_HINT = /rss|atom|feed|syndicate|subscribe|\/xml/i
 
-/** 最多返回几个候选：一个页面可能挂几十个链接，不能顺着全抓一遍。 */
-const MAX_CANDIDATES = 5
+/**
+ * 最多返回几个候选：一个页面可能挂几十个链接，不能顺着全抓一遍。
+ * 导出是给 R8a 03 的合并上限复用：页面候选与 Radar 候选合起来也只能是 5 条，
+ * 上限必须在**一处**定义，否则两边各写一个 5 迟早分家。
+ */
+export const MAX_CANDIDATES = 5
 
 /**
  * 从 HTML 里找出它声明的 feed 地址（绝对化、去重、保序）。

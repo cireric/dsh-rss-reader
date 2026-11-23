@@ -1,5 +1,5 @@
 /**
- * 浏览器半的读写通道：31 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
+ * 浏览器半的读写通道：32 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
  *
  * 原先这里是一个 switch：每臂各自手写 payload 解析、各自记得把未读账并进回包 ——
  * interface 的复杂度 ≈ implementation 的复杂度。现在「一个端点」是一个 module：
@@ -34,6 +34,7 @@ import {
   scopePayload,
   searchQueryPayload,
   setItemTagsPayload,
+  testRsshubPayload,
   unmarkReadPayload,
 } from './endpoint-payloads.js'
 import type { createSearch } from './search.js'
@@ -47,6 +48,9 @@ import { FolderError } from './folders.js'
 import { duplicateHintsOf, linkKeyOf, type DuplicateRow } from './duplicates.js'
 import { TagError } from './tags.js'
 import { discoverCandidates, validateSubscriptions } from './subscribe.js'
+import { decodeRadarResponse, radarRulesUrl } from './radar.js'
+import { fetchFeed } from './feed/fetch.js'
+import { parseTunableValue } from './settings-schema.js'
 import type { ReaderStore, UnreadStore } from './store.js'
 // 未读判据（isUnread / countUnreadPerFeed）不再由本文件在 JS 侧实现：Task 5 把它交给了存储侧，
 // 自持实现里的 SQL `read_at IS NULL` 与 unread.ts 的 isUnread 是同一件事，两者的等价由
@@ -74,6 +78,11 @@ export interface EndpointDeps {
    * 不是条目数据（spec D30）。缺省只发生在测试桩没装配它时，端点会回 not-ready。
    */
   readonly settings?: SettingsControl
+  /**
+   * RSSHub 探活用的抓取实现（R8a 01）：默认 `fetchFeed`，测试注入桩件。
+   * 与 subscribe 的 `options.fetchImpl` 同一手法 —— 否则「超时 / 非 2xx / 非 JSON」只能真出网才能测。
+   */
+  readonly fetchImpl?: typeof fetchFeed
   readonly articleAttempts: Map<string, number>
 }
 
@@ -98,6 +107,7 @@ export interface EndpointCtx {
   readonly lastRefreshCompletedAt: () => number | undefined
   readonly searchItems?: ReturnType<typeof createSearch>['run']
   readonly settings?: SettingsControl
+  readonly fetchImpl?: typeof fetchFeed
   readonly articleAttempts: Map<string, number>
 }
 
@@ -456,7 +466,7 @@ const buildOverview = (
   }
 }
 /**
- * 端点表：31 个端点一处声明（每项的 `payload` 是入参形状的唯一声明）。
+ * 端点表：32 个端点一处声明（每项的 `payload` 是入参形状的唯一声明）。
  *
  * 穷尽性由 `Record<Endpoint, EndpointSpec>` 保证 —— 名字表（shared.ts 的 ENDPOINT_NAMES）
  * 加了新端点而这里没跟上，编译就不过。这是本文件里唯一需要「加端点时改的地方」。
@@ -814,8 +824,19 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       const result = await discoverCandidates(raw, {
         limits: { timeoutMs: ctx.config.timeoutMs, maxBytes: ctx.config.maxBytes, trustedTarget: true },
         concurrency: 1,
+        // R8a 03：实例地址每次现读 ctx.config（settings 保存后直接改内存，不需要重启）。
+        rsshubBase: ctx.config.rsshubBase,
+        // fetchImpl 与 testRsshub 同一手法：端点测要能桩住页面与实例两组出网。
+        fetchImpl: ctx.fetchImpl,
+        // Radar 的「命中/跳过」明细要能出现在宿主日志里；只走日志，不进回包（spec §6）。
+        log: ctx.log,
       })
-      ctx.log('发现结果：' + raw + ' → 已验证 ' + result.candidates.length + ' 个候选，' + result.warnings.length + ' 条警告')
+      // 口径按来源分计（R8a 评审 #7）：Radar 候选**没有**抓取校验（ADR-0010），把它们算进
+      // 「已验证」会让人以为界面上每条都收过一遍。总数仍报，但拆成页面 / RSSHub 两段。
+      const rsshubCount = result.candidates.filter((candidate) => candidate.source === 'rsshub').length
+      const pageCount = result.candidates.length - rsshubCount
+      ctx.log('发现结果：' + raw + ' → 候选 ' + result.candidates.length + ' 条（页面 ' + pageCount
+        + ' / RSSHub ' + rsshubCount + '），' + result.warnings.length + ' 条警告')
       return ok(result)
     },
   }),
@@ -985,7 +1006,8 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
    */
   saveSettings: defineEndpoint({
     payload: saveSettingsPayload,
-    invalidMessage: 'saveSettings 需要 patch 或 resetToDefaults（二选一），patch 只接受白名单内的合法值',
+    invalidMessage: 'saveSettings 需要 patch 或 resetToDefaults（二选一）：数字键要在范围内，'
+      + 'RSSHub 地址只支持 http(s) 且不能带路径、查询或参数',
     to: async (input, ctx) => {
       if (ctx.settings === undefined) return fail('not-ready', '设置服务尚未就绪')
       // 恢复默认（07 票）：删 / 写规则在控制器里逐键判断，端点只负责把结果转成信封。
@@ -995,6 +1017,52 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         : ctx.settings.save(input.patch)
       if (!outcome.ok) return fail('write-failed', outcome.message)
       return ok({ settings: outcome.snapshot })
+    },
+  }),
+
+  /**
+   * RSSHub 实例探活（R8a 01，spec §4.1 / §4.6）。
+   *
+   * 判据是启发式：`GET {base}/api/radar/rules/zhihu.com` 回 200 + 非空 JSON ⇒ 这个实例会发
+   * Radar 规则。返回 `{ passed, message }` 而不是失败信封：探活失败是**观测结果**，不是请求
+   * 形状错误，界面要在原地显示原因（超时 / HTTP 状态 / 非 JSON）。
+   *
+   * **刻意不传 `trustedTarget`**：RSSHub 实例是第三方出网目标，默认按不可信处理，内网地址
+   * 会被 fetch 层拒绝（A9）。把这一条留给 fetch.ts 的唯一判据，不在这里另判。
+   */
+  testRsshub: defineEndpoint({
+    payload: testRsshubPayload,
+    invalidMessage: 'testRsshub 需要 base（字符串）',
+    to: async (input, ctx) => {
+      // 与保存 / 读取同一份地址判据（parseTunableValue）；空串是「未配置」而不是坏入参。
+      const base = parseTunableValue('rsshubBase', input.base)
+      if (base === undefined) {
+        return ok({ passed: false, message: '地址不合法：只支持 http:// 或 https:// 的实例源站（不能带路径、查询或参数）' })
+      }
+      if (base === '') return ok({ passed: false, message: '未配置 RSSHub 实例地址' })
+
+      const fetchImpl = ctx.fetchImpl ?? fetchFeed
+      // limits 不带 trustedTarget（默认 false）：私网实例在这里就会被拒，与 A9 一致。
+      // 地址只从 `radarRulesUrl` 来 —— 与发现流程同一份拼法，别在这里再写一次字符串。
+      const fetched = await fetchImpl(radarRulesUrl(base, 'zhihu.com'), {}, {
+        timeoutMs: ctx.config.timeoutMs,
+        maxBytes: ctx.config.maxBytes,
+      })
+      if (fetched.kind === 'failed') return ok({ passed: false, message: '连接失败：' + fetched.reason })
+      if (fetched.kind === 'not-modified') {
+        return ok({ passed: false, message: '实例返回了 304（探活请求不应带条件头）' })
+      }
+      // 「取 body → 判空 → JSON.parse → 是不是规则表」只有一份实现（radar.ts 的
+      // decodeRadarResponse）：与发现流程各写一遍，就会出现「测试通过但发现报实例故障」
+      // 这类互斥结论（R8a 评审 #2）。这里只把解码结果翻译成探活话术。
+      const decoded = decodeRadarResponse(fetched)
+      if (decoded.kind === 'rules') {
+        return ok({ passed: true, message: '测试通过：实例返回了 Radar 规则 JSON（探活是启发式，不代表每个站点都有规则）' })
+      }
+      if (decoded.kind === 'empty') {
+        return ok({ passed: false, message: '响应里没有可用的 Radar 规则（空响应或只有站点名的空壳）' })
+      }
+      return ok({ passed: false, message: decoded.reason + '（这个地址可能不是 RSSHub 实例）' })
     },
   }),
 
@@ -1176,7 +1244,7 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
  * 异常一律兜成 internal 信封 —— 不把 throw 泄进通道（调用方要的是带 code 的失败信封）。
  */
 export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: unknown, signal?: AbortSignal) => Promise<RpcResult<unknown>> {
-  const { config, log, ready, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings } = deps
+  const { config, log, ready, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, fetchImpl } = deps
 
   const dispatch = async (endpoint: string, payload: unknown, signal?: AbortSignal): Promise<RpcResult<unknown>> => {
     try {
@@ -1191,7 +1259,7 @@ export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: 
       if (spec === undefined) return fail('unknown-endpoint', '未知端点：' + endpoint)
 
       const ctx: EndpointCtx = {
-        store: target, ready, config, log, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, signal,
+        store: target, ready, config, log, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, fetchImpl, signal,
       }
       const outcome = await spec.to(payload, ctx)
       const { result } = outcome

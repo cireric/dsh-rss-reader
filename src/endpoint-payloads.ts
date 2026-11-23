@@ -14,7 +14,7 @@
  * 失败回统一的 bad-request 信封，成功才把已解析的值交给 handler。
  */
 import { z } from 'zod'
-import { isTunableKey, parseTunableValue } from './settings-schema.js'
+import { assignTunableValue, isTunableKey, parseTunableValue } from './settings-schema.js'
 import type { TunableOverrides } from './settings-schema.js'
 
 /** 零入参端点：接受并忽略 payload（与阶段 5 之前的语义一致）。 */
@@ -200,6 +200,15 @@ export const removeFeedPayload = z.object({ url: z.string().min(1) })
 /** `discoverFeeds`：直接给出去空白后的地址（旧行为是 handler 里 trim）。 */
 export const discoverFeedsPayload = z.object({ url: z.string().trim().min(1) })
 
+/**
+ * `testRsshub`（R8a 01）：只声明「base 是字符串」。
+ *
+ * 地址形状（http/https、无 path / query / hash）仍由 handler 用 `parseTunableValue` 判 ——
+ * 与保存 / 读取是同一份判据；这里若再抄一份，就会出现「测试连接通过、保存被拒」的分家。
+ * 空串是合法形状：handler 回一条「未配置」的可展示原因，而不是坏入参。
+ */
+export const testRsshubPayload = z.object({ base: z.string() })
+
 /** `saveViewPreferences`：preferences 是必需键 —— 缺键会把默认视图静默写盘。值本身仍由 store 归一。 */
 export const saveViewPreferencesPayload = z.object({ preferences: z.unknown() })
 
@@ -272,7 +281,7 @@ const tunablePatch = z.record(z.string(), z.unknown()).superRefine((patch, ctx) 
   for (const [key, value] of Object.entries(patch)) {
     if (!isTunableKey(key)) continue
     const parsed = parseTunableValue(key, value)
-    if (parsed !== undefined) overrides[key] = parsed
+    if (parsed !== undefined) assignTunableValue(overrides, key, parsed)
   }
   return overrides
 })

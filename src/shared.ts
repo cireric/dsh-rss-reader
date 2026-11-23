@@ -19,7 +19,7 @@
  * `ctx.connection.requestRejection(req)` 套用同一套 Host/Origin 与浏览器鉴权。
  */
 import type { UnreadAccount } from './unread.js'
-import type { TunableKey } from './settings-schema.js'
+import type { TunableSettings } from './settings-schema.js'
 // 表格块没有 text / items，只有它能摊出可读文字。article-text.ts 零 node 依赖（本文件要进 client
 // bundle），行列摊平也只有那一份实现 —— 不在这里再写一遍遍历（spec 决策 9 / 10）。
 import { tableToText } from './article-text.js'
@@ -41,6 +41,8 @@ export const ENDPOINT_NAMES = [
   'listTags', 'createTag', 'renameTag', 'deleteTag', 'setItemTags',
   // R11 01 / 02：设置页的读端点与写端点（写路径先落盘再改内存，见 settings-control.ts）。
   'settings', 'saveSettings',
+  // R8a 01：RSSHub 实例的「测试连接」探活（宿主出网，浏览器不直连实例）。
+  'testRsshub',
 ] as const
 export type Endpoint = (typeof ENDPOINT_NAMES)[number]
 
@@ -53,7 +55,7 @@ export type RpcResult<T> =
 /**
  * 「关于」区里一行只读参数（R11 06，spec D14.1）。
  *
- * 名单与顺序由**宿主**决定（Config 减去 `feeds` 与四个可调键），客户端只按回包顺序画。
+ * 名单与顺序由**宿主**决定（Config 减去 `feeds` 与可调键），客户端只按回包顺序画。
  * 值原样下发（数字 / 布尔 / 字符串），展示格式归客户端 —— 这样加字段或改展示不需要
  * 在客户端抄一份当前值。
  */
@@ -62,6 +64,17 @@ export interface ReadOnlySettingView {
   key: string
   /** 当前生效值。 */
   value: string | number | boolean
+}
+
+/**
+ * RSSHub「测试连接」的结果（R8a 01，spec §4.1）。
+ *
+ * 探活只是**启发式**：200 + body 是非空 JSON 说明这个实例会回 Radar 规则；`message` 直接
+ * 展示给人，所以失败原因（超时 / HTTP 状态 / 非 JSON）由宿主拼成人话，客户端不再改写。
+ */
+export interface RsshubTestResult {
+  readonly passed: boolean
+  readonly message: string
 }
 
 /**
@@ -75,8 +88,8 @@ export interface ReadOnlySettingView {
  * settings 控制器，12 个只读参数来自同一份 Config —— 客户端不硬编码任何一项。
  */
 export interface SettingsSnapshot {
-  effective: Record<TunableKey, number>
-  defaults: Record<TunableKey, number>
+  effective: TunableSettings
+  defaults: TunableSettings
   warning?: string
   /** 插件版本（运行时读 package.json）。 */
   version: string
@@ -106,14 +119,26 @@ export interface TagView {
 }
 
 /**
- * 发现阶段的一条候选（**已验证**可订阅）。订阅身份就是 url 本身，用户选中后原样交给 addFeed。
+ * 发现阶段的一条候选。订阅身份就是 url 本身，用户选中后原样交给 addFeed。
+ *
+ * 两种来源（R8a 03）：
+ *  - `page`：页面自己声明的 feed，发现时**抓过一遍**确认能解析 ⇒ format / itemCount 有值；
+ *  - `rsshub`：从实例的 Radar 规则拼出来的地址，**没有**抓取校验（ADR-0010）⇒ 两个字段缺省，
+ *    界面标「未验证」，真正的校验推迟到「添加」时由 addFeed 执行。
+ *
+ * `source` 是必填的：候选只在本次发现的内存里流转，没有旧 wire 需要兼容；缺省值会让
+ * 「忘了标来源」静默变成页面候选，界面上就分不清哪些地址没收过抓取校验。
  */
 export interface FeedCandidate {
   url: string
   title?: string
-  /** 'rss2' | 'rss1' | 'atom' —— 解析器认出的格式，界面据此标注 */
-  format: string
-  itemCount: number
+  /** 'rss2' | 'rss1' | 'atom' —— 解析器认出的格式，界面据此标注；Radar 候选没有 */
+  format?: string
+  itemCount?: number
+  /** 候选来源（R8a 03）：页面声明 / RSSHub Radar */
+  source: 'page' | 'rsshub'
+  /** Radar 规则表的 `_name`（站点名）：界面第二行要显示「站点名 · 未验证」；页面候选不填 */
+  siteName?: string
 }
 
 /**

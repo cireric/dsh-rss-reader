@@ -2889,6 +2889,64 @@ test('订阅发现：零候选与通道错误都有明确反馈（错误时不�
   assert.match(doc.querySelector('.dsh-rss-status--error').textContent, /页面抓取失败/, '通道失败要可见')
 })
 
+/* ──────────────── R8a 03：候选来源徽标（真实 React + jsdom） ──────────────── */
+/**
+ * 两类候选混排（spec D9）：页面声明与 RSSHub 各带来源徽标；Radar 行第二行是「站点名 · 未验证」，
+ * 不许出现 format / 条数（那会让用户以为它被校验过）。「添加」对两类一视同仁 —— 都是同一个
+ * onAdd → addFeed，真正的校验在那边。
+ */
+test('R8a 03：RSSHub 候选带来源徽标与「未验证」，添加走 addFeed；页面候选仍标「页面声明」', async () => {
+  const radarUrl = 'https://hub.test/github/branches/DIYgod/RSSHub'
+  const report = {
+    url: 'https://github.com/DIYgod/RSSHub',
+    candidates: [
+      { url: 'https://github.com/feed.xml', title: '页面源', format: 'rss2', itemCount: 3, source: 'page' },
+      { url: radarUrl, title: '仓库分支', siteName: 'GitHub', source: 'rsshub' },
+    ],
+    warnings: [{ url: 'github.com', reason: '1 条规则无法拼出完整地址' }],
+  }
+  const h = await mountReader({
+    items: [item({ id: 'a1', feedId: 'a' })],
+    feeds: [{ id: 'a', title: '源 A' }],
+    folderApi: async (body) => {
+      if (body.endpoint === 'discoverFeeds') {
+        return { ok: true, status: 200, json: async () => ({ ok: true, value: report }) }
+      }
+      if (body.endpoint === 'addFeed') {
+        return { ok: true, status: 200, json: async () => ({ ok: true, value: ADD_FEED_REPORT(body.payload.url) }) }
+      }
+      return undefined
+    },
+  })
+  await h.store.load('overview')
+  await h.settle()
+  h.press('f')
+  await h.settle()
+  const doc = h.win.document
+  setControlValue(h.win, doc.querySelector('[data-rss-add-input]'), 'https://github.com/DIYgod/RSSHub')
+  await h.settle()
+  doc.querySelector('[data-rss-discover]').click()
+  await h.settle()
+
+  const pageRow = doc.querySelector('[data-rss-candidate="https://github.com/feed.xml"]')
+  assert.equal(pageRow.querySelector('[data-rss-candidate-source]').textContent, '页面声明')
+  assert.match(pageRow.textContent, /rss2 · 3 条/, '页面候选保留原有的格式与条数')
+
+  const radarRow = doc.querySelector('[data-rss-candidate="' + radarUrl + '"]')
+  assert.equal(radarRow.querySelector('[data-rss-candidate-source]').textContent, 'RSSHub')
+  assert.match(radarRow.textContent, /GitHub · 未验证/, 'Radar 行第二行：站点名 · 未验证')
+  assert.doesNotMatch(radarRow.textContent, /条|rss2|atom/, '未验证的候选不许显示条数或格式')
+  const add = radarRow.querySelector('[data-rss-candidate-add="' + radarUrl + '"]')
+  assert.equal(add.disabled, false, '「添加」对 Radar 候选同样可用')
+  assert.match(doc.querySelector('[data-rss-discovery]').textContent, /1 条规则无法拼出完整地址/,
+    '跳过计数要在警告区可见')
+
+  add.click()
+  await h.settle()
+  assert.deepEqual(h.requests.filter((request) => request.endpoint === 'addFeed').map((request) => request.payload.url),
+    [radarUrl], '点 Radar 行的「添加」必须把拼出的地址交给 addFeed（那里才真正校验）')
+})
+
 
 /* ──────────────── M4 02：管理页的健康信息（真实 DOM） ──────────────── */
 test('M4 02：管理页显示健康、连败次数、最近尝试与上次成功；历史未知写成「次数未知」而不是 0', skip, async () => {

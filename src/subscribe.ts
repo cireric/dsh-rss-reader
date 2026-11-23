@@ -5,10 +5,13 @@
  * 用桩抓取函数就能完整覆盖，不必起宿主也不必真的出网。
  */
 import { mapConcurrent } from './concurrency.js'
-import { fetchFeed, type FetchLimits } from './feed/fetch.js'
+import { blockedReason, fetchFeed, type FetchLimits } from './feed/fetch.js'
 import { parseFeed } from './feed/parse.js'
 import { normalizeFeedUrl } from './refresh.js'
-import { discoverFeedUrls, isSameOrigin } from './feed/discover.js'
+import { discoverFeedUrls, isSameOrigin, MAX_CANDIDATES } from './feed/discover.js'
+import { candidatesFromRules } from './rsshub.js'
+import { lookupRadarRules } from './radar.js'
+import { parseRsshubBase } from './settings-schema.js'
 import type { DiscoveryResult, DiscoveryWarning, FeedCandidate } from './shared.js'
 
 /** 一条导入结果。`ok` 为假时 reason 必须给出可直接展示的原因。 */
@@ -30,6 +33,17 @@ export interface SubscribeOptions {
   concurrency: number
   /** 单源校验用的抓取实现（测试注入桩） */
   fetchImpl?: typeof fetchFeed
+  /**
+   * RSSHub 实例源站（R8a 03，来自 `ctx.config.rsshubBase`）。空串 / 缺省 = 功能关闭：
+   * **一个 Radar 请求都不发，也不产警告** —— 用户没主动配置实例，不该让每次发现都替他把网址
+   * 送给第三方（spec D1）。
+   */
+  rsshubBase?: string
+  /**
+   * 发现流程的诊断日志（端点传 `ctx.log`）。只用于「Radar 命中了什么」这一行，
+   * 与 DiscoveryResult 分开：日志是排查用的，不是给客户端的第二条数据通道（spec §6）。
+   */
+  log?: (message: string) => void
 }
 
 /**
@@ -147,6 +161,114 @@ async function checkCandidate(
   return { ok: true, title: parsed.title, format: parsed.format, itemCount: parsed.items.length }
 }
 
+/** Radar 支路的结果：候选 + 最多一条警告（实例故障或跳过计数）。 */
+interface RadarBranch {
+  candidates: FeedCandidate[]
+  warnings: DiscoveryWarning[]
+}
+
+/**
+ * 合并：页面候选在前、Radar 在后；按归一化 URL 去重（**页面优先**）；总数封顶 MAX_CANDIDATES。
+ *
+ * 顺序是承重的（spec §4.2 / A1）：Radar 候选没有抓取校验，页面自己声明的才是更可信的那一类；
+ * 同一个地址两边都有时，留下的必须是页面那条（带 format / itemCount），不能被 Radar 覆盖。
+ * 上限也在这里统一裁：`discoverFeedUrls` 已把页面候选封在 5，但合并后仍可能超（4 页面 + 5 Radar），
+ * Radar 只补到上限为止。
+ */
+function mergeCandidates(page: readonly FeedCandidate[], radar: readonly FeedCandidate[]): FeedCandidate[] {
+  const merged: FeedCandidate[] = []
+  const seen = new Set<string>()
+  for (const candidate of [...page, ...radar]) {
+    if (merged.length >= MAX_CANDIDATES) break
+    const key = candidateKey(candidate.url)
+    if (seen.has(key)) continue
+    seen.add(key)
+    merged.push(candidate)
+  }
+  return merged
+}
+
+/** 去重键：URL 归一化（小写主机、默认端口、点段）。两边来源产出的都是合法绝对地址。 */
+function candidateKey(url: string): string {
+  try {
+    return new URL(url).toString()
+  } catch {
+    return url
+  }
+}
+
+/**
+ * Radar 支路（spec §4.2 ②）：配置为空 ⇒ 零请求零警告；实例故障 ⇒ 一条警告；有规则 ⇒ 拼候选。
+ *
+ * `pageUrl` 是**雷达视角的页面地址**：页面抓成功时用 finalUrl（站点可能 301 到别处，规则该按
+ * 真正落地的域名/路径算）；页面抓失败时没有 finalUrl，用用户给的 URL（D7：Radar 只要 URL，
+ * 不要页面内容 —— 「站点挡爬虫、RSSHub 反而能拿到」正是这一路的典型场景）。
+ */
+async function radarBranch(
+  pageUrl: string,
+  options: SubscribeOptions,
+  fetchImpl: typeof fetchFeed,
+): Promise<RadarBranch> {
+  const base = options.rsshubBase?.trim() ?? ''
+  // A5：默认状态（未配置）不该天天吵 —— 不请求、不产警告、不写日志。
+  if (base === '') return { candidates: [], warnings: [] }
+
+  const page = new URL(pageUrl)
+  // 页面主机是私网 / 回环 ⇒ 这段查询会把内网主机名发给第三方实例（R8a 评审 #6）。
+  // 复用 fetch.ts 的唯一地址判据（`http://` + host 是构造出来的合法 URL，不会走到 DNS）；
+  // 跳过不是错误：既不产候选，也不报警告，只在日志里说明原因。
+  const privateReason = blockedReason('http://' + page.hostname)
+  if (privateReason !== undefined) {
+    options.log?.('Radar：' + page.hostname + ' → ' + privateReason + '，跳过 Radar（不把内网主机名发给第三方实例）')
+    return { candidates: [], warnings: [] }
+  }
+  // 与设置面同一个纯函数：profile patch 可以绕过 saveSettings 的入参校验，发现流程必须
+  // 再验一次；非法值只产一条可读警告，零请求，绝不拼出 `…/api/api/radar/…`。
+  const origin = parseRsshubBase(base)
+  if (origin === undefined) {
+    options.log?.('Radar：' + page.hostname + ' → 实例地址不合法，跳过')
+    // 警告**不回显原值**（R8a 评审 #6）：profile patch 里可能写着带凭据的地址，
+    // 原样回显会把密码送进界面与日志。只有固定原因，不带任何用户输入。
+    return {
+      candidates: [],
+      warnings: [{
+        reason: 'RSSHub 实例地址不合法（只支持 http(s) 源站，不能带路径 / 查询 / 参数），已跳过 Radar 查询',
+      }],
+    }
+  }
+
+  const lookup = await lookupRadarRules(origin, page.hostname, options.limits, fetchImpl)
+  if (lookup.kind === 'failure') {
+    options.log?.('Radar：' + page.hostname + ' → 查询失败：' + lookup.reason)
+    return {
+      candidates: [],
+      warnings: [{ url: origin, reason: 'RSSHub 实例查询失败：' + lookup.reason }],
+    }
+  }
+  if (lookup.kind === 'empty') {
+    // 「该域没规则」是正常结果（实测实例回 200 + 空 body），不是警告。
+    options.log?.('Radar：' + page.hostname + ' → 命中 0 条，跳过 0 条')
+    return { candidates: [], warnings: [] }
+  }
+
+  const found = candidatesFromRules(lookup.rules, page, origin, lookup.domain)
+  const skipped = found.skipped.missingParam + found.skipped.wildcard + found.skipped.regex
+  // 坏条目（形状都看不懂）与「拼不出来」分开计数，但都算这次查询里被跳过的规则。
+  // 命中数是规则引擎的产出（合并前的口径）：日志要回答的是「这家实例对这个站给了什么」，
+  // 不是「最后界面上剩几行」—— 后者还受去重与上限影响，合并结果由端点另一行日志报告。
+  options.log?.('Radar：' + lookup.domain + ' → 命中 ' + found.candidates.length + ' 条，跳过 '
+    + (skipped + found.invalid) + ' 条')
+  const reasons: string[] = []
+  if (skipped > 0) reasons.push(skipped + ' 条规则无法拼出完整地址')
+  if (found.invalid > 0) reasons.push(found.invalid + ' 条规则形状不合法（已跳过）')
+  const warnings: DiscoveryWarning[] = reasons.length > 0
+    // §4.3：跳过计数汇总成**一条**警告，不逐条刷屏。
+    ? [{ url: lookup.domain, reason: reasons.join('；') }]
+    : []
+  // RadarCandidate 与 FeedCandidate 结构兼容，直接交出：逐字段转写只是把同一份形状维护两次。
+  return { candidates: found.candidates, warnings }
+}
+
 /**
  * **只发现、不订阅**：把页面声明的候选逐个校验，全部结果交给用户挑。
  *
@@ -157,8 +279,13 @@ async function checkCandidate(
  * 相对链接按**最终页面 URL**（跟完重定向的落点，每跳都过地址策略）解析 —— 见 fetch.ts 的 finalUrl。
  * 信任边界不因此放宽：候选仍只在与「用户给的 URL」同源时才继承可信目标（limitsForCandidate）。
  *
- * 上限：候选数由 discover.ts 的 MAX_CANDIDATES 封顶（5），体积与超时走 options.limits
- * （每个候选各一份）⇒ 最坏一轮 = 1 次页面 + 5 次候选抓取 × timeoutMs。
+ * 顺序固定（R8a 03 / spec §4.2）：① 页面抓取与声明发现（现状）② Radar 规则查询 ③ 合并。
+ * 用户给的就是 feed 时提前返回，**不查 Radar**（A10）—— 那是最快路径，也没有「发现」可言。
+ *
+ * 上限：页面候选由 discover.ts 的 MAX_CANDIDATES 封顶（5），与 Radar 合并后再统一裁到 5。
+ * 页面候选已满时**整段 Radar 直接跳过**（Radar 候选进不了列表，查了也是白花出网预算）。
+ * 体积与超时走 options.limits（每个候选各一份）；Radar 的 4 次域名回退共用**一个**
+ * timeoutMs 总预算（radar.ts 里按剩余时间递减），不是每次各给满额。
  */
 export async function discoverCandidates(
   raw: string,
@@ -173,36 +300,60 @@ export async function discoverCandidates(
   }
 
   const page = await fetchImpl(userUrl, {}, options.limits)
-  if (page.kind === 'failed') {
-    return { url: userUrl, candidates: [], warnings: [{ url: userUrl, reason: page.reason }] }
-  }
-  if (page.kind === 'not-modified') {
-    return { url: userUrl, candidates: [], warnings: [{ url: userUrl, reason: '发现请求收到了 304（不应发生）' }] }
-  }
 
   // 用户给的就是 feed：直接作为唯一候选（与 §9.2「直达 RSS/Atom 地址走现有校验」同一语义）。
   // 订阅身份保留用户给的那个 URL，不换成重定向落点 —— addFeed 存的是同一个键。
-  const direct = parseFeed(page.body, userUrl)
-  if (direct.format !== 'unknown') {
-    const only: FeedCandidate = { url: userUrl, title: direct.title, format: direct.format, itemCount: direct.items.length }
-    return { url: userUrl, candidates: [only], warnings: [] }
-  }
-
-  const declared = discoverFeedUrls(page.body, page.finalUrl)
-  if (declared.length === 0) {
-    return {
-      url: userUrl,
-      candidates: [],
-      warnings: [{ url: userUrl, reason: '未发现公开声明的订阅源（页面里没有 link rel=alternate 的 RSS/Atom 声明）' }],
+  // 位置必须在 Radar 之前：这一支提前返回，Radar 一次都不查（A10）。
+  if (page.kind === 'ok') {
+    const direct = parseFeed(page.body, userUrl)
+    if (direct.format !== 'unknown') {
+      const only: FeedCandidate = {
+        url: userUrl, title: direct.title, format: direct.format, itemCount: direct.items.length, source: 'page',
+      }
+      return { url: userUrl, candidates: [only], warnings: [] }
     }
   }
 
-  const candidates: FeedCandidate[] = []
+  const pageCandidates: FeedCandidate[] = []
   const warnings: DiscoveryWarning[] = []
-  for (const candidate of declared) {
-    const checked = await checkCandidate(candidate, limitsForCandidate(candidate, userUrl, options.limits), fetchImpl)
-    if (checked.ok) candidates.push({ url: candidate, title: checked.title, format: checked.format, itemCount: checked.itemCount })
-    else warnings.push({ url: candidate, reason: checked.reason })
+  if (page.kind === 'failed') {
+    // D7：页面失败**不是**发现的失败 —— 原因记下来，Radar 照查（下面的 pageUrl 回落到 userUrl）。
+    warnings.push({ url: userUrl, reason: page.reason })
+  } else if (page.kind === 'not-modified') {
+    warnings.push({ url: userUrl, reason: '发现请求收到了 304（不应发生）' })
+  } else {
+    const declared = discoverFeedUrls(page.body, page.finalUrl)
+    if (declared.length === 0) {
+      warnings.push({ url: userUrl, reason: '未发现公开声明的订阅源（页面里没有 link rel=alternate 的 RSS/Atom 声明）' })
+    } else {
+      for (const candidate of declared) {
+        const checked = await checkCandidate(candidate, limitsForCandidate(candidate, userUrl, options.limits), fetchImpl)
+        if (checked.ok) {
+          pageCandidates.push({
+            url: candidate, title: checked.title, format: checked.format, itemCount: checked.itemCount, source: 'page',
+          })
+        } else {
+          warnings.push({ url: candidate, reason: checked.reason })
+        }
+      }
+    }
   }
-  return { url: userUrl, candidates, warnings }
+
+  const radarPageUrl = page.kind === 'ok' ? page.finalUrl : userUrl
+  let radar: RadarBranch
+  if (pageCandidates.length >= MAX_CANDIDATES) {
+    // 性能（R8a 评审 #5）：页面候选已经占满合并上限，Radar 候选**永远进不了**最终列表
+    //（mergeCandidates 先放页面、页面优先），这时再查实例纯属浪费一次到四次出网。
+    // 早退不产警告：界面结果与「查了但被上限裁掉」完全一样，警告只会让人以为出了故障。
+    options.log?.('Radar：' + new URL(radarPageUrl).hostname + ' → 页面候选已满 '
+      + MAX_CANDIDATES + ' 条，跳过 Radar')
+    radar = { candidates: [], warnings: [] }
+  } else {
+    radar = await radarBranch(radarPageUrl, options, fetchImpl)
+  }
+  return {
+    url: userUrl,
+    candidates: mergeCandidates(pageCandidates, radar.candidates),
+    warnings: [...warnings, ...radar.warnings],
+  }
 }

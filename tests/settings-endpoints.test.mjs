@@ -17,7 +17,7 @@ import { createSettingsControl } from '../lib/settings-control.js'
 import { createLifecycle } from '../lib/lifecycle.js'
 import { selectStalestFeeds } from '../lib/refresh.js'
 
-const TUNABLE = ['refreshFeedsPerRound', 'refreshConcurrency', 'minRefreshIntervalMs', 'cleanupAfterDays']
+const TUNABLE = ['refreshFeedsPerRound', 'refreshConcurrency', 'minRefreshIntervalMs', 'cleanupAfterDays', 'rsshubBase']
 
 /**
  * 装配一份「生产同形」的 settings 控制器 + dispatch。
@@ -64,17 +64,18 @@ async function settingsOf(h) {
   return result.value.settings
 }
 
-test('settings 回包：effective / defaults 都覆盖四个可调键，默认值来自 schema', async () => {
+test('settings 回包：effective / defaults 都覆盖全部可调键（含 rsshubBase），默认值来自 schema', async () => {
   const h = harness()
   try {
     const settings = await settingsOf(h)
-    assert.deepEqual(Object.keys(settings.effective).sort(), [...TUNABLE].sort(), '生效值必须覆盖四个可调键')
+    assert.deepEqual(Object.keys(settings.effective).sort(), [...TUNABLE].sort(), '生效值必须覆盖全部可调键')
     assert.deepEqual(settings.defaults, {
       refreshFeedsPerRound: 20,
       refreshConcurrency: 5,
       minRefreshIntervalMs: 600000,
       cleanupAfterDays: 30,
-    }, '默认值由 Config({}) 现取，客户端不硬编码')
+      rsshubBase: '',
+    }, '默认值由 Config({}) 现取，客户端不硬编码；RSSHub 默认空 = 功能关闭（D1）')
     assert.deepEqual(settings.effective, settings.defaults, '没有 settings.json 时生效值就是默认值')
     assert.equal(settings.warning, undefined, '文件不存在是正常首装，不该报警')
   } finally {
@@ -138,7 +139,7 @@ test('读失败（EISDIR）：继承值继续 + 警示条 + 日志，且不隔�
 test('坏值逐键丢：合法的照用、非法的只报数量，文件不被重写', async () => {
   const file = JSON.stringify({
     version: 1,
-    overrides: { refreshConcurrency: 0, refreshFeedsPerRound: 7, rsshubBase: 'https://ignored.example' },
+    overrides: { refreshConcurrency: 0, refreshFeedsPerRound: 7, futureKey: 'https://ignored.example' },
   })
   const h = harness({ file })
   try {
@@ -174,6 +175,7 @@ test('saveSettings 稀疏写：只改一项就只写这一个键，形状 { vers
     assert.equal(result.value.settings.effective.refreshFeedsPerRound, 7, '回包里的生效值必须是新值')
     assert.deepEqual(result.value.settings.defaults, {
       refreshFeedsPerRound: 20, refreshConcurrency: 5, minRefreshIntervalMs: 600000, cleanupAfterDays: 30,
+      rsshubBase: '',
     }, '回包形状与 settings 读端点同形（客户端据此统一落地）')
 
     assert.deepEqual(JSON.parse(fileText(h)), { version: 1, overrides: { refreshFeedsPerRound: 7 } },
@@ -207,7 +209,7 @@ test('saveSettings 空 patch：无操作成功（返回当前快照、不写盘�
     assert.deepEqual(h.logs.filter((line) => line.startsWith('设置：')), [], '空 patch 不该留下保存日志')
 
     // D5 的白名单没有放宽：空对象是「没改」，未知键仍是「不许改」。
-    const unknown = await h.dispatch('saveSettings', { patch: { rsshubBase: 'https://rsshub.example' } })
+    const unknown = await h.dispatch('saveSettings', { patch: { futureKey: 'whatever' } })
     assert.equal(unknown.ok, false, '未知键必须 rejected，不能被当成空操作静默接受')
     assert.equal(unknown.error.code, 'bad-request', '未知键走统一坏入参信封')
     assert.equal(fileText(h), beforeText, '被拒的未知键同样不写盘')
@@ -219,7 +221,7 @@ test('saveSettings 空 patch：无操作成功（返回当前快照、不写盘�
 
 test('saveSettings 稀疏合并不吞别的覆盖：已有键原样保留，认不出的键在保存时被丢弃（D6 第三类）', async () => {
   const h = harness({
-    file: JSON.stringify({ version: 1, overrides: { cleanupAfterDays: 45, rsshubBase: 'https://rsshub.example' } }),
+    file: JSON.stringify({ version: 1, overrides: { cleanupAfterDays: 45, futureKey: 'https://ignored.example' } }),
   })
   try {
     const result = await h.dispatch('saveSettings', { patch: { refreshFeedsPerRound: 7 } })
@@ -319,11 +321,14 @@ const TUNABLE_DEFAULTS = {
   refreshConcurrency: 5,
   minRefreshIntervalMs: 600000,
   cleanupAfterDays: 30,
+  rsshubBase: '',
 }
 
 /** 除四个可调键之外的 Config 字段（恢复默认不许碰它们）。 */
 function nonTunableConfig(config) {
-  const { refreshFeedsPerRound, refreshConcurrency, minRefreshIntervalMs, cleanupAfterDays, ...rest } = config
+  const {
+    refreshFeedsPerRound, refreshConcurrency, minRefreshIntervalMs, cleanupAfterDays, rsshubBase, ...rest
+  } = config
   return rest
 }
 
@@ -352,6 +357,7 @@ test('saveSettings 恢复默认：继承值等于默认的键删覆盖，不等�
       refreshConcurrency: h.config.refreshConcurrency,
       minRefreshIntervalMs: h.config.minRefreshIntervalMs,
       cleanupAfterDays: h.config.cleanupAfterDays,
+      rsshubBase: h.config.rsshubBase,
     }, TUNABLE_DEFAULTS)
     assert.deepEqual(h.settings.snapshot().effective, TUNABLE_DEFAULTS, '端点快照与内存一致')
     assert.deepEqual(h.logs.filter((line) => line.startsWith('恢复默认：')), [
@@ -430,6 +436,93 @@ test('saveSettings 恢复默认写盘失败：端点回 write-failed，内存与
     assert.equal(h.config.cleanupAfterDays, 45)
     assert.deepEqual(h.logs.filter((line) => line.startsWith('恢复默认：')), [],
       '没写成功就不能留下「已恢复」的日志')
+  } finally {
+    h.cleanup()
+  }
+})
+
+// ── R8a 01：rsshubBase 配置面（spec §4.1 / §7 A11–A12 / §11 D2–D3）───────────────
+//
+// A11：非法地址「当场拒绝、文件与内存都不变」；A12：合法地址保存后重启仍生效。
+// 只经端点驱动 —— 直接调控制器会绕过入参校验，而非法值零写盘的入口正是端点这一层。
+
+test('saveSettings rsshubBase：只改实例时 overrides 只有 rsshubBase，去尾斜杠后落盘，内存与重启都保持（A12）', async () => {
+  const h = harness()
+  try {
+    const result = await h.dispatch('saveSettings', { patch: { rsshubBase: ' https://rsshub.rssforever.com/ ' } })
+    assert.equal(result.ok, true, '合法实例地址必须保存成功')
+    assert.equal(result.value.settings.effective.rsshubBase, 'https://rsshub.rssforever.com',
+      '回包里的生效值必须是归一后的形态（去尾斜杠、trim）')
+    assert.deepEqual(JSON.parse(fileText(h)), {
+      version: 1,
+      overrides: { rsshubBase: 'https://rsshub.rssforever.com' },
+    }, '只改实例 ⇒ overrides 里只有 rsshubBase（版本仍是 1）')
+    assert.equal(h.config.rsshubBase, 'https://rsshub.rssforever.com',
+      '写盘成功后必须改同一个 config 对象（发现候选下一次就读它）')
+    // 钉死「旧 → 新」两段：旧值是继承来的空串，新值是归一后的地址。只断言「有一行以
+    // 设置：rsshubBase 开头」会让「没写旧值 / 没写新值」也通过（两边都蕴含前者）。
+    assert.deepEqual(h.logs.filter((line) => line.startsWith('设置：rsshubBase')),
+      ['设置：rsshubBase  → https://rsshub.rssforever.com'],
+      '保存要留一行完整的「旧 → 新」（D8）；实际日志：' + JSON.stringify(h.logs))
+
+    // 模拟重启：同一份 settings.json、全新的 Config 与控制器。
+    const restartedConfig = Config({})
+    const restarted = createSettingsControl({
+      config: restartedConfig,
+      settingsPath: h.settingsPath,
+      log: () => {},
+    })
+    assert.equal(restarted.snapshot().effective.rsshubBase, 'https://rsshub.rssforever.com',
+      '重启后仍应是这个实例（A12）')
+    assert.equal(restartedConfig.rsshubBase, 'https://rsshub.rssforever.com', '重启后的 config 对象也必须被合并')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('saveSettings rsshubBase 非法地址：ftp / 带 path / 带 query / javascript / 非 URL 都回 bad-request，文件与内存不变（A11）', async () => {
+  const h = harness({ patch: { rsshubBase: 'https://old.example' } })
+  try {
+    const beforeEffective = h.settings.snapshot().effective
+    assert.equal(beforeEffective.rsshubBase, 'https://old.example', '前置：继承值来自 patch')
+    for (const bad of [
+      'ftp://rsshub.example',
+      'https://rsshub.example/api',
+      'https://rsshub.example/?token=1',
+      'https://rsshub.example/#top',
+      'javascript:alert(1)',
+      'not a url',
+    ]) {
+      const result = await h.dispatch('saveSettings', { patch: { rsshubBase: bad } })
+      assert.equal(result.ok, false, '非法地址必须被拒：' + bad)
+      assert.equal(result.error.code, 'bad-request', '非法地址走统一坏入参信封：' + bad)
+      assert.equal(fileText(h), undefined, '被拒的保存不许创建设置文件：' + bad)
+      assert.equal(h.config.rsshubBase, 'https://old.example', '被拒的保存不许改内存：' + bad)
+      assert.deepEqual(h.settings.snapshot().effective, beforeEffective, '端点快照也必须保持旧值：' + bad)
+    }
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('saveSettings rsshubBase 清空：空串落盘为显式空覆盖，页面级恢复默认不顺手清掉它', async () => {
+  const h = harness({ file: JSON.stringify({ version: 1, overrides: { rsshubBase: 'https://rsshub.example' } }) })
+  try {
+    const cleared = await h.dispatch('saveSettings', { patch: { rsshubBase: '' } })
+    assert.equal(cleared.ok, true, '空串 = 关闭，是合法值')
+    assert.equal(cleared.value.settings.effective.rsshubBase, '')
+    assert.deepEqual(JSON.parse(fileText(h)), { version: 1, overrides: { rsshubBase: '' } },
+      '清空后写入的是空覆盖（与「实例地址」同一条稀疏写路径）')
+
+    // 再加一个数值覆盖，然后跑页面级「恢复默认」：它只管四个数字键（RSSHub 分区自带清空按钮）。
+    await h.dispatch('saveSettings', { patch: { refreshFeedsPerRound: 7 } })
+    await h.dispatch('saveSettings', { patch: { rsshubBase: 'https://rsshub.example' } })
+    const reset = await h.dispatch('saveSettings', { resetToDefaults: true })
+    assert.equal(reset.ok, true)
+    assert.equal(reset.value.settings.effective.rsshubBase, 'https://rsshub.example',
+      '页面级恢复默认只覆盖四个数值参数，不清 RSSHub 地址')
+    assert.deepEqual(JSON.parse(fileText(h)), { version: 1, overrides: { rsshubBase: 'https://rsshub.example' } },
+      '数值覆盖被删，实例地址保留')
   } finally {
     h.cleanup()
   }

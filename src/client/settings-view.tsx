@@ -2,7 +2,8 @@
  * 设置页（R11 01 骨架 / 02 第一个可写参数 / 03 其余三个参数 / 04 手动清理 / 05 显示开关 /
  * 06 Agent 说明与关于区 / 07 恢复默认）。
  *
- * 五个分区按 spec D13 的顺序全部占位；①「抓取与清理」的四行都是**可写**的数值输入框
+ * 六个分区：前五个按 spec D13 的顺序占位，R8a 01 在「显示」之后插入「RSSHub」；
+ * ①「抓取与清理」的四行都是**可写**的数值输入框
  * （03 票补齐并发 / 自动刷新间隔 / 清理天数）；②「显示」是 05 票的两个视图开关
  * （默认折叠图片 / 显示未读计数）；04 票在「清理天数」行右侧加「立即清理」：先预演（dryRun）
  * 再确认，设置页只负责触发与展示，取窗口和判据都在 store / 宿主那一侧（D27）；06 票填
@@ -28,14 +29,13 @@
  */
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { AGENT_APPROVAL_NOTE, AGENT_HELP } from '../agent-help.js'
-import type { CleanupResult, ReadOnlySettingView, SettingsSnapshot } from '../shared.js'
-import { changedTunableKeys, parseTunableValue, TUNABLE_RANGES, type TunableKey } from '../settings-schema.js'
+import type { CleanupResult, ReadOnlySettingView, RsshubTestResult, SettingsSnapshot } from '../shared.js'
+import { changedNumberTunableKeys, parseTunableValue, TUNABLE_RANGES, type NumberTunableKey, type TunableKey } from '../settings-schema.js'
 import type { ReadingPreferences } from '../preferences.js'
 import type { ResetSettingsResult, SaveSettingResult } from './settings-actions.js'
 import { ConfirmDialog } from './confirm-dialog.js'
-
-/** 成功反馈的停留时间：短到不挡视线，长到能看见（spec D14.2 定稿「约 1.4 秒」）。 */
-const SAVED_FEEDBACK_MS = 1400
+import { RsshubSettingRow } from './rsshub-setting-row.js'
+import { useSettingsDraft } from './settings-draft.js'
 
 /** 一分钟的毫秒数。毫秒是 `minRefreshIntervalMs` 的唯一真单位，分钟只是输入框的显示单位。 */
 const MINUTE_MS = 60_000
@@ -64,9 +64,11 @@ export interface SettingsViewProps {
   /** 改「显示未读计数」：store 会整份落盘，重开面板后保持。 */
   onShowUnread: (value: boolean) => void
   /** 逐项保存：由 store 的保存串行链执行，返回是否成功与失败的当下生效值。 */
-  onSave: (key: TunableKey, value: number) => Promise<SaveSettingResult>
+  onSave: (key: TunableKey, value: string | number) => Promise<SaveSettingResult>
   /** 页面级恢复默认：走同一条保存串行链，一次请求把四项恢复成默认值。 */
   onReset: () => Promise<ResetSettingsResult>
+  /** RSSHub 探活（R8a 01）：只把地址交给宿主；返回可展示的结论。 */
+  onTestRsshub: (base: string) => Promise<RsshubTestResult>
   /** 「去订阅管理页」：走既有 toggleFeeds，设置页不复制排序控件（D15）。 */
   onManageFeeds: () => void
   /**
@@ -85,6 +87,8 @@ export interface SettingsViewProps {
 const SECTIONS = [
   { key: 'fetch', title: '抓取与清理' },
   { key: 'display', title: '显示' },
+  // R8a 01：RSSHub 实例地址在「显示」之后、「Agent 说明」之前（票面顺序）。
+  { key: 'rsshub', title: 'RSSHub' },
   { key: 'feedOrder', title: '订阅源顺序' },
   { key: 'agent', title: 'Agent 说明' },
   { key: 'about', title: '关于' },
@@ -104,7 +108,7 @@ interface RowModeOps {
   /** 草稿文本 → 权威单位的整数（未做范围校验；`undefined` = 不是十进制数）。 */
   readonly parse: (text: string) => number | undefined
   /** 就地红字的范围文案：数值从 `TUNABLE_RANGES` 现取，不在 UI 里再抄一份 min/max。 */
-  readonly errorText: (key: TunableKey) => string
+  readonly errorText: (key: NumberTunableKey) => string
 }
 
 const ROW_MODES = {
@@ -141,7 +145,7 @@ const ROW_MODES = {
  * label / unit / help / hint / mode 只在这里写一遍 —— 两处各抄一份时，改文案必然漏一处。
  */
 interface SettingRowDescription {
-  readonly key: TunableKey
+  readonly key: NumberTunableKey
   readonly label: string
   readonly unit: string
   readonly help: string
@@ -185,7 +189,7 @@ const SETTING_ROWS = [
 ] as const satisfies ReadonlyArray<SettingRowDescription>
 
 interface ResetChange {
-  readonly key: TunableKey
+  readonly key: NumberTunableKey
   readonly text: string
 }
 
@@ -193,12 +197,12 @@ interface ResetChange {
  * 确认框里「将变化的项与目标值」。判据与宿主 D28 同源：**当前生效值 ≠ 默认值**的项，
  * 恢复默认后必然变化；相等的项不在列表里，也是按钮 N = 0 的判据。
  *
- * `changedTunableKeys` 同时供 `settings-actions` 的成功提示计数使用 —— 两处各算一遍
+ * `changedNumberTunableKeys` 同时供 `settings-actions` 的成功提示计数使用 —— 两处各算一遍
  * 会在「哪些项算变化」上漂移（S5）。
  */
 function resetChangesOf(settings: SettingsSnapshot | undefined): ResetChange[] {
   if (settings === undefined) return []
-  const changed = new Set(changedTunableKeys(settings.effective, settings.defaults))
+  const changed = new Set(changedNumberTunableKeys(settings.effective, settings.defaults))
   // 按 SETTING_ROWS 的顺序展开（= 页面顺序），不按对象键序 —— 确认框的阅读顺序与输入行一致。
   return SETTING_ROWS.flatMap((row) => {
     if (!changed.has(row.key)) return []
@@ -211,7 +215,7 @@ function resetChangesOf(settings: SettingsSnapshot | undefined): ResetChange[] {
 }
 
 interface NumberSettingRowProps {
-  readonly settingKey: TunableKey
+  readonly settingKey: NumberTunableKey
   readonly label: string
   readonly unit: string
   readonly help: string
@@ -241,44 +245,28 @@ function NumberSettingRow(props: NumberSettingRowProps): ReactNode {
   const helpId = useId()
   const modeOps = ROW_MODES[mode]
   const effectiveText = value === undefined ? '' : modeOps.format(value)
-  const [draft, setDraft] = useState(effectiveText)
-  const [error, setError] = useState<string | undefined>(undefined)
-  const [saved, setSaved] = useState(false)
-  // 用户有未提交输入时，外部回包不许覆盖草稿（否则另一个框里打的字会被一次保存冲掉）。
-  const dirty = useRef(false)
-  const savedTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
-
-  useEffect(() => {
-    if (!dirty.current) setDraft(effectiveText)
-  }, [effectiveText])
-
-  // 卸载时清掉计时器：定时器回调更新一个已卸载组件的 state 是无意义的泄漏。
-  useEffect(() => () => {
-    if (savedTimer.current !== undefined) clearTimeout(savedTimer.current)
-  }, [])
+  // 草稿 / 脏标记 / 「已保存 ✓」状态机与 RSSHub 地址行共用一份（settings-draft.ts）：
+  // 两份复制品在「别的保存回包不冲掉草稿」「闪 1.4 秒」这些不变量上迟早分叉。
+  const form = useSettingsDraft(effectiveText)
 
   const commit = async (): Promise<void> => {
     // 快照还没到（仍在取 / 取失败）：没有「当前生效值」可对照，不提交。
     if (value === undefined) return
     // 用户没编辑过这一项（只是聚焦又失焦）：直接跳过，不发请求、不写覆盖。
     // 用「是否被编辑」而不是「文本是否等于生效值」作主判据，聚焦本身永远不会变成一次写盘。
-    if (!dirty.current) return
-    const parsed = modeOps.parse(draft.trim())
+    if (!form.isDirty()) return
+    const parsed = modeOps.parse(form.draft.trim())
     const next = parsed === undefined ? undefined : parseTunableValue(settingKey, parsed)
     if (next === undefined) {
-      setError(modeOps.errorText(settingKey))
-      setSaved(false)
+      form.reject(modeOps.errorText(settingKey))
       return
     }
     // 编辑过但数值没变（如 10 → 10.0）：同样不写盘，并把输入框归位成权威值的展示形式。
     if (next === value) {
-      dirty.current = false
-      setDraft(effectiveText)
-      setError(undefined)
+      form.revert()
       return
     }
-    setError(undefined)
-    setSaved(false)
+    form.beginSave()
     // 从这里开始有一次真实的写盘在飞：父组件要在窗口期内禁用依赖「当前阈值」的动作。
     onSavingChange?.(true)
     let result: SaveSettingResult
@@ -288,14 +276,11 @@ function NumberSettingRow(props: NumberSettingRowProps): ReactNode {
       onSavingChange?.(false)
     }
     if (result.ok) {
-      dirty.current = false
-      setSaved(true)
-      if (savedTimer.current !== undefined) clearTimeout(savedTimer.current)
-      savedTimer.current = setTimeout(() => setSaved(false), SAVED_FEEDBACK_MS)
+      form.succeed()
       return
     }
     // 失败保留输入（dirty 仍为 true，回包不会把它冲掉），并把「此刻真正生效的值」写在同一句里。
-    setError('保存失败：' + result.message
+    form.fail('保存失败：' + result.message
       + (result.current === undefined ? '' : ' 当前生效值仍是 ' + result.current))
   }
 
@@ -304,13 +289,9 @@ function NumberSettingRow(props: NumberSettingRowProps): ReactNode {
       <label className="dsh-rss-settings-label" htmlFor={inputId}>{label}</label>
       <input id={inputId} className="dsh-rss-settings-input" data-rss-setting-input={settingKey}
         type="text" inputMode={modeOps.inputMode} autoComplete="off" spellCheck={false}
-        title={hint} aria-describedby={helpId} aria-invalid={error !== undefined}
-        value={draft} disabled={value === undefined}
-        onChange={(event) => {
-          dirty.current = true
-          setDraft(event.target.value)
-          setError(undefined)
-        }}
+        title={hint} aria-describedby={helpId} aria-invalid={form.error !== undefined}
+        value={form.draft} disabled={value === undefined}
+        onChange={(event) => { form.edit(event.target.value) }}
         onBlur={() => { void commit() }}
         onKeyDown={(event) => {
           if (event.key !== 'Enter') return
@@ -320,7 +301,7 @@ function NumberSettingRow(props: NumberSettingRowProps): ReactNode {
         }} />
       <span className="dsh-rss-settings-unit">{unit}</span>
       {action}
-      {saved && (
+      {form.saved && (
         <span className="dsh-rss-settings-saved" data-rss-setting-saved={settingKey} role="status">已保存 ✓</span>
       )}
       {/* D11 / D14.2：只有非整分钟才显示真实毫秒；600000 这种整分钟不显示「= 600000 ms」的噪音。 */}
@@ -328,8 +309,8 @@ function NumberSettingRow(props: NumberSettingRowProps): ReactNode {
         <p className="dsh-rss-settings-hint" data-rss-setting-ms-hint={settingKey}>{'= ' + value + ' ms'}</p>
       )}
       <p className="dsh-rss-settings-help" id={helpId}>{help}</p>
-      {error !== undefined && (
-        <p className="dsh-rss-settings-error" data-rss-setting-error={settingKey} role="alert">{error}</p>
+      {form.error !== undefined && (
+        <p className="dsh-rss-settings-error" data-rss-setting-error={settingKey} role="alert">{form.error}</p>
       )}
     </div>
   )
@@ -381,7 +362,7 @@ export function SettingsView(props: SettingsViewProps): ReactNode {
   const {
     settings, error, warningDismissed, onClose, onDismissWarning,
     reading, onReading, showUnread, onShowUnread,
-    onSave, onReset, onCleanupPreview, onCleanup, onManageFeeds,
+    onSave, onReset, onTestRsshub, onCleanupPreview, onCleanup, onManageFeeds,
   } = props
   const box = useRef<HTMLDivElement | null>(null)
   const resetButton = useRef<HTMLButtonElement | null>(null)
@@ -561,6 +542,13 @@ export function SettingsView(props: SettingsViewProps): ReactNode {
                 字号 / 栏宽 / 主题在正文页的 Aa 面板调整
               </p>
             </>
+          )}
+          {section.key === 'rsshub' && (
+            <RsshubSettingRow
+              value={settings?.effective.rsshubBase}
+              onSave={onSave}
+              onTest={onTestRsshub}
+            />
           )}
           {section.key === 'feedOrder' && (
             // D15 / D14③：排序控件已经在订阅管理页（↑/↓），这里只放指针 + 跳转按钮。

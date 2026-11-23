@@ -187,6 +187,9 @@ const CONTRACTS = {
     alsoValid: [
       { patch: { refreshFeedsPerRound: 0 } },
       { patch: { refreshFeedsPerRound: 7, cleanupAfterDays: 45 } },
+      // R8a 01：带类型的键表 —— 字符串键与数字键走同一份 parseTunableValue。
+      { patch: { rsshubBase: 'https://rsshub.example' } },
+      { patch: { rsshubBase: '' } },
       // D4.1 的 Partial 允许空对象：空 patch = 无操作成功（不是坏入参）。
       { patch: {} },
       { resetToDefaults: true },
@@ -197,10 +200,17 @@ const CONTRACTS = {
       { patch: { refreshFeedsPerRound: 1000 } },
       { patch: { refreshFeedsPerRound: '7' } },
       { patch: { refreshFeedsPerRound: 7.5 } },
-      { patch: { rsshubBase: 'https://rsshub.example' } },
+      { patch: { rsshubBase: 'ftp://rsshub.example' } },
+      { patch: { rsshubBase: 'https://rsshub.example/api' } },
       { patch: { refreshFeedsPerRound: 7 }, resetToDefaults: true },
       { resetToDefaults: false },
     ],
+  },
+  // R8a 01：探活入参只有 base（形状归声明，地址合法性归 handler 的唯一判据）。
+  testRsshub: {
+    valid: { base: 'https://rsshub.example' },
+    alsoValid: [{ base: '' }],
+    invalid: [{}, { base: 5 }, { base: null }],
   },
   viewPreferences: { valid: { anything: 1 }, invalid: [] },
   saveViewPreferences: {
@@ -299,8 +309,10 @@ test('入参声明：每条坏样本都被拒，并给出字段路径', () => {
   // 121 = 116 + ADR-0008 给 markRead 补的 5 条选择器负例（两个范围 / 范围+all / ids+all / ids+dryRun / 空选择器）。
   // 129 = 121 + R11 02 的 saveSettings 8 条负例（二选一 / 越界 / 非整数 / 非数字 / 非白名单键）；
   // 空 patch 在 R11 评审 P3 后是合法的空操作，不再是负例。
-  // 删样本、或新增端点忘了配负例，都必须在这里显形。
-  assert.equal(checked, 129, '坏样本条数变了（当前 ' + checked + '）—— 检查契约表是否漏了必填字段')
+  // 133 = 129 + R8a 01 的 testRsshub 3 条负例（缺 base / 非字符串 / null）+ saveSettings 的
+  // rsshubBase 2 条坏样本（ftp 协议 / 带 path）；原来那条「rsshubBase 是未知键」的负例已随
+  // 键表扩容变成合法样本。删样本、或新增端点忘了配负例，都必须在这里显形。
+  assert.equal(checked, 133, '坏样本条数变了（当前 ' + checked + '）—— 检查契约表是否漏了必填字段')
 })
 
 test('坏入参：每个接 payload 的端点，第一条坏样本都经 dispatch 回 bad-request', async () => {
@@ -318,7 +330,8 @@ test('坏入参：每个接 payload 的端点，第一条坏样本都经 dispatc
   // R3 02 加了 reorderFeeds（有负例且经 dispatch 验过），所以接 payload 的端点从 23 变 24。
   // R1 02 给 cleanup 补了窗口负例（它原本是零入参、无负例），所以现在是 25。
   // R11 02 加了 saveSettings（有负例且经 dispatch 验过）：25 → 26。
-  assert.equal(covered.length, 26, '接 payload 的端点应当是 26 个，实际 ' + covered.length)
+  // R8a 01 加了 testRsshub（有负例且经 dispatch 验过）：26 → 27。
+  assert.equal(covered.length, 27, '接 payload 的端点应当是 27 个，实际 ' + covered.length)
 })
 
 test('坏入参：统一 bad-request 信封、details.issues 指出字段，且不触达 store', async () => {

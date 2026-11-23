@@ -17,8 +17,8 @@ import { dirname } from 'node:path'
 import { Config } from './config.js'
 import type { Config as ConfigShape } from './config.js'
 import { readSettingsFile, writeSettingsFile } from './storage/settings-file.js'
-import type { TunableKey, TunableSettings, TunableOverrides } from './settings-schema.js'
-import { TUNABLE_KEYS } from './settings-schema.js'
+import type { NumberTunableKey, TunableKey, TunableSettings, TunableOverrides } from './settings-schema.js'
+import { NUMBER_TUNABLE_KEYS, TUNABLE_KEYS, assignTunableValue } from './settings-schema.js'
 import type { ReadOnlySettingView, SettingsSnapshot } from './shared.js'
 
 /** 一次保存的结果：成功带回与读端点同形的快照，失败只带一句可展示的原因。 */
@@ -35,7 +35,7 @@ export interface SettingsControl {
    */
   save: (patch: TunableOverrides) => SettingsSaveOutcome
   /**
-   * 页面级「恢复默认」（07 票，D28）：一次写盘把四个可调键恢复成代码默认。
+   * 页面级「恢复默认」（07 票，D28）：一次写盘把四个数字键恢复成代码默认。
    *
    * 逐键的删 / 写判断只看**合并前的基线**（`baseline`）与默认值是否相等，不看当前生效值 ——
    * 当前生效值可能是用户刚覆盖的值，拿它判断会得出「已经等于默认就什么都不用做」，而文件里的
@@ -43,7 +43,7 @@ export interface SettingsControl {
    */
   resetToDefaults: () => SettingsSaveOutcome
   /**
-   * 合并**之前**的四键基线快照（D4）。
+   * 合并**之前**的可调键基线快照（D4）。
    *
    * 界面不展示它（D16），恢复默认（07 票）靠它判断某个键该删覆盖还是写一条等于默认值的覆盖（D28）。
    */
@@ -62,7 +62,7 @@ export interface SettingsControlDeps {
  *
  * 为什么要显式列出来而不是 `Object.keys(config)`：Config 将来加字段时，必须有人**决定**
  * 它是否对用户可见 —— 自动枚举会把内部参数一起漏给用户。这份名单是
- * 「Config 减去 `feeds`（订阅种子，不是参数）与四个可调键」的差集，顺序即页面顺序。
+ * 「Config 减去 `feeds`（订阅种子，不是参数）与可调键」的差集，顺序即页面顺序。
  * 取值直接读同一个 config 对象，所以页面上的值就是插件运行时真正在用的值。
  */
 const READ_ONLY_KEYS = [
@@ -129,10 +129,11 @@ export function createSettingsControl(deps: SettingsControlDeps): SettingsContro
     }
     overrides = { ...outcome.overrides }
     // D3：只覆盖文件点名的键；其余键保持 patch / schema 默认给的值。
+    // 键表是唯一的遍历来源：字符串键与数字键走同一段，不再另写一句 `rsshubBase`。
     for (const key of TUNABLE_KEYS) {
       const value = overrides[key]
       if (value === undefined) continue
-      config[key] = value
+      assignTunableValue(config, key, value)
     }
   }
 
@@ -164,7 +165,7 @@ export function createSettingsControl(deps: SettingsControlDeps): SettingsContro
     for (const key of TUNABLE_KEYS) {
       const value = patch[key]
       if (value === undefined) continue
-      config[key] = value
+      assignTunableValue(config, key, value)
       // D8：每次成功保存留一行「旧 → 新」。设置页没有来源标签，日志是唯一的复盘凭据。
       log('设置：' + key + ' ' + before[key] + ' → ' + value)
     }
@@ -184,8 +185,8 @@ export function createSettingsControl(deps: SettingsControlDeps): SettingsContro
   const resetToDefaults = (): SettingsSaveOutcome => {
     const prior = snapshotOf(config)
     const next: TunableOverrides = { ...overrides }
-    const actions: Array<{ readonly key: TunableKey; readonly kind: 'delete' | 'write' }> = []
-    for (const key of TUNABLE_KEYS) {
+    const actions: Array<{ readonly key: NumberTunableKey; readonly kind: 'delete' | 'write' }> = []
+    for (const key of NUMBER_TUNABLE_KEYS) {
       const target = defaults[key]
       if (baseline[key] === target) {
         if (next[key] !== undefined) {
@@ -206,7 +207,7 @@ export function createSettingsControl(deps: SettingsControlDeps): SettingsContro
     }
     // ② 落盘成功后才认这份状态：四项一起回到默认值（删覆盖的键由基线回落，写覆盖的键由覆盖给出）。
     overrides = next
-    for (const key of TUNABLE_KEYS) config[key] = defaults[key]
+    for (const key of NUMBER_TUNABLE_KEYS) config[key] = defaults[key]
     for (const action of actions) {
       // D8：删覆盖记结果值（括号里的默认值）；写覆盖记旧的生效值 → 新的默认值。
       log(action.kind === 'delete'
@@ -219,9 +220,16 @@ export function createSettingsControl(deps: SettingsControlDeps): SettingsContro
   return { baseline, snapshot, save, resetToDefaults }
 }
 
-/** 四键快照：只搬运白名单键，不整份复制 Config（配置面有 17 个字段，设置页只关心这四个）。 */
+/**
+ * 可调键快照：只搬运白名单键，不整份复制 Config（配置面有 17 个字段，设置页只关心这几项）。
+ * 显式列出字段而不是索引循环：键表扩成数字 / 字符串混合后，索引写入会失去类型保证。
+ */
 function snapshotOf(config: ConfigShape): TunableSettings {
-  const snapshot = {} as TunableSettings
-  for (const key of TUNABLE_KEYS) snapshot[key] = config[key]
-  return snapshot
+  return {
+    refreshFeedsPerRound: config.refreshFeedsPerRound,
+    refreshConcurrency: config.refreshConcurrency,
+    minRefreshIntervalMs: config.minRefreshIntervalMs,
+    cleanupAfterDays: config.cleanupAfterDays,
+    rsshubBase: config.rsshubBase,
+  }
 }
