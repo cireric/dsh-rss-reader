@@ -17,6 +17,7 @@ import { sameArticleKeyOf } from './duplicates.js'
 import { fetchFeed } from './feed/fetch.js'
 import { deriveItemId } from './feed/item-id.js'
 import { deriveLinkFilter, extractArchiveLinks, selectBackfillCandidates } from './history.js'
+import type { BackfillFailure, BackfillReport } from './shared.js'
 import type { ReaderStore } from './store.js'
 
 /** 串行抓取的固定间隔（spec §4.3）：礼貌承诺，不进设置页。 */
@@ -47,38 +48,6 @@ export interface BackfillDeps {
   readonly sleep?: (ms: number) => Promise<void>
   /** 运行日志（默认丢弃）；失败原因已经进报告，这里只留可诊断的轨迹。 */
   readonly log?: (message: string) => void
-}
-
-/** 报告里的单条失败（wire 形状，见 spec §4.8）。 */
-export interface BackfillFailure {
-  readonly url: string
-  readonly reason: string
-}
-
-/**
- * 一次回溯的报告（spec §4.8 的 wire 形状）。
- *
- * `remaining = 候选总数 − attempted`：候选是**形态命中且不在已知同文键里**、并按请求篇数截断
- * 之后的那批；它回答「这次没发起抓取的有多少」，原因看 `stoppedBy` / 每源上限说明。
- */
-export interface BackfillReport {
-  readonly feedId: string
-  readonly archiveUrl: string
-  /** 该源现有条目提供的形态样本数。 */
-  readonly sampleCount: number
-  /** 归档页抽到的 http(s) 链接数。 */
-  readonly archiveLinks: number
-  /** 形态命中数（含已被同文键排除的）。 */
-  readonly matched: number
-  /** 同文键判定已存在而跳过的条数（含本次运行内新入库后撞上的）。 */
-  readonly existing: number
-  /** 真正发起抓取的篇数（失败也计入）。 */
-  readonly attempted: number
-  /** 成功入库的篇数。 */
-  readonly added: number
-  readonly failures: BackfillFailure[]
-  readonly stoppedBy?: 'deadline' | 'limit'
-  readonly remaining: number
 }
 
 /** 预期内的失败码：端点据此回带 code 的失败信封，而不是 internal。 */
