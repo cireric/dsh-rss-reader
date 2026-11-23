@@ -491,7 +491,7 @@ function RsshubSettingRow(props: RsshubSettingRowProps): ReactNode {
   return (
     <div className="dsh-rss-settings-row" data-rss-setting="rsshubBase">
       <label className="dsh-rss-settings-label" htmlFor={inputId}>实例地址</label>
-      <input id={inputId} className="dsh-rss-settings-input" data-rss-setting-input="rsshubBase"
+      <input id={inputId} className="dsh-rss-settings-input dsh-rss-settings-input--url" data-rss-setting-input="rsshubBase"
         type="text" inputMode="url" autoComplete="off" spellCheck={false}
         placeholder="https://rsshub.example" title="只支持公网实例；地址不能带路径 / 查询 / 参数"
         aria-describedby={helpId} aria-invalid={error !== undefined}
