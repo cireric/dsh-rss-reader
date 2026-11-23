@@ -5,7 +5,7 @@
  * 设置页的 state（快照、取数错误、告警是否已关）不属于列表 / 搜索 / 订阅 / 标签任何一块。
  * 放进任一既有域都会让那块同时管两种数据来源（端点的 settings 与条目数据）。
  */
-import type { SettingsSnapshot } from '../shared.js'
+import type { RsshubTestResult, SettingsSnapshot } from '../shared.js'
 import { changedTunableKeys, type TunableKey } from '../settings-schema.js'
 import type { ReaderState, ReaderStoreDeps } from './store.js'
 
@@ -17,7 +17,7 @@ import type { ReaderState, ReaderStoreDeps } from './store.js'
  */
 export type SaveSettingResult =
   | { readonly ok: true; readonly settings: SettingsSnapshot }
-  | { readonly ok: false; readonly message: string; readonly current: number | undefined }
+  | { readonly ok: false; readonly message: string; readonly current: string | number | undefined }
 
 /** 「恢复默认」的结果：失败只带可展示的原因；N 由动作在提交时按「生效值 vs 默认值」算出。 */
 export type ResetSettingsResult =
@@ -71,7 +71,7 @@ export function createSettingsActions(host: SettingsActionHost) {
   let saveChain: Promise<unknown> = Promise.resolve()
   let latestSave = 0
 
-  const saveSetting = (key: TunableKey, value: number): Promise<SaveSettingResult> => {
+  const saveSetting = (key: TunableKey, value: string | number): Promise<SaveSettingResult> => {
     const ticket = ++latestSave
     const run = saveChain.then(async (): Promise<SaveSettingResult> => {
       try {
@@ -129,6 +129,26 @@ export function createSettingsActions(host: SettingsActionHost) {
     return run
   }
 
+  /**
+   * RSSHub「测试连接」（R8a 01）：只把地址交给宿主，浏览器不直连实例（CSP 与信任边界都在宿主）。
+   *
+   * 探活失败（超时 / 非 2xx / 非 JSON）是**观测结果**而不是通道错误，宿主会用 `passed: false`
+   * + 可读原因回包；真正抛异常的只有通道本身。两种都在这里折成同一形状，设置页只画一行字。
+   */
+  const testRsshub = async (base: string): Promise<RsshubTestResult> => {
+    try {
+      const result = await rpc<{ passed?: boolean; message?: string }>('testRsshub', { base })
+      if (result === undefined || typeof result.passed !== 'boolean' || typeof result.message !== 'string') {
+        throw new Error('testRsshub 回包缺少 passed / message')
+      }
+      return { passed: result.passed, message: result.message }
+    } catch (failure) {
+      const message = failure instanceof Error ? failure.message : String(failure)
+      log('warn', '[rss-reader] RSSHub 测试连接失败', failure)
+      return { passed: false, message: '测试连接失败：' + message }
+    }
+  }
+
   /** 进入设置页并取一次快照。返回固定回列表（D20：不记 prevView）。 */
   const openSettings = (): void => {
     set({ view: 'settings' })
@@ -146,5 +166,8 @@ export function createSettingsActions(host: SettingsActionHost) {
   /** 关闭警示条只影响本次会话的显示（D17：警示不阻断任何功能）。 */
   const dismissSettingsWarning = (): void => { set({ settingsWarningDismissed: true }) }
 
-  return { loadSettings, openSettings, closeSettings, toggleSettings, dismissSettingsWarning, saveSetting, resetSettings }
+  return {
+    loadSettings, openSettings, closeSettings, toggleSettings, dismissSettingsWarning,
+    saveSetting, resetSettings, testRsshub,
+  }
 }

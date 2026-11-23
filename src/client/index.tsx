@@ -1037,6 +1037,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
             onDismissWarning={() => store.dismissSettingsWarning()}
             onSave={(key, value) => store.saveSetting(key, value)}
             onReset={() => store.resetSettings()}
+            onTestRsshub={(base) => store.testRsshub(base)}
             onCleanupPreview={() => store.cleanupPreview()}
             onCleanup={() => store.cleanup()}
             onManageFeeds={() => store.toggleFeeds()}

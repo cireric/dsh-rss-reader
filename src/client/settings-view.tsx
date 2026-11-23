@@ -2,7 +2,8 @@
  * 设置页（R11 01 骨架 / 02 第一个可写参数 / 03 其余三个参数 / 04 手动清理 / 05 显示开关 /
  * 06 Agent 说明与关于区 / 07 恢复默认）。
  *
- * 五个分区按 spec D13 的顺序全部占位；①「抓取与清理」的四行都是**可写**的数值输入框
+ * 六个分区：前五个按 spec D13 的顺序占位，R8a 01 在「显示」之后插入「RSSHub」；
+ * ①「抓取与清理」的四行都是**可写**的数值输入框
  * （03 票补齐并发 / 自动刷新间隔 / 清理天数）；②「显示」是 05 票的两个视图开关
  * （默认折叠图片 / 显示未读计数）；04 票在「清理天数」行右侧加「立即清理」：先预演（dryRun）
  * 再确认，设置页只负责触发与展示，取窗口和判据都在 store / 宿主那一侧（D27）；06 票填
@@ -28,8 +29,8 @@
  */
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { AGENT_APPROVAL_NOTE, AGENT_HELP } from '../agent-help.js'
-import type { CleanupResult, ReadOnlySettingView, SettingsSnapshot } from '../shared.js'
-import { changedTunableKeys, parseTunableValue, TUNABLE_RANGES, type TunableKey } from '../settings-schema.js'
+import type { CleanupResult, ReadOnlySettingView, RsshubTestResult, SettingsSnapshot } from '../shared.js'
+import { changedTunableKeys, parseTunableValue, TUNABLE_RANGES, type NumberTunableKey, type TunableKey } from '../settings-schema.js'
 import type { ReadingPreferences } from '../preferences.js'
 import type { ResetSettingsResult, SaveSettingResult } from './settings-actions.js'
 import { ConfirmDialog } from './confirm-dialog.js'
@@ -64,9 +65,11 @@ export interface SettingsViewProps {
   /** 改「显示未读计数」：store 会整份落盘，重开面板后保持。 */
   onShowUnread: (value: boolean) => void
   /** 逐项保存：由 store 的保存串行链执行，返回是否成功与失败的当下生效值。 */
-  onSave: (key: TunableKey, value: number) => Promise<SaveSettingResult>
+  onSave: (key: TunableKey, value: string | number) => Promise<SaveSettingResult>
   /** 页面级恢复默认：走同一条保存串行链，一次请求把四项恢复成默认值。 */
   onReset: () => Promise<ResetSettingsResult>
+  /** RSSHub 探活（R8a 01）：只把地址交给宿主；返回可展示的结论。 */
+  onTestRsshub: (base: string) => Promise<RsshubTestResult>
   /** 「去订阅管理页」：走既有 toggleFeeds，设置页不复制排序控件（D15）。 */
   onManageFeeds: () => void
   /**
@@ -85,6 +88,8 @@ export interface SettingsViewProps {
 const SECTIONS = [
   { key: 'fetch', title: '抓取与清理' },
   { key: 'display', title: '显示' },
+  // R8a 01：RSSHub 实例地址在「显示」之后、「Agent 说明」之前（票面顺序）。
+  { key: 'rsshub', title: 'RSSHub' },
   { key: 'feedOrder', title: '订阅源顺序' },
   { key: 'agent', title: 'Agent 说明' },
   { key: 'about', title: '关于' },
@@ -104,7 +109,7 @@ interface RowModeOps {
   /** 草稿文本 → 权威单位的整数（未做范围校验；`undefined` = 不是十进制数）。 */
   readonly parse: (text: string) => number | undefined
   /** 就地红字的范围文案：数值从 `TUNABLE_RANGES` 现取，不在 UI 里再抄一份 min/max。 */
-  readonly errorText: (key: TunableKey) => string
+  readonly errorText: (key: NumberTunableKey) => string
 }
 
 const ROW_MODES = {
@@ -141,7 +146,7 @@ const ROW_MODES = {
  * label / unit / help / hint / mode 只在这里写一遍 —— 两处各抄一份时，改文案必然漏一处。
  */
 interface SettingRowDescription {
-  readonly key: TunableKey
+  readonly key: NumberTunableKey
   readonly label: string
   readonly unit: string
   readonly help: string
@@ -185,7 +190,7 @@ const SETTING_ROWS = [
 ] as const satisfies ReadonlyArray<SettingRowDescription>
 
 interface ResetChange {
-  readonly key: TunableKey
+  readonly key: NumberTunableKey
   readonly text: string
 }
 
@@ -211,7 +216,7 @@ function resetChangesOf(settings: SettingsSnapshot | undefined): ResetChange[] {
 }
 
 interface NumberSettingRowProps {
-  readonly settingKey: TunableKey
+  readonly settingKey: NumberTunableKey
   readonly label: string
   readonly unit: string
   readonly help: string
@@ -377,11 +382,163 @@ function readOnlyText(entry: ReadOnlySettingView): string {
   return String(entry.value)
 }
 
+/** RSSHub 地址不合法时的就地红字：判据来自 `parseTunableValue`，这里只说怎么改。 */
+const RSSHUB_BASE_ERROR = '请输入 http(s):// 的实例地址（不能带路径、查询或参数）'
+
+interface RsshubSettingRowProps {
+  readonly value: string | undefined
+  readonly onSave: SettingsViewProps['onSave']
+  readonly onTest: SettingsViewProps['onTestRsshub']
+}
+
+/**
+ * RSSHub 分区（R8a 01，spec §4.1）：地址输入 + 测试连接 + 恢复默认（清空）。
+ *
+ * 保存复用与四个数字行**同一条** `onSave`（= store 的保存串行链 + 「已保存 ✓」反馈）：
+ * 另写一套写路径就会出现「地址存下了但另三个框的回包把界面冲掉」这类两套状态互相踩的缺陷。
+ *
+ * 测试连接用的是**当前生效值**而不是草稿：宿主探的是已经/即将被用于发现候选的那个地址；
+ * 未配置（空串）时按钮禁用 —— 没有可探的源站，也避免误以为「空地址也能连上」。
+ */
+function RsshubSettingRow(props: RsshubSettingRowProps): ReactNode {
+  const { value, onSave, onTest } = props
+  const inputId = useId()
+  const helpId = useId()
+  const effectiveText = value ?? ''
+  const [draft, setDraft] = useState(effectiveText)
+  const [error, setError] = useState<string | undefined>(undefined)
+  const [saved, setSaved] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<RsshubTestResult | undefined>(undefined)
+  // 与数字行同一条草稿规则：有未提交输入时，别的保存回包不许把它冲掉。
+  const dirty = useRef(false)
+  const savedTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+
+  useEffect(() => {
+    if (!dirty.current) setDraft(effectiveText)
+  }, [effectiveText])
+
+  useEffect(() => () => {
+    if (savedTimer.current !== undefined) clearTimeout(savedTimer.current)
+  }, [])
+
+  const showSaved = (): void => {
+    setSaved(true)
+    if (savedTimer.current !== undefined) clearTimeout(savedTimer.current)
+    savedTimer.current = setTimeout(() => setSaved(false), SAVED_FEEDBACK_MS)
+  }
+
+  const commit = async (raw: string): Promise<void> => {
+    if (value === undefined) return
+    if (!dirty.current) return
+    // 与宿主 / 读侧同一个判据：trim、http(s)、不带 path / query / hash、去尾斜杠。
+    const next = parseTunableValue('rsshubBase', raw)
+    if (next === undefined) {
+      setError(RSSHUB_BASE_ERROR)
+      setSaved(false)
+      return
+    }
+    if (next === value) {
+      dirty.current = false
+      setDraft(effectiveText)
+      setError(undefined)
+      return
+    }
+    setError(undefined)
+    setSaved(false)
+    const result = await onSave('rsshubBase', next)
+    if (result.ok) {
+      dirty.current = false
+      showSaved()
+      return
+    }
+    setError('保存失败：' + result.message
+      + (result.current === undefined ? '' : ' 当前生效值仍是 ' + result.current))
+  }
+
+  /**
+   * 探的是**输入框里当前这个地址**（而不是上次保存的旧值）：用户改完地址直接点测试时，
+   * 探的必须是他眼前写的那个；输入非法 / 为空时按钮本来就是禁用的。
+   */
+  const runTest = async (): Promise<void> => {
+    const base = parseTunableValue('rsshubBase', draft)
+    if (base === undefined || base === '') return
+    setTesting(true)
+    setTestResult(undefined)
+    try {
+      setTestResult(await onTest(base))
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  /** 「恢复默认（清空）」= 同一个键写下空串；不发明第二条删覆盖的通道。 */
+  const clear = async (): Promise<void> => {
+    if (value === undefined || value === '') return
+    dirty.current = false
+    setDraft('')
+    setError(undefined)
+    setTestResult(undefined)
+    const result = await onSave('rsshubBase', '')
+    if (result.ok) showSaved()
+    else setError('恢复默认失败：' + result.message)
+  }
+
+  // 测试按钮跟随**草稿**：未配置（空）或草稿形状不合法时禁用；清空按钮只跟随已保存值。
+  const draftBase = parseTunableValue('rsshubBase', draft)
+  const canTest = draftBase !== undefined && draftBase !== ''
+  const configured = value !== undefined && value !== ''
+  return (
+    <div className="dsh-rss-settings-row" data-rss-setting="rsshubBase">
+      <label className="dsh-rss-settings-label" htmlFor={inputId}>实例地址</label>
+      <input id={inputId} className="dsh-rss-settings-input" data-rss-setting-input="rsshubBase"
+        type="text" inputMode="url" autoComplete="off" spellCheck={false}
+        placeholder="https://rsshub.example" title="只支持公网实例；地址不能带路径 / 查询 / 参数"
+        aria-describedby={helpId} aria-invalid={error !== undefined}
+        value={draft} disabled={value === undefined}
+        onChange={(event) => {
+          dirty.current = true
+          setDraft(event.target.value)
+          setError(undefined)
+          setTestResult(undefined)
+        }}
+        onBlur={() => { void commit(draft) }}
+        onKeyDown={(event) => {
+          if (event.key !== 'Enter') return
+          event.preventDefault()
+          event.currentTarget.blur()
+        }} />
+      {saved && (
+        <span className="dsh-rss-settings-saved" data-rss-setting-saved="rsshubBase" role="status">已保存 ✓</span>
+      )}
+      <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" data-rss-rsshub-test=""
+        title="向 {实例}/api/radar/rules/zhihu.com 探一次；这是启发式，不保证每个站点都有规则"
+        disabled={!canTest || testing}
+        onClick={() => { void runTest() }}>
+        {testing ? '测试中…' : '测试连接'}
+      </button>
+      <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" data-rss-rsshub-reset=""
+        disabled={!configured || testing}
+        onClick={() => { void clear() }}>恢复默认（清空）</button>
+      <p className="dsh-rss-settings-help" id={helpId}>
+        实例源站（如 https://rsshub.example），只支持公网实例。未配置时 RSSHub 候选不出现。
+      </p>
+      {testResult !== undefined && (
+        <p className={testResult.passed ? 'dsh-rss-settings-saved' : 'dsh-rss-settings-error'}
+          data-rss-rsshub-result="" role="status">{testResult.message}</p>
+      )}
+      {error !== undefined && (
+        <p className="dsh-rss-settings-error" data-rss-setting-error="rsshubBase" role="alert">{error}</p>
+      )}
+    </div>
+  )
+}
+
 export function SettingsView(props: SettingsViewProps): ReactNode {
   const {
     settings, error, warningDismissed, onClose, onDismissWarning,
     reading, onReading, showUnread, onShowUnread,
-    onSave, onReset, onCleanupPreview, onCleanup, onManageFeeds,
+    onSave, onReset, onTestRsshub, onCleanupPreview, onCleanup, onManageFeeds,
   } = props
   const box = useRef<HTMLDivElement | null>(null)
   const resetButton = useRef<HTMLButtonElement | null>(null)
@@ -561,6 +718,13 @@ export function SettingsView(props: SettingsViewProps): ReactNode {
                 字号 / 栏宽 / 主题在正文页的 Aa 面板调整
               </p>
             </>
+          )}
+          {section.key === 'rsshub' && (
+            <RsshubSettingRow
+              value={settings?.effective.rsshubBase}
+              onSave={onSave}
+              onTest={onTestRsshub}
+            />
           )}
           {section.key === 'feedOrder' && (
             // D15 / D14③：排序控件已经在订阅管理页（↑/↓），这里只放指针 + 跳转按钮。

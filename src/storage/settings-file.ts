@@ -79,6 +79,16 @@ export function readSettingsFile(path: string): SettingsReadOutcome {
     // ③ 未知键读时忽略，且**不计入** dropped：它不是坏值，只是本版不认识。
     if (!isTunableKey(key)) continue
     // ② 逐键丢弃：一次坏值只该抹掉它自己，不许把另外三项一起带走（与 sanitizeViewPreferences 同一条规则）。
+    // 数字键与字符串键走同一个 parseTunableValue，这里分开写只是因为 TS 的索引写入需要收窄 key。
+    if (key === 'rsshubBase') {
+      const parsedValue = parseTunableValue('rsshubBase', value)
+      if (parsedValue === undefined) {
+        dropped += 1
+        continue
+      }
+      overrides.rsshubBase = parsedValue
+      continue
+    }
     const parsedValue = parseTunableValue(key, value)
     if (parsedValue === undefined) {
       dropped += 1
@@ -100,6 +110,15 @@ export function writeSettingsFile(path: string, overrides: TunableOverrides): vo
   for (const key of TUNABLE_KEYS) {
     const value = overrides[key]
     if (value === undefined) continue
+    // 与读侧同一条分派（数字 / 字符串），判据仍是 parseTunableValue 那一份。
+    if (key === 'rsshubBase') {
+      const parsed = parseTunableValue('rsshubBase', value)
+      if (parsed === undefined) {
+        throw new Error('设置项 ' + key + ' 的值不合法：' + JSON.stringify(value))
+      }
+      clean.rsshubBase = parsed
+      continue
+    }
     const parsed = parseTunableValue(key, value)
     if (parsed === undefined) {
       throw new Error('设置项 ' + key + ' 的值不合法：' + JSON.stringify(value))
