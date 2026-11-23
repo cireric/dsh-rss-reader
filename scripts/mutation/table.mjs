@@ -3156,4 +3156,40 @@ export const MUTATIONS = [
     judgeTests: ['A5 日期：abbr.published / 可见中文 / 可见英文都得真实 ISO；只有年月的 URL 不产生日期'],
     from: '    if (parts.day === undefined)\n        return undefined;',
     to: '    if (parts.day === undefined)\n        parts.day = 1;' },
+
+  // ── R9 02：回溯的宿主编排（2026-11-23）──────────────────────────────────
+  // 间隔归零：串行抓取退化成背靠背请求，礼貌承诺（300ms）消失。A9 用假 sleep 记录事件序列，
+  // 期望 300 而拿到 0 时当场翻红。from 照构建产物 lib/backfill.js 的实际字节写（pitfalls 一、1.4）。
+  { id: 'history-间隔为零', file: 'lib/backfill.js',
+    judges: ['backfill.test.mjs'],
+    judgeTests: ['A9 请求间隔：第一篇立即抓，之后每次前等 300ms，且严格串行'],
+    from: '            await sleep(FETCH_INTERVAL_MS);',
+    to: '            await sleep(0);' },
+  // 无日期入库：拿抓取时间顶替发布日期——A6 说得很清楚：没有真实日期就跳过，绝不用抓取时间冒充。
+  // 变异保留「有日期就用原值」的分支，只给缺失日期补上 stamp，所以它是最小、最像真实失误的改法。
+  { id: 'history-无日期入库', file: 'lib/backfill.js',
+    judges: ['backfill.test.mjs'],
+    judgeTests: ['A5/A6 日期：抓到的 publishedAt 原样入库；没有发布日期的候选跳过并逐条报「无发布日期」'],
+    from: '        const publishedAt = fetched.publishedAt;',
+    to: '        const publishedAt = fetched.publishedAt ?? stamp;' },
+  // 失败中断：单篇 404 / 超时把整次运行抛断，A8 的「其余继续 + 失败清单逐条」会变成 reject。
+  { id: 'history-失败中断', file: 'lib/backfill.js',
+    judges: ['backfill.test.mjs'],
+    judgeTests: ['A8 单篇失败继续：HTTP 404 与超时各记一条，其余照常入库且不重试'],
+    from: "            failures.push({ url, reason: fetched.reason });\n            log('回溯失败：' + url + ' → ' + fetched.reason);\n            continue;",
+    to: "            throw new Error('回溯单篇失败：' + fetched.reason);" },
+  // 预检失效：忽略每源保留余量，实际抓取篇数只看请求数。A10 的「H=2 ⇒ attempted=2」会变成 5，
+  // 且 stoppedBy 不再出现。
+  { id: 'history-预检失效', file: 'lib/backfill.js',
+    judges: ['backfill.test.mjs'],
+    judgeTests: ['A10 headroom：余量 H < 请求篇数 ⇒ 只抓 H 篇，stoppedBy=limit 且 remaining 报差'],
+    from: '    const attemptCap = Math.min(input.limit, headroom);',
+    to: '    const attemptCap = input.limit;' },
+  // 文章页放行内网：把归档页的 trustedTarget 顺手带进文章抓取，SSRF 边界从「发布者可控的链接
+  // 一律不可信」退化成「跟归档页一起可信」。A12 用真实抓取层 + 本地 127.0.0.1 站点判它。
+  { id: 'history-文章页放行内网', file: 'lib/backfill.js',
+    judges: ['backfill.test.mjs'],
+    judgeTests: ['A12 私网：归档页按可信目标放行，文章页 127.0.0.1 被真实抓取层拒绝并进失败清单'],
+    from: '            maxBytes: config.articleMaxBytes,\n        });',
+    to: '            maxBytes: config.articleMaxBytes,\n            trustedTarget: true,\n        });' },
 ]

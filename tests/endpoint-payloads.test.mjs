@@ -138,6 +138,27 @@ const CONTRACTS = {
     valid: { itemId: 'a' },
     invalid: [{}, { itemId: 5 }, { itemId: '' }],
   },
+  // R9 02：回溯的入参。limit 缺省 20；0 / 51 / 非整数 / 非数字都在声明层拒绝，
+  // 归档页只收 http(s)（用户填错协议重试也不会变，属于坏入参）。
+  backfillHistory: {
+    valid: { feedId: 'https://a.example/feed.xml', archiveUrl: 'https://a.example/archives', limit: 10 },
+    alsoValid: [
+      { feedId: 'f', archiveUrl: 'http://a.example/archives' },
+      { feedId: 'f', archiveUrl: 'https://a.example/archives', limit: 50 },
+    ],
+    invalid: [
+      {},
+      { feedId: '', archiveUrl: 'https://a.example/archives' },
+      { feedId: 'f', archiveUrl: '' },
+      { feedId: 'f' },
+      { feedId: 'f', archiveUrl: 'not a url' },
+      { feedId: 'f', archiveUrl: 'ftp://a.example/archives' },
+      { feedId: 'f', archiveUrl: 'https://a.example/archives', limit: 0 },
+      { feedId: 'f', archiveUrl: 'https://a.example/archives', limit: 51 },
+      { feedId: 'f', archiveUrl: 'https://a.example/archives', limit: 1.5 },
+      { feedId: 'f', archiveUrl: 'https://a.example/archives', limit: '10' },
+    ],
+  },
   duplicateHints: {
     valid: {},
     invalid: [{ itemIds: 'a' }, { itemIds: [1] }],
@@ -312,7 +333,9 @@ test('入参声明：每条坏样本都被拒，并给出字段路径', () => {
   // 133 = 129 + R8a 01 的 testRsshub 3 条负例（缺 base / 非字符串 / null）+ saveSettings 的
   // rsshubBase 2 条坏样本（ftp 协议 / 带 path）；原来那条「rsshubBase 是未知键」的负例已随
   // 键表扩容变成合法样本。删样本、或新增端点忘了配负例，都必须在这里显形。
-  assert.equal(checked, 133, '坏样本条数变了（当前 ' + checked + '）—— 检查契约表是否漏了必填字段')
+  // 143 = 133 + R9 02 的 backfillHistory 10 条负例（缺字段 / 空串 / 非 URL / 非 http(s) /
+  // limit 0 / 51 / 非整数 / 非数字）。
+  assert.equal(checked, 143, '坏样本条数变了（当前 ' + checked + '）—— 检查契约表是否漏了必填字段')
 })
 
 test('坏入参：每个接 payload 的端点，第一条坏样本都经 dispatch 回 bad-request', async () => {
@@ -331,7 +354,8 @@ test('坏入参：每个接 payload 的端点，第一条坏样本都经 dispatc
   // R1 02 给 cleanup 补了窗口负例（它原本是零入参、无负例），所以现在是 25。
   // R11 02 加了 saveSettings（有负例且经 dispatch 验过）：25 → 26。
   // R8a 01 加了 testRsshub（有负例且经 dispatch 验过）：26 → 27。
-  assert.equal(covered.length, 27, '接 payload 的端点应当是 27 个，实际 ' + covered.length)
+  // R9 02 加了 backfillHistory（有负例且经 dispatch 验过）：27 → 28。
+  assert.equal(covered.length, 28, '接 payload 的端点应当是 28 个，实际 ' + covered.length)
 })
 
 test('坏入参：统一 bad-request 信封、details.issues 指出字段，且不触达 store', async () => {

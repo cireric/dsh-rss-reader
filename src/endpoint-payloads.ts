@@ -209,6 +209,30 @@ export const discoverFeedsPayload = z.object({ url: z.string().trim().min(1) })
  */
 export const testRsshubPayload = z.object({ base: z.string() })
 
+/**
+ * `backfillHistory`（R9 02）：feedId + 归档页地址 + 可选篇数。
+ *
+ * 归档页地址只接受 http(s)：其它协议在抓取层只会得到「不支持的协议」，那属于**坏入参**而不是
+ * 一次可展示的运行失败（用户填错了协议，重试也不会变）。相对地址无法确定该相对谁，同样拒绝。
+ *
+ * `limit` 的 1–50 是 spec §4.1 的硬边界，缺省 20；越界在入参层就拒绝（bad-request），
+ * 不再让 handler 去夹取 —— 夹取会把「用户要了 500 篇」静默变成「抓 50 篇」。
+ */
+const archiveUrlString = z.string().min(1).refine((value) => {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'http:' || url.protocol === 'https:'
+  } catch {
+    return false
+  }
+}, { message: '必须是 http(s) 地址' })
+
+export const backfillHistoryPayload = z.object({
+  feedId: z.string().min(1),
+  archiveUrl: archiveUrlString,
+  limit: z.number().int().min(1).max(50).default(20),
+})
+
 /** `saveViewPreferences`：preferences 是必需键 —— 缺键会把默认视图静默写盘。值本身仍由 store 归一。 */
 export const saveViewPreferencesPayload = z.object({ preferences: z.unknown() })
 
