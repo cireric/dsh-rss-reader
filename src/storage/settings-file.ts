@@ -18,7 +18,7 @@
 import { closeSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { isTunableKey, parseTunableValue, TUNABLE_KEYS } from '../settings-schema.js'
+import { assignTunableValue, isTunableKey, parseTunableValue, TUNABLE_KEYS } from '../settings-schema.js'
 import type { TunableOverrides } from '../settings-schema.js'
 
 /** 本版只认 1；版本不是 1 与「不是合法 JSON」走同一条隔离路（D2 的闸门语义）。 */
@@ -79,22 +79,13 @@ export function readSettingsFile(path: string): SettingsReadOutcome {
     // ③ 未知键读时忽略，且**不计入** dropped：它不是坏值，只是本版不认识。
     if (!isTunableKey(key)) continue
     // ② 逐键丢弃：一次坏值只该抹掉它自己，不许把另外三项一起带走（与 sanitizeViewPreferences 同一条规则）。
-    // 数字键与字符串键走同一个 parseTunableValue，这里分开写只是因为 TS 的索引写入需要收窄 key。
-    if (key === 'rsshubBase') {
-      const parsedValue = parseTunableValue('rsshubBase', value)
-      if (parsedValue === undefined) {
-        dropped += 1
-        continue
-      }
-      overrides.rsshubBase = parsedValue
-      continue
-    }
+    // 校验与写入都走键表的同一份判据，不再按 key 分派。
     const parsedValue = parseTunableValue(key, value)
     if (parsedValue === undefined) {
       dropped += 1
       continue
     }
-    overrides[key] = parsedValue
+    assignTunableValue(overrides, key, parsedValue)
   }
   return { status: 'ok', overrides, dropped }
 }
@@ -110,20 +101,12 @@ export function writeSettingsFile(path: string, overrides: TunableOverrides): vo
   for (const key of TUNABLE_KEYS) {
     const value = overrides[key]
     if (value === undefined) continue
-    // 与读侧同一条分派（数字 / 字符串），判据仍是 parseTunableValue 那一份。
-    if (key === 'rsshubBase') {
-      const parsed = parseTunableValue('rsshubBase', value)
-      if (parsed === undefined) {
-        throw new Error('设置项 ' + key + ' 的值不合法：' + JSON.stringify(value))
-      }
-      clean.rsshubBase = parsed
-      continue
-    }
+    // 与读侧同一条判据（parseTunableValue 查键表），写前再验一次：写进去读不回来的值等于固化坏数据。
     const parsed = parseTunableValue(key, value)
     if (parsed === undefined) {
       throw new Error('设置项 ' + key + ' 的值不合法：' + JSON.stringify(value))
     }
-    clean[key] = parsed
+    assignTunableValue(clean, key, parsed)
   }
   const serialized = JSON.stringify({ version: SETTINGS_VERSION, overrides: clean }, null, 2) + '\n'
   const tmp = join(dirname(path), '.' + randomUUID() + '.tmp')

@@ -459,9 +459,11 @@ test('saveSettings rsshubBase：只改实例时 overrides 只有 rsshubBase，�
     }, '只改实例 ⇒ overrides 里只有 rsshubBase（版本仍是 1）')
     assert.equal(h.config.rsshubBase, 'https://rsshub.rssforever.com',
       '写盘成功后必须改同一个 config 对象（发现候选下一次就读它）')
-    assert.ok(h.logs.includes('设置：rsshubBase  → https://rsshub.rssforever.com')
-      || h.logs.some((line) => line.startsWith('设置：rsshubBase')),
-    '保存要留一行「旧 → 新」（D8）；实际日志：' + JSON.stringify(h.logs))
+    // 钉死「旧 → 新」两段：旧值是继承来的空串，新值是归一后的地址。只断言「有一行以
+    // 设置：rsshubBase 开头」会让「没写旧值 / 没写新值」也通过（两边都蕴含前者）。
+    assert.deepEqual(h.logs.filter((line) => line.startsWith('设置：rsshubBase')),
+      ['设置：rsshubBase  → https://rsshub.rssforever.com'],
+      '保存要留一行完整的「旧 → 新」（D8）；实际日志：' + JSON.stringify(h.logs))
 
     // 模拟重启：同一份 settings.json、全新的 Config 与控制器。
     const restartedConfig = Config({})

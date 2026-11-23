@@ -83,34 +83,38 @@ test('模板匹配：非法百分号编码不抛异常，整条判不匹配', ()
 })
 
 test('拼地址：:name 用捕获值填，捕获值一律 encodeURIComponent', () => {
-  assert.equal(buildRoute('/bilibili/user/dynamic/:uid', { uid: '2' }), '/bilibili/user/dynamic/2')
-  assert.equal(
+  assert.deepEqual(buildRoute('/bilibili/user/dynamic/:uid', { uid: '2' }),
+    { kind: 'ok', url: '/bilibili/user/dynamic/2' })
+  assert.deepEqual(
     buildRoute('/github/branches/:user/:repo', { user: 'DIY god', repo: 'RSSHub' }),
-    '/github/branches/DIY%20god/RSSHub',
+    { kind: 'ok', url: '/github/branches/DIY%20god/RSSHub' },
   )
 })
 
-test('拼地址：任一必填参数缺失返回 undefined，不产出半成品', () => {
-  assert.equal(buildRoute('/36kr/hot-list/:category', {}), undefined)
-  assert.equal(buildRoute('/github/branches/:user/:repo', { user: 'DIYgod' }), undefined)
+test('拼地址：任一必填参数缺失返回 missing，不产出半成品', () => {
+  // 失败必须分型：`candidatesFromRules` 的跳过计数按 kind 分桶，只回 undefined 会逼调用方
+  // 把同一套判定再写一遍。
+  assert.deepEqual(buildRoute('/36kr/hot-list/:category', {}), { kind: 'missing' })
+  assert.deepEqual(buildRoute('/github/branches/:user/:repo', { user: 'DIYgod' }), { kind: 'missing' })
 })
 
-test('拼地址：target 含 * 或 {} 一律 undefined（通配与正则参数超出现有引擎）', () => {
-  assert.equal(buildRoute('/bangumi.moe/*', {}), undefined)
-  assert.equal(buildRoute('/423down/:category{.+}?', { category: 'tech' }), undefined)
+test('拼地址：target 含 * 或 {} 分别返回 wildcard / regex（通配与正则参数超出现有引擎）', () => {
+  assert.deepEqual(buildRoute('/bangumi.moe/*', {}), { kind: 'wildcard' })
+  assert.deepEqual(buildRoute('/423down/:category{.+}?', { category: 'tech' }), { kind: 'regex' })
 })
 
 test('拼地址：可选参数 :name? 缺了就整段省略，有值就填', () => {
   // 实测 github「User Repo」的 target 就是 /github/repos/:user/:type?/:sort?
-  assert.equal(buildRoute('/github/repos/:user/:type?/:sort?', { user: 'DIYgod' }), '/github/repos/DIYgod')
-  assert.equal(
+  assert.deepEqual(buildRoute('/github/repos/:user/:type?/:sort?', { user: 'DIYgod' }),
+    { kind: 'ok', url: '/github/repos/DIYgod' })
+  assert.deepEqual(
     buildRoute('/github/repos/:user/:type?/:sort?', { user: 'DIYgod', type: 'stars' }),
-    '/github/repos/DIYgod/stars',
+    { kind: 'ok', url: '/github/repos/DIYgod/stars' },
   )
 })
 
 test('拼地址：返回值一定以 / 开头', () => {
-  assert.equal(buildRoute('github/x/:a', { a: '1' }), '/github/x/1')
+  assert.deepEqual(buildRoute('github/x/:a', { a: '1' }), { kind: 'ok', url: '/github/x/1' })
 })
 
 // ── 实例回包样本（实测，2026-11-23）────────────────────────────────────────

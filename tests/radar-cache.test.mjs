@@ -6,7 +6,7 @@
  */
 import { test, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { clearRadarCache, lookupRadarRules } from '../lib/radar.js'
+import { clearRadarCache, lookupRadarRules, radarRulesUrl } from '../lib/radar.js'
 
 const BASE = 'https://hub.test'
 const LIMITS = { timeoutMs: 1000, maxBytes: 1024 * 1024, trustedTarget: true }
@@ -47,8 +47,9 @@ test('同域名第二次零请求（桩件计数 1）', async () => {
   const second = await lookupRadarRules(BASE, 'site.test', LIMITS, fetchImpl)
 
   assert.equal(fetchImpl.calls.length, 1, '第二次必须命中缓存、零请求')
+  assert.equal(first.kind, 'rules')
   assert.equal(first.domain, 'site.test')
-  assert.deepEqual(second.rules, first.rules, '缓存返回同一份规则')
+  assert.deepEqual(second, first, '缓存返回同一份规则')
 })
 
 test('成功缓存 6h：6h 内不请求，6h+1 后重新请求', async () => {
@@ -76,12 +77,14 @@ test('失败只缓存 60s：网络错误 / 非 JSON / 非对象都不钉死长 T
     const fetchImpl = stubFetch({ [radarUrl(BASE, 'site.test')]: item.outcome })
     const time = clock()
     const first = await lookupRadarRules(BASE, 'site.test', LIMITS, fetchImpl, { now: time.now })
-    assert.equal(first.failure, item.failure, item.name + '：第一次如实报失败')
+    assert.equal(first.kind, 'failure', item.name + '：第一次如实报失败')
+    assert.equal(first.reason, item.failure, item.name + '：第一次如实报失败原因')
 
     time.advance(60 * 1000 - 1)
     const cached = await lookupRadarRules(BASE, 'site.test', LIMITS, fetchImpl, { now: time.now })
     assert.equal(fetchImpl.calls.length, 1, item.name + '：60s 内零重试')
-    assert.equal(cached.failure, item.failure, item.name + '：缓存返回同一失败原因')
+    assert.equal(cached.kind, 'failure', item.name + '：缓存返回同一失败状态')
+    assert.equal(cached.reason, item.failure, item.name + '：缓存返回同一失败原因')
 
     time.advance(1001)
     await lookupRadarRules(BASE, 'site.test', LIMITS, fetchImpl, { now: time.now })
@@ -93,10 +96,10 @@ test('空 body（该域没规则）也缓存 6h：第二次不请求', async () 
   const fetchImpl = stubFetch({ [radarUrl(BASE, 'site.test')]: { kind: 'ok', body: '' } })
   const time = clock()
   const first = await lookupRadarRules(BASE, 'site.test', LIMITS, fetchImpl, { now: time.now })
-  assert.deepEqual(first, {}, '空 body = 该域没规则')
+  assert.deepEqual(first, { kind: 'empty' }, '空 body = 该域没规则')
 
   const second = await lookupRadarRules(BASE, 'site.test', LIMITS, fetchImpl, { now: time.now })
-  assert.deepEqual(second, {}, '第二次仍返回「没规则」')
+  assert.deepEqual(second, { kind: 'empty' }, '第二次仍返回「没规则」')
   assert.equal(fetchImpl.calls.length, 1, '空结果也必须命中缓存')
 
   time.advance(6 * 60 * 60 * 1000 + 1)
@@ -111,10 +114,12 @@ test('域名回退中的空 body 也缓存：第二次整条查询零请求', as
   })
   const time = clock()
   const first = await lookupRadarRules(BASE, 'www.zhihu.com', LIMITS, fetchImpl, { now: time.now })
+  assert.equal(first.kind, 'rules')
   assert.equal(first.domain, 'www.zhihu.com')
   assert.equal(fetchImpl.calls.length, 2, '先查 zhihu.com（空）再查 www.zhihu.com（有规则）')
 
   const second = await lookupRadarRules(BASE, 'www.zhihu.com', LIMITS, fetchImpl, { now: time.now })
+  assert.equal(second.kind, 'rules')
   assert.equal(second.domain, 'www.zhihu.com')
   assert.equal(fetchImpl.calls.length, 2, '两级结果都在缓存里，整条查询零请求')
 })
@@ -132,8 +137,9 @@ test('换 base ⇒ 旧条目不被复用，旧实例的规则不进入新实例�
   assert.deepEqual(fetchImpl.calls.map((call) => call.url),
     [radarUrl(BASE, 'site.test'), radarUrl(other, 'site.test')],
     '换实例必须重新请求，不能复用旧实例的缓存')
+  assert.equal(oldLookup.kind, 'rules')
   assert.deepEqual(oldLookup.rules, JSON.parse(RULES))
-  assert.deepEqual(newLookup, {}, '新实例的空结果里不许冒出新实例没给过的旧规则')
+  assert.deepEqual(newLookup, { kind: 'empty' }, '新实例的空结果里不许冒出新实例没给过的旧规则')
 
   // 反向也隔离：再查旧实例仍是它自己的缓存，不会被新实例的空结果污染。
   await lookupRadarRules(BASE, 'site.test', LIMITS, fetchImpl, { now: time.now })
@@ -173,4 +179,8 @@ test('缓存不携带 limits：过期后重查按本次调用重建请求参数�
     '第一次请求只带超时与体积')
   assert.deepEqual(fetchImpl.calls[1].limits, { timeoutMs: 333, maxBytes: 444 },
     '第二次未命中时用本次调用的 limits，不是缓存里第一次的')
+})
+
+test('radarRulesUrl：`{base}/api/radar/rules/{domain}` 只有这一处拼法', () => {
+  assert.equal(radarRulesUrl('https://hub.test', 'zhihu.com'), 'https://hub.test/api/radar/rules/zhihu.com')
 })

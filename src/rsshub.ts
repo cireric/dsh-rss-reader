@@ -144,7 +144,7 @@ const OPTIONAL_PARAM_SEGMENT = /^:([A-Za-z0-9_]+)\?$/
  * 一条 target 的拼装结果。失败原因必须**分型**：调用方要按「缺参 / 通配 / 正则」分别计数，
  * 若只回 `undefined`，计数就得在调用方把同一套判定再写一遍 —— 两处迟早会漂。
  */
-type RouteBuild =
+export type RouteBuild =
   | { kind: 'ok'; url: string }
   | { kind: 'missing' }
   | { kind: 'wildcard' }
@@ -157,8 +157,11 @@ type RouteBuild =
  * 任何「试着填一下」的行为都会拼出一个看起来对、实际指向别的路由的地址。宁可整条跳过。
  * 必填参数缺失同样整条跳过 —— 半成品地址（如 `/36kr/hot-list/undefined`）会被用户当成
  * 可订阅的源，真正的失败要推迟到「添加」那一刻才暴露。
+ *
+ * 返回**分型结果**而不是 `string | undefined`：调用方要按缺失 / 通配 / 正则分别计数，
+ * 只回 undefined 会逼它在外面把同一套判定再写一遍（两处迟早漂）。
  */
-function buildRouteResult(target: string, params: Readonly<Record<string, string>>): RouteBuild {
+export function buildRoute(target: string, params: Readonly<Record<string, string>>): RouteBuild {
   if (target.includes('*')) return { kind: 'wildcard' }
   if (target.includes('{') || target.includes('}')) return { kind: 'regex' }
   const filled: string[] = []
@@ -181,18 +184,6 @@ function buildRouteResult(target: string, params: Readonly<Record<string, string
   }
   const url = filled.join('/')
   return { kind: 'ok', url: url.startsWith('/') ? url : '/' + url }
-}
-
-/**
- * 拼地址：`target` 里的 `:name` 用捕获值填；任一必填参数缺失、或 target 含 `*` / `{}` 返回
- * `undefined`。返回值一定以 `/` 开头（调用方拿它和实例地址拼）。
- *
- * 对外只给 `string | undefined`：调用方关心的是「能不能拼出来」；分型计数留在本模块内部，
- * 通过 `candidatesFromRules` 的 `skipped` 暴露。
- */
-export function buildRoute(target: string, params: Readonly<Record<string, string>>): string | undefined {
-  const result = buildRouteResult(target, params)
-  return result.kind === 'ok' ? result.url : undefined
 }
 
 /** 一条 Radar 候选的最小形状：03 票直接渲染 `.title` / `.siteName`，把 `.source` 透传给 FeedCandidate。 */
@@ -269,7 +260,7 @@ export function candidatesFromRules(
       for (const source of rule.source) {
         const params = matchSource(source, pathname)
         if (params === undefined) continue
-        const built = buildRouteResult(rule.target, params)
+        const built = buildRoute(rule.target, params)
         if (built.kind !== 'ok') {
           // 记下第一条失败原因：多条 source 同时命中时，先失败的那条说明这规则的形状不支持
           failure ??= built.kind

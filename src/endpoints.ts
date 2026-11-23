@@ -48,6 +48,7 @@ import { FolderError } from './folders.js'
 import { duplicateHintsOf, linkKeyOf, type DuplicateRow } from './duplicates.js'
 import { TagError } from './tags.js'
 import { discoverCandidates, validateSubscriptions } from './subscribe.js'
+import { isRadarRules, radarRulesUrl } from './radar.js'
 import { fetchFeed } from './feed/fetch.js'
 import { parseTunableValue } from './settings-schema.js'
 import type { ReaderStore, UnreadStore } from './store.js'
@@ -1037,7 +1038,8 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
 
       const fetchImpl = ctx.fetchImpl ?? fetchFeed
       // limits 不带 trustedTarget（默认 false）：私网实例在这里就会被拒，与 A9 一致。
-      const fetched = await fetchImpl(base + '/api/radar/rules/zhihu.com', {}, {
+      // 地址只从 `radarRulesUrl` 来 —— 与发现流程同一份拼法，别在这里再写一次字符串。
+      const fetched = await fetchImpl(radarRulesUrl(base, 'zhihu.com'), {}, {
         timeoutMs: ctx.config.timeoutMs,
         maxBytes: ctx.config.maxBytes,
       })
@@ -1046,10 +1048,16 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         return ok({ passed: false, message: '实例返回了 304（探活请求不应带条件头）' })
       }
       if (fetched.body.trim() === '') return ok({ passed: false, message: '实例返回了空响应（不是 Radar 规则 JSON）' })
+      let parsed: unknown
       try {
-        JSON.parse(fetched.body)
+        parsed = JSON.parse(fetched.body)
       } catch {
         return ok({ passed: false, message: '响应不是 JSON（这个地址可能不是 RSSHub 实例）' })
+      }
+      // 「是不是规则表」只认 isRadarRules：JSON.parse 成功只说明它是 JSON，`[]` / `null` /
+      // 任意对象的网关不该被判成 RSSHub（与发现流程共用同一份判据）。
+      if (!isRadarRules(parsed)) {
+        return ok({ passed: false, message: '响应不是 Radar 规则对象（这个地址可能不是 RSSHub 实例）' })
       }
       return ok({ passed: true, message: '测试通过：实例返回了 Radar 规则 JSON（探活是启发式，不代表每个站点都有规则）' })
     },

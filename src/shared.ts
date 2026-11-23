@@ -126,7 +126,8 @@ export interface TagView {
  *  - `rsshub`：从实例的 Radar 规则拼出来的地址，**没有**抓取校验（ADR-0010）⇒ 两个字段缺省，
  *    界面标「未验证」，真正的校验推迟到「添加」时由 addFeed 执行。
  *
- * `source` 允许缺省是为了不把旧回包当成坏数据：缺省按页面候选渲染（见 feeds-view.tsx）。
+ * `source` 是必填的：候选只在本次发现的内存里流转，没有旧 wire 需要兼容；缺省值会让
+ * 「忘了标来源」静默变成页面候选，界面上就分不清哪些地址没收过抓取校验。
  */
 export interface FeedCandidate {
   url: string
@@ -135,7 +136,7 @@ export interface FeedCandidate {
   format?: string
   itemCount?: number
   /** 候选来源（R8a 03）：页面声明 / RSSHub Radar */
-  source?: 'page' | 'rsshub'
+  source: 'page' | 'rsshub'
   /** Radar 规则表的 `_name`（站点名）：界面第二行要显示「站点名 · 未验证」；页面候选不填 */
   siteName?: string
 }

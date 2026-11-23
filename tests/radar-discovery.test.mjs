@@ -350,3 +350,23 @@ test('端点：未配置 rsshubBase 时没有 Radar 日志，也没有 Radar 请
   assert.equal(h.lines.some((line) => line.startsWith('Radar：')), false, '未配置不该有 Radar 日志')
   assert.equal(fetchImpl.calls.some((call) => call.url.startsWith('/api/radar')), false)
 })
+
+test('端点：config 里塞了带 path 的非法实例地址 → 零 Radar 请求，一条可读警告（profile patch 绕过保存校验）', async () => {
+  // profile patch / Config 直接注入可以绕过 saveSettings 的入参校验；发现流程必须用
+  // 与设置面同一个纯函数再验一次，否则会真的请求 `…/api/api/radar/…`（spec §4.1 的原始病象）。
+  const fetchImpl = stubFetch({
+    'https://site.test/': { kind: 'ok', body: htmlPage(feedLink('/a.xml')) },
+    'https://site.test/a.xml': { kind: 'ok', body: RSS },
+  })
+  const h = endpointHarness(fetchImpl, { rsshubBase: 'https://hub.test/api' })
+  const result = await h.dispatch('discoverFeeds', { url: 'https://site.test/' })
+
+  assert.equal(result.ok, true, '非法实例地址不能把「发现」整体打成失败')
+  assert.deepEqual(result.value.candidates.map((candidate) => candidate.source), ['page'],
+    '页面候选必须照常返回')
+  assert.equal(fetchImpl.calls.some((call) => call.url.includes('/api/radar/')), false,
+    '非法地址必须零 Radar 请求；实际请求：' + JSON.stringify(fetchImpl.calls.map((call) => call.url)))
+  const radarWarnings = result.value.warnings.filter((warning) => /实例地址不合法/.test(warning.reason))
+  assert.equal(radarWarnings.length, 1, '必须有一条说明「实例地址不合法」的警告')
+  assert.equal(radarWarnings[0].url, 'https://hub.test/api', '警告要指回被拒的原始地址')
+})

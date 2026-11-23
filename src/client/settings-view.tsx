@@ -30,7 +30,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { AGENT_APPROVAL_NOTE, AGENT_HELP } from '../agent-help.js'
 import type { CleanupResult, ReadOnlySettingView, RsshubTestResult, SettingsSnapshot } from '../shared.js'
-import { changedTunableKeys, parseTunableValue, TUNABLE_RANGES, type NumberTunableKey, type TunableKey } from '../settings-schema.js'
+import { changedNumberTunableKeys, parseTunableValue, TUNABLE_RANGES, type NumberTunableKey, type TunableKey } from '../settings-schema.js'
 import type { ReadingPreferences } from '../preferences.js'
 import type { ResetSettingsResult, SaveSettingResult } from './settings-actions.js'
 import { ConfirmDialog } from './confirm-dialog.js'
@@ -198,12 +198,12 @@ interface ResetChange {
  * 确认框里「将变化的项与目标值」。判据与宿主 D28 同源：**当前生效值 ≠ 默认值**的项，
  * 恢复默认后必然变化；相等的项不在列表里，也是按钮 N = 0 的判据。
  *
- * `changedTunableKeys` 同时供 `settings-actions` 的成功提示计数使用 —— 两处各算一遍
+ * `changedNumberTunableKeys` 同时供 `settings-actions` 的成功提示计数使用 —— 两处各算一遍
  * 会在「哪些项算变化」上漂移（S5）。
  */
 function resetChangesOf(settings: SettingsSnapshot | undefined): ResetChange[] {
   if (settings === undefined) return []
-  const changed = new Set(changedTunableKeys(settings.effective, settings.defaults))
+  const changed = new Set(changedNumberTunableKeys(settings.effective, settings.defaults))
   // 按 SETTING_ROWS 的顺序展开（= 页面顺序），不按对象键序 —— 确认框的阅读顺序与输入行一致。
   return SETTING_ROWS.flatMap((row) => {
     if (!changed.has(row.key)) return []
@@ -397,8 +397,8 @@ interface RsshubSettingRowProps {
  * 保存复用与四个数字行**同一条** `onSave`（= store 的保存串行链 + 「已保存 ✓」反馈）：
  * 另写一套写路径就会出现「地址存下了但另三个框的回包把界面冲掉」这类两套状态互相踩的缺陷。
  *
- * 测试连接用的是**当前生效值**而不是草稿：宿主探的是已经/即将被用于发现候选的那个地址；
- * 未配置（空串）时按钮禁用 —— 没有可探的源站，也避免误以为「空地址也能连上」。
+ * 测试连接探的是**输入框里的草稿值**而不是上次保存的生效值：用户改完地址直接点测试时，
+ * 探的必须是他眼前写的那个；草稿非法或为空时按钮禁用（见下面的 canTest）。
  */
 function RsshubSettingRow(props: RsshubSettingRowProps): ReactNode {
   const { value, onSave, onTest } = props
@@ -522,6 +522,11 @@ function RsshubSettingRow(props: RsshubSettingRowProps): ReactNode {
         onClick={() => { void clear() }}>恢复默认（清空）</button>
       <p className="dsh-rss-settings-help" id={helpId}>
         实例源站（如 https://rsshub.example），只支持公网实例。未配置时 RSSHub 候选不出现。
+      </p>
+      <p className="dsh-rss-settings-help" data-rss-rsshub-instances="">
+        公共实例由社区维护，可能失效；可从{' '}
+        <a href="https://docs.rsshub.app/guide/instances" target="_blank" rel="noopener noreferrer">官方实例列表</a>
+        {' '}挑一个。
       </p>
       {testResult !== undefined && (
         <p className={testResult.passed ? 'dsh-rss-settings-saved' : 'dsh-rss-settings-error'}

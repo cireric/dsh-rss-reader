@@ -11,6 +11,7 @@ import { normalizeFeedUrl } from './refresh.js'
 import { discoverFeedUrls, isSameOrigin, MAX_CANDIDATES } from './feed/discover.js'
 import { candidatesFromRules } from './rsshub.js'
 import { lookupRadarRules } from './radar.js'
+import { parseRsshubBase } from './settings-schema.js'
 import type { DiscoveryResult, DiscoveryWarning, FeedCandidate } from './shared.js'
 
 /** 一条导入结果。`ok` 为假时 reason 必须给出可直接展示的原因。 */
@@ -213,21 +214,35 @@ async function radarBranch(
   if (base === '') return { candidates: [], warnings: [] }
 
   const page = new URL(pageUrl)
-  const lookup = await lookupRadarRules(base, page.hostname, options.limits, fetchImpl)
-  if (lookup.failure !== undefined) {
-    options.log?.('Radar：' + page.hostname + ' → 查询失败：' + lookup.failure)
+  // 与设置面同一个纯函数：profile patch 可以绕过 saveSettings 的入参校验，发现流程必须
+  // 再验一次；非法值只产一条可读警告，零请求，绝不拼出 `…/api/api/radar/…`。
+  const origin = parseRsshubBase(base)
+  if (origin === undefined) {
+    options.log?.('Radar：' + page.hostname + ' → 实例地址不合法，跳过')
     return {
       candidates: [],
-      warnings: [{ url: base, reason: 'RSSHub 实例查询失败：' + lookup.failure }],
+      warnings: [{
+        url: base,
+        reason: 'RSSHub 实例地址不合法（只支持 http(s) 源站，不能带路径 / 查询 / 参数），已跳过 Radar 查询',
+      }],
     }
   }
-  if (lookup.domain === undefined || lookup.rules === undefined) {
+
+  const lookup = await lookupRadarRules(origin, page.hostname, options.limits, fetchImpl)
+  if (lookup.kind === 'failure') {
+    options.log?.('Radar：' + page.hostname + ' → 查询失败：' + lookup.reason)
+    return {
+      candidates: [],
+      warnings: [{ url: origin, reason: 'RSSHub 实例查询失败：' + lookup.reason }],
+    }
+  }
+  if (lookup.kind === 'empty') {
     // 「该域没规则」是正常结果（实测实例回 200 + 空 body），不是警告。
     options.log?.('Radar：' + page.hostname + ' → 命中 0 条，跳过 0 条')
     return { candidates: [], warnings: [] }
   }
 
-  const found = candidatesFromRules(lookup.rules, page, base, lookup.domain)
+  const found = candidatesFromRules(lookup.rules, page, origin, lookup.domain)
   const skipped = found.skipped.missingParam + found.skipped.wildcard + found.skipped.regex
   // 命中数是规则引擎的产出（合并前的口径）：日志要回答的是「这家实例对这个站给了什么」，
   // 不是「最后界面上剩几行」—— 后者还受去重与上限影响，合并结果由端点另一行日志报告。

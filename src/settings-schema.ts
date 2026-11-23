@@ -59,6 +59,36 @@ export type TunableSettings = { [K in TunableKey]: TunableValueByKey[K] }
 export type TunableOverrides = Partial<TunableSettings>
 
 /**
+ * 键 → 唯一校验器（R8a 评审 7）。读侧 / 写侧 / 端点 patch / 控制器合并都只查这张表，
+ * 不再各写一句 `if (key === 'rsshubBase')`。`Record<TunableKey, …>` 让新增键漏配
+ * 直接编译失败 —— 表本身是完整性检查，不靠记性。
+ *
+ * 值的**类型**仍由上面的 `TunableValueByKey` 声明：校验器只回答「这个 unknown 能不能变成
+ * 该键的值」，不复制一份类型表。
+ */
+export const TUNABLE_PARSERS: { readonly [K in TunableKey]: (value: unknown) => string | number | undefined } = {
+  refreshFeedsPerRound: (value) => parseNumberValue('refreshFeedsPerRound', value),
+  refreshConcurrency: (value) => parseNumberValue('refreshConcurrency', value),
+  minRefreshIntervalMs: (value) => parseNumberValue('minRefreshIntervalMs', value),
+  cleanupAfterDays: (value) => parseNumberValue('cleanupAfterDays', value),
+  rsshubBase: parseRsshubBase,
+}
+
+/**
+ * 把**已解析**的值写进目标（TunableOverrides 或 Config 都行）。
+ *
+ * 泛型键让 `target[key]` 保型：调用方不必为了「TS 的索引写入需要收窄」再写五个 if 分支。
+ * 校验仍只发生在 `parseTunableValue`，本函数不判值。
+ */
+export function assignTunableValue<K extends TunableKey>(
+  target: TunableOverrides,
+  key: K,
+  value: TunableValueByKey[K],
+): void {
+  target[key] = value
+}
+
+/**
  * 逐键范围（spec §4.1）。`0` 在四个键里语义不同，所以范围与「0 是否合法」必须写在一起：
  *  - `refreshFeedsPerRound = 0` ⇒ 抓全部源（合法）；999 是「源多时一轮会很慢」的上限。
  *  - `refreshConcurrency = 0` ⇒ 非法（没有「零并发」这种调度）。
@@ -89,7 +119,7 @@ export function isTunableKey(key: string): key is TunableKey {
  * 一边说 3 项。宿主 D28 的逐键删/写规则看的是基线，不看生效值；这里只回答「界面上会看到
  * 哪几项变化」，两者职责不同但口径必须一致。
  */
-export function changedTunableKeys(
+export function changedNumberTunableKeys(
   effective: TunableSettings,
   defaults: TunableSettings,
 ): NumberTunableKey[] {
@@ -107,7 +137,7 @@ export function parseTunableValue(key: 'rsshubBase', value: unknown): string | u
 export function parseTunableValue(key: NumberTunableKey, value: unknown): number | undefined
 export function parseTunableValue(key: TunableKey, value: unknown): string | number | undefined
 export function parseTunableValue(key: TunableKey, value: unknown): string | number | undefined {
-  return key === 'rsshubBase' ? parseRsshubBase(value) : parseNumberValue(key, value)
+  return TUNABLE_PARSERS[key](value)
 }
 
 function parseNumberValue(key: NumberTunableKey, value: unknown): number | undefined {
@@ -123,7 +153,7 @@ function parseNumberValue(key: NumberTunableKey, value: unknown): number | undef
  * 拼地址时只面对一种形态。带 userinfo 的地址直接拒绝 —— 它不属于「实例源站」，静默丢掉
  * 凭据会让测试连接看起来配好了却永远 401。
  */
-function parseRsshubBase(value: unknown): string | undefined {
+export function parseRsshubBase(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined
   const trimmed = value.trim()
   if (trimmed === '') return ''

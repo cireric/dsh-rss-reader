@@ -14,7 +14,7 @@
  * 失败回统一的 bad-request 信封，成功才把已解析的值交给 handler。
  */
 import { z } from 'zod'
-import { isTunableKey, parseTunableValue } from './settings-schema.js'
+import { assignTunableValue, isTunableKey, parseTunableValue } from './settings-schema.js'
 import type { TunableOverrides } from './settings-schema.js'
 
 /** 零入参端点：接受并忽略 payload（与阶段 5 之前的语义一致）。 */
@@ -280,14 +280,8 @@ const tunablePatch = z.record(z.string(), z.unknown()).superRefine((patch, ctx) 
   const overrides: TunableOverrides = {}
   for (const [key, value] of Object.entries(patch)) {
     if (!isTunableKey(key)) continue
-    // 数字键与字符串键分开写只为让 TS 的索引写入收窄；取值仍来自同一个 parseTunableValue。
-    if (key === 'rsshubBase') {
-      const parsed = parseTunableValue('rsshubBase', value)
-      if (parsed !== undefined) overrides.rsshubBase = parsed
-      continue
-    }
     const parsed = parseTunableValue(key, value)
-    if (parsed !== undefined) overrides[key] = parsed
+    if (parsed !== undefined) assignTunableValue(overrides, key, parsed)
   }
   return overrides
 })
