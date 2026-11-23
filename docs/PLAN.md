@@ -92,8 +92,8 @@
 
 ### 第三批 2 — R8a：RSSHub Radar 发现（公共实例）
 
-- **状态**：**已完成**（`.scratch/r8a-radar/` 5/5 `resolved`；集成分支 `feat/r8a-radar`，11 个提交 / 34 文件 / +2637 −133）。
-- **交付**：`src/rsshub.ts`（纯规则引擎：域名候选 / 桶 / 匹配 / 拼地址）、`src/radar.ts`（取规则 + 缓存 + `radarRulesUrl` / `isRadarRules` 的单一判据）、`src/subscribe.ts` 的 Radar 支路、`settings.json` 的 `rsshubBase`（`parseRsshubBase` 唯一校验）、端点 `testRsshub`（31 → 32）、设置页 RSSHub 分区、候选来源徽标。
+- **状态**：**已完成**（`.scratch/r8a-radar/` 5/5 `resolved`；集成分支 `feat/r8a-radar`，13 个提交 / 35 文件 / +2646 −135）。
+- **交付**：`src/rsshub.ts`（纯规则引擎：域名候选 / 桶 / 匹配 / 拼地址）、`src/radar.ts`（取规则 + 缓存 + `radarRulesUrl` / `isRadarRules` 的单一判据）、`src/subscribe.ts` 的 Radar 支路、`settings.json` 的 `rsshubBase`（`parseRsshubBase` 唯一校验）、端点 `testRsshub`（31 → 32）、设置页 RSSHub 分区（含 `cfd2d8a` 的实例地址输入框宽度修复）、候选来源徽标。
 - **证据**：`tests/rsshub.test.mjs` 28 条、`radar-discovery.test.mjs`、`radar-cache.test.mjs` 8 条、settings 三件套、`scroll-dom.test.mjs` 1 条；`npm test` **1132/1132**；全量变异 **367/367 应用 · 0 幸存**（R8a 新增 7 条 `rsshub-*`）；真机三步（reload 前后 `[active]` / 当日日志 0 条「装载失败」/ 路由 401）；真实实例（经代理，2026-11-23）—— GitHub 页面出 5 条 rsshub 候选、`github/branches/DIYgod/RSSHub` 校验 `rss2` 14 条；B 站空间页出 `/bilibili/user/dynamic/2`；36kr 缺参跳过；私网实例被拒；未配置零请求；同域第二次零请求。
 - **遗留**：真实 GUI 走查未做（playwright 在本沙箱 target crashed）；「添加」只验到 `addFeed` 之前的校验层，未在真实订阅列表落一条；`settings.json` 真实重启保持未单独复核。
 - **目标**：在「粘贴网页 → 列出可订阅源」里补上 RSSHub 这一路；没有 RSS 的站点也能给出候选。
