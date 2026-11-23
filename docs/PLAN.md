@@ -4,7 +4,7 @@
 > **状态词**：`已完成` / `进行中` / `未开工` / `待拍板` / `暂缓`。
 > **完成定义**：按 [AGENTS.md](../AGENTS.md) 的四道门槛（`build` / `build:client` / `typecheck` / `test`，关键判定另有 `mutation`）+ 真机三步（reload / 日志 / 路由）。本文件不抄门槛，只记结果与遗留。
 > **票据唯一真相**：`.scratch/<slug>/issues/`；本文件只做阶段索引，阶段内的行为规范、验收与变异归属看 spec / 票据，不在这里复制。
-> **基线**：main（v0.2.0 tag `516a79b` + R11 merge `68f0b12`，2026-11-22）——R1–R6、R11、R12 已合入；R11 未抬版本号。
+> **基线**：main（v0.2.0 tag `516a79b` + R11 merge `68f0b12` + R8a merge `de72059`，2026-11-23）——R1–R6、R8a、R11、R12 已合入；R11 / R8a 均未抬版本号。
 > **定位变更**：自 2026-11-22 起本文件改为产品功能进度计划；原「架构候选」计划保存在 git 历史（`git show fd139c6:docs/PLAN.md`），不再在本文件维护。
 
 ## 总览
@@ -92,7 +92,7 @@
 
 ### 第三批 2 — R8a：RSSHub Radar 发现（公共实例）
 
-- **状态**：**已完成**（`.scratch/r8a-radar/` 5/5 `resolved`；集成分支 `feat/r8a-radar`，17 个提交 / 37 文件 / +3042 −179）。
+- **状态**：**已完成**（`.scratch/r8a-radar/` 5/5 `resolved`；**已合入 `main`**（merge `de72059`，17 个提交 / 37 文件 / +3042 −179））。
 - **交付**：`src/rsshub.ts`（纯规则引擎：域名候选 / 桶 / 匹配 / 拼地址）、`src/radar.ts`（取规则 + 缓存 + `radarRulesUrl` / `isRadarRules` 的单一判据）、`src/subscribe.ts` 的 Radar 支路、`settings.json` 的 `rsshubBase`（`parseRsshubBase` 唯一校验）、端点 `testRsshub`（31 → 32）、设置页 RSSHub 分区（含 `cfd2d8a` 的实例地址输入框宽度修复）、候选来源徽标。
 - **证据**：`tests/rsshub.test.mjs` 30 条、`radar-discovery.test.mjs`、`radar-cache.test.mjs` 8 条、settings 三件套、`scroll-dom.test.mjs` 1 条；`npm test` **1142/1142**；全量变异 **368/368 应用 · 0 幸存**（R8a 新增 8 条 `rsshub-*`）；真机三步（reload 前后 `[active]` / 当日日志 0 条「装载失败」/ 路由 401）；真实实例（经代理，2026-11-23）—— GitHub 页面出 5 条 rsshub 候选、`github/branches/DIYgod/RSSHub` 校验 `rss2` 14 条；B 站空间页出 `/bilibili/user/dynamic/2`；36kr 缺参跳过；私网实例被拒；未配置零请求；同域第二次零请求。
 - **遗留**：真实 GUI 走查未做（playwright 在本沙箱 target crashed）；「添加」只验到 `addFeed` 之前的校验层，未在真实订阅列表落一条；`settings.json` 真实重启保持未单独复核。
