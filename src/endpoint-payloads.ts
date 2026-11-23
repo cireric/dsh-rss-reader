@@ -14,6 +14,7 @@
  * 失败回统一的 bad-request 信封，成功才把已解析的值交给 handler。
  */
 import { z } from 'zod'
+import { BACKFILL_LIMIT, isHttpUrl } from './shared.js'
 import { assignTunableValue, isTunableKey, parseTunableValue } from './settings-schema.js'
 import type { TunableOverrides } from './settings-schema.js'
 
@@ -218,19 +219,13 @@ export const testRsshubPayload = z.object({ base: z.string() })
  * `limit` 的 1–50 是 spec §4.1 的硬边界，缺省 20；越界在入参层就拒绝（bad-request），
  * 不再让 handler 去夹取 —— 夹取会把「用户要了 500 篇」静默变成「抓 50 篇」。
  */
-const archiveUrlString = z.string().min(1).refine((value) => {
-  try {
-    const url = new URL(value)
-    return url.protocol === 'http:' || url.protocol === 'https:'
-  } catch {
-    return false
-  }
-}, { message: '必须是 http(s) 地址' })
+// 协议判据与客户端行内预检共用 shared.ts 的 isHttpUrl（不再各写一套）。
+const archiveUrlString = z.string().min(1).refine(isHttpUrl, { message: '必须是 http(s) 地址' })
 
 export const backfillHistoryPayload = z.object({
   feedId: z.string().min(1),
   archiveUrl: archiveUrlString,
-  limit: z.number().int().min(1).max(50).default(20),
+  limit: z.number().int().min(BACKFILL_LIMIT.min).max(BACKFILL_LIMIT.max).default(BACKFILL_LIMIT.default),
 })
 
 /** `saveViewPreferences`：preferences 是必需键 —— 缺键会把默认视图静默写盘。值本身仍由 store 归一。 */

@@ -12,6 +12,7 @@
 import { test, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, existsSync, readdirSync } from 'node:fs'
+import { BACKFILL_LIMIT } from '../lib/shared.js'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -427,6 +428,25 @@ test('R9 03 回溯非法输入：非 http(s) 地址与篇数不在 1–50 都是
   }
   assert.equal(h.requests.filter((entry) => entry.endpoint === 'backfillHistory').length, 0, '客户端先拦：一次请求都不许发')
   assert.equal(h.store.get().error, undefined, '客户端入参校验不写全局 error（就地说明即可）')
+  h.cleanup()
+})
+
+test('R9 03 回溯篇数上界：BACKFILL_LIMIT.max + 1 就地拒绝且零请求', skip, async () => {
+  const h = await mount()
+  await h.store.load('overview')
+  await h.settle()
+  await openFeedsView(h)
+  await openBackfill(h, 'f1')
+
+  fillBackfill(h, 'f1', 'https://example.com/archives.html', String(BACKFILL_LIMIT.max + 1))
+  rowOf(h, 'f1').querySelector('[data-rss-backfill-start]').click()
+  await h.settle()
+
+  const status = rowOf(h, 'f1').querySelector('[data-rss-backfill-result]')
+  assert.ok(status !== null, '超过上界必须就地给出原因')
+  assert.match(status.textContent, /1[–-]50/, '原因要写明 1–50 的范围')
+  assert.equal(h.requests.filter((entry) => entry.endpoint === 'backfillHistory').length, 0,
+    '客户端共用 BACKFILL_LIMIT：上界 + 1 一次请求都不许发')
   h.cleanup()
 })
 

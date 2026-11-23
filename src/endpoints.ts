@@ -928,6 +928,10 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       const feedId = input.url
       const known = ctx.store.feed(feedId)
       if (known === undefined) return fail('not-found', '订阅不存在：' + feedId)
+      // 回溯途中的退订必须由宿主拒绝（spec §4.1）：回溯还在往这个源写条目，退订会先删订阅
+      // 与全部条目，后续写入就落在「已不在订阅集合里的源」上 —— 留下谁都看不见的孤儿条目。
+      // 界面上这一行的退订已经置灰，但界面不是判据：同一秒的重放 / 另开的面板都会绕过它。
+      if (BACKFILL_IN_FLIGHT.has(feedId)) return fail('conflict', '该源正在回溯，结束后再退订')
       // 退订是**一次变更**，由 store 拥有（订阅项 + 条目 + 游标，见 ADR-0002）：
       // 这里既不逐条删（N+1 个事务、还会把整源正文物化出来），也不碰 config.json。
       // 失败时事务回滚 ⇒ 什么都没发生，用户看到的是「退订失败」，不是「少了一半」。

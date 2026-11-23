@@ -83,11 +83,33 @@ function shapeOf(link: string): LinkShape | undefined {
   return { host: url.host, path: digitsToShape(path), directory: digitsToShape(directory), extension }
 }
 
+/** 有效样本：能 `new URL` 且是 http(s) 的链接（形态判断只认这一种）。 */
+function validSamplesOf(links: readonly string[]): Array<{ readonly link: string; readonly shape: LinkShape }> {
+  const samples: Array<{ readonly link: string; readonly shape: LinkShape }> = []
+  for (const link of links) {
+    const shape = shapeOf(link)
+    if (shape !== undefined) samples.push({ link, shape })
+  }
+  return samples
+}
+
+/**
+ * 一组链接里的**有效样本**（原样返回能 `new URL` 且是 http(s) 的那些）。
+ *
+ * 报告里的 `sampleCount` 与形态过滤器的样本下限必须数同一个东西：空链接 / 非 http(s) 的
+ * 条目参不进形态判断，把它们计进样本数会让「3 条样本」变成「2 条能用的 + 1 条废的」，
+ * 过滤器却按 3 条建起来（spec §4.2：有效样本 < 3 ⇒ 拒绝）。
+ */
+export function validSampleLinksOf(links: readonly string[]): string[] {
+  return validSamplesOf(links).map((sample) => sample.link)
+}
+
 /**
  * 用已订阅条目的链接**样本**推出「这篇文章链接长什么样」。
  *
- * 样本 **< 3 条 ⇒ undefined**：一条链接可能只是首页或一篇特例，推不出形态；调用方据此
- * 拒绝整次回溯，绝不退回「全收」（spec §4.2 / A3）。
+ * **有效样本 < 3 条 ⇒ undefined**（不是「样本数组长度 < 3」）：空串、非 http(s)、解析不出的
+ * 链接都不构成形态证据。一条链接可能只是首页或一篇特例，推不出形态；调用方据此拒绝整次
+ * 回溯，绝不退回「全收」（spec §4.2 / A3）。
  *
  * 规则（任一命中即算文章，host 必须与样本一致、忽略协议）：
  *   1. 整路径形状：数字串→`#` 后与某个样本完全相同；
@@ -98,20 +120,31 @@ function shapeOf(link: string): LinkShape | undefined {
  * 把整页月份索引收成候选——那正是本功能要滤掉的东西。
  */
 export function deriveLinkFilter(sampleLinks: readonly string[]): ((url: string) => boolean) | undefined {
-  if (sampleLinks.length < 3) return undefined
-  const samples: LinkShape[] = []
-  for (const link of sampleLinks) {
-    const shape = shapeOf(link)
-    if (shape !== undefined) samples.push(shape)
-  }
+  const samples = validSamplesOf(sampleLinks)
+  if (samples.length < 3) return undefined
   return (url: string): boolean => {
     const shape = shapeOf(url)
     if (shape === undefined) return false
-    return samples.some((sample) => sample.host === shape.host && (
-      sample.path === shape.path
-      || (shape.extension !== '' && sample.directory === shape.directory && sample.extension === shape.extension)
+    return samples.some((sample) => sample.shape.host === shape.host && (
+      sample.shape.path === shape.path
+      || (shape.extension !== '' && sample.shape.directory === shape.directory && sample.shape.extension === shape.extension)
     ))
   }
+}
+
+/**
+ * 一组链接的**同文键集合**（空键 = 非 http(s) / 解析不出，不参与判重）。
+ *
+ * 两个使用面共用这一份：`selectBackfillCandidates` 用它建已知集合，宿主的 `existing` 计数用它
+ * 对归档页命中做预演。各写一遍「逐条 sameArticleKeyOf → add」的循环，就是下一次规则漂移。
+ */
+export function articleKeysOf(links: readonly string[]): Set<string> {
+  const keys = new Set<string>()
+  for (const link of links) {
+    const key = sameArticleKeyOf(link)
+    if (key !== '') keys.add(key)
+  }
+  return keys
 }
 
 /** `selectBackfillCandidates` 的入参：链接、形态过滤器、已知链接、本次最多取几篇。 */
@@ -131,11 +164,7 @@ export interface BackfillCandidateInput {
  */
 export function selectBackfillCandidates(input: BackfillCandidateInput): string[] {
   if (input.limit <= 0) return []
-  const known = new Set<string>()
-  for (const link of input.knownLinks) {
-    const key = sameArticleKeyOf(link)
-    if (key !== '') known.add(key)
-  }
+  const known = articleKeysOf(input.knownLinks)
   const candidates: string[] = []
   for (const link of input.links) {
     if (!input.filter(link)) continue

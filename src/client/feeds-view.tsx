@@ -4,7 +4,7 @@
  * 纯展示 —— 动作全部由入口的 store 通过 props 传进来。
  */
 import { useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
-import { feedHealthOf, type BackfillReport, type DiscoveryResult, type FeedView, type FolderView, type OpmlExportResult, type OpmlImportResult, type TagView } from '../shared.js'
+import { BACKFILL_LIMIT, feedHealthOf, isHttpUrl, type BackfillReport, type DiscoveryResult, type FeedView, type FolderView, type OpmlExportResult, type OpmlImportResult, type TagView } from '../shared.js'
 import type { BackfillActionResult } from './feed-actions.js'
 import { relativeTime } from './store.js'
 
@@ -25,11 +25,6 @@ interface BackfillDraft {
   limit: string
 }
 
-/** 篇数的硬边界（spec §4.1）：客户端先拦一次，宿主入参层仍会再判一次（两道都要有）。 */
-const BACKFILL_LIMIT_MIN = 1
-const BACKFILL_LIMIT_MAX = 50
-const BACKFILL_LIMIT_DEFAULT = '20'
-
 /** 从按源索引的表里删掉一项；没有该键时返回原引用，避免无谓的整表复制。 */
 function withoutKey<T>(table: Readonly<Record<string, T>>, key: string): Readonly<Record<string, T>> {
   if (table[key] === undefined) return table
@@ -46,17 +41,14 @@ function withoutKey<T>(table: Readonly<Record<string, T>>, key: string): Readonl
  *（http(s) 协议 + 1–50 的整数），不另造更宽或更窄的规则。
  */
 function backfillInputReason(rawUrl: string, rawLimit: string): string | undefined {
-  let parsed: URL
-  try {
-    parsed = new URL(rawUrl.trim())
-  } catch {
-    return '归档页地址必须是 http(s) 地址'
-  }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '归档页地址必须是 http(s) 地址'
+  // 协议判据与宿主 payload 声明共用 shared.ts 的 isHttpUrl；篇数边界共用 BACKFILL_LIMIT。
+  // 客户端只负责「就地原因」，不再维护第二套数字/协议清单（两道校验仍都要有）。
+  if (!isHttpUrl(rawUrl.trim())) return '归档页地址必须是 http(s) 地址'
   const limitText = rawLimit.trim()
-  if (!/^\d+$/.test(limitText)) return '篇数必须是 1–50 的整数'
+  const limitReason = '篇数必须是 ' + BACKFILL_LIMIT.min + '–' + BACKFILL_LIMIT.max + ' 的整数'
+  if (!/^\d+$/.test(limitText)) return limitReason
   const limit = Number(limitText)
-  if (limit < BACKFILL_LIMIT_MIN || limit > BACKFILL_LIMIT_MAX) return '篇数必须是 1–50 的整数'
+  if (limit < BACKFILL_LIMIT.min || limit > BACKFILL_LIMIT.max) return limitReason
   return undefined
 }
 
@@ -597,7 +589,7 @@ export function FeedsView({
                   disabled={busy || backfillBusy}
                   onClick={() => {
                     if (backfillDraft?.feedId === feed.id) setBackfillDraft(undefined)
-                    else setBackfillDraft({ feedId: feed.id, url: '', limit: BACKFILL_LIMIT_DEFAULT })
+                    else setBackfillDraft({ feedId: feed.id, url: '', limit: String(BACKFILL_LIMIT.default) })
                   }}>回溯</button>
                 <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
                   data-rss-feed-remove={feed.id}

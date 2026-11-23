@@ -15,8 +15,10 @@ export const MUTATIONS = [
   { id: 'link-协议白名单失效', file: 'lib/shared.js',
     judges: ['parse.test.mjs'],
     judgeTests: ['条目链接只放行 http/https：javascript: / data: / file: / mailto: 归一成空串，相对与合法链接不变'],
-    from: "return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : '';",
-    to: "return url.toString();" },
+    // 2026-11-24（R9 评审修复）：协议判据收进 httpUrlOf（isHttpUrl 与 httpUrlOrEmpty 共用），
+    // 变异锚点随产物重锚——语义不变：放行任何协议，javascript: 链接会原样回到客户端。
+    from: "return url.protocol === 'http:' || url.protocol === 'https:' ? url : undefined;",
+    to: "return url;" },
   // —— 内联语义（R5 02）——
   // 链接白名单在**抽取期**失效：javascript: 会变成可点的 link run（渲染期还有第二道，但抽取期
   // 这道是「不产生可点数据」的源头）。锚在 article-text.js：safeUrl 已从 article.ts 搬走。
@@ -3140,7 +3142,9 @@ export const MUTATIONS = [
   { id: 'history-形态恒真', file: 'lib/history.js',
     judges: ['history.test.mjs'],
     judgeTests: ['形态规则：整路径形状（数字→#）或「目录形状 + 扩展名」任一命中即算文章；host 必须一致、协议忽略'],
-    from: "        return samples.some((sample) => sample.host === shape.host && (sample.path === shape.path\n            || (shape.extension !== '' && sample.directory === shape.directory && sample.extension === shape.extension)));",
+    // 2026-11-24（R9 评审修复）：样本先经 validSamplesOf 取形状（有效样本口径），
+    // 产物里是 sample.shape.*；变异语义不变：过滤器恒真。
+    from: "        return samples.some((sample) => sample.shape.host === shape.host && (sample.shape.path === shape.path\n            || (shape.extension !== '' && sample.shape.directory === shape.directory && sample.shape.extension === shape.extension)));",
     to: '        return true;' },
   // 同文键带上协议：归档页的 https 与 atom 的 http 判成两篇，A1 里已在 feed 的 3 篇会被再抓一遍
   //（真实样本的全部收益归零）。A4 的四种写法与「只差协议」的派生断言都会翻红。
@@ -3192,6 +3196,15 @@ export const MUTATIONS = [
     judgeTests: ['A12 私网：归档页按可信目标放行，文章页 127.0.0.1 被真实抓取层拒绝并进失败清单'],
     from: '            maxBytes: config.articleMaxBytes,\n        });',
     to: '            maxBytes: config.articleMaxBytes,\n            trustedTarget: true,\n        });' },
+
+  // deadline 失效：单轮 120s 预算不再拦住后续请求。A11 的假时钟到点后本应停在 3 篇，
+  // 变异后 5 篇全抓、stoppedBy 缺省 —— 这条守的是「预算真的在请求前检查」。
+  // from 照构建产物 lib/backfill.js 的实际字节写（8 空格缩进，pitfalls 一、1.4）。
+  { id: 'history-deadline失效', file: 'lib/backfill.js',
+    judges: ['backfill.test.mjs'],
+    judgeTests: ['A11 deadline：假时钟推进到 120s 后不再发起新请求，stoppedBy=deadline 且 remaining>0'],
+    from: '        if (now().getTime() - startedAt >= RUN_DEADLINE_MS) {',
+    to: '        if (false) {' },
 
   // ── R9 03：订阅管理的回溯行内表单（2026-11-23）────────────────────────────
   // 报告里的失败条目不再渲染（数组换成空数组）：行内只剩「失败 N 篇」的标题、看不到任何

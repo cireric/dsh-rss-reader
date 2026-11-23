@@ -156,6 +156,34 @@ test('在途闸门：同一源第二次请求回 conflict；结束后可再次�
   assert.equal(again.value.added, 0)
 })
 
+test('在途回溯期间 removeFeed 回 conflict（防孤儿条目）；结束后可以正常退订', async () => {
+  const store = makeStore()
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const url = 'https://feed.example.com/blog/2020/01/slow-remove.html'
+  const dispatch = makeDispatch(store, {
+    fetchImpl: archiveStub([url]),
+    fetchArticleImpl: async () => {
+      await gate
+      return okArticle('慢文章', '2020-01-01T00:00:00.000Z')
+    },
+  })
+
+  const running = dispatch('backfillHistory', { feedId: FEED_ID, archiveUrl: ARCHIVE_URL, limit: 1 })
+  const rejected = await dispatch('removeFeed', { url: FEED_ID })
+  assert.equal(rejected.ok, false, '回溯在途时退订必须被宿主拒绝，不能只靠界面置灰')
+  assert.equal(rejected.error.code, 'conflict')
+  assert.match(rejected.error.message, /回溯/)
+  assert.ok(store.feed(FEED_ID) !== undefined, '被拒的退订不许动订阅')
+
+  release()
+  const finished = await running
+  assert.equal(finished.ok, true)
+  const removed = await dispatch('removeFeed', { url: FEED_ID })
+  assert.equal(removed.ok, true, '回溯结束后同一源必须能退订')
+  assert.equal(store.feed(FEED_ID), undefined)
+})
+
 test('正文已缓存：回溯后打开该条不再发网络请求', async () => {
   const store = makeStore()
   const url = 'https://feed.example.com/blog/2020/01/cached.html'

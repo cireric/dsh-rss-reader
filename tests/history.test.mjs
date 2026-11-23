@@ -68,12 +68,23 @@ test('A3 样本不足：少于 3 条链接不产生过滤器（调用方据此�
     'https://www.ruanyifeng.com/blog/2026/11/weekly-issue-420.html',
     'https://www.ruanyifeng.com/blog/2026/11/weekly-issue-419.html',
   ]), undefined)
-  // 3 条就够：样本给的是「这个源的文章长什么样」
+  // 3 条**有效**样本才够：样本给的是「这个源的文章长什么样」
   assert.equal(typeof deriveLinkFilter([
     'https://www.ruanyifeng.com/blog/2026/11/weekly-issue-420.html',
     'https://www.ruanyifeng.com/blog/2026/11/weekly-issue-419.html',
     'https://www.ruanyifeng.com/blog/2026/11/weekly-issue-418.html',
   ]), 'function')
+  // 数组长度是 3、但一条是空串 / 非 http(s) ⇒ 有效样本只有 2 条，仍不足（A3 的「有效样本」口径）
+  assert.equal(deriveLinkFilter([
+    'https://www.ruanyifeng.com/blog/2026/11/weekly-issue-420.html',
+    'https://www.ruanyifeng.com/blog/2026/11/weekly-issue-419.html',
+    '',
+  ]), undefined)
+  assert.equal(deriveLinkFilter([
+    'https://www.ruanyifeng.com/blog/2026/11/weekly-issue-420.html',
+    'https://www.ruanyifeng.com/blog/2026/11/weekly-issue-419.html',
+    'mailto:x@example.com',
+  ]), undefined)
 })
 
 test('形态规则：整路径形状（数字→#）或「目录形状 + 扩展名」任一命中即算文章；host 必须一致、协议忽略', () => {

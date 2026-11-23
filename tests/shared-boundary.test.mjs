@@ -8,6 +8,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { effectiveLimitOf } from '../lib/shared.js'
 
 const shared = readFileSync('src/shared.ts', 'utf8')
 
@@ -32,4 +33,14 @@ test('规则模块存在且导出各自的判据', () => {
   assert.ok(cursor.includes('export function encodeCursor(') && cursor.includes('export interface Cursor'))
   assert.ok(preferences.includes('export function sanitizeViewPreferences('))
   assert.ok(unread.includes('export const isUnread') && unread.includes('export interface UnreadAccount'))
+})
+
+test('effectiveLimitOf：合法上限向下取整，非法值一律回落到「不限」这一边', () => {
+  assert.equal(effectiveLimitOf(500), 500)
+  assert.equal(effectiveLimitOf(12.9), 12, '上限是条数/字符数，小数只能向下取整')
+  assert.equal(effectiveLimitOf(0), Infinity, '0 不是「一条都不留」')
+  assert.equal(effectiveLimitOf(-1), Infinity)
+  assert.equal(effectiveLimitOf(Number.NaN), Infinity)
+  assert.equal(effectiveLimitOf(Number.POSITIVE_INFINITY), Infinity)
+  assert.equal(effectiveLimitOf(Number.NEGATIVE_INFINITY), Infinity)
 })
