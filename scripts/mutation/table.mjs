@@ -3321,4 +3321,17 @@ export const MUTATIONS = [
     judgeTests: ['未配置实例：两个端点都回可读错误，且一个网络请求都不发（B9）'],
     from: "        return { ok: false, result: fail('not-configured', '未配置 RSSHub 实例地址，无法浏览路由表') };",
     to: "        return { ok: true, base: 'https://rsshub.app' };" },
+
+  // ── R8b 04：客户端探索视图（2026-11-24）────────────────────────────────────
+  // 必填参数本地拦截失效：`missing` 永远收不到值 ⇒ 空着必填也发 exploreBuildUrl。
+  // 宿主的 B14 仍会拒（400），但用户在界面上先看到一次无谓往返，且「缺哪个参数」的点名
+  // 从本地即时反馈退化成服务端错误条。DOM 用例同时断言「零请求」与「点名 user」。
+  // explore-template.ts 被内联进 lib/client.js（不是 lib/explore-template.js），
+  // from 按构建产物 lib/client.js 的实际字节写（pitfalls 一、1.4），独立实测 OCCURRENCES=1。
+  { id: 'explore-客户端不拦缺参', file: 'lib/client.js',
+    judges: ['explore-view-dom.test.mjs'],
+    judgeTests: ['R8b 04 参数表单：按 example 预填；必填留空本地拦截并点名（不调 exploreBuildUrl）'],
+    // 条件恒假是**行为变异**：missing 保持空数组，流程继续走宿主拼地址（不是崩溃）。
+    from: 'if ((explore.draft[segment.name] ?? "").trim() === "" && !missing.includes(segment.name)) missing.push(segment.name);',
+    to: 'if (false && (explore.draft[segment.name] ?? "").trim() === "" && !missing.includes(segment.name)) missing.push(segment.name);' },
 ]

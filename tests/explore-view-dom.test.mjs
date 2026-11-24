@@ -310,6 +310,25 @@ test('R8b 04 D11 入口隐藏：未配置 rsshubBase 时两处入口都不渲染
   }
 })
 
+test('R8b 04 入口可见性：非法 rsshubBase（ftp://x）与未配置同判据 —— 两处入口都不渲染', skip, async () => {
+  // 宿主 exploreBaseOf 走 parseRsshubBase：ftp://x 解析失败 ⇒ not-configured。入口若只看
+  // 字符串非空，就会先渲染再让人点进一个必然报错的页面 — 两处入口必须用同一份判据。
+  const h = await mount({ rsshubBase: 'ftp://x' })
+  try {
+    await openSettings(h)
+    const settingsEntry = h.$('[data-rss-settings-section="rsshub"] [data-rss-explore-open]')
+    assert.equal(settingsEntry !== null, false, '非法实例地址时设置页入口必须消失')
+
+    h.press('Escape')
+    await h.waitFor(() => h.store.get().view === 'list', { label: 'Esc 回列表' })
+    await openFeeds(h)
+    const feedsEntry = h.$('[data-rss-explore-open]')
+    assert.equal(feedsEntry !== null, false, '非法实例地址时订阅管理页入口必须消失')
+  } finally {
+    h.cleanup()
+  }
+})
+
 test('R8b 04 列表行：站点名可点、路由名 / 模板 / 参数说明 / example / 事实徽标（false 不出现）', skip, async () => {
   const h = await mount()
   try {
@@ -481,6 +500,97 @@ test('R8b 04 参数表单：按 example 预填；必填留空本地拦截并点�
     h.$('[data-rss-explore-route="/people/activities/:id"]').click()
     await h.waitFor(() => h.$('[data-rss-explore-field="id"]') !== null, { label: '知乎表单' })
     assert.equal(h.$('[data-rss-explore-field="id"]').textContent?.trim(), 'id', '缺说明时显示参数名')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R8b 04 预填提示：example 缺省 / 段数对不上 ⇒ 字段留空并提示按官方文档填写', skip, async () => {
+  const NO_EXAMPLE = {
+    namespace: 'zhihu', siteName: '知乎', path: '/people/activities/:id', name: '用户动态',
+    categories: ['social'], parameters: {},
+    features: { requireConfig: false, requirePuppeteer: false, antiCrawler: false, supportPodcast: false },
+  }
+  // 段数对不上：模板要 3 段（branches + user + repo），example 只给了 2 段 ⇒ prefillValues 返回空
+  const MISMATCH = {
+    namespace: 'github', siteName: 'GitHub', path: '/labels/:user/:repo', name: '段数对不上',
+    categories: ['programming'], example: '/github/labels/DIYgod',
+    parameters: { user: '用户名', repo: '仓库名' },
+    features: { requireConfig: false, requirePuppeteer: false, antiCrawler: false, supportPodcast: false },
+  }
+  const h = await mount({
+    catalog: () => ({ value: catalogPage([BRANCHES, NO_EXAMPLE, MISMATCH], { siteTotal: 2, routeTotal: 3 }) }),
+  })
+  try {
+    await openExploreFromFeeds(h)
+
+    // example 能对齐：有预填，不许出现「按官方文档填写」的提示
+    h.$('[data-rss-explore-route="/branches/:user/:repo"]').click()
+    await h.waitFor(() => h.$('[data-rss-explore-param="user"]') !== null, { label: 'Branches 表单' })
+    assert.equal(h.$('[data-rss-explore-param="user"]').value, 'DIYgod')
+    assert.equal(h.$('[data-rss-explore-prefill-hint]') ?? null, null, '预填成功时不显示提示')
+
+    // example 缺省：字段留空 + 明说要按官方文档填写（不是让人以为界面没加载出来）
+    h.$('[data-rss-explore-route="/people/activities/:id"]').click()
+    await h.waitFor(() => h.$('[data-rss-explore-param="id"]') !== null, { label: '无 example 表单' })
+    assert.equal(h.$('[data-rss-explore-param="id"]').value, '', '缺 example 时字段必须留空')
+    assert.match(h.$('[data-rss-explore-prefill-hint]')?.textContent ?? '', /按官方文档填写/, '缺 example 必须提示按官方文档填写')
+
+    // 段数对不上：同样不预填、同样提示
+    h.$('[data-rss-explore-route="/labels/:user/:repo"]').click()
+    await h.waitFor(() => h.$('[data-rss-explore-param="repo"]') !== null, { label: '段数不符表单' })
+    assert.equal(h.$('[data-rss-explore-param="user"]').value, '', '段数对不上时不许猜值')
+    assert.equal(h.$('[data-rss-explore-param="repo"]').value, '', '段数对不上时不许猜值')
+    assert.match(h.$('[data-rss-explore-prefill-hint]')?.textContent ?? '', /按官方文档填写/, '段数对不上也必须提示按官方文档填写')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R8b 04 拼地址回包竞态：两个站点同 path 时，切站后旧回包不许写进新表单', skip, async () => {
+  const ALPHA_ROOT = {
+    namespace: 'alpha', siteName: 'Alpha', path: '/', name: '站点首页',
+    categories: [], parameters: {},
+    features: { requireConfig: false, requirePuppeteer: false, antiCrawler: false, supportPodcast: false },
+  }
+  const BETA_ROOT = {
+    namespace: 'beta', siteName: 'Beta', path: '/', name: '站点首页',
+    categories: [], parameters: {},
+    features: { requireConfig: false, requirePuppeteer: false, antiCrawler: false, supportPodcast: false },
+  }
+  // 回包由用例手动放行：在飞期间切到另一站点的同 path 路由，模拟旧回包迟到。
+  let releaseBuild
+  const buildGate = new Promise((resolve) => { releaseBuild = resolve })
+  const h = await mount({
+    catalog: () => ({ value: catalogPage([ALPHA_ROOT, BETA_ROOT], { siteTotal: 2, routeTotal: 2 }) }),
+    build: async () => {
+      await buildGate
+      return { value: { url: 'https://rsshub.example/alpha/' } }
+    },
+  })
+  try {
+    await openExploreFromFeeds(h)
+    const rowOf = (namespace) => h.$$('[data-rss-explore-row]').find(
+      (row) => row.querySelector('[data-rss-explore-site]')?.getAttribute('data-rss-explore-site') === namespace,
+    )
+    const alphaRow = rowOf('alpha')
+    const betaRow = rowOf('beta')
+    assert.ok(alphaRow !== undefined && betaRow !== undefined, '两个同 path 站点都要在列表里')
+
+    alphaRow.querySelector('[data-rss-explore-route="/"]').click()
+    await h.waitFor(() => h.$('[data-rss-explore-build]') !== null, { label: 'Alpha 表单' })
+    h.$('[data-rss-explore-build]').click()
+    await h.waitFor(() => h.calls('exploreBuildUrl').length === 1, { label: 'Alpha 拼地址请求在飞' })
+
+    // 在飞期间切到 Beta 的同 path 路由：旧回包属于 Alpha，绝不能落到 Beta 的表单上。
+    betaRow.querySelector('[data-rss-explore-route="/"]').click()
+    await h.waitFor(() => h.store.get().explore?.selected?.namespace === 'beta', { label: '切到 Beta' })
+    releaseBuild()
+    await h.settle()
+
+    assert.equal(h.store.get().explore?.builtUrl, undefined, '切站后旧回包不许写进新表单状态')
+    assert.equal(h.$('[data-rss-explore-url]') ?? null, null, 'Beta 表单不许显示 Alpha 拼出的地址')
+    assert.equal(h.$('[data-rss-explore-form-path]')?.textContent, '/', '仍停在 Beta 的表单上')
   } finally {
     h.cleanup()
   }

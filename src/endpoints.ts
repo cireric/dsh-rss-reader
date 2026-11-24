@@ -67,7 +67,7 @@ import {
   type CatalogIndex,
   type CatalogPosition,
 } from './explore-catalog.js'
-import { loadCatalog, type CatalogProjection as LoadCatalogProjection } from './explore-catalog-fetch.js'
+import { loadCatalog, type CatalogProjectResult } from './explore-catalog-fetch.js'
 // 未读判据（isUnread / countUnreadPerFeed）不再由本文件在 JS 侧实现：Task 5 把它交给了存储侧，
 // 自持实现里的 SQL `read_at IS NULL` 与 unread.ts 的 isUnread 是同一件事，两者的等价由
 // tests/store-sqlite.test.mjs 的「同一夹具上逐键对账」钉住。shared.ts 仍是那条规则的定义处。
@@ -536,7 +536,7 @@ function exploreBaseOf(ctx: EndpointCtx): { ok: true; base: string } | { ok: fal
  * 顺带塞进 `totals`，02 的成功日志就能报「N 站 / M 路由」——不必为了凑一句日志去改投影形状。
  * `invalid` 在端点这一层没有下发位置（wire 里没有它），只作为 02 日志与 01 用例的事实。
  */
-function projectForLoad(raw: unknown): LoadCatalogProjection<CatalogIndex> {
+function projectForLoad(raw: unknown): CatalogProjectResult<CatalogIndex> {
   const projected = projectCatalog(raw)
   if (!projected.ok) return projected
   return {

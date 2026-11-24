@@ -181,6 +181,13 @@ export function ExploreView(props: ExploreViewProps): ReactNode {
           {params.length === 0 && (
             <div className="dsh-rss-explore-detail">这条路由没有参数，直接拼地址即可。</div>
           )}
+          {/* spec §4.5：example 缺省或段数对不上 ⇒ 不预填，字段留空并明说「按官方文档填写」。
+              不给这句话时，一排空 input 看起来像界面没加载出实例已有的示例。 */}
+          {params.length > 0 && !state.prefilled && (
+            <div className="dsh-rss-explore-detail" data-rss-explore-prefill-hint="">
+              按官方文档填写（无官方 example）
+            </div>
+          )}
           {params.map((param) => (
             <label key={param.name} className="dsh-rss-explore-field" data-rss-explore-field={param.name}>
               <span className="dsh-rss-explore-field-label">

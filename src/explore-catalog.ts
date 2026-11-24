@@ -177,6 +177,8 @@ function freezeRow(row: ExploreRouteView): ExploreRouteView {
  * 顶层不是对象（null / 数组 / 标量）⇒ `{ ok: false, reason }`，**不抛**：调用方（02 票的取表）
  * 要把「非 JSON / 形状非法」拼成一句可读错误，而不是让异常穿透到 HTTP 层变成 500。
  * 站点 / 路由的坏条目逐条跳过并计数，整表仍可用（B20）—— 3.3 MB 的回包里出现一条脏数据是常态。
+ * 站点名缺失**不**算坏条目：它只影响展示，回落成 namespace 后路由照常展开（spec §4.2 的跳过
+ * 清单不含它）；只有 `routes` 不是对象才丢掉整站。
  */
 export function projectCatalog(raw: unknown): CatalogProjection {
   if (!isRecord(raw)) return { ok: false, reason: '路由目录不是对象（实例回包形状非法）' }
@@ -189,11 +191,16 @@ export function projectCatalog(raw: unknown): CatalogProjection {
       invalid += 1
       continue
     }
-    const siteName = siteValue['name']
+    const siteName = typeof siteValue['name'] === 'string' && siteValue['name'] !== ''
+      ? siteValue['name']
+      // 站点名缺失 / 非字符串 / 空串 ⇒ 回落成 namespace。namespace 是实例自己声明的键，
+      // 也是路由地址的第一段 —— 它是真实标识，不是编造的值；而 spec §4.2 的跳过清单只列了
+      // 形状非法（站点值不是对象 / routes 不是对象 / 路由值不是对象 / path 不是字符串），
+      // 「名字缺失」不在其中：为了一个展示名丢掉整站的全部路由超出了 spec 的授权。
+      : namespace
     const routes = siteValue['routes']
-    // 站点名是 B3「搜站点名 ⇒ 该站全部路由命中」的判据；回落到 namespace 会让「搜 github」
-    // 命中一个名字其实缺失的站点 —— 那条命中不是实例声明的，属于编造。宁可跳过这个站点。
-    if (typeof siteName !== 'string' || siteName === '' || !isRecord(routes)) {
+    // 只有 routes 不是对象才是站点级形状非法 —— 没有路由表就无从展开，跳过并计数。
+    if (!isRecord(routes)) {
       invalid += 1
       continue
     }

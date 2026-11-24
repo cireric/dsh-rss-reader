@@ -48,6 +48,7 @@ import { ConfirmDialog } from './confirm-dialog.js'
 // 两处各造一个 `new Set()` 会得到值相等但引用不同的两份「空组覆盖」，而 React 的相等判断与
 // `foldOf` 的快照语义都靠**同一个引用**才不多跑一次渲染。理由见那边的常量注释。
 import { EMPTY_IMAGE_GROUPS } from '../image-fold.js'
+import { parseTunableValue } from '../settings-schema.js'
 import { hasBodyText, httpUrlOrEmpty, ROUTE_PATH, type ArticlePayload, type CleanupResult, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult } from '../shared.js'
 import { recencyOf } from '../cursor.js'
 import { paragraphsOf } from '../html-text.js'
@@ -847,9 +848,15 @@ export function createReader(store: ReaderStore): () => ReactNode {
       : state.items.find((item) => item.id === state.selectedId)
     /**
      * 探索入口的可见性（R8b 04 / D11）：两处入口共用这一份判据 —— 同一份 settings 快照、
-     * 同一个「非空」检查。客户端不解析地址（解析在宿主），也不自己补一个默认实例。
+     * 同一个「解析得出且非空」检查。
+     *
+     * `parseTunableValue('rsshubBase', …)` 就是宿主 `exploreBaseOf` 调的那份地址判据
+     *（`parseRsshubBase`），**不是**客户端第二套「实例可用」规则；这里只是把同一份解析结果
+     * 拿来判空。坏地址（如 `ftp://x`）与未配置在宿主同归 `not-configured`，入口也必须同样
+     * 不渲染 —— 否则点进去必然拿到一句「地址不合法」，把人送进死胡同。
      */
-    const exploreAvailable = (state.settings?.effective.rsshubBase ?? '') !== ''
+    const exploreBase = parseTunableValue('rsshubBase', state.settings?.effective.rsshubBase)
+    const exploreAvailable = exploreBase !== undefined && exploreBase !== ''
 
     return (
       <div ref={setRoot} tabIndex={0} {...{ [ROOT_ATTR]: '' }}
