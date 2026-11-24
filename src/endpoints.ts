@@ -16,6 +16,8 @@ import {
   cleanupPayload,
   discoverFeedsPayload,
   duplicateHintsPayload,
+  exploreBuildUrlPayload,
+  exploreCatalogPayload,
   idPayload,
   itemIdPayload,
   itemIdWindowPayload,
@@ -52,12 +54,24 @@ import { TagError } from './tags.js'
 import { discoverCandidates, validateSubscriptions } from './subscribe.js'
 import { decodeRadarResponse, radarRulesUrl } from './radar.js'
 import { fetchFeed } from './feed/fetch.js'
-import { parseTunableValue } from './settings-schema.js'
+import { parseRsshubBase, parseTunableValue } from './settings-schema.js'
 import type { ReaderStore, UnreadStore } from './store.js'
+// R8b 03：探索的接线只**调用** 01 / 02 两层，不改它们的签名与行为。01 负责投影 / 检索 /
+// 游标 / 拼装（唯一一份判据），02 负责出网与 12h 实例键缓存（唯一一份取表路径）。
+import {
+  buildExploreUrl,
+  decodeCatalogCursor,
+  encodeCatalogCursor,
+  projectCatalog,
+  type CatalogFilter,
+  type CatalogIndex,
+  type CatalogPosition,
+} from './explore-catalog.js'
+import { loadCatalog, type CatalogProjection as LoadCatalogProjection } from './explore-catalog-fetch.js'
 // 未读判据（isUnread / countUnreadPerFeed）不再由本文件在 JS 侧实现：Task 5 把它交给了存储侧，
 // 自持实现里的 SQL `read_at IS NULL` 与 unread.ts 的 isUnread 是同一件事，两者的等价由
 // tests/store-sqlite.test.mjs 的「同一夹具上逐键对账」钉住。shared.ts 仍是那条规则的定义处。
-import { clampReadingRatio, fail, ok, type DuplicateHintView, type Endpoint, type ItemView, type Overview, type RefreshRun, type RpcResult } from './shared.js'
+import { clampReadingRatio, fail, ok, type DuplicateHintView, type Endpoint, type ExploreCatalogPage, type ExploreRouteView, type ItemView, type Overview, type RefreshRun, type RpcResult } from './shared.js'
 import type { UnreadAccount } from './unread.js'
 import { sanitizeViewPreferences } from './preferences.js'
 import { recencyOf } from './cursor.js'
@@ -488,8 +502,103 @@ const buildOverview = (
     refreshedAt: refreshedAtMs === undefined ? undefined : new Date(refreshedAtMs).toISOString(),
   }
 }
+// ── R8b 03：探索的两个只读端点（spec §4.3 / §4.5）────────────────────────────
+
+/** 一页的默认条数与上限（spec §4.3）：展示偏好，越界夹取不拒绝。 */
+const CATALOG_PAGE_DEFAULT = 30
+const CATALOG_PAGE_MAX = 100
+
 /**
- * 端点表：33 个端点一处声明（每项的 `payload` 是入参形状的唯一声明）。
+ * 实例源站 + 「这个实例当前是否可用」的唯一判据。
+ *
+ * 未配置是**功能关闭**（D11），不是实例故障：翻成 `not-configured` 让界面能指回设置页，
+ * 同时保证这一刻零请求（B9）。非法地址也归同一个码 —— 对调用方是同一件事「没有可用的实例」，
+ * 差别只在文案；地址判据仍只有 `parseRsshubBase` 这一份，不在这里重写协议 / 路径的规则。
+ */
+function exploreBaseOf(ctx: EndpointCtx): { ok: true; base: string } | { ok: false; result: RpcResult<never> } {
+  const base = parseRsshubBase(ctx.config.rsshubBase)
+  if (base === '') {
+    return { ok: false, result: fail('not-configured', '未配置 RSSHub 实例地址，无法浏览路由表') }
+  }
+  if (base === undefined) {
+    return {
+      ok: false,
+      result: fail('not-configured', 'RSSHub 实例地址不合法（只支持 http(s) 源站，不能带路径 / 查询 / 参数），无法浏览路由表'),
+    }
+  }
+  return { ok: true, base }
+}
+
+/**
+ * 01 的投影 → 02 的取表之间那层**薄适配**（票面明确不许改两侧签名）。
+ *
+ * 投影回 `{ ok, catalog, invalid }`，取表层要 `{ ok, value, totals? }`。把 `sites` / `total`
+ * 顺带塞进 `totals`，02 的成功日志就能报「N 站 / M 路由」——不必为了凑一句日志去改投影形状。
+ * `invalid` 在端点这一层没有下发位置（wire 里没有它），只作为 02 日志与 01 用例的事实。
+ */
+function projectForLoad(raw: unknown): LoadCatalogProjection<CatalogIndex> {
+  const projected = projectCatalog(raw)
+  if (!projected.ok) return projected
+  return {
+    ok: true,
+    value: projected.catalog,
+    totals: { siteTotal: projected.catalog.sites, routeTotal: projected.catalog.total },
+  }
+}
+
+/**
+ * 取表：两个端点共用同一条路径（同一份缓存、同一份失败文案）。
+ *
+ * 失败统一翻成 `catalog-unavailable`：拉不到表既不是调用方的请求错误（400 会让人去查自己的
+ * 入参），也不是插件内部异常（internal 会让人以为代码坏了）。真正的原因（超时 / 非 JSON /
+ * 内网地址被拒）由 02 原样给出，这里只加一层「拉取路由表失败」的上下文。
+ */
+async function loadExploreCatalog(
+  ctx: EndpointCtx,
+  base: string,
+): Promise<{ ok: true; catalog: CatalogIndex } | { ok: false; result: RpcResult<never> }> {
+  const loaded = await loadCatalog(base, projectForLoad, { fetchImpl: ctx.fetchImpl, log: ctx.log })
+  if (loaded.kind === 'failure') {
+    return { ok: false, result: fail('catalog-unavailable', '拉取路由表失败：' + loaded.reason) }
+  }
+  return { ok: true, catalog: loaded.catalog }
+}
+
+/** 入参 → 01 的检索条件；null 与缺省都当「不生效」（与 01 的 normalizeFilter 同一语义）。 */
+function catalogFilterOf(
+  input: { readonly q?: string | null; readonly category?: string | null; readonly namespace?: string | null },
+): CatalogFilter {
+  return {
+    ...(input.q === null || input.q === undefined ? {} : { q: input.q }),
+    ...(input.category === null || input.category === undefined ? {} : { category: input.category }),
+    ...(input.namespace === null || input.namespace === undefined ? {} : { namespace: input.namespace }),
+  }
+}
+
+/**
+ * 一页 = 游标边界之后的 `limit` 行。
+ *
+ * 边界行必须**还在**当前结果里：栅栏保证筛选相同、目录在同一次缓存里冻结，正常情况一定找得到；
+ * 找不到只可能是 12h 过期后实例换了表。此时明确失败 —— 回第一页会让界面无限追加重复行
+ *（与 spec §4.3 / B7 拒绝失配游标是同一条理由）。返回 undefined = 这一页无法定位。
+ */
+function catalogPageOf(
+  items: readonly ExploreRouteView[],
+  position: CatalogPosition | undefined,
+  limit: number,
+): { page: ExploreRouteView[]; hasMore: boolean } | undefined {
+  let start = 0
+  if (position !== undefined) {
+    const boundary = items.findIndex((row) => row.namespace === position.namespace && row.path === position.path)
+    if (boundary < 0) return undefined
+    start = boundary + 1
+  }
+  const page = items.slice(start, start + limit)
+  return { page, hasMore: start + page.length < items.length }
+}
+
+/**
+ * 端点表：35 个端点一处声明（每项的 `payload` 是入参形状的唯一声明）。
  *
  * 穷尽性由 `Record<Endpoint, EndpointSpec>` 保证 —— 名字表（shared.ts 的 ENDPOINT_NAMES）
  * 加了新端点而这里没跟上，编译就不过。这是本文件里唯一需要「加端点时改的地方」。
@@ -1121,6 +1230,89 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         return ok({ passed: false, message: '响应里没有可用的 Radar 规则（空响应或只有站点名的空壳）' })
       }
       return ok({ passed: false, message: decoded.reason + '（这个地址可能不是 RSSHub 实例）' })
+    },
+  }),
+
+  /**
+   * 探索：分页取一页路由行（R8b 03，spec §4.3 / §6）。
+   *
+   * 浏览器永远拿不到整张表：宿主按需拉一次（02 的 12h 实例键缓存）→ 01 的索引里筛 → 只回这一页。
+   * 三个筛子 AND 叠加、`matched` 与目录口径分开、游标栅栏全部由 01 的 `query` 与
+   * `encode/decodeCatalogCursor` 判 —— 这里只做「取表、夹 limit、装配 wire 形状」。
+   *
+   * 只读：不写库、不改配置（探索是一次性浏览，D14 的视图状态也不落盘）。
+   */
+  exploreCatalog: defineEndpoint({
+    payload: exploreCatalogPayload,
+    invalidMessage: 'exploreCatalog 的 q / category / namespace 需为字符串，limit 需为正整数，cursor 需为字符串',
+    to: async (input, ctx) => {
+      const resolved = exploreBaseOf(ctx)
+      if (!resolved.ok) return resolved.result
+      const loaded = await loadExploreCatalog(ctx, resolved.base)
+      if (!loaded.ok) return loaded.result
+
+      const filter = catalogFilterOf(input)
+      // 游标先过栅栏：筛选变了（B7）或游标认不出（B8）都回 bad-request。
+      // **绝不**把 undefined 当成「没有游标 ⇒ 从第一页开始」—— 那会让界面无限追加重复行。
+      let position: CatalogPosition | undefined
+      if (input.cursor !== null && input.cursor !== undefined) {
+        position = decodeCatalogCursor(input.cursor, filter)
+        if (position === undefined) return fail('bad-request', '分页游标与当前筛选不匹配，请重新加载')
+      }
+      // 越界夹取不拒绝：limit 是展示偏好，不是正确性（spec §4.3）。默认 30 / 上限 100。
+      const limit = Math.min(input.limit ?? CATALOG_PAGE_DEFAULT, CATALOG_PAGE_MAX)
+      const { matched, items } = loaded.catalog.query(filter)
+      const paged = catalogPageOf(items, position, limit)
+      if (paged === undefined) return fail('bad-request', '分页游标已失效（目录已更新），请重新加载')
+      const last = paged.page[paged.page.length - 1]
+      const nextCursor = paged.hasMore && last !== undefined
+        ? encodeCatalogCursor(filter, { namespace: last.namespace, path: last.path })
+        : undefined
+      return ok<ExploreCatalogPage>({
+        siteTotal: loaded.catalog.sites,
+        routeTotal: loaded.catalog.total,
+        matched,
+        categories: [...loaded.catalog.categories],
+        items: paged.page,
+        ...(nextCursor === undefined ? {} : { nextCursor }),
+      })
+    },
+  }),
+
+  /**
+   * 探索：把 `{ namespace, path, values }` 拼成一个**没有 `:param` 残留**的订阅地址
+   *（R8b 03，spec §4.5）。地址拼装只在宿主做，客户端只提交参数值。
+   *
+   * 404 与 400 的分工是承重的：未知站点 / 未知路由是「你点的这一行不在目录里」（404），
+   * 缺必填参数是「这一行在，但你没填全」（400 且点名参数）。未知站点要先查目录，所以两个端点
+   * 都走同一条取表路径（02 的缓存让第二次点击不再出网）。
+   *
+   * 只读：拼地址不订阅、不写库（订阅仍走既有的 addFeed）。
+   */
+  exploreBuildUrl: defineEndpoint({
+    payload: exploreBuildUrlPayload,
+    invalidMessage: 'exploreBuildUrl 需要 namespace / path（非空字符串）与 values（参数名 → 值）',
+    to: async (input, ctx) => {
+      const resolved = exploreBaseOf(ctx)
+      if (!resolved.ok) return resolved.result
+      const loaded = await loadExploreCatalog(ctx, resolved.base)
+      if (!loaded.ok) return loaded.result
+
+      // 站点先判：打错站点与「站点对、路由不存在」是两条不同的排障线索，文案要能区分。
+      if (!loaded.catalog.rows.some((row) => row.namespace === input.namespace)) {
+        return fail('not-found', '未知的站点（namespace）：' + input.namespace)
+      }
+      if (!loaded.catalog.rows.some((row) => row.namespace === input.namespace && row.path === input.path)) {
+        return fail('not-found', '未知的路由路径：' + input.path)
+      }
+      // 拼装只调 01 的 buildExploreUrl：端点内不出现第二套模板解析（`*` / `{}` 的拒绝、
+      // 可选段的省略、必填的点名都在那一份实现里）。
+      const built = buildExploreUrl(resolved.base, input.namespace, input.path, input.values)
+      if (built.kind === 'unsupported') {
+        return fail('bad-request', '这条路由的路径模板含通配 / 正则段，无法安全拼出地址（' + input.path + '）')
+      }
+      if (built.kind === 'missing') return fail('bad-request', '缺少必填参数：' + built.parameter)
+      return ok({ url: built.url })
     },
   }),
 

@@ -287,6 +287,37 @@ export const searchQueryPayload = z.object({
 }).refine(({ from, to }) => !from || !to || from <= to)
 
 /**
+ * `exploreCatalog`（R8b 03，spec §4.3）：三个筛子 + 分页。
+ *
+ * `limit` 只判**正整数**：默认 30 / 上限 100 是展示偏好，越界由 handler 夹取而不是在这里拒绝
+ *（spec §4.3 明确「不是拒绝」）。若把上限写进声明，改窗宽就会变成一次 400 —— 声明的职责
+ * 只是「形状与类型」（ADR-0003），业务夹取留在 handler。
+ *
+ * 三个筛子用 `nullish`：浏览器通道把缺省序列化成 null，空串与 null 都当「不生效」
+ *（归 01 的 normalizeFilter 判，这里不重写一份空值语义）。整份 payload 也先过 `emptyAsObject`：
+ * 「没有筛选」的常态请求就是 `{}` / `null`，不该因为少一个空对象回 bad-request。
+ */
+export const exploreCatalogPayload = z.preprocess(emptyAsObject, z.object({
+  q: z.string().nullish(),
+  category: z.string().nullish(),
+  namespace: z.string().nullish(),
+  limit: z.number().int().positive().nullish(),
+  cursor: z.string().nullish(),
+}))
+
+/**
+ * `exploreBuildUrl`（R8b 03，spec §4.5）：站点 + 路径模板 + 参数值。
+ *
+ * 只判「namespace / path 是非空字符串、values 是字符串表」；**未知站点 / 未知路由是 404**、
+ * 缺必填参数是 400 —— 那两条要读路由目录，属于 handler 的业务判定，搬进声明就多了一个裁决者。
+ */
+export const exploreBuildUrlPayload = z.object({
+  namespace: z.string().min(1),
+  path: z.string().min(1),
+  values: z.record(z.string(), z.string()),
+})
+
+/**
  * `saveSettings` 的逐键 patch（R11 02，spec D4.1 / D5 / D9）。
  *
  * 形状（record）在这里判，**每个值仍走 `parseTunableValue`** —— 范围判据只有

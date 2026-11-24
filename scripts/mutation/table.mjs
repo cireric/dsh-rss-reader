@@ -3297,4 +3297,28 @@ export const MUTATIONS = [
     judgeTests: ['projectCatalog：坏站点 / 坏路由逐条跳过，invalid 计数，整表仍可用（B20）'],
     from: "    if (typeof path !== 'string' || path === '' || typeof name !== 'string')\n        return undefined;",
     to: '    if (false)\n        return undefined;' },
+
+  // ── R8b 03：探索端点的接线（2026-11-24）────────────────────────────────
+  // 分页上限失效：越界 limit 原样放行。夹具里 110 条路由，limit=500 时一次回全部 110 条，
+  // 「上限夹到 100」的判据当场翻红 —— 浏览器端收到的是整张表（B18 的病象）。
+  // from 照构建产物 lib/endpoints.js 的实际字节写（pitfalls 一、1.4），独立实测 OCCURRENCES=1。
+  { id: 'explore-没有分页上限', file: 'lib/endpoints.js',
+    judges: ['explore-endpoints.test.mjs'],
+    judgeTests: ['limit：默认 30、上限 100 夹取不拒绝，非正整数是形状错误（B18 的前半）'],
+    from: '            const limit = Math.min(input.limit ?? CATALOG_PAGE_DEFAULT, CATALOG_PAGE_MAX);',
+    to: '            const limit = input.limit ?? CATALOG_PAGE_DEFAULT;' },
+  // 游标栅栏失效：失配时不再拒绝，而是当成「没有游标」从第一页开始。B7 / B8 的用例会看到
+  // 200 + 第一页（界面无限追加重复行），而不是 bad-request。
+  { id: 'explore-游标不复位', file: 'lib/endpoints.js',
+    judges: ['explore-endpoints.test.mjs'],
+    judgeTests: ['游标栅栏：换 q / category / namespace 或乱码一律 bad-request，绝不回第一页（B7 / B8）'],
+    from: "                if (position === undefined)\n                    return fail('bad-request', '分页游标与当前筛选不匹配，请重新加载');",
+    to: "                if (false)\n                    return fail('bad-request', '分页游标与当前筛选不匹配，请重新加载');" },
+  // 未配置也请求：空地址不再回 not-configured，而是落一个公共实例去拉表。B9 的两条判据
+  // （错误码 not-configured + 零请求）同时翻红 —— 这正是 D11「未配置就不可用」的反面。
+  { id: 'explore-未配置也请求', file: 'lib/endpoints.js',
+    judges: ['explore-endpoints.test.mjs'],
+    judgeTests: ['未配置实例：两个端点都回可读错误，且一个网络请求都不发（B9）'],
+    from: "        return { ok: false, result: fail('not-configured', '未配置 RSSHub 实例地址，无法浏览路由表') };",
+    to: "        return { ok: true, base: 'https://rsshub.app' };" },
 ]
