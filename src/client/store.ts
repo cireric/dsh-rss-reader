@@ -123,6 +123,13 @@ export interface ExploreState {
   selected: ExploreRouteView | undefined
   /** 参数草稿（name → 值）。 */
   draft: Record<string, string>
+  /**
+   * 选中这条路由时，官方 example 是否真的反推出至少一个值（spec §4.5）。
+   *
+   * 只在 `selectExploreRoute` 那一刻按 `prefillValues` 的结果定死：它是「实例给没给样本」
+   * 的事实，不该随用户往输入框里敲字变化。false + 模板有参数 ⇒ 表单提示「按官方文档填写」。
+   */
+  prefilled: boolean
   /** 本地拦下的缺失必填参数名（点名用，不是唯一防线）。 */
   missing: string[]
   /** 宿主拼好的地址；undefined = 还没拼 / 表单已改。 */

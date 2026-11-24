@@ -33,8 +33,15 @@ export interface CatalogTotals {
   readonly routeTotal: number
 }
 
-/** 一次投影的结果：成功带投影值与可选计数；失败带可直接展示的原因。 */
-export type CatalogProjection<T> =
+/**
+ * 一次投影的结果：成功带投影值与可选计数；失败带可直接展示的原因。
+ *
+ * 刻意**不叫** `CatalogProjection`：01 的 `CatalogProjection` 是「raw → 索引」的投影**结果**
+ *（成功带 `catalog`，失败带 `reason`），这里是取表层对任意注入投影的**回执**（成功带 `value`）。
+ * 同名会让 endpoints.ts 被迫写一个别名 cast 才分得清两者 —— 那正是两个同名异义类型在同一处
+ * 汇合的征兆。
+ */
+export type CatalogProjectResult<T> =
   | { readonly ok: true; readonly value: T; readonly totals?: CatalogTotals }
   | { readonly ok: false; readonly reason: string }
 
@@ -90,7 +97,7 @@ export function catalogUrl(base: string): string {
  */
 export async function loadCatalog<T>(
   base: string,
-  project: (raw: unknown) => CatalogProjection<T>,
+  project: (raw: unknown) => CatalogProjectResult<T>,
   options: LoadCatalogOptions = {},
 ): Promise<CatalogLoadResult<T>> {
   const log = options.log ?? (() => {})

@@ -135,6 +135,33 @@ test('projectCatalog：坏站点 / 坏路由逐条跳过，invalid 计数，整�
   assert.equal(result.catalog.total, 3, '只有三条可投影路由')
 })
 
+test('projectCatalog：站点 name 缺失 / 非字符串 / 空串 ⇒ 回落 namespace，路由照常展开（spec §4.2）', () => {
+  // spec §4.2 的跳过清单只有形状非法（站点值不是对象 / routes 不是对象 / 路由值不是对象 /
+  // path 不是字符串）：「站点名缺失」不在其中。名字只影响展示，用实例自己的键（namespace）
+  // 回落；为了一个展示名丢掉整站路由，等于把一条无关紧要的字段漂移放大成整站消失。
+  for (const name of [undefined, '', 42, null]) {
+    const raw = {
+      anon: {
+        ...(name === undefined ? {} : { name }),
+        routes: { only: { path: '/anon/only/:id', name: '匿名站路由' } },
+      },
+    }
+    const result = projectCatalog(raw)
+    assert.equal(result.ok, true)
+    assert.equal(result.invalid, 0, 'name=' + String(name) + ' 不是坏条目，invalid 不许增加')
+    assert.equal(result.catalog.sites, 1, 'name=' + String(name) + ' 时站点照常计数')
+    assert.equal(result.catalog.total, 1, 'name=' + String(name) + ' 时路由照常展开')
+    assert.equal(result.catalog.rows[0].siteName, 'anon', 'siteName 必须回落成 namespace')
+  }
+
+  // 只有 routes 不是对象才是站点级形状非法：没有路由表就无从展开，照旧跳过并计数。
+  const dropped = projectCatalog({ broken: { name: '有名字' } })
+  assert.equal(dropped.ok, true)
+  assert.equal(dropped.invalid, 1)
+  assert.equal(dropped.catalog.sites, 0)
+  assert.equal(dropped.catalog.total, 0)
+})
+
 test('projectCatalog：字段裁剪 —— description / location / maintainers / radar / apiRoutes 一律丢弃（D12）', () => {
   const result = projectCatalog(rawCatalog())
   assert.equal(result.ok, true)

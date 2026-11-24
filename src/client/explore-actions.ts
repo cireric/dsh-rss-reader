@@ -40,6 +40,7 @@ function emptyExplore(): ExploreState {
     nextCursor: undefined,
     selected: undefined,
     draft: {},
+    prefilled: false,
     missing: [],
     builtUrl: undefined,
     building: false,
@@ -185,6 +186,10 @@ export function createExploreActions(host: ExploreActionHost) {
   /**
    * 选中一条路由：字段来自 parsePathTemplate，预填来自 prefillValues（两者都只有一份实现）。
    * 换路由 = 上一份草稿作废：残留值只会在新模板里制造「看起来填过」的假象。
+   *
+   * `prefilled` 记的是「这次真的预填了没有」：example 缺省（262 条）或段数对不上时
+   * prefillValues 返回空对象，表单要据此提示按官方文档填写，而不是给一排空 input 让人
+   * 以为实例没提供任何信息（spec §4.5）。
    */
   const selectExploreRoute = (route: ExploreRouteView): void => {
     const explore = get().explore
@@ -196,6 +201,7 @@ export function createExploreActions(host: ExploreActionHost) {
         ...explore,
         selected: route,
         draft,
+        prefilled: Object.keys(draft).length > 0,
         missing: [],
         builtUrl: undefined,
         building: false,
@@ -241,6 +247,13 @@ export function createExploreActions(host: ExploreActionHost) {
       return
     }
     set({ explore: { ...explore, building: true, missing: [] } })
+    // 回包落地前重判「用户还在看同一站点的同一条路由」。只比 path 不够：两个站点可以有
+    // 同一条 path（如都是 `/`），切换站点后旧回包会把 A 的 URL 写进 B 的表单。
+    // namespace 是站点的唯一键，必须与 path 一起比对。
+    const sameRouteSelected = (current: ExploreState | undefined): current is ExploreState =>
+      current !== undefined
+      && current.selected?.namespace === route.namespace
+      && current.selected?.path === route.path
     try {
       const result = await rpc<{ url?: string }>('exploreBuildUrl', {
         namespace: route.namespace,
@@ -248,14 +261,14 @@ export function createExploreActions(host: ExploreActionHost) {
         values: explore.draft,
       })
       const current = get().explore
-      if (current === undefined || current.selected?.path !== route.path) return
+      if (!sameRouteSelected(current)) return
       if (typeof result?.url !== 'string' || result.url === '') {
         throw new Error('exploreBuildUrl 回包缺少 url')
       }
       set({ explore: { ...current, building: false, builtUrl: result.url, receipt: undefined } })
     } catch (failure) {
       const current = get().explore
-      if (current === undefined || current.selected?.path !== route.path) return
+      if (!sameRouteSelected(current)) return
       set({ explore: { ...current, building: false } })
       // 与既有动作同一条错误通道：顶部错误条可见原因，不另造一套探索专用错误位。
       set({ error: failure instanceof Error ? failure.message : String(failure) })
