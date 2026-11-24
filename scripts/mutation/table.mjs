@@ -951,8 +951,10 @@ export const MUTATIONS = [
     judges: ['client-bundle.test.mjs', 'nav-persistence.test.mjs', 'overview-scale.test.mjs'],
     judgeTests: ['分页接线：续页游标在时渲染「加载更多」，点它真的取下一页（并追加到当前列表）', '记住上次选中的导航项、filter 与左栏显隐，重开后恢复', '选中的标签会记住：重开后回到同一个标签，而不是静默掉回「全部」', '改字号只动排版：导航、过滤与左栏显隐一项都不许被覆盖（重开后排版也恢复）', '持久化值不可信时（未知 feedId / 非法 shape）回落默认值且不抛错'],
     // 2026-11-16 重锚：视图记忆改成 host 注入的 viewMemory（load 已搬进 list-actions.ts）。
-    from: 'if (!viewMemory.restored()) viewMemory.apply(preferences);',
-    to: ';' },
+    // 2026-11-24 重锚（R14）：恢复分支多了一层「恢复出的范围要重取」，去掉 apply 即可；
+    // 内层 if 看到的是虚拟视图，不会触发重取。
+    from: 'if (!viewMemory.restored()) {\n\t\t\t\t\t\tviewMemory.apply(preferences);',
+    to: 'if (!viewMemory.restored()) {\n\t\t\t\t\t\t;' },
   // ⑫ R2-01 阅读位置：恢复只读不写。恢复时调一次 persistView 会把「读」与「写」耦合成环
   // （读到的旧值覆盖用户刚做的动作），也让每次打开面板都白热一次存储。
   { id: 'client-恢复写盘', file: 'lib/client.js',
@@ -3234,4 +3236,11 @@ export const MUTATIONS = [
     judgeTests: ['R14 选源向宿主取源范围（feedId），取消选源重新取跨源第一页'],
     from: 'const scopeChanged = current.kind !== "virtual" || next.kind !== "virtual";',
     to: 'const scopeChanged = false;' },
+  // 恢复视图后不按恢复出的范围重取：重开面板时恢复到某个源，列表仍停在「全局第一页里恰好
+  // 属于该源的那几条」——R14 原病象的另一条入口（用户截图正是重开面板的路径）。
+  { id: 'client-恢复视图不按范围重取', file: 'lib/client.js',
+    judges: ['nav-selection.test.mjs'],
+    judgeTests: ['R14 恢复视图：恢复到某个源时，首屏之后按源重取一次（重开面板不回到「全局页里的 2 条」）'],
+    from: 'if (!get().search && get().navSelection.kind !== "virtual") {',
+    to: 'if (false) {' },
 ]

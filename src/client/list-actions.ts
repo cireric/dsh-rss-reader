@@ -739,7 +739,16 @@ export function createListActions(host: ListActionHost) {
       } else {
         applyOverview(overview, request.window)
       }
-      if (!viewMemory.restored()) viewMemory.apply(preferences)
+      if (!viewMemory.restored()) {
+        viewMemory.apply(preferences)
+        // 恢复出的范围可能不是「跨源」：刚才那一页是按恢复前的虚拟视图取的（全局第一页），
+        // 恢复成源 / 文件夹 / 标签后必须按新范围重取一次。否则这些范围只能看见「全局第一页里
+        // 恰好属于它的那几条」—— 正是 R14 的病象在「重开面板」这条路径上的复现。
+        if (!get().search && get().navSelection.kind !== 'virtual') {
+          void load(endpoint === 'refresh' ? 'overview' : endpoint)
+          return
+        }
+      }
       // 用新游标重查已加载的页数，刷新插入的新条目不会挤掉整个阅读窗口。
       if (get().search) await search.load(undefined, search.loadedPages())
       // 「按了刷新没反应」是本插件最早的体验投诉：界面从不说明发生了什么。

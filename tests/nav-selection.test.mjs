@@ -49,10 +49,11 @@ const overviewOf = (items) => overviewStub({ items })
  *
  * @param overview 第一页的桩回包（或 `{ first, next }`：见下）
  */
-function loadExports(overview) {
+function loadExports(overview, request) {
   // 2026-11-15 阶段 4 票据 02：沙箱与假通道收进共享 helper —— 本文件不再自己写 fetch 分支。
+  // request 是「非 overview 端点」的桩（R14 的恢复视图用例要喂 viewPreferences）。
   const { exports } = loadClientModule({ AbortController, setTimeout, clearTimeout })
-  const channel = createFakeChannel({ overview, request: overview.request })
+  const channel = createFakeChannel({ overview, request: request ?? overview.request })
   // 调用点保持原样（exports.createReaderStore()）：这里把通道注入进去。
   const create = exports.createReaderStore
   exports.createReaderStore = (overrides = {}) => create({ rpc: channel.rpc, ...overrides })
@@ -599,4 +600,23 @@ test('R14 源范围的续页带 feedId（与第一页同一份范围）', async 
   assert.equal(page?.cursor, 'C1', '游标原样回带')
   assert.equal(page?.feedId, 'feedB',
     '续页必须带与第一页同一份范围；只带游标会让源页的下一页退化成跨源')
+})
+
+
+test('R14 恢复视图：恢复到某个源时，首屏之后按源重取一次（重开面板不回到「全局页里的 2 条」）', async () => {
+  const preferences = { navSelection: { kind: 'feed', feedId: 'feedB' }, filter: 'all', navVisible: true }
+  const exports = loadExports(overviewOf(twoFeeds()), async (endpoint) => {
+    if (endpoint === 'viewPreferences') return { preferences }
+    return undefined
+  })
+  const store = exports.createReaderStore()
+  await store.load('overview')
+
+  const calls = exports.__calls()
+  await waitFor(
+    () => calls.some(([endpoint, payload]) => endpoint === 'overview' && payload?.feedId === 'feedB'),
+    '恢复后按源重取',
+  )
+  assert.deepEqual({ ...store.get().navSelection }, { kind: 'feed', feedId: 'feedB' },
+    '恢复出的源选择必须留在 state 里；重取只是把「哪一页」换成源范围')
 })

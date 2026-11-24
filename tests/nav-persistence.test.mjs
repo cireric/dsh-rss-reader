@@ -744,9 +744,19 @@ test('改字号只动排版：导航、过滤与左栏显隐一项都不许被�
 
 test('持久化值不可信时（未知 feedId / 非法 shape）回落默认值且不抛错', async () => {
   const ghost = { value: { navSelection: { kind: 'feed', feedId: 'ghost' }, filter: 'unread', navVisible: false }, writes: [] }
-  const store = await openPanel({ items: twoFeeds(), prefs: ghost })
+  // 不用 openPanel：这条还要看**调用序列**。未知 feedId 若没在读侧被挡掉，恢复后会按它向宿主
+  // 取一次源页（R14 的恢复重取）—— 那次请求本身就是缺陷的可见形态，最终 state 回不回落是后话。
+  const exports = loadExports({ items: twoFeeds(), prefs: ghost })
+  const store = exports.createReaderStore()
+  await store.load('overview')
+  await flush()
   assert.equal(store.get().navSelection.kind, 'virtual', '源已退订 ⇒ 回落虚拟视图，而不是留一个指向不存在源的选中态')
   assert.deepEqual(ids(store.visible()), ['a1', 'a2', 'b1'], '回落之后右栏必须能看到条目（不是空列表）')
+  assert.deepEqual(
+    exports.__calls().filter(([endpoint, payload]) => endpoint === 'overview' && payload?.feedId !== undefined),
+    [],
+    '读侧不校验形状 ⇒ 会把一个已知无效的 feedId 当成真的范围发给宿主；回落必须发生在请求之前',
+  )
 
   // 三项**全部**非法时整份回落默认
   for (const value of [
