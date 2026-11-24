@@ -45,6 +45,8 @@ export const ENDPOINT_NAMES = [
   'testRsshub',
   // R9 02：归档页回溯（宿主读归档页、逐篇抓正文与日期、写入条目库）。
   'backfillHistory',
+  // R8b 03：探索的两个**只读**端点 —— 目录分页与地址拼装。整张路由表永不下发浏览器（D12）。
+  'exploreCatalog', 'exploreBuildUrl',
 ] as const
 export type Endpoint = (typeof ENDPOINT_NAMES)[number]
 

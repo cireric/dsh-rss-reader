@@ -240,6 +240,35 @@ const CONTRACTS = {
     alsoValid: [{ base: '' }],
     invalid: [{}, { base: 5 }, { base: null }],
   },
+  // R8b 03：探索的两个只读端点。`limit` 的默认 / 上限是展示偏好，夹取在 handler（spec §4.3），
+  // 声明这一层只判正整数；三筛与游标都只是字符串 / 缺省。
+  exploreCatalog: {
+    valid: {},
+    alsoValid: [
+      null,
+      { q: 'github', category: 'programming', namespace: 'github', limit: 30, cursor: 'x' },
+    ],
+    invalid: [
+      { q: 5 },
+      { category: 5 },
+      { namespace: 5 },
+      { limit: 0 },
+      { limit: 1.5 },
+      { limit: '30' },
+      { cursor: 5 },
+    ],
+  },
+  // namespace / path 非空是形状；「未知站点 / 未知路由是 404」读目录，归 handler（ADR-0003）。
+  exploreBuildUrl: {
+    valid: { namespace: 'github', path: '/branches/:user/:repo', values: {} },
+    invalid: [
+      {},
+      { namespace: '', path: '/branches/:user/:repo', values: {} },
+      { namespace: 'github', path: '', values: {} },
+      { namespace: 'github', path: '/branches/:user/:repo' },
+      { namespace: 'github', path: '/branches/:user/:repo', values: { user: 5 } },
+    ],
+  },
   viewPreferences: { valid: { anything: 1 }, invalid: [] },
   saveViewPreferences: {
     valid: { preferences: {} },
@@ -344,7 +373,9 @@ test('入参声明：每条坏样本都被拒，并给出字段路径', () => {
   // limit 0 / 51 / 非整数 / 非数字）。
   // 149 = 143 + R14 的 feedId 6 条负例（overview 4：feed+各范围互斥 / 空串 / 非字符串；
   // refresh 2：feed+folder 互斥 / 空串）。
-  assert.equal(checked, 149, '坏样本条数变了（当前 ' + checked + '）—— 检查契约表是否漏了必填字段')
+  // 161 = 149 + R8b 03 的 exploreCatalog 7 条（三筛与游标非字符串、limit 非正整数）+ exploreBuildUrl
+  // 的 5 条（缺字段 / 空 namespace / 空 path / 缺 values / values 非字符串表）。
+  assert.equal(checked, 161, '坏样本条数变了（当前 ' + checked + '）—— 检查契约表是否漏了必填字段')
 })
 
 test('坏入参：每个接 payload 的端点，第一条坏样本都经 dispatch 回 bad-request', async () => {
@@ -364,7 +395,8 @@ test('坏入参：每个接 payload 的端点，第一条坏样本都经 dispatc
   // R11 02 加了 saveSettings（有负例且经 dispatch 验过）：25 → 26。
   // R8a 01 加了 testRsshub（有负例且经 dispatch 验过）：26 → 27。
   // R9 02 加了 backfillHistory（有负例且经 dispatch 验过）：27 → 28。
-  assert.equal(covered.length, 28, '接 payload 的端点应当是 28 个，实际 ' + covered.length)
+  // R8b 03 加了 exploreCatalog / exploreBuildUrl（都有负例且经 dispatch 验过）：28 → 30。
+  assert.equal(covered.length, 30, '接 payload 的端点应当是 30 个，实际 ' + covered.length)
 })
 
 test('坏入参：统一 bad-request 信封、details.issues 指出字段，且不触达 store', async () => {
