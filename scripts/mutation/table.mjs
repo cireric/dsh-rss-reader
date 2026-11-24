@@ -1049,8 +1049,9 @@ export const MUTATIONS = [
   { id: 'persist-selectNav 不写盘', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs'],
     judgeTests: ['记住上次选中的导航项、filter 与左栏显隐，重开后恢复', '选中的标签会记住：重开后回到同一个标签，而不是静默掉回「全部」', '写盘串行化：前一次慢、后一次快时，最终的记忆是「后一次动作」'],
-    from: 'relocateSelection();\n\t\t\t\tpersistView();\n\t\t\t\tsearchActions.reset();\n\t\t\t\tconst scopeChanged = current.kind === "folder" || next.kind === "folder" || current.kind === "tag" || next.kind === "tag";',
-    to: 'relocateSelection();\n\t\t\t\tresetSearchPage();\n\t\t\t\tconst scopeChanged = current.kind === "folder" || next.kind === "folder" || current.kind === "tag" || next.kind === "tag";' },
+    // 2026-11-24 重锚（R14）：「任一侧不是虚拟视图 ⇒ 重取」取代了逐个点名 folder/tag 的旧判据。
+    from: 'relocateSelection();\n\t\t\t\tpersistView();\n\t\t\t\tsearchActions.reset();\n\t\t\t\tconst scopeChanged = current.kind !== "virtual" || next.kind !== "virtual";',
+    to: 'relocateSelection();\n\t\t\t\tresetSearchPage();\n\t\t\t\tconst scopeChanged = current.kind !== "virtual" || next.kind !== "virtual";' },
   { id: 'persist-toggleNav 不写盘', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs'],
     judgeTests: ['记住上次选中的导航项、filter 与左栏显隐，重开后恢复', '写盘失败必须可见：进 error 而不是被吞掉', '恢复是异步的：用户在它到达之前的手势不会被旧记忆盖掉（整份让位）', '只在关键动作时写盘：移动光标（每次按键）不产生写入'],
@@ -1739,7 +1740,8 @@ export const MUTATIONS = [
     // 2026-11-15 重锚：同上（deps.rpc）。
     // 2026-11-16 重锚：同上一族（deps.rpc → rpc、state.navSelection → 本地 nav 快照）。
     // 2026-11-20 重锚（R1-03 / 评审 P1）：续页载荷改为从「档位 + 载荷」成对取出的 request 展开。
-    from: 'const overview = await rpc("overview", {\n\t\t\t\t\t\tcursor,\n\t\t\t\t\t\t...nav.kind === "folder" ? { folder: nav.folder } : {},\n\t\t\t\t\t\t...nav.kind === "tag" ? { tagId: nav.tagId } : {},\n\t\t\t\t\t\t...request.payload\n\t\t\t\t\t});',
+    // 2026-11-24 重锚（R14）：续页载荷增加 feedId 一行（源范围的续页必须带同一份范围）。
+    from: 'const overview = await rpc("overview", {\n\t\t\t\t\t\tcursor,\n\t\t\t\t\t\t...nav.kind === "feed" ? { feedId: nav.feedId } : {},\n\t\t\t\t\t\t...nav.kind === "folder" ? { folder: nav.folder } : {},\n\t\t\t\t\t\t...nav.kind === "tag" ? { tagId: nav.tagId } : {},\n\t\t\t\t\t\t...request.payload\n\t\t\t\t\t});',
     // 2026-11-16 评审修复：callRpc 在产物里不存在（只有 rpc / deps.callRpc）—— 改成真的打第一页。
     to: 'const overview = await rpc("overview", {});' },
   { id: 'paging-在途不挡重复请求', file: 'lib/client.js',
@@ -3215,4 +3217,21 @@ export const MUTATIONS = [
     judgeTests: ['R9 03 回溯结果：新增 / 已存在 / 形态命中与技术性失败逐条渲染，失败为空时不显示空列表'],
     from: 'backfillReport.failures.map((failure, failureIndex) =>',
     to: '[].map((failure, failureIndex) =>' },
+
+  // ── R14：订阅源范围下沉到宿主分页（2026-11-24）──────────────────────────────
+  // 源范围不落到查询：feed 分支退回「无范围」⇒ 选源拿到的是跨源第一页。病象正是
+  // 「648 条的库里 27 条的源只显示 2 条」——列表看着有源内条目，实际是全局页的偶然交集。
+  // from 照构建产物 lib/item-page.js 的实际字节写（12 空格缩进），OCCURRENCES=1。
+  { id: 'paging-源范围不落到查询', file: 'lib/item-page.js',
+    judges: ['overview-paging.test.mjs'],
+    judgeTests: ['R14 源范围：宿主先筛再分页，跨页只有该源的行'],
+    from: '            return { feedIds: [scope.id] };',
+    to: '            return {};' },
+  // 选源不重取：范围判据恒 false ⇒ 点左栏的源只改 navSelection、列表仍是跨源第一页。
+  // 只靠客户端 inScope 过滤时，源内条目全在页外就显示 0 条。
+  { id: 'client-选源不重取', file: 'lib/client.js',
+    judges: ['nav-selection.test.mjs'],
+    judgeTests: ['R14 选源向宿主取源范围（feedId），取消选源重新取跨源第一页'],
+    from: 'const scopeChanged = current.kind !== "virtual" || next.kind !== "virtual";',
+    to: 'const scopeChanged = false;' },
 ]

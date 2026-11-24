@@ -55,9 +55,10 @@ export function createNavActions(host: NavActionHost) {
     relocateSelection()
     persistView()
     searchActions.reset()
-    // 文件夹/标签范围必须由宿主先筛再分页：进入/退出/切换范围时重取一页。
-    const scopeChanged = current.kind === 'folder' || next.kind === 'folder'
-      || current.kind === 'tag' || next.kind === 'tag'
+    // 三种范围（源 / 文件夹 / 标签）都必须由宿主先筛再分页（R14）：进入 / 退出 / 切换任何
+    // 一种都要重取一页。判据写成「任一侧不是虚拟视图」而不是逐个点名 —— 点名时新增一种
+    // 范围（R14 的源）就会在这里被静默漏掉，症状是「界面看着切了、列表还是旧范围的过滤结果」。
+    const scopeChanged = current.kind !== 'virtual' || next.kind !== 'virtual'
     if (!get().search && scopeChanged) void reload()
   }
 

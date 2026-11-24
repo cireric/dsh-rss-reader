@@ -20,13 +20,18 @@ import type { Cursor } from './cursor.js'
 import type { DisplayWindowBounds } from './display-window.js'
 
 /**
- * 浏览范围：文件夹（成员参与栅栏键）或标签（id 参与）。
+ * 浏览范围：单个订阅源（id 参与栅栏键）、文件夹（成员参与）或标签（id 参与）。
  *
  * 用判别联合而不是「两个可选字段 + 一条互斥约定」：互斥约定写在注释里就会被下一个人违反，
  * 而判别联合在 fenceKeyOf 的 switch 里能穷尽。无范围就是 `undefined`（跨源首页），
- * 它同样有栅栏（键 = 空串），所以三种范围走同一条编解码。
+ * 它同样有栅栏（键 = 空串），所以四种范围走同一条编解码。
+ *
+ * **源范围必须由宿主筛**（R14）：客户端拿全局第一页再按 `feedId` 过滤，会让低产源只显示
+ * 「恰好落在这一页里的那几条」——实测 648 条的库里，27 条的源只有 2 条在前 300。文件夹 /
+ * 标签本来就是宿主先筛，源与它们没有理由不同。
  */
 export type PageScope =
+  | { readonly kind: 'feed'; readonly id: string }
   | { readonly kind: 'folder'; readonly name: string; readonly feedIds: readonly string[] }
   | { readonly kind: 'tag'; readonly id: string }
 
@@ -40,6 +45,11 @@ export type PageScope =
 function scopeFenceOf(scope: PageScope | undefined): string {
   if (scope === undefined) return ''
   switch (scope.kind) {
+    case 'feed':
+      // 源 id 是规范化 URL（含 `:` / `/`）。栅栏匹配是「前缀 + 冒号」的 startsWith，
+      // 不用分隔符切开，所以 URL 里的冒号不会与段分隔撞车；前缀再带一个 `:` 也挡住了
+      // 「feed A 的 id 是 feed B 的前缀」这类碰撞。
+      return 'feed:' + scope.id
     case 'tag':
       return 'tag:' + scope.id
     case 'folder': {
@@ -183,6 +193,10 @@ export interface PageRequest {
 function listRecentArgsOf(scope: PageScope | undefined): { feedIds?: readonly string[]; tagId?: string } {
   if (scope === undefined) return {}
   switch (scope.kind) {
+    case 'feed':
+      // 存储层的 listRecent 本就按 feedIds 数组筛：单源就是只含一个成员的范围，
+      // 不新开「单源专用」参数（同一语义只留一种表达）。
+      return { feedIds: [scope.id] }
     case 'folder':
       return { feedIds: scope.feedIds }
     case 'tag':

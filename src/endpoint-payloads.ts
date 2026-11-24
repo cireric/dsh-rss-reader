@@ -140,11 +140,25 @@ export const markReadPayload = withWindow({
 export const duplicateHintsPayload = z.object({ itemIds: z.array(z.string().min(1)).nullish() })
 
 const scopeShape = {
+  feedId: z.string().min(1).nullish(),
   folder: z.string().min(1).nullish(),
   tagId: z.string().min(1).nullish(),
 }
 
-/** 浏览类端点共用的形状：范围（folder / tag 互斥）+ 显示窗（半开区间）。 */
+/**
+ * 范围互斥：feedId / folder / tagId **最多一个**。
+ *
+ * 判据只写一份，`scopePayload`（refresh）与 `overviewPayload` 共用 —— 两个端点的范围
+ * 是同一个概念，各写一条 `!(folder && tagId)` 只会让第三个范围（feedId）在一处被漏掉。
+ */
+const singleScopeRule = (scope: {
+  feedId?: string | null
+  folder?: string | null
+  tagId?: string | null
+}): boolean => [scope.feedId, scope.folder, scope.tagId]
+  .filter((value) => value !== undefined && value !== null).length <= 1
+
+/** 浏览类端点共用的形状：范围（feed / folder / tag 互斥）+ 显示窗（半开区间）。 */
 const browseShape = { ...scopeShape, ...windowShape }
 
 /**
@@ -173,7 +187,7 @@ export const cleanupPayload = z.preprocess(emptyAsObject, z.object({
  * 悄悄放回「全部」，而按钮上没有任何东西提示这件事（spec 补充说明）。
  */
 export const scopePayload = z.preprocess(emptyAsObject, z.object(browseShape)
-  .refine((scope) => !(scope.folder != null && scope.tagId != null))
+  .refine(singleScopeRule)
   .refine(windowRule))
 
 /** `overview`：浏览范围 + 显示窗 + 续页游标。cursor 只判类型，认不出的格式由 decodeCursor 判。 */
@@ -181,7 +195,7 @@ export const overviewPayload = z.preprocess(emptyAsObject, z.object({
   ...browseShape,
   cursor: z.string().nullish(),
 })
-  .refine((scope) => !(scope.folder != null && scope.tagId != null))
+  .refine(singleScopeRule)
   .refine(windowRule))
 
 /** `saveReadingProgress`：ratio 是必需键 —— 缺省 0 会把阅读进度静默写回开头。 */

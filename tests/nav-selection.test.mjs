@@ -58,6 +58,8 @@ function loadExports(overview) {
   exports.createReaderStore = (overrides = {}) => create({ rpc: channel.rpc, ...overrides })
   // pageCalls 是分页断言的原料（每次 overview 回带的是哪个游标）
   exports.__pageCalls = () => channel.pageCalls
+  // calls 是范围断言的原料（每次 overview 带了哪些范围字段）
+  exports.__calls = () => channel.calls
   return exports
 }
 
@@ -532,4 +534,69 @@ test('刷新途中换筛选时，刷新结果按新筛选重查并更新全局�
   assert.equal(requests.at(-1).cursor, undefined)
   assert.equal(store.get().unread, 2)
   assert.deepEqual(Array.from(store.visible(), ({ id }) => id), ['new'])
+})
+
+
+/**
+ * 等一个异步动作落地（selectNav 内部是 `void reload()`，不返回 Promise）。
+ * 5ms 轮询 + 1s 上限：比固定 sleep 稳，也不会在慢机器上假红。
+ */
+async function waitFor(predicate, label) {
+  const deadline = Date.now() + 1000
+  for (;;) {
+    if (predicate()) return
+    if (Date.now() >= deadline) throw new Error('等待超时：' + label)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+}
+
+/** 最后一次 overview 调用的 payload：selectNav 还会顺带写 saveViewPreferences，不能取 calls.at(-1)。 */
+const lastOverviewPayload = (calls) => [...calls].reverse().find(([endpoint]) => endpoint === 'overview')?.[1]
+
+// ── R14：订阅源范围必须交给宿主 ─────────────────────────────────────────────
+//
+// 病象：选中一个低产源时，列表只在「全局第一页」里按 feedId 过滤 —— 库里 648 条、
+// 源内 27 条，只有 2 条落在第一页，界面就只显示 2 条。判据是「选源必须发带 feedId 的
+// overview」，而不是「visible() 看起来对了」（本地过滤也能让 visible() 看起来对）。
+
+test('R14 选源向宿主取源范围（feedId），取消选源重新取跨源第一页', async () => {
+  const exports = loadExports(overviewOf(twoFeeds()))
+  const store = exports.createReaderStore()
+  await store.load('overview')
+  const calls = exports.__calls()
+  calls.length = 0
+
+  store.selectNav({ kind: 'feed', feedId: 'feedB' })
+  await waitFor(() => calls.length >= 1, '选源后的 overview 重取')
+  // 只断言范围三字段：载荷里还有显示窗的 todayFrom（与范围正交），整包 deepEqual 会把
+  // 「今天的起点」也钉进来，换日跑测试就红 —— 那不是这条用例要守的东西。
+  const selected = lastOverviewPayload(calls)
+  assert.equal(selected?.feedId, 'feedB',
+    '选源必须把 feedId 交给宿主 —— 不能拿全局第一页在本地过滤')
+  assert.equal(selected?.folder, undefined)
+  assert.equal(selected?.tagId, undefined)
+
+  store.selectNav({ kind: 'feed', feedId: 'feedB' })
+  await waitFor(() => calls.length >= 2, '取消选源后的 overview 重取')
+  const cancelled = lastOverviewPayload(calls)
+  assert.equal(cancelled?.feedId, undefined,
+    '再点同一个源 = 取消选中，必须重新取跨源第一页（旧列表是源范围的，不能直接复用）')
+  assert.equal(cancelled?.folder, undefined)
+  assert.equal(cancelled?.tagId, undefined)
+})
+
+test('R14 源范围的续页带 feedId（与第一页同一份范围）', async () => {
+  const second = overviewOf([item('b2', { feedId: 'feedB', feedTitle: '源 B' })])
+  const exports = loadExports({ pages: { base: { ...overviewOf(twoFeeds()), nextCursor: 'C1' }, C1: second } })
+  const store = exports.createReaderStore()
+  await store.load('overview')
+
+  store.selectNav({ kind: 'feed', feedId: 'feedB' })
+  await waitFor(() => store.get().nextCursor === 'C1', '选源重取落地')
+  const calls = exports.__calls()
+  await store.loadMore()
+  const page = lastOverviewPayload(calls)
+  assert.equal(page?.cursor, 'C1', '游标原样回带')
+  assert.equal(page?.feedId, 'feedB',
+    '续页必须带与第一页同一份范围；只带游标会让源页的下一页退化成跨源')
 })

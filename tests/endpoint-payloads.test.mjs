@@ -63,13 +63,18 @@ const CONTRACTS = {
   overview: {
     valid: { folder: 'tech', cursor: null },
     // R1 显示窗：窗口三字段是可选的；合法样本同时钉「三个字段一起给」这条路。
-    alsoValid: [null, {
+    // R14：源范围（feedId）与 folder / tagId 一样是宿主范围。
+    alsoValid: [null, { feedId: 'https://a.example/feed.xml' }, {
       from: '2026-11-20T00:00:00.000Z',
       to: '2026-11-21T00:00:00.000Z',
       todayFrom: '2026-11-20T00:00:00.000Z',
     }],
     invalid: [
       { folder: 'a', tagId: 'b' },
+      { feedId: 'a', folder: 'b' },
+      { feedId: 'a', tagId: 'b' },
+      { feedId: '' },
+      { feedId: 5 },
       { folder: 5 },
       { tagId: '' },
       { cursor: 5 },
@@ -85,13 +90,15 @@ const CONTRACTS = {
   },
   refresh: {
     valid: { folder: null },
-    alsoValid: [null, {
+    alsoValid: [null, { feedId: 'https://a.example/feed.xml' }, {
       from: '2026-11-20T00:00:00.000Z',
       to: '2026-11-21T00:00:00.000Z',
       todayFrom: '2026-11-20T00:00:00.000Z',
     }],
     invalid: [
       { folder: 'a', tagId: 'b' },
+      { feedId: 'a', folder: 'b' },
+      { feedId: '' },
       { folder: 5 },
       // refresh 回的是同一页 + 同一份账：不带窗口会在按刷新时把视图悄悄放回全部，
       // 所以它接受**同一段**窗口字段，坏样本与 overview 逐条对齐。
@@ -335,7 +342,9 @@ test('入参声明：每条坏样本都被拒，并给出字段路径', () => {
   // 键表扩容变成合法样本。删样本、或新增端点忘了配负例，都必须在这里显形。
   // 143 = 133 + R9 02 的 backfillHistory 10 条负例（缺字段 / 空串 / 非 URL / 非 http(s) /
   // limit 0 / 51 / 非整数 / 非数字）。
-  assert.equal(checked, 143, '坏样本条数变了（当前 ' + checked + '）—— 检查契约表是否漏了必填字段')
+  // 149 = 143 + R14 的 feedId 6 条负例（overview 4：feed+各范围互斥 / 空串 / 非字符串；
+  // refresh 2：feed+folder 互斥 / 空串）。
+  assert.equal(checked, 149, '坏样本条数变了（当前 ' + checked + '）—— 检查契约表是否漏了必填字段')
 })
 
 test('坏入参：每个接 payload 的端点，第一条坏样本都经 dispatch 回 bad-request', async () => {
