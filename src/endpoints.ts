@@ -359,9 +359,15 @@ function scopeMarkCandidates(
 /** 从 overview/refresh 的**已解析**入参里把范围落到库上（形状由 payload 声明判，这里只判存在性）。 */
 function overviewScopeOf(
   ctx: EndpointCtx,
-  input: { readonly folder?: string | null; readonly tagId?: string | null },
+  input: { readonly feedId?: string | null; readonly folder?: string | null; readonly tagId?: string | null },
 ): { scope?: PageScope; failure?: RpcResult<never> } {
-  const { folder, tagId } = input
+  const { feedId, folder, tagId } = input
+  if (feedId !== undefined && feedId !== null) {
+    // 源范围必须由宿主先筛再分页（R14）：客户端拿全局第一页过滤会让低产源只露出
+    // 恰好落在这一页里的几条。与 folder / tag 一样，存在性在这里判，不存在回 not-found。
+    if (ctx.store.feed(feedId) === undefined) return { failure: fail('not-found', '订阅源不存在：' + feedId) }
+    return { scope: { kind: 'feed', id: feedId } }
+  }
   if (tagId !== undefined && tagId !== null) {
     const found = ctx.store.listTags().find((tag) => tag.id === tagId)
     if (found === undefined) return { failure: fail('not-found', '标签不存在：' + tagId) }

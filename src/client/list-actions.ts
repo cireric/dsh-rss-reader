@@ -703,14 +703,17 @@ export function createListActions(host: ListActionHost) {
       // 读一次拿到记忆，等 overview 落地再按在订的源校验。并发两次 load 会各读一次（版本号只让
       // 最后一次落地）—— 这里没有「只读一次」的保证，别把注释当承诺。
       const preferences = viewMemory.restored() ? undefined : await viewMemory.read()
-      // 文件夹浏览必须把范围带给宿主：由 SQL 先筛成员再限页，客户端拿到的才是这个文件夹的
-      // 一页，而不是「跨源首页里恰好属于成员的那几条」。
+      // 三种范围都必须把范围带给宿主：由 SQL 先筛再限页，客户端拿到的才是这个范围的一页，
+      // 而不是「跨源首页里恰好属于它的那几条」。源范围同样如此（R14）—— 低产源的条目可能
+      // 全在全局第一页之外，靠客户端过滤只会显示 0–2 条。
       const scopeSelection = get().navSelection
-      const scopePayload = scopeSelection.kind === 'folder'
-        ? { folder: scopeSelection.folder }
-        : scopeSelection.kind === 'tag'
-          ? { tagId: scopeSelection.tagId }
-          : undefined
+      const scopePayload = scopeSelection.kind === 'feed'
+        ? { feedId: scopeSelection.feedId }
+        : scopeSelection.kind === 'folder'
+          ? { folder: scopeSelection.folder }
+          : scopeSelection.kind === 'tag'
+            ? { tagId: scopeSelection.tagId }
+            : undefined
       // 窗口与范围正交（ADR-0004 的 2026-11-19 修订）：refresh 也带窗口，否则按一次刷新就把
       // 视图从「今天」悄悄放回「全部」。载荷只由唯一构造器产出，这里不写 from / to。
       //
@@ -795,6 +798,8 @@ export function createListActions(host: ListActionHost) {
       const request = windowRequest()
       const overview = await rpc<Overview>('overview', {
         cursor,
+        // 续页必须带与第一页**同一份**范围：源的续页带 feedId，文件夹带 folder，标签带 tagId。
+        ...(nav.kind === 'feed' ? { feedId: nav.feedId } : {}),
         ...(nav.kind === 'folder' ? { folder: nav.folder } : {}),
         ...(nav.kind === 'tag' ? { tagId: nav.tagId } : {}),
         ...request.payload,
