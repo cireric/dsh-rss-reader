@@ -3243,4 +3243,22 @@ export const MUTATIONS = [
     judgeTests: ['R14 恢复视图：恢复到某个源时，首屏之后按源重取一次（重开面板不回到「全局页里的 2 条」）'],
     from: 'if (!get().search && get().navSelection.kind !== "virtual") {',
     to: 'if (false) {' },
+
+  // ── R8b 02：路由目录的取表与实例键缓存（2026-11-24）──────────────────────
+  // 缓存键去掉实例：所有实例共用一份投影 ⇒ 换实例后探索仍显示旧站点的路由，而拼地址用的是
+  // 新实例 base —— 正是 spec §4.7 点名禁止的「旧实例投影拼新实例地址」。B12 的换实例用例
+  // 同时断言「按新实例请求」与「拿到新实例的表」，键一常量化当场翻红。
+  { id: 'explore-换实例仍用旧表', file: 'lib/explore-catalog-fetch.js',
+    judges: ['explore-catalog-fetch.test.mjs'],
+    judgeTests: ['换实例按新实例拉表：旧实例投影不会被拿去拼新实例地址'],
+    from: '    const cacheKey = origin;',
+    to: "    const cacheKey = 'rsshub';" },
+  // 私网放行：把 trustedTarget 顺手带进目录拉取，fetch 层的地址策略就不再拦 127.0.0.1 的实例。
+  // B19 走真实 fetchFeed（其余用例才注入桩），原因从「拒绝访问内网地址」变成连接失败或别的
+  // 错误；「只带 60s / 16MiB」那条同时会因 limits 多出一个键翻红。
+  { id: 'explore-私网放行', file: 'lib/explore-catalog-fetch.js',
+    judges: ['explore-catalog-fetch.test.mjs'],
+    judgeTests: ['私网实例被拒：原因指向内网地址，不是实例故障', '出网只带 60s / 16MiB 专用预算，不带 trustedTarget'],
+    from: '        timeoutMs: CATALOG_TIMEOUT_MS,\n        maxBytes: CATALOG_MAX_BYTES,',
+    to: '        timeoutMs: CATALOG_TIMEOUT_MS,\n        maxBytes: CATALOG_MAX_BYTES,\n        trustedTarget: true,' },
 ]
