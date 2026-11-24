@@ -3243,4 +3243,41 @@ export const MUTATIONS = [
     judgeTests: ['R14 恢复视图：恢复到某个源时，首屏之后按源重取一次（重开面板不回到「全局页里的 2 条」）'],
     from: 'if (!get().search && get().navSelection.kind !== "virtual") {',
     to: 'if (false) {' },
+
+  // ── R8b 01：路由目录投影 / 检索 / 拼地址（2026-11-24）────────────────────────
+  // 分类落到站点级：投影时用实例的 site.categories 覆盖路由级 categories。夹具里站点级
+  // categories 全为空、路由级有值（D7 的判据），于是 category=programming 从命中 2 条变 0 条。
+  // from 照构建产物 lib/explore-catalog.js 的实际字节写（pitfalls 一、1.4）。
+  { id: 'explore-分类落到站点级', file: 'lib/explore-catalog.js',
+    judges: ['explore-catalog.test.mjs'],
+    judgeTests: ['query：category 只看路由级 categories —— 夹具站点级分类为空（B5 / D7）'],
+    from: '            const view = projectRoute(namespace, siteName, routeValue);',
+    to: '            const view = projectRoute(namespace, siteName, routeValue);\n            if (view !== undefined)\n                view.categories = categoriesOf(siteValue[\'categories\']);' },
+  // 站点名不参与搜索：q 只剩路由名 / 路径两个匹配面。实测的站点名常是中文（知乎）而 namespace
+  // 是拉丁（zhihu），去掉站点名后「搜知乎」从 1 条变 0 条 —— B3 / D8 的判据。
+  { id: 'explore-站点名不参与搜索', file: 'lib/explore-catalog.js',
+    judges: ['explore-catalog.test.mjs'],
+    judgeTests: ['query：q 对站点名 OR 路由名 OR 路径模板，大小写不敏感（B3 / B4）'],
+    from: '            const hit = row.siteName.toLowerCase().includes(q)\n                || row.name.toLowerCase().includes(q)',
+    to: '            const hit = false\n                || row.name.toLowerCase().includes(q)' },
+  // 缺必填也拼地址：缺参时不再分型失败，而是把 :param 原样留在地址里。用户会订到一个
+  // 指向错误路由的地址，失败要等 addFeed 才暴露（spec §4.5 / B14）。
+  { id: 'explore-缺必填也拼地址', file: 'lib/explore-catalog.js',
+    judges: ['explore-catalog.test.mjs'],
+    judgeTests: ['buildExploreUrl：必填缺失 ⇒ 分型失败并点名缺的参数（B14）'],
+    from: "            return { kind: 'missing', parameter: segment.name };",
+    to: "            filled.push(':' + segment.name);\n            continue;" },
+  // 可选段不省略：缺值时压入空串，地址里出现空段（`//`）而不是让整段消失（B15）。
+  { id: 'explore-可选段不省略', file: 'lib/explore-catalog.js',
+    judges: ['explore-catalog.test.mjs'],
+    judgeTests: ['buildExploreUrl：可选参数缺值 ⇒ 整段省略，不留空段 / undefined（B15）'],
+    from: '            if (segment.optional)\n                continue;',
+    to: "            if (segment.optional) {\n                filled.push('');\n                continue;\n            }" },
+  // 坏条目照收：去掉 path / name 的逐条形状校验。numericPath（path=42）与 missingName 会被
+  // 收进索引，invalid 从 5 掉到 2、total 从 3 涨到 5 —— B20 的判据当场翻红。
+  { id: 'explore-坏条目照收', file: 'lib/explore-catalog.js',
+    judges: ['explore-catalog.test.mjs'],
+    judgeTests: ['projectCatalog：坏站点 / 坏路由逐条跳过，invalid 计数，整表仍可用（B20）'],
+    from: "    if (typeof path !== 'string' || path === '' || typeof name !== 'string')\n        return undefined;",
+    to: '    if (false)\n        return undefined;' },
 ]

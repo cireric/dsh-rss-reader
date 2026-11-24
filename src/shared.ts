@@ -530,3 +530,48 @@ export function fail<T = never>(code: string, message: string, details: object =
   // details 必填：宿主信封 ConnectionRpcFailure 要求它（源码为准，技能文档样板落后）
   return { ok: false, error: { code, message, details } }
 }
+
+/**
+ * R8b 01：探索视图的一条路由（spec §6）。
+ *
+ * 只放「列表展示 + 拼地址」需要的字段：`description` / `location` / `maintainers` / `radar` /
+ * `apiRoutes` 一律不下发（D12）。`description` 是带 markdown 与外链的长文本，v1 不展示；
+ * 其余与「列出来 + 拼地址」无关。形状放这里，是因为宿主投影与浏览器渲染必须共用同一份。
+ */
+export interface ExploreRouteView {
+  /** 站点 key，也是路由地址的第一段（`/api/namespace` 的顶层键）。 */
+  namespace: string
+  siteName: string
+  /** 路径模板原文，如 `/user/dynamic/:uid`。 */
+  path: string
+  name: string
+  /** **路由级**分类；站点级分类不参与筛选（D7，站点级只覆盖 206 站）。 */
+  categories: string[]
+  example?: string
+  /** 参数名 → 中文说明（可能为空对象）。 */
+  parameters: Record<string, string>
+  /** 只带四个会被展示的布尔；其余 features 丢弃，非布尔按 false。 */
+  features: {
+    requireConfig: boolean
+    requirePuppeteer: boolean
+    antiCrawler: boolean
+    supportPodcast: boolean
+  }
+}
+
+/**
+ * R8b 01：探索目录的一页（spec §6）。
+ *
+ * `siteTotal` / `routeTotal`（目录口径，与筛选无关）与 `matched`（筛选后）**刻意分开**：
+ * 合成一个 `total` 会让界面在筛选态显示一个既不是命中数、也不是目录大小的数（D13）。
+ */
+export interface ExploreCatalogPage {
+  siteTotal: number
+  routeTotal: number
+  matched: number
+  /** 整张目录的分类（升序，供筛选项）。 */
+  categories: string[]
+  items: ExploreRouteView[]
+  /** 缺省 = 已到底。 */
+  nextCursor?: string
+}
