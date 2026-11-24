@@ -119,11 +119,20 @@ export function freshRows(tag, rows) {
     'INSERT INTO items (id, feed_id, title, link, published_at, fetched_at, starred)'
     + ' VALUES (?, ?, ?, ?, ?, ?, 0)',
   )
+  // 每行可以带自己的 feedId（R14 的源范围分页要两源交错）；不带就落进默认源，既有用例
+  // 的夹具逐字不变。feeds 键域必须覆盖出现过的每个源 —— overview 会把「不在 feeds 里的
+  // 条目」当孤儿挡掉，缺一个键就会让用例红在别的理由上。
+  const feedIds = []
   db.exec('BEGIN')
   for (const row of rows) {
-    insert.run(row.id, PAGING_FEED_ID, '标题 ' + row.id, 'https://site.example/post/' + row.id, row.recency, row.recency)
+    const feedId = row.feedId ?? PAGING_FEED_ID
+    if (!feedIds.includes(feedId)) feedIds.push(feedId)
+    insert.run(row.id, feedId, '标题 ' + row.id, 'https://site.example/post/' + row.id, row.recency, row.recency)
   }
   db.exec('COMMIT')
-  writeConfigFile(join(dir, 'config.json'), { version: 1, feeds: { [PAGING_FEED_ID]: { url: PAGING_FEED_ID, title: '源 0' } } })
+  if (feedIds.length === 0) feedIds.push(PAGING_FEED_ID)
+  const feeds = {}
+  feedIds.forEach((feedId, index) => { feeds[feedId] = { url: feedId, title: '源 ' + index } })
+  writeConfigFile(join(dir, 'config.json'), { version: 1, feeds })
   return { store, db, dir }
 }

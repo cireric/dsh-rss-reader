@@ -390,3 +390,70 @@ test('逐方法同义性：listArticleCacheEntries 与旧实现逐条相等（�
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+// ── R14：订阅源范围由宿主先筛再分页 ──────────────────────────────────────────
+//
+// 病象：选中「阮一峰的网络日志」（库里 27 条），顶栏写「已加载 300 条」、列表只有 2 条。
+// 根因：源范围一直靠客户端在**全局第一页**上按 feedId 过滤，宿主的分页范围只有 folder / tag。
+// 这两条用例钉的是「源也是宿主范围」：取数先筛再限页、游标绑在源上。
+
+const FEED_B = 'https://feedb.example.com/atom.xml'
+
+/** 两源交错的夹具：源 B 的三条分别落在三个 recency，且都被源 A 的行夹住。 */
+const interleavedRows = () => [
+  { id: 'a1', recency: ROUND_A },
+  { id: 'b1', recency: ROUND_A, feedId: FEED_B },
+  { id: 'a2', recency: ROUND_B },
+  { id: 'b2', recency: ROUND_B, feedId: FEED_B },
+  { id: 'a3', recency: ROUND_C },
+  { id: 'b3', recency: ROUND_C, feedId: FEED_B },
+]
+
+test('R14 源范围：宿主先筛再分页，跨页只有该源的行', async () => {
+  const { store, db, dir } = freshRows('feed-scope', interleavedRows())
+  try {
+    const dispatch = createDispatch(deps(store, Config({ maxItemsShown: 2 })))
+    const first = await view(dispatch, { feedId: FEED_B })
+    assert.deepEqual(first.items.map((entry) => entry.id), ['b1', 'b2'],
+      '源 B 第一页只含源 B 的两条（按 recency 降序），源 A 的行一条都不许混进来')
+    assert.equal(typeof first.nextCursor, 'string', '源 B 还有第 3 条 ⇒ 必须给出续页游标')
+
+    const second = await view(dispatch, { feedId: FEED_B, cursor: first.nextCursor })
+    assert.deepEqual(second.items.map((entry) => entry.id), ['b3'],
+      '第二页从源 B 的第 3 条继续，不重不漏')
+    assert.equal(second.nextCursor, undefined, '源 B 到底 ⇒ nextCursor 缺省')
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('R14 源范围：跨源游标不能续源页（栅栏失配，必须响亮拒绝）', async () => {
+  const { store, db, dir } = freshRows('feed-fence', interleavedRows())
+  try {
+    const dispatch = createDispatch(deps(store, Config({ maxItemsShown: 2 })))
+    const globalFirst = await view(dispatch, {})
+    assert.equal(typeof globalFirst.nextCursor, 'string', '前置条件：跨源第一页还有下一页')
+
+    const result = await dispatch('overview', { feedId: FEED_B, cursor: globalFirst.nextCursor })
+    assert.equal(result.ok, false, '跨源游标拿来续源页必须失败，不能静默按旧边界续')
+    assert.equal(result.error.code, 'bad-request')
+    assert.match(result.error.message, /分页游标与当前范围不匹配/)
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('R14 源范围：不存在的源回 not-found，不是空列表', async () => {
+  const { store, db, dir } = freshRows('feed-missing', interleavedRows())
+  try {
+    const dispatch = createDispatch(deps(store, Config({})))
+    const result = await dispatch('overview', { feedId: 'https://nope.example/atom.xml' })
+    assert.equal(result.ok, false, '未知源必须是可读错误，不是「没有条目」')
+    assert.equal(result.error.code, 'not-found')
+  } finally {
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

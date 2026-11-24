@@ -1,10 +1,11 @@
 /**
- * 订阅管理面板（2026-10-07 从 index.tsx 拆出；M2 03 加文件夹管理）：
- * OPML 导入导出、加源、退订，以及文件夹的创建/改名/删除与订阅移动。
+ * 订阅管理面板（2026-10-07 从 index.tsx 拆出；M2 03 加文件夹管理；R9 03 加逐源回溯）：
+ * OPML 导入导出、加源、退订，文件夹的创建/改名/删除与订阅移动，以及行内的归档页回溯表单。
  * 纯展示 —— 动作全部由入口的 store 通过 props 传进来。
  */
-import { useRef, useState, type ReactNode } from 'react'
-import { feedHealthOf, type DiscoveryResult, type FeedView, type FolderView, type OpmlExportResult, type OpmlImportResult, type TagView } from '../shared.js'
+import { useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { BACKFILL_LIMIT, feedHealthOf, isHttpUrl, type BackfillReport, type DiscoveryResult, type FeedView, type FolderView, type OpmlExportResult, type OpmlImportResult, type TagView } from '../shared.js'
+import type { BackfillActionResult } from './feed-actions.js'
 import { relativeTime } from './store.js'
 
 /** 文件夹管理里一次改名草稿。 */
@@ -15,6 +16,40 @@ interface RenameDraft {
 interface TagRenameDraft {
   id: string
   draft: string
+}
+
+/** 回溯表单的草稿。篇数保留输入原文：空串 / 小数 / 越界都要能就地报原因，不能被 Number('') 洗成 0。 */
+interface BackfillDraft {
+  feedId: string
+  url: string
+  limit: string
+}
+
+/** 从按源索引的表里删掉一项；没有该键时返回原引用，避免无谓的整表复制。 */
+function withoutKey<T>(table: Readonly<Record<string, T>>, key: string): Readonly<Record<string, T>> {
+  if (table[key] === undefined) return table
+  const next = { ...table }
+  delete next[key]
+  return next
+}
+
+/**
+ * 回溯入参的客户端预检：返回可读原因，undefined = 可以发请求。
+ *
+ * 为什么客户端要拦一遍：宿主也会回 bad-request，但那一来一回既慢又只能显示在顶部；
+ * 行内表单的「就地原因」必须在请求之前就有。判定与宿主 payload schema 同口径
+ *（http(s) 协议 + 1–50 的整数），不另造更宽或更窄的规则。
+ */
+function backfillInputReason(rawUrl: string, rawLimit: string): string | undefined {
+  // 协议判据与宿主 payload 声明共用 shared.ts 的 isHttpUrl；篇数边界共用 BACKFILL_LIMIT。
+  // 客户端只负责「就地原因」，不再维护第二套数字/协议清单（两道校验仍都要有）。
+  if (!isHttpUrl(rawUrl.trim())) return '归档页地址必须是 http(s) 地址'
+  const limitText = rawLimit.trim()
+  const limitReason = '篇数必须是 ' + BACKFILL_LIMIT.min + '–' + BACKFILL_LIMIT.max + ' 的整数'
+  if (!/^\d+$/.test(limitText)) return limitReason
+  const limit = Number(limitText)
+  if (limit < BACKFILL_LIMIT.min || limit > BACKFILL_LIMIT.max) return limitReason
+  return undefined
 }
 
 /** 健康状态的三个人话标签（判据在 shared.ts 的 feedHealthOf，这里只负责措辞）。 */
@@ -36,6 +71,7 @@ export function FeedsView({
   feeds, folders, busy, report, notice, discovery,
   onImport, onExport, onAdd, onRemove, onDiscover, onClearDiscovery,
   onCreateFolder, onRenameFolder, onDeleteFolder, onMoveFeed, onMoveOrder,
+  onBackfill,
   tags, onCreateTag, onRenameTag, onDeleteTag, onBack,
 }: {
   feeds: FeedView[]
@@ -58,6 +94,11 @@ export function FeedsView({
   onMoveFeed: (feedId: string, folder: string | undefined) => void
   /** 上 / 下挪一格（R3-03）。只发意图，行序等宿主回包后的 reload。 */
   onMoveOrder: (feedId: string, direction: -1 | 1) => void
+  /**
+   * 回溯一个源（R9 03）：只发 RPC，成功后宿主侧 reload；界面只展示返回的报告 / 可读原因。
+   * 组件保持纯展示 —— 网络与 state 写入都在 store 动作里。
+   */
+  onBackfill: (feedId: string, archiveUrl: string, limit: number) => Promise<BackfillActionResult>
   tags: TagView[]
   onCreateTag: (name: string) => void
   onRenameTag: (id: string, name: string) => void
@@ -75,6 +116,80 @@ export function FeedsView({
   const renameButtons = useRef(new Map<string, HTMLButtonElement | null>())
   const deleteButtons = useRef(new Map<string, HTMLButtonElement | null>())
   const tagRenameButtons = useRef(new Map<string, HTMLButtonElement | null>())
+  /**
+   * 回溯相关状态（R9 03）。结果 / 原因按源保存：一次运行结束后收起表单也要能回看，
+   * 而且每个源的结果互不覆盖（上层允许对不同的源各跑一次）。
+   */
+  const [backfillDraft, setBackfillDraft] = useState<BackfillDraft | undefined>(undefined)
+  /**
+   * 正在跑的源集合（不是单个 id）：不同源可以同时跑，各自的行只按自己是否在集合里置灰。
+   * 用 Set 而不是一个 string，是因为后开始的源会把单个 id 覆盖掉，前一行会提前解禁。
+   */
+  const [backfillRunning, setBackfillRunning] = useState<ReadonlySet<string>>(() => new Set())
+  const [backfillReports, setBackfillReports] = useState<Readonly<Record<string, BackfillReport>>>({})
+  const [backfillReasons, setBackfillReasons] = useState<Readonly<Record<string, string>>>({})
+  const backfillButtons = useRef(new Map<string, HTMLButtonElement | null>())
+  /**
+   * 连点的同步守卫：`backfillRunning` 要等下一次渲染才把「开始」置灰，
+   * 同一事件循环里的第二下点击会赶在那之前。这里用 ref，setState 挡不住的那一下由它挡。
+   */
+  const backfillSubmitting = useRef(new Set<string>())
+
+  /** 收起表单并把焦点还给触发它的「回溯」按钮（取消 / Esc 共用一条路径）。 */
+  const closeBackfill = (feedId: string): void => {
+    setBackfillDraft((current) => (current?.feedId === feedId ? undefined : current))
+    backfillButtons.current.get(feedId)?.focus()
+  }
+
+  /**
+   * 回溯输入框的键盘纪律（与本文件既有行内表单同一条）：
+   * Enter 提交、Esc 取消，两者都 preventDefault + stopPropagation —— 全局快捷键挂在 document 上，
+   * 输入框里的键不能被它截走（尤其 Esc，否则会顺手把订阅管理页关掉）。
+   */
+  const onBackfillFieldKeyDown = (event: KeyboardEvent<HTMLInputElement>, feedId: string): void => {
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      event.stopPropagation()
+      void submitBackfill(feedId)
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      event.stopPropagation()
+      closeBackfill(feedId)
+    }
+  }
+
+  /**
+   * 提交一行回溯。客户端先拦非法输入（零请求），通过后才交给 store 动作。
+   * 连点由 ref 守卫兜住；结束后无论成败都解除，允许用户改参数重跑。
+   */
+  const submitBackfill = async (feedId: string): Promise<void> => {
+    const draft = backfillDraft
+    if (draft === undefined || draft.feedId !== feedId) return
+    const reason = backfillInputReason(draft.url, draft.limit)
+    // 新一轮开始先清旧结果：留着上一次的数字会让人以为这次也跑完了。
+    setBackfillReports((current) => withoutKey(current, feedId))
+    setBackfillReasons((current) => withoutKey(current, feedId))
+    if (reason !== undefined) {
+      setBackfillReasons((current) => ({ ...current, [feedId]: reason }))
+      return
+    }
+    if (backfillSubmitting.current.has(feedId)) return
+    backfillSubmitting.current.add(feedId)
+    setBackfillRunning((current) => new Set(current).add(feedId))
+    try {
+      const outcome = await onBackfill(feedId, draft.url.trim(), Number(draft.limit.trim()))
+      if ('error' in outcome) setBackfillReasons((current) => ({ ...current, [feedId]: outcome.error }))
+      else setBackfillReports((current) => ({ ...current, [feedId]: outcome.report }))
+    } finally {
+      backfillSubmitting.current.delete(feedId)
+      setBackfillRunning((current) => {
+        const next = new Set(current)
+        next.delete(feedId)
+        return next
+      })
+    }
+  }
 
   const pickFile = (event: { target: { files?: ArrayLike<File> | null; value?: string } }): void => {
     const file = event.target.files?.[0]
@@ -416,56 +531,152 @@ export function FeedsView({
 
       <div style={{ borderTop: '1px solid color-mix(in srgb, currentColor 12%, transparent)' }}>
         {feeds.length === 0 && <div style={{ padding: '12px 0', opacity: 0.7 }}>还没有订阅源。可以用上面的「导入 OPML…」。</div>}
-        {feeds.map((feed, index) => (
-          <div key={feed.id} data-rss-feed-row={feed.id} style={{
-            display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0',
-            borderBottom: '1px solid color-mix(in srgb, currentColor 8%, transparent)',
-          }}>
-            <span style={{ flex: 1, minWidth: 0 }}>
-              <span style={{ display: 'block' }}>{feed.title ?? feed.id}</span>
-              <span style={{ display: 'block', fontSize: 11, opacity: 0.6, wordBreak: 'break-all' }}>
-                {feed.id}{feed.folder !== undefined ? ' · 文件夹：' + feed.folder : ' · 未分类'}
-              </span>
-              {/* 健康信息（M4 02）：状态 / 连败次数 / 最近尝试 / 上次成功 / 最近错误。
-                  连败次数缺失时写「次数未知」而不是 0 —— 老记录从来没记过计数（见 domain.ts 的三态）。 */}
-              <span data-rss-feed-health={feed.id} style={{ display: 'block', fontSize: 11, opacity: 0.75, wordBreak: 'break-all' }}>
-                {'健康：' + feedHealthLabel(feed)}
-                {' · 连续失败：' + (feed.failureCount === undefined ? '次数未知' : feed.failureCount + ' 次')}
-                {' · 最近尝试：' + (feed.lastAttemptedAt === undefined ? '从未' : relativeTime(feed.lastAttemptedAt))}
-                {' · 上次成功：' + (feed.lastFetchedAt === undefined ? '从未' : relativeTime(feed.lastFetchedAt))}
-                {feed.lastFailure !== undefined ? ' · 最近错误：' + feed.lastFailure : ''}
-              </span>
-            </span>
-            {/* 原生按钮即可满足「可聚焦、回车触发」；**不承诺空格**（空格是全局翻页键）。
-                首行 ↑ / 末行 ↓ 置灰；busy（导入/加源在途）时全灰——两个写手不能同时改同一份订阅文件。 */}
-            <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
-              data-rss-feed-order-up={feed.id}
-              aria-label={'上移「' + (feed.title ?? feed.id) + '」'}
-              title="上移一位"
-              disabled={busy || index === 0}
-              onClick={() => onMoveOrder(feed.id, -1)}>↑</button>
-            <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
-              data-rss-feed-order-down={feed.id}
-              aria-label={'下移「' + (feed.title ?? feed.id) + '」'}
-              title="下移一位"
-              disabled={busy || index === feeds.length - 1}
-              onClick={() => onMoveOrder(feed.id, 1)}>↓</button>
-            <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 4 }}>
-              移动到
-              <select data-rss-feed-folder={feed.id} value={feed.folder ?? ''} disabled={busy}
-                onChange={(event) => onMoveFeed(feed.id, event.target.value === '' ? undefined : event.target.value)}>
-                <option value="">未分类</option>
-                {folders.map((folder) => <option key={folder.name} value={folder.name}>{folder.name}</option>)}
-              </select>
-            </label>
-            <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
-              title="退订并删除该源的全部条目（含星标，不可撤销）"
-              onClick={() => {
-                if (window.confirm('退订该源并删除它的全部条目？\n\n' + feed.id +
-                  '\n\n全部条目（包括你星标的）会被永久删除，此操作不可撤销。')) onRemove(feed.id)
-              }}>退订</button>
-          </div>
-        ))}
+        {feeds.map((feed, index) => {
+          // 运行中：本行的写操作与回溯入口一起置灰；别的源不受影响（各源的回溯互不共享写盘）。
+          const backfillBusy = backfillRunning.has(feed.id)
+          const draft = backfillDraft?.feedId === feed.id ? backfillDraft : undefined
+          const backfillReport = backfillReports[feed.id]
+          const backfillReason = backfillReasons[feed.id]
+          return (
+            <div key={feed.id} data-rss-feed-row={feed.id} style={{
+              padding: '8px 0',
+              borderBottom: '1px solid color-mix(in srgb, currentColor 8%, transparent)',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span style={{ display: 'block' }}>{feed.title ?? feed.id}</span>
+                  <span style={{ display: 'block', fontSize: 11, opacity: 0.6, wordBreak: 'break-all' }}>
+                    {feed.id}{feed.folder !== undefined ? ' · 文件夹：' + feed.folder : ' · 未分类'}
+                  </span>
+                  {/* 健康信息（M4 02）：状态 / 连败次数 / 最近尝试 / 上次成功 / 最近错误。
+                      连败次数缺失时写「次数未知」而不是 0 —— 老记录从来没记过计数（见 domain.ts 的三态）。 */}
+                  <span data-rss-feed-health={feed.id} style={{ display: 'block', fontSize: 11, opacity: 0.75, wordBreak: 'break-all' }}>
+                    {'健康：' + feedHealthLabel(feed)}
+                    {' · 连续失败：' + (feed.failureCount === undefined ? '次数未知' : feed.failureCount + ' 次')}
+                    {' · 最近尝试：' + (feed.lastAttemptedAt === undefined ? '从未' : relativeTime(feed.lastAttemptedAt))}
+                    {' · 上次成功：' + (feed.lastFetchedAt === undefined ? '从未' : relativeTime(feed.lastFetchedAt))}
+                    {feed.lastFailure !== undefined ? ' · 最近错误：' + feed.lastFailure : ''}
+                  </span>
+                </span>
+                {/* 原生按钮即可满足「可聚焦、回车触发」；**不承诺空格**（空格是全局翻页键）。
+                    首行 ↑ / 末行 ↓ 置灰；busy（导入/加源在途）或本行回溯运行中时全灰——
+                    同一份订阅文件与同一条源不能有两个写手。 */}
+                <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
+                  data-rss-feed-order-up={feed.id}
+                  aria-label={'上移「' + (feed.title ?? feed.id) + '」'}
+                  title="上移一位"
+                  disabled={busy || backfillBusy || index === 0}
+                  onClick={() => onMoveOrder(feed.id, -1)}>↑</button>
+                <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
+                  data-rss-feed-order-down={feed.id}
+                  aria-label={'下移「' + (feed.title ?? feed.id) + '」'}
+                  title="下移一位"
+                  disabled={busy || backfillBusy || index === feeds.length - 1}
+                  onClick={() => onMoveOrder(feed.id, 1)}>↓</button>
+                <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 4 }}>
+                  移动到
+                  <select data-rss-feed-folder={feed.id} value={feed.folder ?? ''} disabled={busy || backfillBusy}
+                    onChange={(event) => onMoveFeed(feed.id, event.target.value === '' ? undefined : event.target.value)}>
+                    <option value="">未分类</option>
+                    {folders.map((folder) => <option key={folder.name} value={folder.name}>{folder.name}</option>)}
+                  </select>
+                </label>
+                {/* 回溯入口（R9 03）：展开一页归档页 + 篇数，结果留在同一行。 */}
+                <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
+                  data-rss-feed-backfill={feed.id}
+                  ref={(node) => { backfillButtons.current.set(feed.id, node) }}
+                  title="从归档页补更早的文章"
+                  disabled={busy || backfillBusy}
+                  onClick={() => {
+                    if (backfillDraft?.feedId === feed.id) setBackfillDraft(undefined)
+                    else setBackfillDraft({ feedId: feed.id, url: '', limit: String(BACKFILL_LIMIT.default) })
+                  }}>回溯</button>
+                <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
+                  data-rss-feed-remove={feed.id}
+                  title="退订并删除该源的全部条目（含星标，不可撤销）"
+                  disabled={busy || backfillBusy}
+                  onClick={() => {
+                    if (window.confirm('退订该源并删除它的全部条目？\n\n' + feed.id +
+                      '\n\n全部条目（包括你星标的）会被永久删除，此操作不可撤销。')) onRemove(feed.id)
+                  }}>退订</button>
+              </div>
+
+              {draft !== undefined && (
+                <form data-rss-backfill-form="" onSubmit={(event) => { event.preventDefault(); void submitBackfill(feed.id) }}
+                  onKeyDown={(event) => {
+                    // 表单内的 Esc 只收表单：stopPropagation 防止全局 Esc 把订阅管理页一起关掉。
+                    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeBackfill(feed.id) }
+                  }}
+                  style={{
+                    display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, marginTop: 6,
+                    padding: '6px 8px', background: 'color-mix(in srgb, currentColor 6%, transparent)', borderRadius: 6,
+                  }}>
+                  <input data-rss-backfill-url="" value={draft.url} autoFocus disabled={backfillBusy}
+                    placeholder="归档页地址（http/https）"
+                    onChange={(event) => setBackfillDraft({ ...draft, url: event.target.value })}
+                    onKeyDown={(event) => onBackfillFieldKeyDown(event, feed.id)}
+                    style={{ flex: '1 1 300px', fontSize: 13, padding: '4px 8px' }} />
+                  <input data-rss-backfill-limit="" value={draft.limit} inputMode="numeric" disabled={backfillBusy}
+                    placeholder="篇数（1–50）"
+                    onChange={(event) => setBackfillDraft({ ...draft, limit: event.target.value })}
+                    onKeyDown={(event) => onBackfillFieldKeyDown(event, feed.id)}
+                    style={{ width: 96, fontSize: 13, padding: '4px 8px' }} />
+                  <button type="submit" className="dsh-rss-btn" data-rss-backfill-start=""
+                    disabled={backfillBusy}>开始</button>
+                  <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" data-rss-backfill-cancel=""
+                    disabled={backfillBusy} onClick={() => closeBackfill(feed.id)}>取消</button>
+                </form>
+              )}
+
+              {(backfillReason !== undefined || backfillReport !== undefined) && (
+                <div data-rss-backfill-result="" aria-live="polite"
+                  role={backfillReason === undefined ? undefined : 'alert'}
+                  style={{
+                    marginTop: 6, padding: '6px 8px', fontSize: 12, borderRadius: 6,
+                    background: 'color-mix(in srgb, currentColor 5%, transparent)',
+                  }}>
+                  {backfillReason !== undefined && (
+                    <div data-rss-backfill-error="" style={{ color: '#c0392b', wordBreak: 'break-all' }}>{backfillReason}</div>
+                  )}
+                  {backfillReport !== undefined && (
+                    <>
+                      <div data-rss-backfill-summary="">
+                        {'新增 '}<strong>{backfillReport.added}</strong>{' 篇 · 已存在 ' + backfillReport.existing
+                          + ' 篇 · 形态命中 ' + backfillReport.matched + ' 篇'}
+                        {'（归档页链接 ' + backfillReport.archiveLinks + ' 条，尝试 ' + backfillReport.attempted
+                          + ' 篇，剩余 ' + backfillReport.remaining + ' 篇）'}
+                      </div>
+                      {/* stoppedBy 的两种原因各给一句人话：只回字段值等于让用户自己猜。 */}
+                      {backfillReport.stoppedBy === 'deadline' && (
+                        <div data-rss-backfill-stopped="deadline" style={{ marginTop: 2 }}>
+                          {'已到单轮 120 秒预算，这次不再发起新请求；剩余 ' + backfillReport.remaining + ' 篇可重跑接着补。'}
+                        </div>
+                      )}
+                      {backfillReport.stoppedBy === 'limit' && (
+                        <div data-rss-backfill-stopped="limit" style={{ marginTop: 2 }}>
+                          {'受每源上限限制，这次只回溯了 ' + backfillReport.attempted + ' 篇；剩余 '
+                            + backfillReport.remaining + ' 篇可先调大每源上限或清理条目后再跑。'}
+                        </div>
+                      )}
+                      {/* 失败必须逐条列出原因；没有失败时整块不渲染，不留一个空列表。 */}
+                      {backfillReport.failures.length > 0 && (
+                        <div data-rss-backfill-failures="" style={{ marginTop: 2, color: '#c0392b' }}>
+                          <div>{'失败 ' + backfillReport.failures.length + ' 篇：'}</div>
+                          {backfillReport.failures.map((failure, failureIndex) => (
+                            <div key={failure.url + '#' + String(failureIndex)} data-rss-backfill-failure=""
+                              style={{ wordBreak: 'break-all' }}>
+                              {'· ' + failure.url + ' —— ' + failure.reason}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          )
+        })}
       </div>
     </div>
   )

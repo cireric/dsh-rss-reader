@@ -49,7 +49,7 @@ export interface CleanupCandidate extends CleanupRow {
  * 保证切片与主接口永远一致。
  *
  * 用途：调用方只声明自己真正用到的那片，替身也只需要满足自己那一片。逐步替换即可 ——
- * 端点上下文（EndpointCtx.store）目前仍是完整 ReaderStore，收窄它是 32 个端点的活，不在这一轮。
+ * 端点上下文（EndpointCtx.store）目前仍是完整 ReaderStore，收窄它是 33 个端点的活，不在这一轮。
  */
 export type PagingStore = Pick<ReaderStore, 'listRecent'>
 /** 未读账：判据来自 unreadPerFeed，**键域**来自 listFeeds（0 未读的源也要留 0）。 */

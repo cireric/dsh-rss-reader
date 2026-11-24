@@ -15,8 +15,10 @@ export const MUTATIONS = [
   { id: 'link-协议白名单失效', file: 'lib/shared.js',
     judges: ['parse.test.mjs'],
     judgeTests: ['条目链接只放行 http/https：javascript: / data: / file: / mailto: 归一成空串，相对与合法链接不变'],
-    from: "return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : '';",
-    to: "return url.toString();" },
+    // 2026-11-24（R9 评审修复）：协议判据收进 httpUrlOf（isHttpUrl 与 httpUrlOrEmpty 共用），
+    // 变异锚点随产物重锚——语义不变：放行任何协议，javascript: 链接会原样回到客户端。
+    from: "return url.protocol === 'http:' || url.protocol === 'https:' ? url : undefined;",
+    to: "return url;" },
   // —— 内联语义（R5 02）——
   // 链接白名单在**抽取期**失效：javascript: 会变成可点的 link run（渲染期还有第二道，但抽取期
   // 这道是「不产生可点数据」的源头）。锚在 article-text.js：safeUrl 已从 article.ts 搬走。
@@ -949,8 +951,10 @@ export const MUTATIONS = [
     judges: ['client-bundle.test.mjs', 'nav-persistence.test.mjs', 'overview-scale.test.mjs'],
     judgeTests: ['分页接线：续页游标在时渲染「加载更多」，点它真的取下一页（并追加到当前列表）', '记住上次选中的导航项、filter 与左栏显隐，重开后恢复', '选中的标签会记住：重开后回到同一个标签，而不是静默掉回「全部」', '改字号只动排版：导航、过滤与左栏显隐一项都不许被覆盖（重开后排版也恢复）', '持久化值不可信时（未知 feedId / 非法 shape）回落默认值且不抛错'],
     // 2026-11-16 重锚：视图记忆改成 host 注入的 viewMemory（load 已搬进 list-actions.ts）。
-    from: 'if (!viewMemory.restored()) viewMemory.apply(preferences);',
-    to: ';' },
+    // 2026-11-24 重锚（R14）：恢复分支多了一层「恢复出的范围要重取」，去掉 apply 即可；
+    // 内层 if 看到的是虚拟视图，不会触发重取。
+    from: 'if (!viewMemory.restored()) {\n\t\t\t\t\t\tviewMemory.apply(preferences);',
+    to: 'if (!viewMemory.restored()) {\n\t\t\t\t\t\t;' },
   // ⑫ R2-01 阅读位置：恢复只读不写。恢复时调一次 persistView 会把「读」与「写」耦合成环
   // （读到的旧值覆盖用户刚做的动作），也让每次打开面板都白热一次存储。
   { id: 'client-恢复写盘', file: 'lib/client.js',
@@ -1047,8 +1051,9 @@ export const MUTATIONS = [
   { id: 'persist-selectNav 不写盘', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs'],
     judgeTests: ['记住上次选中的导航项、filter 与左栏显隐，重开后恢复', '选中的标签会记住：重开后回到同一个标签，而不是静默掉回「全部」', '写盘串行化：前一次慢、后一次快时，最终的记忆是「后一次动作」'],
-    from: 'relocateSelection();\n\t\t\t\tpersistView();\n\t\t\t\tsearchActions.reset();\n\t\t\t\tconst scopeChanged = current.kind === "folder" || next.kind === "folder" || current.kind === "tag" || next.kind === "tag";',
-    to: 'relocateSelection();\n\t\t\t\tresetSearchPage();\n\t\t\t\tconst scopeChanged = current.kind === "folder" || next.kind === "folder" || current.kind === "tag" || next.kind === "tag";' },
+    // 2026-11-24 重锚（R14）：「任一侧不是虚拟视图 ⇒ 重取」取代了逐个点名 folder/tag 的旧判据。
+    from: 'relocateSelection();\n\t\t\t\tpersistView();\n\t\t\t\tsearchActions.reset();\n\t\t\t\tconst scopeChanged = current.kind !== "virtual" || next.kind !== "virtual";',
+    to: 'relocateSelection();\n\t\t\t\tresetSearchPage();\n\t\t\t\tconst scopeChanged = current.kind !== "virtual" || next.kind !== "virtual";' },
   { id: 'persist-toggleNav 不写盘', file: 'lib/client.js',
     judges: ['nav-persistence.test.mjs'],
     judgeTests: ['记住上次选中的导航项、filter 与左栏显隐，重开后恢复', '写盘失败必须可见：进 error 而不是被吞掉', '恢复是异步的：用户在它到达之前的手势不会被旧记忆盖掉（整份让位）', '只在关键动作时写盘：移动光标（每次按键）不产生写入'],
@@ -1737,7 +1742,8 @@ export const MUTATIONS = [
     // 2026-11-15 重锚：同上（deps.rpc）。
     // 2026-11-16 重锚：同上一族（deps.rpc → rpc、state.navSelection → 本地 nav 快照）。
     // 2026-11-20 重锚（R1-03 / 评审 P1）：续页载荷改为从「档位 + 载荷」成对取出的 request 展开。
-    from: 'const overview = await rpc("overview", {\n\t\t\t\t\t\tcursor,\n\t\t\t\t\t\t...nav.kind === "folder" ? { folder: nav.folder } : {},\n\t\t\t\t\t\t...nav.kind === "tag" ? { tagId: nav.tagId } : {},\n\t\t\t\t\t\t...request.payload\n\t\t\t\t\t});',
+    // 2026-11-24 重锚（R14）：续页载荷增加 feedId 一行（源范围的续页必须带同一份范围）。
+    from: 'const overview = await rpc("overview", {\n\t\t\t\t\t\tcursor,\n\t\t\t\t\t\t...nav.kind === "feed" ? { feedId: nav.feedId } : {},\n\t\t\t\t\t\t...nav.kind === "folder" ? { folder: nav.folder } : {},\n\t\t\t\t\t\t...nav.kind === "tag" ? { tagId: nav.tagId } : {},\n\t\t\t\t\t\t...request.payload\n\t\t\t\t\t});',
     // 2026-11-16 评审修复：callRpc 在产物里不存在（只有 rpc / deps.callRpc）—— 改成真的打第一页。
     to: 'const overview = await rpc("overview", {});' },
   { id: 'paging-在途不挡重复请求', file: 'lib/client.js',
@@ -3132,4 +3138,109 @@ export const MUTATIONS = [
     judgeTests: ['失败只缓存 60s：网络错误 / 非 JSON / 非对象都不钉死长 TTL'],
     from: 'writeCached(key, { kind: \'failure\', reason }, CACHE_FAILURE_MS, now);',
     to: 'writeCached(key, { kind: \'failure\', reason }, CACHE_SUCCESS_MS, now);' },
+
+  // ── R9 01：回溯纯函数层（2026-11-23）──────────────────────────────────────
+  // 形态过滤器恒真：月份索引 / 分类页 / 社交链接全部变成「文章候选」，A1 的 20→17 与 A2 的
+  // 「月份索引被滤掉」当场翻红。这是回溯最危险的退化——它不报错，只会把垃圾抓进库。
+  // from 照构建产物 lib/history.js 的实际字节写（pitfalls 一、1.4），独立实测 OCCURRENCES=1。
+  { id: 'history-形态恒真', file: 'lib/history.js',
+    judges: ['history.test.mjs'],
+    judgeTests: ['形态规则：整路径形状（数字→#）或「目录形状 + 扩展名」任一命中即算文章；host 必须一致、协议忽略'],
+    // 2026-11-24（R9 评审修复）：样本先经 validSamplesOf 取形状（有效样本口径），
+    // 产物里是 sample.shape.*；变异语义不变：过滤器恒真。
+    from: "        return samples.some((sample) => sample.shape.host === shape.host && (sample.shape.path === shape.path\n            || (shape.extension !== '' && sample.shape.directory === shape.directory && sample.shape.extension === shape.extension)));",
+    to: '        return true;' },
+  // 同文键带上协议：归档页的 https 与 atom 的 http 判成两篇，A1 里已在 feed 的 3 篇会被再抓一遍
+  //（真实样本的全部收益归零）。A4 的四种写法与「只差协议」的派生断言都会翻红。
+  { id: 'history-同文键分协议', file: 'lib/duplicates.js',
+    judges: ['history.test.mjs'],
+    judgeTests: ['A4 同文键：http/https、锚点、utm 四种写法判同一篇；路径大小写不同判两篇'],
+    from: "    const key = linkKeyOf(link);\n    const separator = key.indexOf('://');\n    return separator === -1 ? key : key.slice(separator + 3);",
+    to: '    return linkKeyOf(link);' },
+  // 月级补日：只有年月的页面 / URL 被写成当月 1 日——那是编出来的日期，回溯条目会排到错误位置。
+  // A5 的「只有年月不产生日期」是唯一判据。
+  { id: 'history-月级补日', file: 'lib/article-date.js',
+    judges: ['history.test.mjs'],
+    judgeTests: ['A5 日期：abbr.published / 可见中文 / 可见英文都得真实 ISO；只有年月的 URL 不产生日期'],
+    from: '    if (parts.day === undefined)\n        return undefined;',
+    to: '    if (parts.day === undefined)\n        parts.day = 1;' },
+
+  // ── R9 02：回溯的宿主编排（2026-11-23）──────────────────────────────────
+  // 间隔归零：串行抓取退化成背靠背请求，礼貌承诺（300ms）消失。A9 用假 sleep 记录事件序列，
+  // 期望 300 而拿到 0 时当场翻红。from 照构建产物 lib/backfill.js 的实际字节写（pitfalls 一、1.4）。
+  { id: 'history-间隔为零', file: 'lib/backfill.js',
+    judges: ['backfill.test.mjs'],
+    judgeTests: ['A9 请求间隔：第一篇立即抓，之后每次前等 300ms，且严格串行'],
+    from: '            await sleep(FETCH_INTERVAL_MS);',
+    to: '            await sleep(0);' },
+  // 无日期入库：拿抓取时间顶替发布日期——A6 说得很清楚：没有真实日期就跳过，绝不用抓取时间冒充。
+  // 变异保留「有日期就用原值」的分支，只给缺失日期补上 stamp，所以它是最小、最像真实失误的改法。
+  { id: 'history-无日期入库', file: 'lib/backfill.js',
+    judges: ['backfill.test.mjs'],
+    judgeTests: ['A5/A6 日期：抓到的 publishedAt 原样入库；没有发布日期的候选跳过并逐条报「无发布日期」'],
+    from: '        const publishedAt = fetched.publishedAt;',
+    to: '        const publishedAt = fetched.publishedAt ?? stamp;' },
+  // 失败中断：单篇 404 / 超时把整次运行抛断，A8 的「其余继续 + 失败清单逐条」会变成 reject。
+  { id: 'history-失败中断', file: 'lib/backfill.js',
+    judges: ['backfill.test.mjs'],
+    judgeTests: ['A8 单篇失败继续：HTTP 404 与超时各记一条，其余照常入库且不重试'],
+    from: "            failures.push({ url, reason: fetched.reason });\n            log('回溯失败：' + url + ' → ' + fetched.reason);\n            continue;",
+    to: "            throw new Error('回溯单篇失败：' + fetched.reason);" },
+  // 预检失效：忽略每源保留余量，实际抓取篇数只看请求数。A10 的「H=2 ⇒ attempted=2」会变成 5，
+  // 且 stoppedBy 不再出现。
+  { id: 'history-预检失效', file: 'lib/backfill.js',
+    judges: ['backfill.test.mjs'],
+    judgeTests: ['A10 headroom：余量 H < 请求篇数 ⇒ 只抓 H 篇，stoppedBy=limit 且 remaining 报差'],
+    from: '    const attemptCap = Math.min(input.limit, headroom);',
+    to: '    const attemptCap = input.limit;' },
+  // 文章页放行内网：把归档页的 trustedTarget 顺手带进文章抓取，SSRF 边界从「发布者可控的链接
+  // 一律不可信」退化成「跟归档页一起可信」。A12 用真实抓取层 + 本地 127.0.0.1 站点判它。
+  { id: 'history-文章页放行内网', file: 'lib/backfill.js',
+    judges: ['backfill.test.mjs'],
+    judgeTests: ['A12 私网：归档页按可信目标放行，文章页 127.0.0.1 被真实抓取层拒绝并进失败清单'],
+    from: '            maxBytes: config.articleMaxBytes,\n        });',
+    to: '            maxBytes: config.articleMaxBytes,\n            trustedTarget: true,\n        });' },
+
+  // deadline 失效：单轮 120s 预算不再拦住后续请求。A11 的假时钟到点后本应停在 3 篇，
+  // 变异后 5 篇全抓、stoppedBy 缺省 —— 这条守的是「预算真的在请求前检查」。
+  // from 照构建产物 lib/backfill.js 的实际字节写（8 空格缩进，pitfalls 一、1.4）。
+  { id: 'history-deadline失效', file: 'lib/backfill.js',
+    judges: ['backfill.test.mjs'],
+    judgeTests: ['A11 deadline：假时钟推进到 120s 后不再发起新请求，stoppedBy=deadline 且 remaining>0'],
+    from: '        if (now().getTime() - startedAt >= RUN_DEADLINE_MS) {',
+    to: '        if (false) {' },
+
+  // ── R9 03：订阅管理的回溯行内表单（2026-11-23）────────────────────────────
+  // 报告里的失败条目不再渲染（数组换成空数组）：行内只剩「失败 N 篇」的标题、看不到任何
+  // {url, reason}，用户无法判断哪一篇坏了。DOM 用例逐条断言两条失败可见，改空即当场翻红。
+  // from 照构建产物 lib/client.js 的实际字节写（pitfalls 一、1.4），独立实测 OCCURRENCES=1。
+  { id: 'history-报告丢失败', file: 'lib/client.js',
+    judges: ['backfill-dom.test.mjs'],
+    judgeTests: ['R9 03 回溯结果：新增 / 已存在 / 形态命中与技术性失败逐条渲染，失败为空时不显示空列表'],
+    from: 'backfillReport.failures.map((failure, failureIndex) =>',
+    to: '[].map((failure, failureIndex) =>' },
+
+  // ── R14：订阅源范围下沉到宿主分页（2026-11-24）──────────────────────────────
+  // 源范围不落到查询：feed 分支退回「无范围」⇒ 选源拿到的是跨源第一页。病象正是
+  // 「648 条的库里 27 条的源只显示 2 条」——列表看着有源内条目，实际是全局页的偶然交集。
+  // from 照构建产物 lib/item-page.js 的实际字节写（12 空格缩进），OCCURRENCES=1。
+  { id: 'paging-源范围不落到查询', file: 'lib/item-page.js',
+    judges: ['overview-paging.test.mjs'],
+    judgeTests: ['R14 源范围：宿主先筛再分页，跨页只有该源的行'],
+    from: '            return { feedIds: [scope.id] };',
+    to: '            return {};' },
+  // 选源不重取：范围判据恒 false ⇒ 点左栏的源只改 navSelection、列表仍是跨源第一页。
+  // 只靠客户端 inScope 过滤时，源内条目全在页外就显示 0 条。
+  { id: 'client-选源不重取', file: 'lib/client.js',
+    judges: ['nav-selection.test.mjs'],
+    judgeTests: ['R14 选源向宿主取源范围（feedId），取消选源重新取跨源第一页'],
+    from: 'const scopeChanged = current.kind !== "virtual" || next.kind !== "virtual";',
+    to: 'const scopeChanged = false;' },
+  // 恢复视图后不按恢复出的范围重取：重开面板时恢复到某个源，列表仍停在「全局第一页里恰好
+  // 属于该源的那几条」——R14 原病象的另一条入口（用户截图正是重开面板的路径）。
+  { id: 'client-恢复视图不按范围重取', file: 'lib/client.js',
+    judges: ['nav-selection.test.mjs'],
+    judgeTests: ['R14 恢复视图：恢复到某个源时，首屏之后按源重取一次（重开面板不回到「全局页里的 2 条」）'],
+    from: 'if (!get().search && get().navSelection.kind !== "virtual") {',
+    to: 'if (false) {' },
 ]

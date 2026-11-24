@@ -43,6 +43,8 @@ export const ENDPOINT_NAMES = [
   'settings', 'saveSettings',
   // R8a 01：RSSHub 实例的「测试连接」探活（宿主出网，浏览器不直连实例）。
   'testRsshub',
+  // R9 02：归档页回溯（宿主读归档页、逐篇抓正文与日期、写入条目库）。
+  'backfillHistory',
 ] as const
 export type Endpoint = (typeof ENDPOINT_NAMES)[number]
 
@@ -322,6 +324,54 @@ export interface DuplicateHintView {
   others: Array<{ itemId: string; feedId: string; feedTitle: string; title: string; link: string; readAt?: string }>
 }
 
+/**
+ * 回溯篇数的硬边界（R9，spec §4.1）：默认 20，范围 1–50。
+ *
+ * 宿主 payload 声明（zod）、客户端行内预检、客户端默认值三处共用这一份。抄三份数字就会
+ * 出现「界面允许、宿主拒绝」这类两边都自称按 spec 的漂移；边界改一次，三处一起变。
+ */
+export const BACKFILL_LIMIT = { min: 1, max: 50, default: 20 } as const
+
+/**
+ * 回溯报告里的单条失败（R9 03，spec §4.8）。
+ *
+ * 放在 shared.ts 而不是 `backfill.ts`：后者 import `node:crypto` 一族的宿主模块，客户端
+ * 只能安全 import 纯 wire 类型；类型若留宿主编排文件，客户端要么 import 宿主实现（bundle 里
+ * 出现 node 内建，见 docs/pitfalls.md §1.7b），要么抄第二份形状（下一次漂移）。
+ */
+export interface BackfillFailure {
+  readonly url: string
+  readonly reason: string
+}
+
+/**
+ * 一次归档页回溯的报告（R9 02 的宿主回包，spec §4.8 的 wire 形状）。
+ *
+ * `remaining = max(0, matched − existing − attempted)`：**全部可用候选**（形态命中 − 已存在）
+ * 里这次没发起抓取的条数——被请求篇数、每源余量或 deadline 挡下的都算。它回答「还剩多少」；
+ * 被每源余量挡下时 `stoppedBy: 'limit'`，被 deadline 挡下时 `'deadline'`，仅被请求篇数
+ * 截断时 `stoppedBy` 缺省。客户端只展示这份报告，不从中派生条目——条目以 reload 后的宿主快照为准。
+ */
+export interface BackfillReport {
+  readonly feedId: string
+  readonly archiveUrl: string
+  /** 该源现有条目提供的**有效**形态样本数（能解析成 http(s) 的链接）。 */
+  readonly sampleCount: number
+  /** 归档页抽到的 http(s) 链接数。 */
+  readonly archiveLinks: number
+  /** 形态命中数（含已被同文键排除的）。 */
+  readonly matched: number
+  /** 同文键判定已存在而跳过的条数（含本次运行内新入库后撞上的）。 */
+  readonly existing: number
+  /** 真正发起抓取的篇数（失败也计入）。 */
+  readonly attempted: number
+  /** 成功入库的篇数。 */
+  readonly added: number
+  readonly failures: BackfillFailure[]
+  readonly stoppedBy?: 'deadline' | 'limit'
+  readonly remaining: number
+}
+
 /** OPML 导入（`opmlImport`）的返回：逐源结果 + 汇总，坏源单独列出（§3.1）。 */
 export interface OpmlImportResult {
   /** 新增（此前不在订阅里）的源数 */
@@ -395,6 +445,21 @@ export function clampReadingRatio(value: unknown): number {
 }
 
 /**
+ * 「上限」类参数的共用判据：有限且 > 0 ⇒ 向下取整；其余 ⇒ `Infinity`（= 不限）。
+ *
+ * **非法值必须回落到不制造破坏的一边**。这些值同时充当每源保留量（`maxItemsPerFeed`）与
+ * 去重窗口（`maxSeenPerFeed`）的上限：回落到 0 会一次删光条目 / 清空 `seen`，而两者都是
+ * 不可逆的数据损失；回落到 `Infinity` 最坏只是这一轮没按上限裁剪，改好配置即恢复。
+ *
+ * 同一个判据原先在 refresh 的 prune / seen 窗口与 backfill 的余量 / seen 窗口各写一份
+ * （ADR-0001：同一判据只留一处实现）。四处必须共用这**一个**函数——改一处漏三处，
+ * 漏掉的那处就是下一次数据事故。
+ */
+export function effectiveLimitOf(value: number): number {
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : Number.POSITIVE_INFINITY
+}
+
+/**
  * 「这算不算正文」的长度门槛（字符）。
  *
  * 一个值、两个使用面：抽取层用它滤掉导航残留（低于它的段落多是「分类：xxx」「相关阅读」），
@@ -432,13 +497,29 @@ export function hasBodyText(paragraphs: readonly string[]): boolean {
  *（见 docs/ops/backup-restore.md 的备份约束）。
  */
 export function httpUrlOrEmpty(raw: string): string {
+  const url = httpUrlOf(raw)
+  // 归一化后的字符串交回去（同时剥掉 URL 里的控制字符）；合法 http(s) 的常见写法逐字不变。
+  return url === undefined ? '' : url.toString()
+}
+
+/** 解析成 http(s) URL；解析不出 / 其它协议 ⇒ undefined（`isHttpUrl` 与 `httpUrlOrEmpty` 共用）。 */
+function httpUrlOf(raw: string): URL | undefined {
   try {
     const url = new URL(raw)
-    // 归一化后的字符串交回去（同时剥掉 URL 里的控制字符）；合法 http(s) 的常见写法逐字不变。
-    return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : ''
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url : undefined
   } catch {
-    return ''
+    return undefined
   }
+}
+
+/**
+ * 是否是绝对 http(s) 地址。
+ *
+ * 协议判断只留这一份：宿主入参声明（`endpoint-payloads.ts` 的归档页地址）与客户端行内预检
+ * 各写一遍 `protocol === 'http:' || protocol === 'https:'`，下次加/减协议就会两边分家。
+ */
+export function isHttpUrl(value: string): boolean {
+  return httpUrlOf(value) !== undefined
 }
 
 /** 成功信封（两侧共用的信封构造器：宿主端点与客户端解包都按这个形状）。 */

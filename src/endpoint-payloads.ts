@@ -14,6 +14,7 @@
  * 失败回统一的 bad-request 信封，成功才把已解析的值交给 handler。
  */
 import { z } from 'zod'
+import { BACKFILL_LIMIT, isHttpUrl } from './shared.js'
 import { assignTunableValue, isTunableKey, parseTunableValue } from './settings-schema.js'
 import type { TunableOverrides } from './settings-schema.js'
 
@@ -139,11 +140,25 @@ export const markReadPayload = withWindow({
 export const duplicateHintsPayload = z.object({ itemIds: z.array(z.string().min(1)).nullish() })
 
 const scopeShape = {
+  feedId: z.string().min(1).nullish(),
   folder: z.string().min(1).nullish(),
   tagId: z.string().min(1).nullish(),
 }
 
-/** 浏览类端点共用的形状：范围（folder / tag 互斥）+ 显示窗（半开区间）。 */
+/**
+ * 范围互斥：feedId / folder / tagId **最多一个**。
+ *
+ * 判据只写一份，`scopePayload`（refresh）与 `overviewPayload` 共用 —— 两个端点的范围
+ * 是同一个概念，各写一条 `!(folder && tagId)` 只会让第三个范围（feedId）在一处被漏掉。
+ */
+const singleScopeRule = (scope: {
+  feedId?: string | null
+  folder?: string | null
+  tagId?: string | null
+}): boolean => [scope.feedId, scope.folder, scope.tagId]
+  .filter((value) => value !== undefined && value !== null).length <= 1
+
+/** 浏览类端点共用的形状：范围（feed / folder / tag 互斥）+ 显示窗（半开区间）。 */
 const browseShape = { ...scopeShape, ...windowShape }
 
 /**
@@ -172,7 +187,7 @@ export const cleanupPayload = z.preprocess(emptyAsObject, z.object({
  * 悄悄放回「全部」，而按钮上没有任何东西提示这件事（spec 补充说明）。
  */
 export const scopePayload = z.preprocess(emptyAsObject, z.object(browseShape)
-  .refine((scope) => !(scope.folder != null && scope.tagId != null))
+  .refine(singleScopeRule)
   .refine(windowRule))
 
 /** `overview`：浏览范围 + 显示窗 + 续页游标。cursor 只判类型，认不出的格式由 decodeCursor 判。 */
@@ -180,7 +195,7 @@ export const overviewPayload = z.preprocess(emptyAsObject, z.object({
   ...browseShape,
   cursor: z.string().nullish(),
 })
-  .refine((scope) => !(scope.folder != null && scope.tagId != null))
+  .refine(singleScopeRule)
   .refine(windowRule))
 
 /** `saveReadingProgress`：ratio 是必需键 —— 缺省 0 会把阅读进度静默写回开头。 */
@@ -208,6 +223,24 @@ export const discoverFeedsPayload = z.object({ url: z.string().trim().min(1) })
  * 空串是合法形状：handler 回一条「未配置」的可展示原因，而不是坏入参。
  */
 export const testRsshubPayload = z.object({ base: z.string() })
+
+/**
+ * `backfillHistory`（R9 02）：feedId + 归档页地址 + 可选篇数。
+ *
+ * 归档页地址只接受 http(s)：其它协议在抓取层只会得到「不支持的协议」，那属于**坏入参**而不是
+ * 一次可展示的运行失败（用户填错了协议，重试也不会变）。相对地址无法确定该相对谁，同样拒绝。
+ *
+ * `limit` 的 1–50 是 spec §4.1 的硬边界，缺省 20；越界在入参层就拒绝（bad-request），
+ * 不再让 handler 去夹取 —— 夹取会把「用户要了 500 篇」静默变成「抓 50 篇」。
+ */
+// 协议判据与客户端行内预检共用 shared.ts 的 isHttpUrl（不再各写一套）。
+const archiveUrlString = z.string().min(1).refine(isHttpUrl, { message: '必须是 http(s) 地址' })
+
+export const backfillHistoryPayload = z.object({
+  feedId: z.string().min(1),
+  archiveUrl: archiveUrlString,
+  limit: z.number().int().min(BACKFILL_LIMIT.min).max(BACKFILL_LIMIT.max).default(BACKFILL_LIMIT.default),
+})
 
 /** `saveViewPreferences`：preferences 是必需键 —— 缺键会把默认视图静默写盘。值本身仍由 store 归一。 */
 export const saveViewPreferencesPayload = z.object({ preferences: z.unknown() })

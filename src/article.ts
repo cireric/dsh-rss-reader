@@ -12,6 +12,7 @@
  * 已知它会漏掉少数与导航混排的版式，这种失败是**可见**的（内容明显不对），而不是静默出错。
  */
 import { createHash } from 'node:crypto'
+import { articleDateOf } from './article-date.js'
 import { fetchFeed, type FetchLimits } from './feed/fetch.js'
 import { MIN_CONTENT_CHARS } from './shared.js'
 import { decodeEntities, htmlToText, preToText } from './html-text.js'
@@ -1317,7 +1318,7 @@ export async function fetchArticle(
    * '重定向被拒：拒绝访问内网地址 127.0.0.1'）。不注入就只能读源码断言，那是脆弱方式。
    */
   fetchImpl: typeof fetchFeed = fetchFeed,
-): Promise<{ kind: 'ok'; title?: string; blocks: ArticleBlock[]; frameable: boolean } | { kind: 'failed'; reason: string }> {
+): Promise<{ kind: 'ok'; title?: string; publishedAt?: string; blocks: ArticleBlock[]; frameable: boolean } | { kind: 'failed'; reason: string }> {
   let frameable = true
   const result = await fetchImpl(url, {}, limits, signal, (response) => { frameable = isFrameable(response.headers) })
   if (result.kind === 'failed') return { kind: 'failed', reason: result.reason }
@@ -1328,5 +1329,8 @@ export async function fetchArticle(
   // 与 src/subscribe.ts 的 discoverCandidates 用的是同一条纪律（page.finalUrl）。
   const extracted = extractArticle(result.body, result.finalUrl)
   if (extracted.blocks.length === 0) return { kind: 'failed', reason: '没能从该页面里抽出正文（版式不支持）' }
-  return { kind: 'ok', title: extracted.title, blocks: extracted.blocks, frameable }
+  // 发布日期与正文读的是**同一份** HTML 与同一个落点：在这里一次解析出来，回溯不必再拿不到原始
+  // HTML。解析不出就是 `undefined`（不拿抓取时间冒充，见 article-date.ts）；article 端点忽略它。
+  const publishedAt = articleDateOf(result.body, result.finalUrl)
+  return { kind: 'ok', title: extracted.title, blocks: extracted.blocks, frameable, publishedAt }
 }

@@ -1,5 +1,5 @@
 /**
- * 浏览器半的读写通道：32 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
+ * 浏览器半的读写通道：33 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
  *
  * 原先这里是一个 switch：每臂各自手写 payload 解析、各自记得把未读账并进回包 ——
  * interface 的复杂度 ≈ implementation 的复杂度。现在「一个端点」是一个 module：
@@ -12,6 +12,7 @@
 import type { ZodType } from 'zod'
 import {
   addFeedPayload,
+  backfillHistoryPayload,
   cleanupPayload,
   discoverFeedsPayload,
   duplicateHintsPayload,
@@ -41,6 +42,7 @@ import type { createSearch } from './search.js'
 import type { Config } from './config.js'
 import type { SettingsControl } from './settings-control.js'
 import { EXTRACTOR_REVISION, contentVersionOf, fetchArticle, blocksToText } from './article.js'
+import { BackfillError, backfillHistory } from './backfill.js'
 import { rebuildItem } from './domain.js'
 import { selectCleanup } from './retention.js'
 import { buildOpml, parseOpml } from './opml.js'
@@ -83,6 +85,11 @@ export interface EndpointDeps {
    * 与 subscribe 的 `options.fetchImpl` 同一手法 —— 否则「超时 / 非 2xx / 非 JSON」只能真出网才能测。
    */
   readonly fetchImpl?: typeof fetchFeed
+  /**
+   * 文章页抓取实现（R9 02）：默认 `fetchArticle`，只有回溯端点用它；测试注入桩件以断言
+   * 「抓了哪几篇、间隔多少」而不真出网。index.ts 不传（生产走默认值）。
+   */
+  readonly fetchArticleImpl?: typeof fetchArticle
   readonly articleAttempts: Map<string, number>
 }
 
@@ -108,6 +115,7 @@ export interface EndpointCtx {
   readonly searchItems?: ReturnType<typeof createSearch>['run']
   readonly settings?: SettingsControl
   readonly fetchImpl?: typeof fetchFeed
+  readonly fetchArticleImpl?: typeof fetchArticle
   readonly articleAttempts: Map<string, number>
 }
 
@@ -226,6 +234,15 @@ const tagFailure = (error: unknown): RpcResult<never> | undefined =>
   error instanceof TagError ? fail(error.code, error.message) : undefined
 
 /**
+ * 同一订阅源的在途回溯（R9 02，spec §4.1）：第二次运行由**宿主**拒绝，而不是只靠界面禁用。
+ *
+ * 模块级而不是挂在 ctx / store 上：store 每代装载会换，闸门必须跨换代有效；而「一个源同时在跑
+ * 两次回溯」是进程级事实。`finally` 清理（成功、失败、抛错三条路径都释放），否则一次失败会把
+ * 该源永久锁死。
+ */
+const BACKFILL_IN_FLIGHT = new Set<string>()
+
+/**
  * 读一次未读账（总数 + 每源）。只读，不改任何条目。
  *
  * **这是全仓库唯一的算账处**（R1 02 决策 20）：overview 与分发核（五个带账写端点）都调它。
@@ -342,9 +359,15 @@ function scopeMarkCandidates(
 /** 从 overview/refresh 的**已解析**入参里把范围落到库上（形状由 payload 声明判，这里只判存在性）。 */
 function overviewScopeOf(
   ctx: EndpointCtx,
-  input: { readonly folder?: string | null; readonly tagId?: string | null },
+  input: { readonly feedId?: string | null; readonly folder?: string | null; readonly tagId?: string | null },
 ): { scope?: PageScope; failure?: RpcResult<never> } {
-  const { folder, tagId } = input
+  const { feedId, folder, tagId } = input
+  if (feedId !== undefined && feedId !== null) {
+    // 源范围必须由宿主先筛再分页（R14）：客户端拿全局第一页过滤会让低产源只露出
+    // 恰好落在这一页里的几条。与 folder / tag 一样，存在性在这里判，不存在回 not-found。
+    if (ctx.store.feed(feedId) === undefined) return { failure: fail('not-found', '订阅源不存在：' + feedId) }
+    return { scope: { kind: 'feed', id: feedId } }
+  }
   if (tagId !== undefined && tagId !== null) {
     const found = ctx.store.listTags().find((tag) => tag.id === tagId)
     if (found === undefined) return { failure: fail('not-found', '标签不存在：' + tagId) }
@@ -466,7 +489,7 @@ const buildOverview = (
   }
 }
 /**
- * 端点表：32 个端点一处声明（每项的 `payload` 是入参形状的唯一声明）。
+ * 端点表：33 个端点一处声明（每项的 `payload` 是入参形状的唯一声明）。
  *
  * 穷尽性由 `Record<Endpoint, EndpointSpec>` 保证 —— 名字表（shared.ts 的 ENDPOINT_NAMES）
  * 加了新端点而这里没跟上，编译就不过。这是本文件里唯一需要「加端点时改的地方」。
@@ -688,6 +711,37 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
     },
   }),
 
+  backfillHistory: defineEndpoint({
+    payload: backfillHistoryPayload,
+    invalidMessage: 'backfillHistory 需要 feedId、http(s) 归档页地址，以及 1–50 的篇数',
+    to: async (input, ctx) => {
+      // 在途闸门放在解析之后、读归档页之前：拿坏入参的请求不该占住一个源。
+      if (BACKFILL_IN_FLIGHT.has(input.feedId)) {
+        return fail('conflict', '该源已有回溯在进行，请等它结束再试')
+      }
+      BACKFILL_IN_FLIGHT.add(input.feedId)
+      try {
+        const report = await backfillHistory(input, {
+          store: ctx.store,
+          config: ctx.config,
+          // 归档页复用端点既有的 fetchImpl 注入缝（与 testRsshub / discoverFeeds 同一手法）；
+          // 文章页单独一条缝，因为它的返回形状与 feed 抓取不同。
+          ...(ctx.fetchImpl === undefined ? {} : { fetchFeedImpl: ctx.fetchImpl }),
+          ...(ctx.fetchArticleImpl === undefined ? {} : { fetchArticleImpl: ctx.fetchArticleImpl }),
+          log: ctx.log,
+        })
+        return ok(report)
+      } catch (error) {
+        // 预期失败（源不存在 / 样本不足 / 余量为零 / 归档页读不出来）回带 code 的失败信封；
+        // 其它异常原样抛给 dispatch 的 internal 兜底 —— 存储故障不能伪装成用户输入错误。
+        if (error instanceof BackfillError) return fail(error.code, error.message)
+        throw error
+      } finally {
+        BACKFILL_IN_FLIGHT.delete(input.feedId)
+      }
+    },
+  }),
+
   duplicateHints: defineEndpoint({
     payload: duplicateHintsPayload,
     invalidMessage: 'duplicateHints 的 itemIds 必须是字符串数组',
@@ -880,6 +934,10 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       const feedId = input.url
       const known = ctx.store.feed(feedId)
       if (known === undefined) return fail('not-found', '订阅不存在：' + feedId)
+      // 回溯途中的退订必须由宿主拒绝（spec §4.1）：回溯还在往这个源写条目，退订会先删订阅
+      // 与全部条目，后续写入就落在「已不在订阅集合里的源」上 —— 留下谁都看不见的孤儿条目。
+      // 界面上这一行的退订已经置灰，但界面不是判据：同一秒的重放 / 另开的面板都会绕过它。
+      if (BACKFILL_IN_FLIGHT.has(feedId)) return fail('conflict', '该源正在回溯，结束后再退订')
       // 退订是**一次变更**，由 store 拥有（订阅项 + 条目 + 游标，见 ADR-0002）：
       // 这里既不逐条删（N+1 个事务、还会把整源正文物化出来），也不碰 config.json。
       // 失败时事务回滚 ⇒ 什么都没发生，用户看到的是「退订失败」，不是「少了一半」。
@@ -1244,7 +1302,7 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
  * 异常一律兜成 internal 信封 —— 不把 throw 泄进通道（调用方要的是带 code 的失败信封）。
  */
 export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: unknown, signal?: AbortSignal) => Promise<RpcResult<unknown>> {
-  const { config, log, ready, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, fetchImpl } = deps
+  const { config, log, ready, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, fetchImpl, fetchArticleImpl } = deps
 
   const dispatch = async (endpoint: string, payload: unknown, signal?: AbortSignal): Promise<RpcResult<unknown>> => {
     try {
@@ -1259,7 +1317,7 @@ export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: 
       if (spec === undefined) return fail('unknown-endpoint', '未知端点：' + endpoint)
 
       const ctx: EndpointCtx = {
-        store: target, ready, config, log, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, fetchImpl, signal,
+        store: target, ready, config, log, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, fetchImpl, fetchArticleImpl, signal,
       }
       const outcome = await spec.to(payload, ctx)
       const { result } = outcome

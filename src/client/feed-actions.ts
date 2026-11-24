@@ -6,8 +6,9 @@
  *
  * R3-03 增加 moveFeedOrder：排序同样是宿主的真相，客户端只发「整份目标顺序」，
  * 成功后 reload 取回宿主快照——**不做乐观重排**（否则宿主拒绝时会留下屏幕新、文件旧的形态）。
+ * R9 03 增加 backfill：同一条纪律，报告只用于展示，条目仍以 reload 后的宿主快照为准。
  */
-import type { DiscoveryResult, OpmlImportResult } from '../shared.js'
+import type { BackfillReport, DiscoveryResult, OpmlImportResult } from '../shared.js'
 import type { ReaderStoreDeps, ReaderState } from './store.js'
 
 export interface FeedActionHost {
@@ -16,6 +17,14 @@ export interface FeedActionHost {
   rpc: ReaderStoreDeps['rpc']
   reload: () => Promise<void>
 }
+
+/**
+ * 回溯动作的结果（R9 03）：成功带宿主报告，失败带**给行内表单就地显示**的原因。
+ *
+ * 为什么不直接抛异常：失败原因既要进全局 `state.error`（本文件既有的 catch 纪律），又要画在
+ * 那一行的结果区；抛出去会把「谁来写 error」拆成两条路径。返回可读原因让两个落点一次写清。
+ */
+export type BackfillActionResult = { report: BackfillReport } | { error: string }
 
 export function createFeedActions(host: FeedActionHost) {
   const { get, set, rpc, reload } = host
@@ -96,5 +105,39 @@ export function createFeedActions(host: FeedActionHost) {
     }
   }
 
-  return { discover, addFeed, removeFeed, clearDiscovery, moveFeedOrder }
+  /**
+   * 每源在途的回溯 Promise（key = feedId）。
+   *
+   * 界面会把「开始」置灰，但 state 要等下一次渲染才生效：同一事件循环里的连点仍可能第二次
+   * 调到这里。共享同一个 Promise 既不发第二个请求，也保证两个调用看到同一份结果。
+   */
+  const backfillRuns = new Map<string, Promise<BackfillActionResult>>()
+
+  /**
+   * 回溯一个源（R9 03）：只发 RPC，成功后 reload 取回宿主快照。
+   *
+   * **不乐观改列表**：报告里的 added 只是「宿主刚写了多少篇」的陈述，条目与源的真相仍在宿主；
+   * 照着它往 state 里塞条目，会在宿主裁剪 / 并发写入时留下屏幕与库不一致的形态。
+   */
+  const runBackfill = async (feedId: string, archiveUrl: string, limit: number): Promise<BackfillActionResult> => {
+    try {
+      const report = await rpc<BackfillReport>('backfillHistory', { feedId, archiveUrl, limit })
+      await reload()
+      return { report }
+    } catch (failure) {
+      const reason = failure instanceof Error ? failure.message : String(failure)
+      set({ error: reason })
+      return { error: reason }
+    }
+  }
+
+  const backfill = (feedId: string, archiveUrl: string, limit: number): Promise<BackfillActionResult> => {
+    const running = backfillRuns.get(feedId)
+    if (running !== undefined) return running
+    const run = runBackfill(feedId, archiveUrl, limit).finally(() => { backfillRuns.delete(feedId) })
+    backfillRuns.set(feedId, run)
+    return run
+  }
+
+  return { discover, addFeed, removeFeed, clearDiscovery, moveFeedOrder, backfill }
 }
