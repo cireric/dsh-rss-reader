@@ -21,7 +21,7 @@
 | R11 v1 | RSS 设置页 v1（入口 B） | 已完成 | 7/7 `resolved` | `settings.json` 稀疏覆盖 + `settings` / `saveSettings` 端点 + 五分区设置页；1054/1054、变异 360/360、真机三步；用户人工验收可用（2026-11-22）。遗留：`<460px` 观感、真实 0600 权限位、真实重启保持未单独复核 |
 | R8a | RSSHub Radar 发现（公共实例） | 已完成 | 5/5 `resolved` | 1142/1142、全量变异 368/368 · 0 幸存、真机三步；真实实例验收（GitHub 端到端 / B 站 / 36kr 缺参 / 私网拒绝 / 缓存）。遗留：GUI 走查（playwright target crashed）、添加未落真实订阅列表、settings 真实重启未验 |
 | R9 | 归档页回溯更早文章 | 已完成 | 4/4 `resolved` | 1191/1191、全量变异 378/378 · 0 幸存、真机三步；真实站点（真实库快照）阮一峰 8 篇 / 云风 2 篇 / 重复 0。遗留：GUI 走查、未写实时库、两级日期规则无真实样本 |
-| R8b | RSSHub 路由表探索 | 已完成 | 5/5 `resolved` | 1270/1270、全量变异 392/392 · 0 幸存、真机三步；真实实例（`rsshub.rssforever.com`，经代理）1589 站 / 3136 路由 / 24 分类，首拉 7.9 s；GitHub 端到端拼出 `/github/branches/DIYgod/RSSHub` 并抓回 11 条。遗留：GUI 观感（playwright target crashed）、152 条多路径路由按 §4.2 跳过 |
+| R8b | RSSHub 路由表探索 | 已完成 | 5/5 `resolved` | 1271/1271、全量变异 392/392 · 0 幸存、真机三步；真实实例（`rsshub.rssforever.com`，经代理）1589 站 / 3136 路由 / 24 分类，首拉 7.9 s；GitHub 端到端拼出 `/github/branches/DIYgod/RSSHub` 并抓回 11 条。遗留：GUI 观感（playwright target crashed）、152 条多路径路由按 §4.2 跳过 |
 | R7 | 一键翻译 | 待拍板 | — | 模型/成本/隐私；R11 设置承载已就绪，仍缺模型目录接线 |
 | R10 | 右侧边栏单栏 | 暂缓 | — | 第二套 UI；现有 `u` 已收左栏 |
 | R13 | `/rss` 命令 | 暂缓 | — | 与 4 个 Agent 工具重复 |
@@ -127,7 +127,7 @@
 - **拍板（D1–D15，见 spec §11）**：独立 `view: 'explore'`；单级扁平 + 站点名钻取；目录缓存 12 h 硬编码不设键；拉表专用 60 s / 16 MiB；constraint 不校验正则；订阅后不关视图；分类只按**路由级**；搜站点名命中该站全部路由；三筛 AND；分类单选；未配置实例入口不可见；下发行裁剪（丢 `description` / `location` / `maintainers` / `radar`）；`siteTotal`·`routeTotal` 与 `matched` 分口径；视图状态不持久化。
 - **交付**：`src/explore-catalog.ts`（投影 / 检索 / 游标栅栏 / 拼地址）、`src/explore-template.ts`（模板解析 + example 预填，host 与 client 共用一份）、`src/explore-catalog-fetch.ts`（取表 + 12 h 实例键缓存）、端点 `exploreCatalog` / `exploreBuildUrl`（33 → 35）、客户端 `view: 'explore'`（探索视图 + 两处入口 + 连续订阅）。
 - **票据**：01 纯函数投影与拼装 → 02 取表与缓存（并行）→ 03 端点 → 04 客户端 → 05 真机；评审修复 1 轮（入口判据统一 / 站点名回落 / 拼地址竞态 / 预填提示 / 客户端变异）。
-- **证据**：`npm test` **1270/1270**（探索相关 25 + 14 + 21 + 9 条）；全量变异 **392/392 应用 · 0 幸存**（新增 10 条 `explore-*` 全部 caught）；真机三步（reload 前后 `[active]` / 日志无装载失败 / `curl` 401）。真实实例（经代理）：首拉 **7.9 s**、`siteTotal 1589 / routeTotal 3136 / 分类 24`、`limit=30` 回包 **10 569 B**、`limit=100` **33 781 B**；3 页 90 条 0 重复；`category=programming` 203 条且逐条含该分类；GitHub 端到端 addFeed `added: 1` + 抓回 **11 条**；私网 `127.0.0.1:1200` 与不可达域名各自明确报错且失败不缓存。
+- **证据**：`npm test` **1271/1271**（探索相关 25 + 14 + 21 + 13 条）；全量变异 **392/392 应用 · 0 幸存**（新增 10 条 `explore-*` 全部 caught）；真机三步（reload 前后 `[active]` / 日志无装载失败 / `curl` 401）。真实实例（经代理）：首拉 **7.9 s**、`siteTotal 1589 / routeTotal 3136 / 分类 24`、`limit=30` 回包 **10 569 B**、`limit=100` **33 781 B**；3 页 90 条 0 重复；`category=programming` 203 条且逐条含该分类；GitHub 端到端 addFeed `added: 1` + 抓回 **11 条**；私网 `127.0.0.1:1200` 与不可达域名各自明确报错且失败不缓存。
 - **实测修正**：真实回包里 **152 条路由的 `path` 是数组**（多路径路由），按 spec §4.2「`path` 不是字符串 ⇒ 跳过」计入 `invalid`，所以真实 `routeTotal = 3136`（不是 3288）；路由级分类并集 **24**（spec §1.1 的 28 未复现）。
 - **遗留**：真实 GUI 观感（列表密度 / 窄栏表单堆叠 / 100 条滚动）未验 —— `playwright-cli` 起浏览器即 `Target crashed`（本机沙箱，与 R8a / R9 同因）；HTTP 面只验了 401 与热重载，端到端走的是注入进程内的 dispatch。
 - **修正**：原写「整表约 3.3MB、首次约 1 秒」——**「1 秒」不实**，实测 8.9 s（gzip）/ 23.5 s（裸，本机经代理）。3.3MB 是解压后体积，传输 638KB。

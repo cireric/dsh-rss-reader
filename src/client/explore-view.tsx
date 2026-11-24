@@ -44,6 +44,75 @@ function paramSegmentsOf(route: ExploreRouteView): Array<{ name: string; optiona
   return result
 }
 
+/**
+ * 一条路由的参数表单。**渲染在被点中的那一行内部**（2026-11-24 真机反馈）：
+ * 原先它挂在整张列表之后，搜出几十行时点完行标题要滚到页面底部才看得见表单，
+ * 界面上等于「点了没反应」。放进行内之后「选中 → 填 → 拼 → 添加」在同一处闭环。
+ */
+function RouteForm(props: {
+  readonly route: ExploreRouteView
+  readonly params: Array<{ name: string; optional: boolean }>
+  readonly state: ExploreState
+  readonly onDraftValue: (name: string, value: string) => void
+  readonly onBuild: () => void
+  readonly onAdd: () => void
+}): ReactNode {
+  const { route, params, state, onDraftValue, onBuild, onAdd } = props
+  return (
+    <form className="dsh-rss-explore-form" data-rss-explore-form=""
+      onSubmit={(event) => {
+        event.preventDefault()
+        onBuild()
+      }}>
+      <div className="dsh-rss-explore-form-title">
+        参数 · {route.siteName} / {route.name}
+      </div>
+      <code className="dsh-rss-explore-path" data-rss-explore-form-path="">{route.path}</code>
+      {params.length === 0 && (
+        <div className="dsh-rss-explore-detail">这条路由没有参数，直接拼地址即可。</div>
+      )}
+      {/* spec §4.5：example 缺省或段数对不上 ⇒ 不预填，字段留空并明说「按官方文档填写」。
+          不给这句话时，一排空 input 看起来像界面没加载出实例已有的示例。 */}
+      {params.length > 0 && !state.prefilled && (
+        <div className="dsh-rss-explore-detail" data-rss-explore-prefill-hint="">
+          按官方文档填写（无官方 example）
+        </div>
+      )}
+      {params.map((param) => (
+        <label key={param.name} className="dsh-rss-explore-field" data-rss-explore-field={param.name}>
+          <span className="dsh-rss-explore-field-label">
+            {route.parameters[param.name] ?? param.name}
+            {param.optional ? '（可选）' : ''}
+          </span>
+          <input className="dsh-rss-explore-input" data-rss-explore-param={param.name}
+            value={state.draft[param.name] ?? ''}
+            placeholder={param.optional ? '留空则从地址中省略' : ''}
+            onChange={(event) => { onDraftValue(param.name, event.target.value) }} />
+        </label>
+      ))}
+      {state.missing.length > 0 && (
+        <div className="dsh-rss-settings-error" role="alert" data-rss-explore-missing="">
+          缺少必填参数：{state.missing.join('、')}
+        </div>
+      )}
+      <div className="dsh-rss-explore-form-actions">
+        <button type="submit" className="dsh-rss-btn" data-rss-explore-build=""
+          disabled={state.building}>{state.building ? '拼地址中…' : '拼地址'}</button>
+        {state.builtUrl !== undefined && (
+          <>
+            <code className="dsh-rss-explore-url" data-rss-explore-url="">{state.builtUrl}</code>
+            <button type="button" className="dsh-rss-btn dsh-rss-btn--primary" data-rss-explore-add=""
+              disabled={state.adding} onClick={onAdd}>{state.adding ? '添加中…' : '添加'}</button>
+          </>
+        )}
+        {state.receipt !== undefined && (
+          <span className="dsh-rss-settings-saved" role="status" data-rss-explore-added="">{state.receipt}</span>
+        )}
+      </div>
+    </form>
+  )
+}
+
 export function ExploreView(props: ExploreViewProps): ReactNode {
   const { state, onQuery, onLoadMore, onSelectRoute, onDraftValue, onBuild, onAdd, onBack } = props
   /**
@@ -140,6 +209,11 @@ export function ExploreView(props: ExploreViewProps): ReactNode {
                   </button>
                   <button type="button" className="dsh-rss-explore-route" data-rss-explore-route={route.path}
                     onClick={() => { onSelectRoute(route) }}>{route.name}</button>
+                  {/* 行标题长得像纯文本（无边框、只有 hover 变色），真机上没人看出来能点。
+                      给一个看得见的落点：按钮本身就是入口，行标题的点击保留不变。 */}
+                  <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost dsh-rss-explore-pick"
+                    data-rss-explore-pick={route.path}
+                    onClick={() => { onSelectRoute(route) }}>订阅…</button>
                 </div>
                 <code className="dsh-rss-explore-path" data-rss-explore-path-text="">{route.path}</code>
                 {paramsText !== '' && (
@@ -153,6 +227,10 @@ export function ExploreView(props: ExploreViewProps): ReactNode {
                     <span key={key} className="dsh-rss-explore-badge" data-rss-explore-feature={key}>{label}</span>
                   ))}
                 </div>
+                {selected !== undefined && selected.namespace === route.namespace && selected.path === route.path && (
+                  <RouteForm route={route} params={paramSegmentsOf(route)} state={state}
+                    onDraftValue={onDraftValue} onBuild={onBuild} onAdd={onAdd} />
+                )}
               </li>
             )
           })}
@@ -168,59 +246,6 @@ export function ExploreView(props: ExploreViewProps): ReactNode {
         </div>
       )}
 
-      {selected !== undefined && (
-        <form className="dsh-rss-explore-form" data-rss-explore-form=""
-          onSubmit={(event) => {
-            event.preventDefault()
-            onBuild()
-          }}>
-          <div className="dsh-rss-explore-form-title">
-            参数 · {selected.siteName} / {selected.name}
-          </div>
-          <code className="dsh-rss-explore-path" data-rss-explore-form-path="">{selected.path}</code>
-          {params.length === 0 && (
-            <div className="dsh-rss-explore-detail">这条路由没有参数，直接拼地址即可。</div>
-          )}
-          {/* spec §4.5：example 缺省或段数对不上 ⇒ 不预填，字段留空并明说「按官方文档填写」。
-              不给这句话时，一排空 input 看起来像界面没加载出实例已有的示例。 */}
-          {params.length > 0 && !state.prefilled && (
-            <div className="dsh-rss-explore-detail" data-rss-explore-prefill-hint="">
-              按官方文档填写（无官方 example）
-            </div>
-          )}
-          {params.map((param) => (
-            <label key={param.name} className="dsh-rss-explore-field" data-rss-explore-field={param.name}>
-              <span className="dsh-rss-explore-field-label">
-                {selected.parameters[param.name] ?? param.name}
-                {param.optional ? '（可选）' : ''}
-              </span>
-              <input className="dsh-rss-explore-input" data-rss-explore-param={param.name}
-                value={state.draft[param.name] ?? ''}
-                placeholder={param.optional ? '留空则从地址中省略' : ''}
-                onChange={(event) => { onDraftValue(param.name, event.target.value) }} />
-            </label>
-          ))}
-          {state.missing.length > 0 && (
-            <div className="dsh-rss-settings-error" role="alert" data-rss-explore-missing="">
-              缺少必填参数：{state.missing.join('、')}
-            </div>
-          )}
-          <div className="dsh-rss-explore-form-actions">
-            <button type="submit" className="dsh-rss-btn" data-rss-explore-build=""
-              disabled={state.building}>{state.building ? '拼地址中…' : '拼地址'}</button>
-            {state.builtUrl !== undefined && (
-              <>
-                <code className="dsh-rss-explore-url" data-rss-explore-url="">{state.builtUrl}</code>
-                <button type="button" className="dsh-rss-btn dsh-rss-btn--primary" data-rss-explore-add=""
-                  disabled={state.adding} onClick={onAdd}>{state.adding ? '添加中…' : '添加'}</button>
-              </>
-            )}
-            {state.receipt !== undefined && (
-              <span className="dsh-rss-settings-saved" role="status" data-rss-explore-added="">{state.receipt}</span>
-            )}
-          </div>
-        </form>
-      )}
     </div>
   )
 }

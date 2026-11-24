@@ -371,6 +371,30 @@ test('R8b 04 列表行：站点名可点、路由名 / 模板 / 参数说明 / e
   }
 })
 
+test('R8b 04 行尾「订阅…」把表单开在该行内部（真机反馈：原先表单挂在整张列表之后）', skip, async () => {
+  const h = await mount()
+  try {
+    await openExploreFromFeeds(h)
+    const rows = () => h.$$('[data-rss-explore-row]')
+    assert.equal(h.$('[data-rss-explore-form]'), null, '没选路由时不该有表单')
+
+    const branches = rows().find((row) => row.getAttribute('data-rss-explore-path') === '/branches/:user/:repo')
+    branches.querySelector('[data-rss-explore-pick="/branches/:user/:repo"]').click()
+    await h.waitFor(() => h.$('[data-rss-explore-form]') !== null, { label: '行内表单上屏' })
+    assert.equal(branches.contains(h.$('[data-rss-explore-form]')), true, '表单必须落在被点中的那一行里')
+    assert.equal(h.$$('[data-rss-explore-form]').length, 1, '同时只允许一张表单')
+
+    // 换一行：表单跟着移动，旧行不再持有
+    const zhihu = rows().find((row) => row.getAttribute('data-rss-explore-path') === '/people/activities/:id')
+    zhihu.querySelector('[data-rss-explore-pick="/people/activities/:id"]').click()
+    await h.settle()
+    assert.equal(branches.contains(h.$('[data-rss-explore-form]')), false, '旧行不该留着表单')
+    assert.equal(zhihu.contains(h.$('[data-rss-explore-form]')), true, '表单必须移到新选中的行里')
+  } finally {
+    h.cleanup()
+  }
+})
+
 test('R8b 04 切换 category / q：重取第一页，旧行清空、请求不带 cursor', skip, async () => {
   const h = await mount()
   try {

@@ -198,6 +198,8 @@ const STYLE = `
 .dsh-rss-explore-route { font:inherit; font-size:14px; font-weight:600; padding:0; border:0;
   background:transparent; color:inherit; cursor:pointer; text-align:left; }
 .dsh-rss-explore-route:hover { color:var(--rss-accent); }
+.dsh-rss-explore-pick { margin-left:auto; }
+
 .dsh-rss-explore-path { display:block; margin-top:4px; font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size:12px; overflow-wrap:anywhere; }
 .dsh-rss-explore-detail { margin-top:4px; font-size:12px; color:var(--rss-muted); overflow-wrap:anywhere; }
@@ -205,8 +207,8 @@ const STYLE = `
 .dsh-rss-explore-badge { padding:0 5px; border-radius:3px; border:1px solid var(--rss-line);
   font-size:10px; color:var(--rss-muted); }
 .dsh-rss-explore-more { padding:10px 0; text-align:center; }
-.dsh-rss-explore-form { display:flex; flex-direction:column; gap:8px; margin-top:16px;
-  padding-top:14px; border-top:2px solid var(--rss-line); }
+.dsh-rss-explore-form { display:flex; flex-direction:column; gap:8px; margin-top:10px;
+  padding-top:10px; border-top:1px solid var(--rss-line); }
 .dsh-rss-explore-form-title { font-size:14px; font-weight:600; }
 .dsh-rss-explore-field { display:flex; flex-direction:column; gap:3px; }
 .dsh-rss-explore-field-label { font-size:12px; color:var(--rss-muted); }
