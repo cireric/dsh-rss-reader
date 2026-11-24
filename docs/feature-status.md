@@ -1,6 +1,6 @@
 # 功能状态
 
-> 版本 **0.1.0**（工作树已含 R1–R6、R11、R12、R8a 与 R9，尚未发版）· 更新 2026-11-24 · **本地 main 已合入 R12，未 push**（origin/main 停在 `bb89995`）· 未打 tag、无 npm publish
+> 版本 **0.1.0**（工作树已含 R1–R6、R9、R11、R12、R14 与 R8a，尚未发版）· 更新 2026-11-24 · **本地 main 已合入 R9 / R14（merge `a59baf4`），未 push**（origin/main 停在 `516a79b`，即 v0.2.0 tag）· 未打 tag、无 npm publish
 >
 > 状态词只有五个，按「证据离真机有多远」排：
 > **已落地**（代码在 `src/`、门槛绿）→ **隔离 smoke**（测试或合成夹具通过）→ **真机确认**（活体宿主装载过）→
@@ -68,4 +68,4 @@
       演练记录 `.scratch/r12-author/migration-rehearsal.md`。**快照保留作回滚点，别删**；
 - [ ] 5. 版本号与 `CHANGELOG.md` 一致 —— `package.json` 仍是 `0.1.0`，而 R1–R4 已合入但**未发版**：
       发版时要抬版本号并在 `CHANGELOG.md` 补对应小节（当前那条记为「未发布」）；
-- [ ] 6. **发布动作（打 tag / npm publish）另行授权** —— 已推送 `main`（R1 收尾 `bb89995`），未打 tag、无 npm publish。
+- [ ] 6. **发布动作（打 tag / npm publish）另行授权** —— 本地 `main` 领先 `origin/main`（origin 在 `516a79b` / v0.2.0 tag），未 push、未打新 tag、无 npm publish。

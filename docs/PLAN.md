@@ -4,7 +4,7 @@
 > **状态词**：`已完成` / `进行中` / `未开工` / `待拍板` / `暂缓`。
 > **完成定义**：按 [AGENTS.md](../AGENTS.md) 的四道门槛（`build` / `build:client` / `typecheck` / `test`，关键判定另有 `mutation`）+ 真机三步（reload / 日志 / 路由）。本文件不抄门槛，只记结果与遗留。
 > **票据唯一真相**：`.scratch/<slug>/issues/`；本文件只做阶段索引，阶段内的行为规范、验收与变异归属看 spec / 票据，不在这里复制。
-> **基线**：main（v0.2.0 tag `516a79b` + R11 merge `68f0b12` + R8a merge `de72059`，2026-11-23）——R1–R6、R8a、R11、R12 已合入；R11 / R8a 均未抬版本号。
+> **基线**：main（v0.2.0 tag `516a79b` + R11 merge `68f0b12` + R8a merge `de72059` + R9/R14 merge `a59baf4`，2026-11-24）——R1–R6、R8a、R9、R11、R12、R14 已合入；均未抬版本号、未 push。
 > **定位变更**：自 2026-11-22 起本文件改为产品功能进度计划；原「架构候选」计划保存在 git 历史（`git show fd139c6:docs/PLAN.md`），不再在本文件维护。
 
 ## 总览
@@ -113,7 +113,7 @@
 
 ### 第三批 3 — R9：归档页回溯更早文章
 
-- **状态**：**已完成**（`.scratch/r9-archive/issues/` 4/4 `resolved`；已合入 `feat/r9-archive`）。
+- **状态**：**已完成**（`.scratch/r9-archive/issues/` 4/4 `resolved`；已合入 main `a59baf4`）。
 - **前置（第 0 步，0.5–1 天）**：**已完成**（2026-11-23 实测）。阮一峰 `atom.xml` 恰好 3 条、`archives.html` 形态命中 20 / 新 17，月份页 2020/01 新 8，日期用 `abbr.published`；云风 `atom.xml` 15 条、首页是月份索引、月份页 2026/10 新 1，日期只有可见文本「提交于 October 11, 2026 07:30 PM」。形态规则（整路径形状 / 目录形状+扩展名）两家都成立。
 - **拍板**：D1–D10 见 `.scratch/r9-archive/spec.md` §11（一次一页、行内入口、日期三级来源、同文键忽略协议、未读、headroom 预检、同步 + 120s deadline、N = 尝试数、归档页可信 / 文章页不可信、无时区按 +08:00）。
 - **交付**：`src/history.ts`（链接抽取 / 形态过滤 / 候选）、`src/article-date.ts`（五级日期来源）、`src/backfill.ts`（编排）、`src/duplicates.ts` 的 `sameArticleKeyOf`、`fetchArticle.publishedAt`、端点 `backfillHistory`（32→33）、`feeds-view` 行内表单；无迁移、无新依赖。
@@ -137,7 +137,7 @@
 
 ### 修复轮 — R14：订阅源范围改为宿主分页
 
-- **状态**：**已完成**（`.scratch/r14-feed-scope/issues/` 1/1 `resolved`）。
+- **状态**：**已完成**（`.scratch/r14-feed-scope/issues/` 1/1 `resolved`；已合入 main `a59baf4`）。
 - **病象**：选中阮一峰（库里 27 条）时顶栏「已加载 300 条」、列表只有 2 条，点两次「加载更多」才全。
 - **根因**：源范围没有宿主分页——`PageScope` 只有 folder/tag，客户端选源不重取，`inScope()` 在全局第一页上按 feedId 过滤。R9 回溯按真实日期补进旧条目后暴露。
 - **交付**：`PageScope` 增加 feed 态（栅栏 `feed:<id>`）、`overview`/`refresh` 接受 `feedId`（与 folder/tagId 互斥、未知源 not-found）、客户端选源/取消/续页都带 `feedId`，**恢复到非虚拟范围时首屏之后按范围重取**。
@@ -180,5 +180,5 @@
 - **v0.2.0**：git tag `v0.2.0` 在 `516a79b`（2026-11-22），但 `package.json` 仍是 `0.1.0`，`CHANGELOG.md` 的 R1–R4 / R5 / R12 仍标「未发布」，`docs/feature-status.md` 仍写「版本 0.1.0…尚未发版」。代码状态不受影响，但发布账目要补，否则「v0.2.0 到底包含什么」不可追溯。
 - **R6 文档面**：`CHANGELOG.md` 没有 R6 小节，`docs/feature-status.md` 没有 R6 行（文档核对）；R6 的交付证据只在 `.scratch/r6-image-fold/` 与 git 历史里。R6 的 `spec.md` 头仍写 `ready-for-agent`，但 8 张票已全部 `resolved`——以票据为准，spec 头待回填。
 - **R6 真机**：三项观感未验（图片 640 限高、灯箱长截图溢出、Referer 实发）；不要因为 tag 已打就写成「真机全验」。
-- **R9 账目**：R9 已合入 `feat/r9-archive`（评审修复 `e317e73`），**未合 main、未打 tag、未 push**；`CHANGELOG.md` 已补 R9 小节，`docs/feature-status.md` 已加 R9 行。真机与真实站点证据在 `.scratch/r9-archive/issues/04-real-device.md`。
+- **R9 / R14 账目**：R9（评审修复 `e317e73`）与 R14（`6153927`）已合入 **main `a59baf4`**，**未打 tag、未 push**；`CHANGELOG.md` 已补两节，`docs/feature-status.md` 已加两行。真机与真实站点证据在 `.scratch/r9-archive/issues/04-real-device.md` 与 `.scratch/r14-feed-scope/issues/01-feed-scope.md`。
 - **R11 版本账目**：R11 已合入 `main`（`68f0b12`），但 `package.json` 仍 `0.1.0`、未打 tag；`CHANGELOG.md` 的 R11 小节仍标「未发布」。功能状态见 `docs/feature-status.md` 的 R11 行（真机验收可用 + 三项细项未复核）。
