@@ -42,6 +42,7 @@ import { FeedNav } from './feed-nav.js'
 import { TagEditor } from './tag-editor.js'
 import { ArticleView } from './article-pane.js'
 import { SettingsView } from './settings-view.js'
+import { ExploreView } from './explore-view.js'
 import { ConfirmDialog } from './confirm-dialog.js'
 // 空组覆盖住 `image-fold.ts`（R6 04 从本文件搬去）：`i` 键在 keyboard-routing.ts 里也要写它，
 // 两处各造一个 `new Set()` 会得到值相等但引用不同的两份「空组覆盖」，而 React 的相等判断与
@@ -173,6 +174,44 @@ const STYLE = `
 /* R11 06 关于区：绝对路径很长，窄面板里必须能断行，否则会横向溢出（只作用于本票新增节点）。 */
 .dsh-rss-about-value { overflow-wrap:anywhere; }
 .dsh-rss-about-summary { cursor:pointer; font-size:13px; margin-top:6px; }
+/* R8b 04 探索视图：主栏可能很窄，所以搜索 / 分类 / 参数字段一律可换行、纵向堆叠，
+   输入框只给 flex-basis 下限，绝不写死宽度（写死会把窄栏撑出横向滚动）。 */
+.dsh-rss-explore-page { flex:1; min-height:0; overflow-y:auto; padding:12px clamp(12px, 2vw, 28px) 24px; }
+.dsh-rss-explore-head { display:flex; align-items:center; flex-wrap:wrap; gap:8px 12px; }
+.dsh-rss-explore-title { font-size:16px; line-height:1.35; }
+.dsh-rss-explore-search { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:12px; }
+.dsh-rss-explore-input { font:inherit; font-size:13px; padding:3px 8px; border-radius:4px;
+  color:inherit; background:var(--rss-bg); border:1px solid var(--rss-line); min-width:0; flex:1 1 220px; }
+.dsh-rss-explore-categories { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+.dsh-rss-explore-category { font:inherit; font-size:12px; padding:2px 8px; border-radius:999px;
+  border:1px solid var(--rss-line); background:transparent; color:inherit; cursor:pointer; }
+.dsh-rss-explore-category[aria-pressed="true"] { background:var(--rss-selected);
+  border-color:var(--rss-accent); font-weight:600; }
+.dsh-rss-explore-active { margin-top:8px; font-size:12px; color:var(--rss-muted); }
+.dsh-rss-explore-note { padding:16px 4px; font-size:13px; color:var(--rss-muted); }
+.dsh-rss-explore-list { list-style:none; margin:12px 0 0; padding:0; }
+.dsh-rss-explore-row { padding:10px 0; border-top:1px solid var(--rss-line); }
+.dsh-rss-explore-row-head { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 10px; }
+.dsh-rss-explore-site { font:inherit; font-size:12px; padding:0; border:0; background:transparent;
+  color:var(--rss-accent); cursor:pointer; text-decoration:underline; text-underline-offset:.2em; }
+.dsh-rss-explore-route { font:inherit; font-size:14px; font-weight:600; padding:0; border:0;
+  background:transparent; color:inherit; cursor:pointer; text-align:left; }
+.dsh-rss-explore-route:hover { color:var(--rss-accent); }
+.dsh-rss-explore-path { display:block; margin-top:4px; font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:12px; overflow-wrap:anywhere; }
+.dsh-rss-explore-detail { margin-top:4px; font-size:12px; color:var(--rss-muted); overflow-wrap:anywhere; }
+.dsh-rss-explore-features { display:flex; flex-wrap:wrap; gap:4px; margin-top:6px; }
+.dsh-rss-explore-badge { padding:0 5px; border-radius:3px; border:1px solid var(--rss-line);
+  font-size:10px; color:var(--rss-muted); }
+.dsh-rss-explore-more { padding:10px 0; text-align:center; }
+.dsh-rss-explore-form { display:flex; flex-direction:column; gap:8px; margin-top:16px;
+  padding-top:14px; border-top:2px solid var(--rss-line); }
+.dsh-rss-explore-form-title { font-size:14px; font-weight:600; }
+.dsh-rss-explore-field { display:flex; flex-direction:column; gap:3px; }
+.dsh-rss-explore-field-label { font-size:12px; color:var(--rss-muted); }
+.dsh-rss-explore-form-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+.dsh-rss-explore-url { flex:1 1 240px; font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:12px; overflow-wrap:anywhere; }
 .dsh-rss-row { border-bottom:1px solid var(--rss-line); }
 .dsh-rss-row:hover, [data-rss-nav-row]:hover { background:var(--rss-hover); }
 .dsh-rss-row[data-rss-selected], [data-rss-nav-selected] { background:var(--rss-selected); }
@@ -499,6 +538,14 @@ export function createReader(store: ReaderStore): () => ReactNode {
      * 再留一个跨组件的 ref 桥接。
      */
     const listBox = useRef<HTMLDivElement | null>(null)
+    /**
+     * 进入探索前的焦点所在（R8b 04，spec §4.1）。
+     *
+     * 为什么在这里记而不是在 store：DOM 节点不属于状态域；而且入口按钮所在的面板（设置 / 订阅管理）
+     * 会在切到探索时卸载 —— 必须在**点击那一刻**取，等 React 提交后再取，activeElement 已经变成 body。
+     * 退出时若那个控件还连着就还给它，否则回落面板根（与 closeMarkAllConfirm 的同一条兜底）。
+     */
+    const exploreReturnFocus = useRef<HTMLElement | null>(null)
     const [expanded, setExpanded] = useState<string | undefined>(undefined)
     /**
      * 被点开的**图片组**序号（R6 03，spec 决策 5 / 14 的「组级覆盖」）。
@@ -569,9 +616,12 @@ export function createReader(store: ReaderStore): () => ReactNode {
       return () => clearTimeout(timer)
     }, [state.loading])
 
-    // 打开面板即刷新（主进程侧有最小间隔节流），并把焦点收到列表上，键盘立即可用
+    // 打开面板即刷新（主进程侧有最小间隔节流），并把焦点收到列表上，键盘立即可用。
+    // R8b 04：设置快照原先只在打开设置页时才取；探索的两处入口要按 `effective.rsshubBase`
+    // 判可见性，所以面板挂载时补一次 —— 没进过设置页也必须能正确决定入口显不显示。
     useEffect(() => {
       void store.load('refresh')
+      void store.loadSettings()
     }, [])
     // 关面板时把待写的阅读位置落一次（R2-01）：写手是 300ms 去抖的，读者完全可能选完一行立刻离开。
     // 没有待写值时 flushViewMemory 什么都不做 —— 「打开面板看一眼再关」不产生写请求。
@@ -579,6 +629,29 @@ export function createReader(store: ReaderStore): () => ReactNode {
     useEffect(() => {
       root?.focus()
     }, [root])
+
+    /**
+     * 退出探索后还焦点（R8b 04）。入口按钮通常已随设置 / 订阅管理页卸载，此时回落面板根 ——
+     * 不还的话焦点落在 body，之后的 j/k / Esc 全都要用户先点一下面板（同 useSelectFocusReturn 的教训）。
+     */
+    const viewBeforeExploreExit = useRef(state.view)
+    useEffect(() => {
+      const previous = viewBeforeExploreExit.current
+      viewBeforeExploreExit.current = state.view
+      if (previous !== 'explore' || state.view === 'explore') return
+      const target = exploreReturnFocus.current
+      exploreReturnFocus.current = null
+      if (target !== null && target.isConnected) target.focus()
+      else root?.focus()
+    }, [state.view, root])
+
+    /** 打开探索：入口两处共用；先记下焦点再切视图（见 exploreReturnFocus 的注释）。 */
+    const openExplore = useCallback((): void => {
+      const doc = root?.ownerDocument
+      const active = doc?.activeElement
+      exploreReturnFocus.current = isElementNode(active) && active !== doc?.body ? active : null
+      store.openExplore()
+    }, [root, store])
 
     // 记录列表滚动位置（R2-02）：passive 监听，滚动手势只更新 store 的模块内值并排 300ms 去抖写。
     // 刻意不 setState：滚动不该触发 React 渲染。卸载时随上面那条 flushViewMemory 一起落一次。
@@ -772,6 +845,11 @@ export function createReader(store: ReaderStore): () => ReactNode {
     const tagTarget = state.view === 'article'
       ? activeArticle
       : state.items.find((item) => item.id === state.selectedId)
+    /**
+     * 探索入口的可见性（R8b 04 / D11）：两处入口共用这一份判据 —— 同一份 settings 快照、
+     * 同一个「非空」检查。客户端不解析地址（解析在宿主），也不自己补一个默认实例。
+     */
+    const exploreAvailable = (state.settings?.effective.rsshubBase ?? '') !== ''
 
     return (
       <div ref={setRoot} tabIndex={0} {...{ [ROOT_ATTR]: '' }}
@@ -998,6 +1076,8 @@ export function createReader(store: ReaderStore): () => ReactNode {
             onRenameTag={(id, name) => { void store.renameTag(id, name) }}
             onDeleteTag={(id) => { void store.deleteTag(id) }}
             onBack={() => store.toggleFeeds()}
+            exploreAvailable={exploreAvailable}
+            onExplore={openExplore}
           />
         )}
 
@@ -1028,6 +1108,19 @@ export function createReader(store: ReaderStore): () => ReactNode {
           />
         )}
 
+        {state.view === 'explore' && state.explore !== undefined && (
+          <ExploreView
+            state={state.explore}
+            onQuery={store.setExploreQuery}
+            onLoadMore={() => { void store.loadMoreExplore() }}
+            onSelectRoute={store.selectExploreRoute}
+            onDraftValue={store.setExploreDraftValue}
+            onBuild={() => { void store.buildExploreAddress() }}
+            onAdd={() => { void store.addExploreSubscription() }}
+            onBack={() => store.closeExplore()}
+          />
+        )}
+
         {state.view === 'settings' && (
           <SettingsView
             settings={state.settings}
@@ -1045,6 +1138,8 @@ export function createReader(store: ReaderStore): () => ReactNode {
             onCleanupPreview={() => store.cleanupPreview()}
             onCleanup={() => store.cleanup()}
             onManageFeeds={() => store.toggleFeeds()}
+            exploreAvailable={exploreAvailable}
+            onExplore={openExplore}
           />
         )}
 

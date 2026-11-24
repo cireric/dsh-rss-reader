@@ -28,7 +28,7 @@ import {
   scanTop, pageTop, halfPageTop, scanStepFor, scrollSelectorFor, lineStepFrom,
 } from '../list-scroll.js'
 import { isElementNode } from './element-node.js'
-import { nextExpandedOf, type ReaderStore } from './store.js'
+import { nextExpandedOf, type ReaderState, type ReaderStore } from './store.js'
 import { EMPTY_IMAGE_GROUPS, baselineExpandedOf } from '../image-fold.js'
 
 export interface KeyRoutingCtx {
@@ -156,6 +156,16 @@ function measureLineStep(box: HTMLElement, win: Window | undefined): number | un
 }
 
 /**
+ * 「非阅读视图」：这些视图里阅读键（j/k/空格/g/G/d/u…）一律不接管，只留帮助 / 订阅管理 / 返回。
+ *
+ * 为什么是集合而不是每加一个视图就往 10 个 case 里各补一条 `if`：本层的 `run()` 都带
+ * preventDefault，而这两个视图都要求阅读键**完全不动**、空格 / d 交给浏览器原生滚动；
+ * 「不接管」必须发生在 switch 之前。加视图只改这一处，不会漏掉某个 case（R11 01 的 settings
+ * 与 R8b 04 的 explore 是同一条规则）。
+ */
+const NON_READING_VIEWS: ReadonlySet<ReaderState['view']> = new Set(['settings', 'explore'])
+
+/**
  * 一次按键 → 零次或一次动作。
  *
  * 同步返回：异步动作（openArticle / toggleStar / markAllRead…）由 store 自己兜，
@@ -168,6 +178,19 @@ export function routeKey(event: KeyboardEvent, ctx: KeyRoutingCtx): void {
   // 用 getClientRects().length 判可见：display:none 或未挂载时为 0，且不受定位方式影响。
   if (ctx.root === null || ctx.root.getClientRects().length === 0) return
   if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return
+  const store = ctx.store
+  const view = store.get().view
+  /**
+   * 探索视图的 `b` = 返回（spec §4.1）。
+   *
+   * 刻意**不**把 b 加进 keys.ts 的全局表：那会让 b 在正文页也变成「关闭文章」，凭空多出一个
+   * 用户没要求的危险键。探索是唯一需要它的地方，所以判据也留在这里。
+   */
+  if (view === 'explore' && event.key === 'b' && !event.shiftKey) {
+    event.preventDefault()
+    store.closeExplore()
+    return
+  }
   const action = resolveReaderKey(event.key, event.shiftKey)
   if (action === 'none') return
 
@@ -191,18 +214,13 @@ export function routeKey(event: KeyboardEvent, ctx: KeyRoutingCtx): void {
     return isElementNode(container) ? container : null
   }
 
-  const store = ctx.store
-  const view = store.get().view
   /**
-   * settings 视图**提前 return**（R11 01，spec D22）：只有 `?`（帮助）、`F`（订阅管理）、
+   * 非阅读视图**提前 return**（R11 01 / R8b 04）：只有 `?`（帮助）、`F`（订阅管理）、
    * `Esc`（回列表）保持可用，其余动作一律不接管。
    *
-   * 为什么不逐个 case 加 `if (view !== 'settings') return`：本层的 `run()` 都带
-   * `preventDefault`，而设置页要求 j / k 等阅读键**完全不动**、空格 / d 交给浏览器原生滚动。
-   * 「不接管」必须发生在 switch 之前 —— 在最外层 return 才能保证 `defaultPrevented === false`。
-   * 也不要在这里 focusScrollBox('settings')：滚动容器不在 list-scroll 的视图表里，会 warn。
+   * 也不要在这里 focusScrollBox：这两个视图的滚动容器不在 list-scroll 的视图表里，会 warn。
    */
-  if (view === 'settings' && action !== 'help' && action !== 'manageFeeds' && action !== 'back') return
+  if (NON_READING_VIEWS.has(view) && action !== 'help' && action !== 'manageFeeds' && action !== 'back') return
   const run = (act: () => void): void => { event.preventDefault(); act() }
   switch (action) {
     case 'search':
@@ -340,7 +358,7 @@ export function routeKey(event: KeyboardEvent, ctx: KeyRoutingCtx): void {
     // r：刷新未读计数（只重取本地视图，不抓取 —— 规格不变量 1）
     case 'refreshCount': run(() => { void store.refreshCount() }); break
     case 'manageFeeds': run(() => store.toggleFeeds()); break
-    // Esc：帮助浮窗 → 灯箱 → 正文 → 订阅管理 → 设置 → 列表。列表态不拦截（不抢弹层的 Esc）
+    // Esc：帮助浮窗 → 灯箱 → 正文 → 订阅管理 → 探索 → 设置 → 列表。列表态不拦截（不抢弹层的 Esc）
     case 'back':
       // 帮助浮窗优先：开着帮助时 Esc **只**关帮助 —— 否则在正文页按 Esc 会「浮窗与文章一起
       // 消失」，而读者只是想收掉那张挡住视线的卡片（用户拍板的三个关闭出口之一）。
@@ -353,6 +371,8 @@ export function routeKey(event: KeyboardEvent, ctx: KeyRoutingCtx): void {
       if (ctx.lightboxSrc !== undefined) { run(() => ctx.setLightboxSrc(undefined)); break }
       if (view === 'article') { event.preventDefault(); store.closeArticle(); break }
       if (view === 'feeds') { event.preventDefault(); store.toggleFeeds(); break }
+      // 探索与设置同级：返回固定回列表（不记来源视图，D20）。
+      if (view === 'explore') { event.preventDefault(); store.closeExplore(); break }
       // 设置页与订阅管理同级：返回固定回列表，不记来源视图（D20 —— 记 prevView 会把
       // ArticleView 的重挂与正文滚动恢复牵进来，收益低于风险）。
       if (view === 'settings') { event.preventDefault(); store.closeSettings(); break }

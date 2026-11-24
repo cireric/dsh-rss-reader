@@ -743,8 +743,8 @@ export const MUTATIONS = [
     ],
     // 2026-11-22 R11 01：入口改名 leaveTransientViews 并多收一类 settings，锚点按产物重锚；
     // 本条只抹掉「正文退出」，settings 分支留着 —— 否则两条判定会被同一条变异一起带走。
-    from: '\t\t\tconst leaveTransientViews = () => {\n\t\t\t\tconst view = get().view;\n\t\t\t\tif (view === "article") set({\n\t\t\t\t\tview: "list",\n\t\t\t\t\tarticle: void 0\n\t\t\t\t});\n\t\t\t\telse if (view === "settings") set({ view: "list" });\n\t\t\t};',
-    to: '\t\t\tconst leaveTransientViews = () => {\n\t\t\t\tconst view = get().view;\n\t\t\t\tif (view === "article") {\n\t\t\t\t} else if (view === "settings") set({ view: "list" });\n\t\t\t};' },
+    from: '\t\t\tconst leaveTransientViews = () => {\n\t\t\t\tconst view = get().view;\n\t\t\t\tif (view === "article") set({\n\t\t\t\t\tview: "list",\n\t\t\t\t\tarticle: void 0\n\t\t\t\t});\n\t\t\t\telse if (view === "settings") set({ view: "list" });\n\t\t\t\telse if (view === "explore") set({\n\t\t\t\t\tview: "list",\n\t\t\t\t\texplore: void 0\n\t\t\t\t});\n\t\t\t};',
+    to: '\t\t\tconst leaveTransientViews = () => {\n\t\t\t\tconst view = get().view;\n\t\t\t\tif (view === "article") {\n\t\t\t\t} else if (view === "settings") set({ view: "list" });\n\t\t\t\telse if (view === "explore") set({\n\t\t\t\t\tview: "list",\n\t\t\t\t\texplore: void 0\n\t\t\t\t});\n\t\t\t};' },
   // 每源未读数的**键域**（2026-10-10）。左栏角标按 feeds 表逐行渲染，键域必须严格 = feeds 表：
   // 删掉「以 feeds 表铺 0」后，0 未读的源会丢键，那一行变成「角标空白」而不是「角标 0」——
   // 界面上无从分辨，是最贵的那类沉默失败。非等价变异：丢键后取值变 undefined，两条测试会红。
