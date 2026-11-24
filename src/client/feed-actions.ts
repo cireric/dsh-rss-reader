@@ -26,6 +26,18 @@ export interface FeedActionHost {
  */
 export type BackfillActionResult = { report: BackfillReport } | { error: string }
 
+/**
+ * 加单个源的结果（R8b 04）：探索的「已添加 ✓」回执只许在**真的落库**后出现，
+ * 而 `addFeed` 原来的返回是 void —— 调用方拿不到成败，只能靠猜全局 state。
+ *
+ * 为什么校验失败也算 `ok: false`：`addFeed` 端点对「URL 校验不过」是**正常回包**
+ *（`failed[0].reason`），不是 HTTP / 通道错误；探索必须把那条原因展示出来，不能给回执。
+ * feeds-view 仍只看 `importReport`，返回值对它是透明的新增信息，既有行为不变。
+ */
+export type AddFeedActionResult =
+  | { readonly ok: true; readonly added: number; readonly existed: number }
+  | { readonly ok: false; readonly message: string }
+
 export function createFeedActions(host: FeedActionHost) {
   const { get, set, rpc, reload } = host
   /**
@@ -81,16 +93,26 @@ export function createFeedActions(host: FeedActionHost) {
   /** 取消挑选：清掉候选，不写任何订阅。 */
   const clearDiscovery = (): void => { set({ discovery: undefined }) }
 
-  /** 加单个源：同样先校验再落库，避免把网页当订阅。 */
-  const addFeed = async (url: string): Promise<void> => {
+  /**
+   * 加单个源：同样先校验再落库，避免把网页当订阅。
+   *
+   * 返回值是 R8b 04 加的，只为让探索知道「到底成没成」；feeds-view 的 `onAdd` 仍丢弃它，
+   * 页面表现与改动前逐字一致（报告照旧由 importReport 渲染）。
+   */
+  const addFeed = async (url: string): Promise<AddFeedActionResult> => {
     set({ feedsBusy: true, importReport: undefined })
     try {
       const report = await rpc<OpmlImportResult>('addFeed', { url })
       // 落库成功即收掉候选清单：用户已经在清单里做过选择，留着它只会让人怀疑「到底加了没」。
       set({ importReport: report, feedsBusy: false, discovery: undefined })
       await reload()
+      const failed = report.failed[0]
+      if (failed !== undefined) return { ok: false, message: failed.reason }
+      return { ok: true, added: report.added, existed: report.existed }
     } catch (failure) {
-      set({ feedsBusy: false, error: failure instanceof Error ? failure.message : String(failure) })
+      const message = failure instanceof Error ? failure.message : String(failure)
+      set({ feedsBusy: false, error: message })
+      return { ok: false, message }
     }
   }
 

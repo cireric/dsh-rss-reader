@@ -159,7 +159,10 @@ export function createListActions(host: ListActionHost) {
   const leaveTransientViews = (): void => {
     const view = get().view
     if (view === 'article') set({ view: 'list', article: undefined })
+    // 设置页与探索都是「跨域呈现」：左栏导航 / 切过滤 / 切档必须收回列表。
+    // 探索没有内容快照要留（整份 explore 随视图丢弃，D14），所以连状态一起清。
     else if (view === 'settings') set({ view: 'list' })
+    else if (view === 'explore') set({ view: 'list', explore: undefined })
   }
 
   /**

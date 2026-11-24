@@ -72,6 +72,13 @@ export interface SettingsViewProps {
   /** 「去订阅管理页」：走既有 toggleFeeds，设置页不复制排序控件（D15）。 */
   onManageFeeds: () => void
   /**
+   * 探索入口是否可见（R8b 04 / D11）：判据由入口统一算好（同一份 settings 快照的
+   * `effective.rsshubBase`），设置页不再自己解析一次地址。
+   */
+  exploreAvailable: boolean
+  /** 打开探索视图（设置页只发意图，不复制探索状态）。 */
+  onExplore: () => void
+  /**
    * 清理预演（D27.1）：只取「如果现在执行会删多少」，不删任何条目。
    * 返回 undefined = 失败（全局 error 已由 store 设置），设置页不弹确认框。
    */
@@ -363,6 +370,7 @@ export function SettingsView(props: SettingsViewProps): ReactNode {
     settings, error, warningDismissed, onClose, onDismissWarning,
     reading, onReading, showUnread, onShowUnread,
     onSave, onReset, onTestRsshub, onCleanupPreview, onCleanup, onManageFeeds,
+    exploreAvailable, onExplore,
   } = props
   const box = useRef<HTMLDivElement | null>(null)
   const resetButton = useRef<HTMLButtonElement | null>(null)
@@ -544,11 +552,24 @@ export function SettingsView(props: SettingsViewProps): ReactNode {
             </>
           )}
           {section.key === 'rsshub' && (
-            <RsshubSettingRow
-              value={settings?.effective.rsshubBase}
-              onSave={onSave}
-              onTest={onTestRsshub}
-            />
+            <>
+              <RsshubSettingRow
+                value={settings?.effective.rsshubBase}
+                onSave={onSave}
+                onTest={onTestRsshub}
+              />
+              {/* R8b 04 / D11：未配置实例时入口整个不渲染（同一个判据也管订阅管理页那一处）。 */}
+              {exploreAvailable && (
+                <div className="dsh-rss-settings-row" data-rss-explore-entry="">
+                  <button type="button" className="dsh-rss-btn" data-rss-explore-open="" onClick={onExplore}>
+                    浏览该实例的路由表
+                  </button>
+                  <p className="dsh-rss-settings-help">
+                    按站点 / 分类浏览 RSSHub 的路由，填参数可拼出订阅地址；拼出的地址仍需点「添加」才落库。
+                  </p>
+                </div>
+              )}
+            </>
           )}
           {section.key === 'feedOrder' && (
             // D15 / D14③：排序控件已经在订阅管理页（↑/↓），这里只放指针 + 跳转按钮。
