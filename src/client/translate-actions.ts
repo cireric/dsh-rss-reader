@@ -8,8 +8,8 @@
  * 为什么动作住在独立文件而不是 store.ts：store 已经是 800 行的汇合点；翻译的写边界只有
  * `translations` 一个字段，独立成工厂后 02/03/05 扩展编排时不必在 store 里穿针。
  */
-import type { TranslateBatchResult } from '../shared.js'
-import { DEFAULT_TARGET_LANGUAGE, type TargetLanguage } from '../translate-copy.js'
+import type { TranslateBatchResult, TranslateInfo } from '../shared.js'
+import { DEFAULT_TARGET_LANGUAGE, isTargetLanguage, type TargetLanguage } from '../translate-copy.js'
 import { translatableBlocksOf, translatableTextOf } from '../translate-blocks.js'
 import type { ReaderState, ReaderStoreDeps, TranslationEntry } from './store.js'
 
@@ -67,10 +67,12 @@ export interface TranslateActionHost {
   set: (patch: Partial<ReaderState>) => void
   rpc: ReaderStoreDeps['rpc']
   log: ReaderStoreDeps['log']
+  /** 目标语言属于视图记忆（ViewPreferences.translateTarget），改动要走整份落盘。 */
+  persistView: () => void
 }
 
 export function createTranslateActions(host: TranslateActionHost) {
-  const { get, set, rpc, log } = host
+  const { get, set, rpc, log, persistView } = host
 
   /** 整份替换 Map（不改原对象，React 才会看到变化）。 */
   const storeEntry = (entry: TranslationEntry): void => {
@@ -80,17 +82,47 @@ export function createTranslateActions(host: TranslateActionHost) {
   }
 
   /**
+   * 读一次可用性探测（R7 02，spec §4.1）：面板加载时探一次，设置保存成功后由 store 再刷一次。
+   *
+   * 失败时不编造原因：保持上一份结果（通常是 undefined）→ 文章面不渲染「译」按钮，
+   * 设置页显示「正在探测」而不是一个假 reason。原因由宿主裁决，客户端只搬运。
+   */
+  const loadTranslateInfo = async (): Promise<void> => {
+    try {
+      const info = await rpc<TranslateInfo>('translateInfo', {})
+      if (info === null || typeof info !== 'object' || typeof info.available !== 'boolean') {
+        throw new Error('translateInfo 回包缺少 available')
+      }
+      set({ translationInfo: info })
+    } catch (failure) {
+      log('warn', '[rss-reader] 读取翻译可用性失败', failure)
+    }
+  }
+
+  /**
+   * 改目标语言（R7 02，spec §5.3）：`Aa` 面板与设置页共用这一个值。
+   *
+   * 落盘走既有的整份视图记忆通道（persistView），不新开端点：旧译文按
+   * `${itemId}:${contentVersion}:${target}` 分键，换语言既不冒充也不清空（spec 验收 13）。
+   */
+  const setTranslateTarget = (target: TargetLanguage): void => {
+    if (!isTargetLanguage(target) || get().translateTarget === target) return
+    set({ translateTarget: target })
+    persistView()
+  }
+
+  /**
    * 翻译当前正文的首批（01 的唯一入口）。
    *
-   * 目标语言固定 `zh-CN`：语言偏好是 03/06 的票；01 先证明链路通。
-   * 同一篇同一语言正在飞时直接忽略重复点击 —— 01 没有停止按钮，重复请求只会白花两份钱。
+   * 目标语言取当前视图偏好（R7 02 起可切换）；同一篇同一语言正在飞时直接忽略重复点击 ——
+   * 01 没有停止按钮，重复请求只会白花两份钱。
    */
   const startTranslate = async (): Promise<void> => {
     const state = get()
     const article = state.article
     if (article === undefined || article.loading === true) return
     if (article.itemId === undefined || article.contentVersion === undefined || article.blocks === undefined) return
-    const target = DEFAULT_TARGET_LANGUAGE
+    const target = state.translateTarget
     const key = translationKeyOf(article.itemId, article.contentVersion, target)
     if (state.translations.get(key)?.status === 'running') return
 
@@ -138,5 +170,5 @@ export function createTranslateActions(host: TranslateActionHost) {
     }
   }
 
-  return { startTranslate }
+  return { startTranslate, loadTranslateInfo, setTranslateTarget }
 }

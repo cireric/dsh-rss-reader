@@ -626,6 +626,8 @@ export function createReader(store: ReaderStore): () => ReactNode {
     useEffect(() => {
       void store.load('refresh')
       void store.loadSettings()
+      // R7 02：翻译可用性在面板加载时探一次（宿主侧 30s 缓存；saveSettings 后失效）。
+      void store.loadTranslateInfo()
     }, [])
     // 关面板时把待写的阅读位置落一次（R2-01）：写手是 300ms 去抖的，读者完全可能选完一行立刻离开。
     // 没有待写值时 flushViewMemory 什么都不做 —— 「打开面板看一眼再关」不产生写请求。
@@ -852,7 +854,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
      */
     const articleTranslation = state.article === undefined
       ? undefined
-      : translationEntryOf(state, state.article.itemId, state.article.contentVersion)
+      : translationEntryOf(state, state.article.itemId, state.article.contentVersion, state.translateTarget)
     const tagTarget = state.view === 'article'
       ? activeArticle
       : state.items.find((item) => item.id === state.selectedId)
@@ -1119,6 +1121,9 @@ export function createReader(store: ReaderStore): () => ReactNode {
             onOpenImage={setLightboxSrc}
             onCloseLightbox={() => setLightboxSrc(undefined)}
             translation={articleTranslation}
+            translateAvailable={state.translationInfo?.available === true}
+            translateTarget={state.translateTarget}
+            onTranslateTarget={store.setTranslateTarget}
             onTranslate={() => { void store.startTranslate() }}
             canPrev={store.canStepArticle(-1)}
             canNext={store.canStepArticle(1)}
@@ -1149,6 +1154,10 @@ export function createReader(store: ReaderStore): () => ReactNode {
             onReading={(patch) => store.setReading(patch)}
             showUnread={state.showUnread}
             onShowUnread={(value) => store.setShowUnread(value)}
+            translationInfo={state.translationInfo}
+            translateTarget={state.translateTarget}
+            onTranslateTarget={store.setTranslateTarget}
+            onSaveTranslateRoute={(patch) => store.saveTranslateRoute(patch)}
             onClose={() => store.closeSettings()}
             onDismissWarning={() => store.dismissSettingsWarning()}
             onSave={(key, value) => store.saveSetting(key, value)}

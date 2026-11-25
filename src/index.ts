@@ -122,8 +122,9 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
     return {
       // 真实服务 → 本仓库最小结构的**薄适配**：不 import dsh-llm 的类型，也不把整个服务
       // 原样塞进来（`stream` 的 GenerateOptions 带品牌类型，字符串 effort 传不过去）。
-      // 01 只传 provider / model / messages / system / maxTokens / signal；effort 留到 02 的
-      // 路由选择一起处理。
+      // R7 02 起把 effort 一并转发：值要么来自适配器自己 listModels 返回的 effort id，
+      // 要么来自 settings.json 且已被同一份列表校验过（见 translate.ts 的 resolveTranslateRoute），
+      // 所以这里对品牌类型的收窄是安全的 —— 不做 `as any`，只把边界收窄到 GenerateOptions 的字段类型。
       ...(llm === undefined ? {} : {
         llm: {
           listProviders: () => llm.listProviders(),
@@ -131,6 +132,9 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
           stream: (options: Parameters<TranslateLlmService['stream']>[0]) => llm.stream({
             provider: options.provider,
             model: options.model,
+            ...(options.reasoningEffort === undefined ? {} : {
+              reasoningEffort: options.reasoningEffort as Parameters<typeof llm.stream>[0]['reasoningEffort'],
+            }),
             messages: options.messages.map((message) => ({
               role: message.role,
               content: message.content.map((block) => ({ type: block.type, text: block.text })),

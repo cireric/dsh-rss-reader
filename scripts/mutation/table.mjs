@@ -3355,4 +3355,21 @@ export const MUTATIONS = [
     judgeTests: ['applyBatch：编号重复 ⇒ 整批失败（哪怕条数碰巧相等）'],
     from: "        if (seen.has(item.id))\n            return { ok: false, reason: 'misaligned' };",
     to: "        if (false)\n            return { ok: false, reason: 'misaligned' };" },
+
+  // ── R7 02：两层路由与探测缓存（2026-11-25）──────────────────────────────
+  // 可用性忽略「目录里确有默认路由」：modelCatalog().default 不存在时仍回 available，
+  // 文章面会出现「译」按钮，点下去 translateBatch 却选不出路由（用户看到按钮却翻不了）。
+  // 判据是「回落会话默认但 modelCatalog().default 不存在 ⇒ no-default-route」。
+  { id: 'translate-可用性忽略默认路由', file: 'lib/translate.js',
+    judges: ['translate-availability.test.mjs'],
+    judgeTests: ['回落会话默认但 modelCatalog().default 不存在 ⇒ no-default-route'],
+    from: "    if (currentSelection === undefined || catalog?.default === undefined) {\n        return { available: false, reason: 'no-default-route', providers: providerViews };\n    }",
+    to: "    if (currentSelection === undefined) {\n        return { available: false, reason: 'no-default-route', providers: providerViews };\n    }" },
+  // 保存设置后不清探测缓存：改完模型最多 30 秒内文章面按钮 / 设置页原因仍是旧结论。
+  // 时钟固定在同一个值的用例只有「显式失效」能让它看到新服务 —— 正是这条变异要抓的。
+  { id: 'translate-保存后不清缓存', file: 'lib/endpoints.js',
+    judges: ['translate-availability.test.mjs'],
+    judgeTests: ['saveSettings 成功后探测缓存立即失效（不用等 30s）'],
+    from: "            invalidateTranslateInfoCache();\n            return ok({ settings: outcome.snapshot });",
+    to: "            void 0;\n            return ok({ settings: outcome.snapshot });" },
 ]

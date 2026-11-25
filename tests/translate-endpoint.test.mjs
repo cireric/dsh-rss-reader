@@ -14,6 +14,13 @@ import { maxTokensFor } from '../lib/translate.js'
 const STORE = {}
 
 function dispatchWith({ services, deadlineMs } = {}) {
+  // R7 02 起可用性 / 路由探测要求「目录里确有默认路由」：回落到会话默认时
+  // modelCatalog().default 必须存在（spec §4.4）。这里给所有用例一份最小会话目录；
+  // 单测要覆盖「没有默认路由」时在 services 里显式传 sessionController 覆盖它。
+  const withSession = {
+    sessionController: { modelCatalog: async () => ({ default: { provider: 'p', model: 'm' } }) },
+    ...services,
+  }
   return createDispatch({
     config: Config({}),
     log: () => {},
@@ -21,7 +28,7 @@ function dispatchWith({ services, deadlineMs } = {}) {
     refreshNow: async () => ({ outcome: 'not-ready', attempted: 0, total: 0 }),
     lastRefreshCompletedAt: () => undefined,
     articleAttempts: new Map(),
-    ...(services === undefined ? {} : { translateServices: () => services }),
+    ...(services === undefined ? {} : { translateServices: () => withSession }),
     ...(deadlineMs === undefined ? {} : { translateDeadlineMs: deadlineMs }),
   })
 }

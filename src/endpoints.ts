@@ -39,6 +39,7 @@ import {
   setItemTagsPayload,
   testRsshubPayload,
   translateBatchPayload,
+  translateInfoPayload,
   unmarkReadPayload,
 } from './endpoint-payloads.js'
 import type { createSearch } from './search.js'
@@ -80,7 +81,13 @@ import { decodeFencedCursor, encodeFencedCursor, queryFenceKey } from './cursor-
 import type { Cursor } from './cursor.js'
 import type { DisplayWindowBounds } from './display-window.js'
 import { buildItemPage, decodePageCursor, type PageScope } from './item-page.js'
-import { translateBatch, type TranslateServices } from './translate.js'
+import {
+  invalidateTranslateInfoCache,
+  probeTranslateInfo,
+  translateBatch,
+  translateRouteSelectionOf,
+  type TranslateServices,
+} from './translate.js'
 
 /** 端点需要的运行时依赖（显式传入，不靠闭包）。 */
 export interface EndpointDeps {
@@ -116,6 +123,8 @@ export interface EndpointDeps {
   readonly translateServices?: () => TranslateServices
   /** 单批 deadline 的测试接缝（生产缺省 60s，见 translate.ts 的 TRANSLATE_DEADLINE_MS）。 */
   readonly translateDeadlineMs?: number
+  /** 可用性探测缓存的时钟接缝（默认 Date.now）：测试用假 now 走完 30s，不 sleep。 */
+  readonly translateNow?: () => number
 }
 
 /**
@@ -144,6 +153,7 @@ export interface EndpointCtx {
   readonly articleAttempts: Map<string, number>
   readonly translateServices?: () => TranslateServices
   readonly translateDeadlineMs?: number
+  readonly translateNow?: () => number
 }
 
 /**
@@ -1196,6 +1206,9 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         ? ctx.settings.resetToDefaults()
         : ctx.settings.save(input.patch)
       if (!outcome.ok) return fail('write-failed', outcome.message)
+      // R7 02 / spec §4.1：可用性探测缓存 30s；设置落盘成功后必须立刻失效，否则用户改完模型
+      // 仍会在最长 30 秒里看到旧路由（文章面按钮 / 设置页原因都可能是过期结论）。
+      invalidateTranslateInfoCache()
       return ok({ settings: outcome.snapshot })
     },
   }),
@@ -1343,8 +1356,29 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
     invalidMessage: 'translateBatch 需要目标语言与至少一条待译文本（id 不重复、文本非空）',
     to: async (input, ctx) => translateBatch(input, {
       services: ctx.translateServices?.() ?? {},
+      // 显式路由每次现读 config（settings 保存后直接改内存，不需要重启）。
+      selection: translateRouteSelectionOf(ctx.config),
       ...(ctx.translateDeadlineMs === undefined ? {} : { deadlineMs: ctx.translateDeadlineMs }),
     }),
+  }),
+
+  /**
+   * 翻译可用性探测（R7 02，spec §4.1 / §4.4）。
+   *
+   * 四类原因由 translate.ts 的 resolveTranslateRoute 一次定下；这里只负责把「当前设置里的
+   * 显式路由」和「探测时钟」交给它。**永远回 ok 信封**：不可用是正常观测结果，不是请求失败；
+   * 文章面据 `available` 决定是否渲染「译」按钮，设置页据 `reason` 显示中文原因。
+   */
+  translateInfo: defineEndpoint({
+    payload: translateInfoPayload,
+    invalidMessage: 'translateInfo 不接受参数（可传 null / 空对象）',
+    to: async (_input, ctx) => ok(await probeTranslateInfo(
+      ctx.translateServices?.() ?? {},
+      {
+        explicit: translateRouteSelectionOf(ctx.config),
+        ...(ctx.translateNow === undefined ? {} : { now: ctx.translateNow }),
+      },
+    )),
   }),
 
   // ── 文件夹目录与变更接口（M2 02）────────────────────────────────────────
@@ -1524,7 +1558,7 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
  * 异常一律兜成 internal 信封 —— 不把 throw 泄进通道（调用方要的是带 code 的失败信封）。
  */
 export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: unknown, signal?: AbortSignal) => Promise<RpcResult<unknown>> {
-  const { config, log, ready, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, fetchImpl, fetchArticleImpl, translateServices, translateDeadlineMs } = deps
+  const { config, log, ready, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, fetchImpl, fetchArticleImpl, translateServices, translateDeadlineMs, translateNow } = deps
 
   const dispatch = async (endpoint: string, payload: unknown, signal?: AbortSignal): Promise<RpcResult<unknown>> => {
     try {
@@ -1542,6 +1576,7 @@ export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: 
         store: target, ready, config, log, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, fetchImpl, fetchArticleImpl, signal,
         ...(translateServices === undefined ? {} : { translateServices }),
         ...(translateDeadlineMs === undefined ? {} : { translateDeadlineMs }),
+        ...(translateNow === undefined ? {} : { translateNow }),
       }
       const outcome = await spec.to(payload, ctx)
       const { result } = outcome

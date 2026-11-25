@@ -343,7 +343,7 @@ afterEach(() => {
   }
 })
 
-test('R11 01 设置页骨架：工具栏进入、标题与返回按钮、五分区按 D13 顺序、首行只读值', skip, async () => {
+test('R11 01 设置页骨架：工具栏进入、标题与返回按钮、分区按 D13 顺序（R7 02 插入「翻译」）、首行只读值', skip, async () => {
   const h = await mount({
     settings: {
       effective: { ...TUNABLE_DEFAULTS, refreshFeedsPerRound: 7 },
@@ -357,7 +357,7 @@ test('R11 01 设置页骨架：工具栏进入、标题与返回按钮、五分�
   assert.equal(h.$('[data-rss-settings-back]')?.textContent, '← 返回列表（Esc）', '返回按钮文案是验收项')
   const sections = [...h.win.document.querySelectorAll('[data-rss-settings-section]')]
     .map((node) => node.getAttribute('data-rss-settings-section'))
-  assert.deepEqual(sections, ['fetch', 'display', 'rsshub', 'feedOrder', 'agent', 'about'],
+  assert.deepEqual(sections, ['fetch', 'display', 'translate', 'rsshub', 'feedOrder', 'agent', 'about'],
     '六分区必须按 D13 + R8a 的顺序（RSSHub 在「显示」之后、「Agent 说明」之前）')
   const row = h.$('[data-rss-setting="refreshFeedsPerRound"]')
   assert.ok(row !== null, '第一个分区里必须有「每次刷新抓取源数」这一行')
@@ -1325,7 +1325,7 @@ test('R11 05 显示区：两个开关带帮助文案，「默认折叠图片」�
     await openSettings(h)
 
     const section = h.$('[data-rss-settings-section="display"]')
-    assert.ok(section !== null, '五分区里的「显示」区必须存在')
+    assert.ok(section !== null, '分区里的「显示」区必须存在')
     const expand = h.$('[data-rss-setting-checkbox="expandImages"]')
     const unread = h.$('[data-rss-setting-checkbox="showUnread"]')
     assert.ok(expand !== null, '「默认折叠图片」复选框必须在显示区')

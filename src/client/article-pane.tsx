@@ -23,7 +23,7 @@ import { paragraphsOf } from '../html-text.js'
 import { READING_FONT_SIZES, READING_LINE_WIDTHS } from '../preferences.js'
 import type { ReadingPreferences } from '../preferences.js'
 import type { ArticleState, TranslationEntry } from './store.js'
-import { TRANSLATE_BUTTON_TEXT } from '../translate-copy.js'
+import { TARGET_LANGUAGES, TRANSLATE_BUTTON_TEXT, type TargetLanguage } from '../translate-copy.js'
 // InlineRun 从 article-text.js 取，**不从 article.js**：后者 import 了 node:crypto 与 feed/fetch.js，
 // 而 client bundle 不许出现任何 node: 说明符（tsdown 不会因此报错，失败被推迟到浏览器运行期）。
 // 见 docs/pitfalls.md §1.7b。
@@ -586,7 +586,7 @@ function Lightbox({ src, onClose }: {
   )
 }
 
-export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress, expandedGroups, onExpandImageGroup, imagesExpanded, lightboxSrc, onOpenImage, onCloseLightbox, translation, onTranslate }: {
+export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress, expandedGroups, onExpandImageGroup, imagesExpanded, lightboxSrc, onOpenImage, onCloseLightbox, translation, translateAvailable, translateTarget, onTranslateTarget, onTranslate }: {
   article: ArticleState | undefined
   item: ItemView | undefined
   onBack: () => void
@@ -597,6 +597,15 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
   translation: TranslationEntry | undefined
   /** 点「译」：动作在 store 的 translate-actions 里，组件只交回意图。 */
   onTranslate: () => void
+  /**
+   * 翻译当前是否可用（R7 02，spec §4.1）：`translateInfo.available === true` 才渲染「译」按钮
+   * 与 Aa 面板里的目标语言下拉。判据只由 store 持有，组件不自己再探一次。
+   */
+  translateAvailable: boolean
+  /** 目标语言（R7 02 / §5.3）：值与设置页「显示」分区共用 store 里的同一份。 */
+  translateTarget: TargetLanguage
+  /** 改目标语言：交给 store 落进 viewPreferences，组件不持有状态。 */
+  onTranslateTarget: (target: TargetLanguage) => void
   /**
    * 重试抓取当前正文页这一篇（R4-B4）。
    * 请求哪个条目由 store 按 `article.itemId` 决定，本组件只负责把用户意图交回去 ——
@@ -921,12 +930,13 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
               <a className="dsh-rss-btn dsh-rss-btn--ghost" href={link} target="_blank" rel="noreferrer">打开原站 ↗</a>
             )}
             {/*
-              * 一键翻译（R7 01）。01 里**始终渲染**：可用性门禁（translateInfo.available）
-              * 是 02 的票；这里点了但没模型时，动作会把 failed 状态留在 store，界面不挂。
-              * 放在 Aa 左侧是 spec §4.1 的固定位置，别挪到「更多」里。
+              * 一键翻译（R7 01 / R7 02 门禁）。不可用时**不渲染**（spec §4.1）：
+              * 连按钮都不该出现，而不是点了再说「没有模型」。放在 Aa 左侧是固定位置。
               */}
-            <button type="button" className="dsh-rss-btn" data-rss-translate=""
-              title="翻译当前文章（首批最多 12 段）" onClick={onTranslate}>{TRANSLATE_BUTTON_TEXT.translate}</button>
+            {translateAvailable && (
+              <button type="button" className="dsh-rss-btn" data-rss-translate=""
+                title="翻译当前文章（首批最多 12 段）" onClick={onTranslate}>{TRANSLATE_BUTTON_TEXT.translate}</button>
+            )}
             {/*
               * 阅读偏好（M5 01）收在一个 <details> 里：三个 <select> 摊开摆会把这一行挤成两层，
               * 而它们是「调一次就一直用」的东西，不值得占常驻版面。与顶栏「更多」同一个面板样式。
@@ -971,6 +981,22 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
                     onChange={(event) => onReading({ expandImages: !event.target.checked })} />
                   默认折叠图片
                 </label>
+                {/*
+                  * 翻译目标语言（R7 02 / spec §5.3）：与设置页「显示」分区共用同一个
+                  * viewPreferences.translateTarget。不可用时不渲染（spec §4.1）；
+                  * 语言表从 translate-copy 读，不在这里另抄一份语言名。
+                  */}
+                {translateAvailable && (
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    目标语言
+                    <select value={translateTarget} aria-label="翻译目标语言" data-rss-target-language=""
+                      onChange={(event) => onTranslateTarget(event.target.value as TargetLanguage)}>
+                      {TARGET_LANGUAGES.map((language) => (
+                        <option key={language.id} value={language.id}>{language.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                )}
               </div>
             </details>
           </div>

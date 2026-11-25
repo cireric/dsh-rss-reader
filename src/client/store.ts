@@ -12,6 +12,7 @@ import type { ReadingPreferences, ViewPreferences } from '../preferences.js'
 import { clampScrollTop } from '../list-scroll.js'
 import type { DisplayWindowRange } from '../display-window.js'
 import type { UnreadSplit } from '../unread.js'
+import { DEFAULT_TARGET_LANGUAGE, type TargetLanguage } from '../translate-copy.js'
 
 export type Filter = 'all' | 'unread' | 'starred'
 
@@ -58,7 +59,7 @@ import { createListActions } from './list-actions.js'
 import { createNavActions } from './nav-actions.js'
 import { createOpmlActions } from './opml-actions.js'
 import { createSearchActions } from './search-actions.js'
-import { createSettingsActions } from './settings-actions.js'
+import { createSettingsActions, type TranslateRouteSettingsPatch } from './settings-actions.js'
 import { createExploreActions } from './explore-actions.js'
 import { createTagActions } from './tag-actions.js'
 import { createTranslateActions } from './translate-actions.js'
@@ -246,8 +247,13 @@ export interface ReaderState {
   translations: ReadonlyMap<string, TranslationEntry>
   /** 三态（02/03 票接线；01 只渲染「原文 + 下方译文」的对照形态，不显示切换器）。 */
   translationMode: 'original' | 'translated' | 'parallel'
-  /** 可用性探测结果（02 票写入；01 不做门禁，保持 undefined）。 */
+  /** 可用性探测结果（R7 02）：面板加载时探一次；undefined = 还没探到（按钮先不渲染）。 */
   translationInfo: TranslateInfo | undefined
+  /**
+   * 翻译目标语言（R7 02 / spec §5.3）：与 `viewPreferences.translateTarget` 同一份状态。
+   * `Aa` 面板与设置页「显示」分区共读这一位；切换只影响新译文，旧译文按语言分键保留。
+   */
+  translateTarget: TargetLanguage
   /** 导航选中（虚拟视图 / 某个具体源）。与 filter 叠加生效，见 NavSelection。 */
   navSelection: NavSelection
   /** 导航**光标**（左栏键盘高亮所在行）。与 navSelection 是两件事，见 NavCursor。 */
@@ -401,7 +407,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   let state: ReaderState = {
     items: [], feeds: [], folders: [], tags: [], unread: 0, unreadSplit: undefined, filter: 'all',
     selectedId: undefined, loading: true, error: undefined, undo: undefined,
-    view: 'list', layout: 'list', markAllRange: 'all', displayWindow: 'all', accountWindow: 'all', showUnread: DEFAULT_VIEW_PREFERENCES.showUnread, settings: undefined, settingsError: undefined, settingsWarningDismissed: false, explore: undefined, article: undefined, translations: new Map(), translationMode: 'original', translationInfo: undefined, notice: undefined,
+    view: 'list', layout: 'list', markAllRange: 'all', displayWindow: 'all', accountWindow: 'all', showUnread: DEFAULT_VIEW_PREFERENCES.showUnread, settings: undefined, settingsError: undefined, settingsWarningDismissed: false, explore: undefined, article: undefined, translations: new Map(), translationMode: 'original', translationInfo: undefined, translateTarget: DEFAULT_TARGET_LANGUAGE, notice: undefined,
     importReport: undefined, discovery: undefined, feedsBusy: false,
     navSelection: { kind: 'virtual' }, perFeedUnread: {}, navVisible: true,
     reading: DEFAULT_READING_PREFERENCES, duplicates: {},
@@ -523,6 +529,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
       filter: state.filter,
       navVisible: state.navVisible,
       showUnread: state.showUnread,
+      translateTarget: state.translateTarget,
       reading: state.reading,
     }
     if (state.selectedId !== undefined) preferences.lastItemId = state.selectedId
@@ -566,6 +573,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
       filter: prefs.filter,
       navVisible: prefs.navVisible,
       showUnread: prefs.showUnread,
+      translateTarget: prefs.translateTarget,
       reading: prefs.reading,
       navCursor: prefs.navSelection.kind === 'feed'
         ? { kind: 'feed', feedId: prefs.navSelection.feedId }
@@ -796,7 +804,18 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   const settingsActions = createSettingsActions({ get, set, rpc: deps.rpc, log: deps.log })
 
   // 翻译域（R7 01）：只写 translations；正文块本身归 article，动作只读不写。
-  const translateActions = createTranslateActions({ get, set, rpc: deps.rpc, log: deps.log })
+  const translateActions = createTranslateActions({ get, set, rpc: deps.rpc, log: deps.log, persistView })
+
+  /**
+   * 翻译路由保存（R7 02）：复用设置域的串行链，成功后**立刻**重探可用性 ——
+   * 宿主的 30s 缓存在 saveSettings 成功时失效，客户端这份也要马上换成新结论，
+   * 否则设置页刚选完模型，文章面的「译」按钮要等下一次面板加载才出现。
+   */
+  const saveTranslateRoute = async (patch: TranslateRouteSettingsPatch): Promise<Awaited<ReturnType<typeof settingsActions.saveTranslateRoute>>> => {
+    const result = await settingsActions.saveTranslateRoute(patch)
+    if (result.ok) await translateActions.loadTranslateInfo()
+    return result
+  }
 
   // 探索域（R8b 04）：订阅只经 feedActions.addFeed（唯一入口），探索自己不碰 feeds 真相。
   const exploreActions = createExploreActions({
@@ -819,6 +838,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     ...folderActions,
     ...tagActions,
     ...settingsActions,
+    saveTranslateRoute,
     ...translateActions,
     ...exploreActions,
   }

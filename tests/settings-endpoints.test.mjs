@@ -17,7 +17,10 @@ import { createSettingsControl } from '../lib/settings-control.js'
 import { createLifecycle } from '../lib/lifecycle.js'
 import { selectStalestFeeds } from '../lib/refresh.js'
 
-const TUNABLE = ['refreshFeedsPerRound', 'refreshConcurrency', 'minRefreshIntervalMs', 'cleanupAfterDays', 'rsshubBase']
+const TUNABLE = [
+  'refreshFeedsPerRound', 'refreshConcurrency', 'minRefreshIntervalMs', 'cleanupAfterDays', 'rsshubBase',
+  'translateProvider', 'translateModel', 'translateEffort', 'translateNoticeAck',
+]
 
 /**
  * 装配一份「生产同形」的 settings 控制器 + dispatch。
@@ -69,13 +72,8 @@ test('settings 回包：effective / defaults 都覆盖全部可调键（含 rssh
   try {
     const settings = await settingsOf(h)
     assert.deepEqual(Object.keys(settings.effective).sort(), [...TUNABLE].sort(), '生效值必须覆盖全部可调键')
-    assert.deepEqual(settings.defaults, {
-      refreshFeedsPerRound: 20,
-      refreshConcurrency: 5,
-      minRefreshIntervalMs: 600000,
-      cleanupAfterDays: 30,
-      rsshubBase: '',
-    }, '默认值由 Config({}) 现取，客户端不硬编码；RSSHub 默认空 = 功能关闭（D1）')
+    assert.deepEqual(settings.defaults, TUNABLE_DEFAULTS,
+      '默认值由 Config({}) 现取，客户端不硬编码；RSSHub / 翻译三键默认空 = 未配置（D1 / R7 D6）')
     assert.deepEqual(settings.effective, settings.defaults, '没有 settings.json 时生效值就是默认值')
     assert.equal(settings.warning, undefined, '文件不存在是正常首装，不该报警')
   } finally {
@@ -173,10 +171,8 @@ test('saveSettings 稀疏写：只改一项就只写这一个键，形状 { vers
     const result = await h.dispatch('saveSettings', { patch: { refreshFeedsPerRound: 7 } })
     assert.equal(result.ok, true, '合法保存必须成功')
     assert.equal(result.value.settings.effective.refreshFeedsPerRound, 7, '回包里的生效值必须是新值')
-    assert.deepEqual(result.value.settings.defaults, {
-      refreshFeedsPerRound: 20, refreshConcurrency: 5, minRefreshIntervalMs: 600000, cleanupAfterDays: 30,
-      rsshubBase: '',
-    }, '回包形状与 settings 读端点同形（客户端据此统一落地）')
+    assert.deepEqual(result.value.settings.defaults, TUNABLE_DEFAULTS,
+      '回包形状与 settings 读端点同形（客户端据此统一落地）')
 
     assert.deepEqual(JSON.parse(fileText(h)), { version: 1, overrides: { refreshFeedsPerRound: 7 } },
       '稀疏覆盖：只改这一项时 overrides 里不许出现另外三个键')
@@ -322,12 +318,18 @@ const TUNABLE_DEFAULTS = {
   minRefreshIntervalMs: 600000,
   cleanupAfterDays: 30,
   rsshubBase: '',
+  // R7 02：翻译三键默认空（未配置），确认标记默认 false（未确认）。
+  translateProvider: '',
+  translateModel: '',
+  translateEffort: '',
+  translateNoticeAck: false,
 }
 
-/** 除四个可调键之外的 Config 字段（恢复默认不许碰它们）。 */
+/** 除全部可调键之外的 Config 字段（恢复默认不许碰它们）。 */
 function nonTunableConfig(config) {
   const {
-    refreshFeedsPerRound, refreshConcurrency, minRefreshIntervalMs, cleanupAfterDays, rsshubBase, ...rest
+    refreshFeedsPerRound, refreshConcurrency, minRefreshIntervalMs, cleanupAfterDays, rsshubBase,
+    translateProvider, translateModel, translateEffort, translateNoticeAck, ...rest
   } = config
   return rest
 }
@@ -358,6 +360,10 @@ test('saveSettings 恢复默认：继承值等于默认的键删覆盖，不等�
       minRefreshIntervalMs: h.config.minRefreshIntervalMs,
       cleanupAfterDays: h.config.cleanupAfterDays,
       rsshubBase: h.config.rsshubBase,
+      translateProvider: h.config.translateProvider,
+      translateModel: h.config.translateModel,
+      translateEffort: h.config.translateEffort,
+      translateNoticeAck: h.config.translateNoticeAck,
     }, TUNABLE_DEFAULTS)
     assert.deepEqual(h.settings.snapshot().effective, TUNABLE_DEFAULTS, '端点快照与内存一致')
     assert.deepEqual(h.logs.filter((line) => line.startsWith('恢复默认：')), [
@@ -743,5 +749,74 @@ test('A1 后半：抓取途中保存新值，进行中的这一轮仍是旧批�
     globalThis.fetch = originalFetch
     await lifecycle.stop()
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ── R7 02：翻译三键 + 确认标记（spec §5.2）──────────────────────────────────
+
+test('R7 02：翻译三键与确认标记可经 saveSettings 写入；确认标记不出现在只读区', async () => {
+  const h = harness()
+  try {
+    const before = await settingsOf(h)
+    const readOnlyKeys = before.readOnly.map((entry) => entry.key)
+    for (const key of ['translateProvider', 'translateModel', 'translateEffort', 'translateNoticeAck']) {
+      assert.equal(readOnlyKeys.includes(key), false, key + ' 是可调键，不许出现在「其余参数（只读）」区')
+    }
+
+    const result = await h.dispatch('saveSettings', { patch: {
+      translateProvider: '  deepseek  ',
+      translateModel: 'deepseek-chat',
+      translateEffort: 'high',
+      // 06 票的确认框会写这一位：它不是用户可调项，但必须能经同一个端点落盘。
+      translateNoticeAck: true,
+    } })
+    assert.equal(result.ok, true, JSON.stringify(result))
+    assert.deepEqual(result.value.settings.effective, {
+      ...TUNABLE_DEFAULTS,
+      translateProvider: 'deepseek',
+      translateModel: 'deepseek-chat',
+      translateEffort: 'high',
+      translateNoticeAck: true,
+    }, '四个键一次写盘后内存立即生效，字符串按 trim 存')
+    assert.deepEqual(JSON.parse(fileText(h)), { version: 1, overrides: {
+      translateProvider: 'deepseek',
+      translateModel: 'deepseek-chat',
+      translateEffort: 'high',
+      translateNoticeAck: true,
+    } }, '稀疏写：只写这四个键')
+
+    // 重启保持：重新创建控制器（模拟插件重装）后仍是刚才的值。
+    const reopened = createSettingsControl({
+      config: Config({}),
+      settingsPath: h.settingsPath,
+      log: () => {},
+    })
+    assert.equal(reopened.snapshot().effective.translateProvider, 'deepseek')
+    assert.equal(reopened.snapshot().effective.translateEffort, 'high')
+    assert.equal(reopened.snapshot().effective.translateNoticeAck, true)
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R7 02：翻译设置的坏值（非字符串 / 超长 / 非布尔）回 bad-request，文件与内存都不变', async () => {
+  const h = harness()
+  try {
+    for (const patch of [
+      { translateProvider: 5 },
+      { translateModel: 'x'.repeat(201) },
+      { translateEffort: null },
+      { translateNoticeAck: 'true' },
+      { translateNoticeAck: 1 },
+    ]) {
+      const result = await h.dispatch('saveSettings', { patch })
+      assert.equal(result.ok, false, '坏值必须拒绝：' + JSON.stringify(patch))
+      assert.equal(result.error.code, 'bad-request', JSON.stringify(patch))
+    }
+    assert.equal(fileText(h), undefined, '坏值一个都不许落盘')
+    assert.equal(h.config.translateProvider, '', '坏值一个都不许改进内存')
+    assert.equal(h.config.translateNoticeAck, false)
+  } finally {
+    h.cleanup()
   }
 })
