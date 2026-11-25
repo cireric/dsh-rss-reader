@@ -3405,4 +3405,23 @@ export const MUTATIONS = [
     judgeTests: ['R7 03 list 行数不等 / 空白译文：整块退回原文，不渲染空段落'],
     from: 'if (lines.length !== items.length) return void 0;',
     to: 'if (false) return void 0;' },
+
+  // ── R7 05：失败分类、重试与连续失败停止（2026-11-25）──────────────────────
+  // 一批失败被当成整篇失败：第一批发 translate-failed 后立刻把 status 置 failed 并 return，
+  // 其余批不再继续 —— 读者只看到第一批的错误，后面本来能译的段落全没了。
+  // 判据是「批失败后其余批继续 + 重试只重发那一批」用例（它要求第一次失败后仍有第二次请求）。
+  // from 照构建产物 lib/client.js 的实际字节写，独立实测 OCCURRENCES=1。
+  { id: 'translate-批失败当整篇失败', file: 'lib/client.js',
+    judges: ['translate-failure.test.mjs'],
+    judgeTests: ['R7 05 批失败：其余批继续，失败处显示原因 + 批首一个重试按钮，点重试只重发那一批'],
+    from: 'if (reason === void 0) {',
+    to: 'if (true) {' },
+  // 连续失败计数不清零：失败 → 成功 → 失败 → 失败 会被累计成 3 次连续失败而提前停整篇，
+  // 用户在一篇本来能译完的文章上点第三次重试时发现「翻译已停止」。
+  // 判据是「失败 → 成功 → 失败 → 失败 → 成功 仍然跑完全篇」用例（要求 5 次请求）。
+  { id: 'translate-连续失败计数不清零', file: 'lib/client.js',
+    judges: ['translate-failure.test.mjs'],
+    judgeTests: ['R7 05 连续失败计数清零：失败 → 成功 → 失败 → 失败 → 成功 仍然跑完全篇'],
+    from: '\t\t\t\t\tconsecutiveFailures = 0;',
+    to: '\t\t\t\t\tvoid 0;' },
 ]

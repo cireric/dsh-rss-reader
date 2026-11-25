@@ -181,6 +181,10 @@ export async function mount({
     readOnly: [],
   }
   const requests = []
+  // 失败信封要抛**真的** RpcError（bundle 里的类），否则 translate-actions 的
+  // `instanceof RpcError` 判据在假 rpc 下永远不会成立，测试会覆盖不到 reason 分支。
+  // 类在 bundle 加载后才拿得到，所以先声明、执行期再赋值。
+  let RpcErrorClass
   const rpc = async (endpoint, payload) => {
     requests.push({ endpoint, payload })
     if (endpoint === 'settings') return { settings }
@@ -215,7 +219,10 @@ export async function mount({
     if (endpoint === 'translateBatch') {
       if (translateBatch !== undefined) {
         const custom = await translateBatch(payload)
-        if (custom?.error !== undefined) throw new Error(custom.error.code + ': ' + custom.error.message)
+        if (custom?.error !== undefined) {
+          // details 原样带给 RpcError：测试要覆盖「失败原因只在 details.reason 里」的契约。
+          throw new RpcErrorClass(custom.error.code, custom.error.message, custom.error.details ?? {})
+        }
         if (custom?.value !== undefined) return custom.value
       }
       return {
@@ -237,6 +244,7 @@ export async function mount({
     throw new Error('未预期的外部依赖：' + specifier)
   }
   const exportsObj = captured.factory(requireFn)
+  RpcErrorClass = exportsObj.RpcError
   const createStore = () => exportsObj.createReaderStore({ rpc })
   const store = createStore()
   const root = createRoot(win.document.getElementById('root'))
@@ -282,7 +290,7 @@ export async function mount({
   const $ = (selector) => win.document.querySelector(selector)
   const $$ = (selector) => [...win.document.querySelectorAll(selector)]
   const calls = (endpoint) => requests.filter((entry) => entry.endpoint === endpoint)
-  return { win, store, requests, calls, createStore, press, settle, waitFor, cleanup, $, $$ }
+  return { win, store, requests, calls, createStore, exports: exportsObj, press, settle, waitFor, cleanup, $, $$ }
 }
 
 /** 打开某条目正文页并等它渲染完成。 */

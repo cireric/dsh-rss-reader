@@ -12,7 +12,7 @@ import type { ReadingPreferences, ViewPreferences } from '../preferences.js'
 import { clampScrollTop } from '../list-scroll.js'
 import type { DisplayWindowRange } from '../display-window.js'
 import type { UnreadSplit } from '../unread.js'
-import { DEFAULT_TARGET_LANGUAGE, type TargetLanguage } from '../translate-copy.js'
+import { DEFAULT_TARGET_LANGUAGE, type TargetLanguage, type TranslateFailureReason } from '../translate-copy.js'
 
 export type Filter = 'all' | 'unread' | 'starred'
 
@@ -143,6 +143,18 @@ export interface ExploreState {
 }
 
 /**
+ * 一个失败批的可见信息（R7 05 / spec §4.7）。
+ *
+ * `indices` 必须原样保留**整批**：重试按钮点一次要重发这一批的全部块，而不是只发批首块。
+ * 失败批的块不在 `blocks` 里，所以渲染层能据此同时做到「每块位置显示原因」与
+ * 「批首块位置只放一个重试按钮」。
+ */
+export interface TranslationBatchFailure {
+  readonly indices: readonly number[]
+  readonly reason: TranslateFailureReason
+}
+
+/**
  * 一条正文的翻译内存态（R7，contract「客户端共享状态」）。
  *
  * 键 = `${itemId}:${contentVersion}:${target}`：正文版本变了旧译文自动不可见（spec §4.6），
@@ -153,10 +165,25 @@ export interface TranslationEntry {
   title?: string
   titleFailed?: boolean
   readonly blocks: ReadonlyMap<number, string>
+  /**
+   * 失败批：键 = 批首块下标。批失败不影响已完成块，也不让整篇立刻失败；
+   * 只有连续 3 批失败才写 `status: 'failed'`（spec §4.7）。
+   */
+  readonly failures: ReadonlyMap<number, TranslationBatchFailure>
   done: number
   total: number
+  /**
+   * `model` 取**回包**里的值（spec §4.4），不取客户端设置。
+   *
+   * 多批 / 重试之间模型可能变化。这里取**最后一条非空回包**：它代表最近一次真正产出译文的
+   * 路由，标签不会因为早期批次的旧模型而误导；「全程一致才显示」看似更保守，但路由切换时
+   * 会把整篇译文标成没有出处，读者反而无法核对是谁译的。
+   */
+  model?: string
   status: 'running' | 'done' | 'stopped' | 'failed'
   error?: string
+  /** 连续 3 批失败而整篇停止时的最后一类原因；顶层「翻译已停止：…」的文案来源。 */
+  stoppedReason?: TranslateFailureReason
 }
 
 /** 正文的三态（R7 03 / spec §4.5 / D5）：原文 / 译文 / 对照。 */
@@ -316,12 +343,34 @@ export interface ReaderState {
 }
 
 /**
- * 调一个端点并解信封；失败抛出 `code: message`，由面板渲染。
+ * 宿主失败信封的 Error 投影（R7 05）。
+ *
+ * 为什么需要子类：失败原因住在 `details.reason` 里，而 `throw new Error(code + ': ' + message)`
+ * 会把 details 丢掉 —— 客户端只能从中文文案反推原因（那是字符串前缀猜测，改一句文案就断）。
+ * `message` 仍**逐字**保持 `code: message`：既有调用点只依赖 `instanceof Error` 与这句文本，
+ * 日志与错误提示不受影响；新的翻译编排用 `instanceof RpcError` 读 `code` / `details`。
+ */
+export class RpcError extends Error {
+  readonly code: string
+  readonly details: object
+
+  constructor(code: string, message: string, details: object) {
+    super(code + ': ' + message)
+    this.name = 'RpcError'
+    this.code = code
+    this.details = details
+  }
+}
+
+/**
+ * 调一个端点并解信封；失败抛出 `RpcError`，由面板渲染。
  *
  * endpoint 收的是 shared.ts 的 Endpoint（= ENDPOINT_NAMES 派生）：拼错名字从「运行时收一个
  * unknown-endpoint」变成**编译错误**。这是本文件与宿主之间唯一的那条 seam，值得有类型。
+ *
+ * 仅供 05 的测试接缝导出：测试要直接喂一个失败信封，断言 `details.reason` 确实进了 Error。
  */
-async function browserRpc<T>(endpoint: Endpoint, payload?: unknown, signal?: AbortSignal): Promise<T> {
+export async function browserRpc<T>(endpoint: Endpoint, payload?: unknown, signal?: AbortSignal): Promise<T> {
   const response = await fetch(ROUTE_PATH, {
     method: 'POST',
     ...(signal === undefined ? {} : { signal }),
@@ -332,7 +381,13 @@ async function browserRpc<T>(endpoint: Endpoint, payload?: unknown, signal?: Abo
   const result = (await response.json()) as RpcResult<T>
   if (result?.ok) return result.value
   const error = result?.error
-  throw new Error(error ? error.code + ': ' + error.message : '通道返回了非预期形状')
+  if (error === undefined || typeof error.code !== 'string' || typeof error.message !== 'string') {
+    throw new Error('通道返回了非预期形状')
+  }
+  // details 在 wire 上必填；但旧宿主 / 手写桩可能省掉它。缺省成空对象，不让「读 reason」
+  // 在客户端抛 TypeError —— 那会把一次可读的失败变成整块面板的错误。
+  const details = typeof error.details === 'object' && error.details !== null ? error.details : {}
+  throw new RpcError(error.code, error.message, details)
 }
 
 export { relativeTime } from './relative-time.js'
