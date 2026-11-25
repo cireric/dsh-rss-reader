@@ -47,6 +47,8 @@ export const ENDPOINT_NAMES = [
   'backfillHistory',
   // R8b 03：探索的两个**只读**端点 —— 目录分页与地址拼装。整张路由表永不下发浏览器（D12）。
   'exploreCatalog', 'exploreBuildUrl',
+  // R7 01：翻译一批正文块（纯函数式；模型路由与失败原因都从宿主注入的服务取）。
+  'translateBatch',
 ] as const
 export type Endpoint = (typeof ENDPOINT_NAMES)[number]
 
@@ -522,6 +524,39 @@ function httpUrlOf(raw: string): URL | undefined {
  */
 export function isHttpUrl(value: string): boolean {
   return httpUrlOf(value) !== undefined
+}
+
+/**
+ * 翻译的 wire 形状（R7，contract「shared.ts 共享 wire 类型」）。
+ *
+ * `TranslateRoute` 的 `effort` 是**已确认可用**的推理强度；01 只回会话默认，02 的可用性
+ * 探测会复用同一份形状。`TranslateInfo` 的 reason 四枚举就是设置页 / 文章面不渲染按钮的
+ * 依据 —— 客户端不自己拼「为什么不可用」。
+ */
+export interface TranslateRoute {
+  readonly provider: string
+  readonly model: string
+  readonly effort?: string
+}
+
+/** 一条待译 / 已译文本：id 是 `'b' + 正文块下标`（标题走独立字段，不做成 item）。 */
+export interface TranslateItem {
+  readonly id: string
+  readonly text: string
+}
+
+/** `translateBatch` 的成功回包：model 取响应回包里的值（不信客户端）。 */
+export interface TranslateBatchResult {
+  readonly model: string
+  readonly title?: string
+  readonly items: TranslateItem[]
+}
+
+/** `translateInfo` 的 wire 形状（02 用；01 先建立，避免两票各造一份）。 */
+export interface TranslateInfo {
+  readonly available: boolean
+  readonly reason?: 'llm-unmounted' | 'no-provider' | 'no-model' | 'no-default-route'
+  readonly route?: TranslateRoute
 }
 
 /** 成功信封（两侧共用的信封构造器：宿主端点与客户端解包都按这个形状）。 */

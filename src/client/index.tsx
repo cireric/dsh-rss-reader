@@ -26,6 +26,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import { createReaderStore, nextExpandedOf, relativeTime, useReaderStore, VIRTUAL_VIEWS, type Filter, type MarkAllRange, type ReaderState, type ReaderStore, type ReaderStoreDeps } from './store.js'
 import { DISPLAY_WINDOW_OPTIONS, displayWindowNameOf, unreadCountTextOf } from './window-control.js'
+import { translationEntryOf } from './translate-actions.js'
 import type { DisplayWindowRange } from '../display-window.js'
 // 导出面是构建产物对外的契约（契约测试直接调它），store 搬家后仍要从入口转出去
 export { createReaderStore }
@@ -845,6 +846,13 @@ export function createReader(store: ReaderStore): () => ReactNode {
     const activeArticle = state.view === 'article'
       ? state.items.find((entry) => entry.id === state.article?.itemId)
       : undefined
+    /**
+     * 当前正文的译文（R7 01）：从 store 按「条目 + 正文版本 + 目标语言」现查。
+     * 不把整张 Map 传进 ArticleView —— 组件只该看见这一篇的那一条。
+     */
+    const articleTranslation = state.article === undefined
+      ? undefined
+      : translationEntryOf(state, state.article.itemId, state.article.contentVersion)
     const tagTarget = state.view === 'article'
       ? activeArticle
       : state.items.find((item) => item.id === state.selectedId)
@@ -1110,6 +1118,8 @@ export function createReader(store: ReaderStore): () => ReactNode {
             lightboxSrc={lightboxSrc}
             onOpenImage={setLightboxSrc}
             onCloseLightbox={() => setLightboxSrc(undefined)}
+            translation={articleTranslation}
+            onTranslate={() => { void store.startTranslate() }}
             canPrev={store.canStepArticle(-1)}
             canNext={store.canStepArticle(1)}
             onPrev={() => { store.stepArticle(-1) }}

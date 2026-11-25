@@ -6,7 +6,7 @@
  * 列表、正文、订阅管理与键盘接线，任一改动都要动同一个文件。
  */
 import { useEffect, useState } from 'react'
-import { ROUTE_PATH, type DiscoveryResult, type Endpoint, type ExploreRouteView, type FeedView, type FolderView, type ItemView, type OpmlImportResult, type RpcResult, type SearchQuery, type SettingsSnapshot, type TagView, type DuplicateHintView } from '../shared.js'
+import { ROUTE_PATH, type DiscoveryResult, type Endpoint, type ExploreRouteView, type FeedView, type FolderView, type ItemView, type OpmlImportResult, type RpcResult, type SearchQuery, type SettingsSnapshot, type TagView, type DuplicateHintView, type TranslateInfo } from '../shared.js'
 import { DEFAULT_READING_PREFERENCES, DEFAULT_VIEW_PREFERENCES, sanitizeViewPreferences, validListScrollTop } from '../preferences.js'
 import type { ReadingPreferences, ViewPreferences } from '../preferences.js'
 import { clampScrollTop } from '../list-scroll.js'
@@ -61,6 +61,7 @@ import { createSearchActions } from './search-actions.js'
 import { createSettingsActions } from './settings-actions.js'
 import { createExploreActions } from './explore-actions.js'
 import { createTagActions } from './tag-actions.js'
+import { createTranslateActions } from './translate-actions.js'
 import {
   navRowsOf, navCursorKey, nextExpandedOf, memorableSelectionOf, VIRTUAL_VIEWS,
 } from './nav-model.js'
@@ -138,6 +139,23 @@ export interface ExploreState {
   adding: boolean
   /** 「已添加 ✓」回执（D6：不关视图、不清表单）。 */
   receipt: string | undefined
+}
+
+/**
+ * 一条正文的翻译内存态（R7，contract「客户端共享状态」）。
+ *
+ * 键 = `${itemId}:${contentVersion}:${target}`：正文版本变了旧译文自动不可见（spec §4.6），
+ * 目标语言不同也不互相冒充。`blocks` 只收**非空译文**的块下标 → 渲染层不需要再判空。
+ */
+export interface TranslationEntry {
+  readonly key: string
+  title?: string
+  titleFailed?: boolean
+  readonly blocks: ReadonlyMap<number, string>
+  done: number
+  total: number
+  status: 'running' | 'done' | 'stopped' | 'failed'
+  error?: string
 }
 
 export interface ReaderState {
@@ -219,6 +237,17 @@ export interface ReaderState {
   /** 一次性提示（如清理结果）：显示后由用户下一个动作清掉，不设定时器 */
   notice: string | undefined
   article: ArticleState | undefined
+  /**
+   * 内存译文（R7 01）：键 = `${itemId}:${contentVersion}:${target}`。
+   *
+   * 刻意不落盘、不进 viewPreferences：刷新 / 热重载即丢（spec D9 / D11）。切条目、切面板
+   * 不丢 —— 它挂在 store 上而不是组件 state 上。
+   */
+  translations: ReadonlyMap<string, TranslationEntry>
+  /** 三态（02/03 票接线；01 只渲染「原文 + 下方译文」的对照形态，不显示切换器）。 */
+  translationMode: 'original' | 'translated' | 'parallel'
+  /** 可用性探测结果（02 票写入；01 不做门禁，保持 undefined）。 */
+  translationInfo: TranslateInfo | undefined
   /** 导航选中（虚拟视图 / 某个具体源）。与 filter 叠加生效，见 NavSelection。 */
   navSelection: NavSelection
   /** 导航**光标**（左栏键盘高亮所在行）。与 navSelection 是两件事，见 NavCursor。 */
@@ -372,7 +401,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   let state: ReaderState = {
     items: [], feeds: [], folders: [], tags: [], unread: 0, unreadSplit: undefined, filter: 'all',
     selectedId: undefined, loading: true, error: undefined, undo: undefined,
-    view: 'list', layout: 'list', markAllRange: 'all', displayWindow: 'all', accountWindow: 'all', showUnread: DEFAULT_VIEW_PREFERENCES.showUnread, settings: undefined, settingsError: undefined, settingsWarningDismissed: false, explore: undefined, article: undefined, notice: undefined,
+    view: 'list', layout: 'list', markAllRange: 'all', displayWindow: 'all', accountWindow: 'all', showUnread: DEFAULT_VIEW_PREFERENCES.showUnread, settings: undefined, settingsError: undefined, settingsWarningDismissed: false, explore: undefined, article: undefined, translations: new Map(), translationMode: 'original', translationInfo: undefined, notice: undefined,
     importReport: undefined, discovery: undefined, feedsBusy: false,
     navSelection: { kind: 'virtual' }, perFeedUnread: {}, navVisible: true,
     reading: DEFAULT_READING_PREFERENCES, duplicates: {},
@@ -766,6 +795,9 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   // 设置域（R11 01）：只读快照 + 视图开关。写路径是 02 票的 saveSettings。
   const settingsActions = createSettingsActions({ get, set, rpc: deps.rpc, log: deps.log })
 
+  // 翻译域（R7 01）：只写 translations；正文块本身归 article，动作只读不写。
+  const translateActions = createTranslateActions({ get, set, rpc: deps.rpc, log: deps.log })
+
   // 探索域（R8b 04）：订阅只经 feedActions.addFeed（唯一入口），探索自己不碰 feeds 真相。
   const exploreActions = createExploreActions({
     get, set, rpc: deps.rpc, addFeed: feedActions.addFeed,
@@ -787,6 +819,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     ...folderActions,
     ...tagActions,
     ...settingsActions,
+    ...translateActions,
     ...exploreActions,
   }
 }

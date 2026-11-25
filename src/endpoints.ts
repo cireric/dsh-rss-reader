@@ -1,5 +1,5 @@
 /**
- * 浏览器半的读写通道：33 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
+ * 浏览器半的读写通道：36 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
  *
  * 原先这里是一个 switch：每臂各自手写 payload 解析、各自记得把未读账并进回包 ——
  * interface 的复杂度 ≈ implementation 的复杂度。现在「一个端点」是一个 module：
@@ -38,6 +38,7 @@ import {
   searchQueryPayload,
   setItemTagsPayload,
   testRsshubPayload,
+  translateBatchPayload,
   unmarkReadPayload,
 } from './endpoint-payloads.js'
 import type { createSearch } from './search.js'
@@ -79,6 +80,7 @@ import { decodeFencedCursor, encodeFencedCursor, queryFenceKey } from './cursor-
 import type { Cursor } from './cursor.js'
 import type { DisplayWindowBounds } from './display-window.js'
 import { buildItemPage, decodePageCursor, type PageScope } from './item-page.js'
+import { translateBatch, type TranslateServices } from './translate.js'
 
 /** 端点需要的运行时依赖（显式传入，不靠闭包）。 */
 export interface EndpointDeps {
@@ -105,6 +107,15 @@ export interface EndpointDeps {
    */
   readonly fetchArticleImpl?: typeof fetchArticle
   readonly articleAttempts: Map<string, number>
+  /**
+   * R7：翻译用的宿主服务（llm / sessionController / agentDefaultModel）。
+   *
+   * **每次调用现取**（index.ts 传闭包）：服务可能后挂，缓存下来的 undefined 会让「装上模型
+   * 之后仍然没有译按钮」。测试经 createDispatch 注入假服务，因此端点不需要 cordis ctx。
+   */
+  readonly translateServices?: () => TranslateServices
+  /** 单批 deadline 的测试接缝（生产缺省 60s，见 translate.ts 的 TRANSLATE_DEADLINE_MS）。 */
+  readonly translateDeadlineMs?: number
 }
 
 /**
@@ -131,6 +142,8 @@ export interface EndpointCtx {
   readonly fetchImpl?: typeof fetchFeed
   readonly fetchArticleImpl?: typeof fetchArticle
   readonly articleAttempts: Map<string, number>
+  readonly translateServices?: () => TranslateServices
+  readonly translateDeadlineMs?: number
 }
 
 /**
@@ -598,7 +611,7 @@ function catalogPageOf(
 }
 
 /**
- * 端点表：35 个端点一处声明（每项的 `payload` 是入参形状的唯一声明）。
+ * 端点表：36 个端点一处声明（每项的 `payload` 是入参形状的唯一声明）。
  *
  * 穷尽性由 `Record<Endpoint, EndpointSpec>` 保证 —— 名字表（shared.ts 的 ENDPOINT_NAMES）
  * 加了新端点而这里没跟上，编译就不过。这是本文件里唯一需要「加端点时改的地方」。
@@ -1317,6 +1330,23 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
   }),
 
 
+  /**
+   * 翻译一批正文块（R7 01，spec §5.1）。
+   *
+   * **纯函数式**：不读 store、不碰库、不认 itemId —— 入参只有目标语言、可选标题与
+   * `{id,text}[]`。这是刻意的：翻译结果属于客户端内存态（`itemId:contentVersion:target`），
+   * 宿主若保存第二份「谁翻了什么」，就会变成第二个真相。模型侧失败一律 translate-failed，
+   * 由 details.reason 区分四类；HTTP 仍是 200 信封（与其它端点同形）。
+   */
+  translateBatch: defineEndpoint({
+    payload: translateBatchPayload,
+    invalidMessage: 'translateBatch 需要目标语言与至少一条待译文本（id 不重复、文本非空）',
+    to: async (input, ctx) => translateBatch(input, {
+      services: ctx.translateServices?.() ?? {},
+      ...(ctx.translateDeadlineMs === undefined ? {} : { deadlineMs: ctx.translateDeadlineMs }),
+    }),
+  }),
+
   // ── 文件夹目录与变更接口（M2 02）────────────────────────────────────────
   // 与订阅同住 config.json；每个变更都在**一次**读改写里完成（改名连带成员归属）。
   // 名称规则与错误码归 src/folders.ts；这里只做 payload 形状校验与错误信封转换。
@@ -1494,7 +1524,7 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
  * 异常一律兜成 internal 信封 —— 不把 throw 泄进通道（调用方要的是带 code 的失败信封）。
  */
 export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: unknown, signal?: AbortSignal) => Promise<RpcResult<unknown>> {
-  const { config, log, ready, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, fetchImpl, fetchArticleImpl } = deps
+  const { config, log, ready, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, fetchImpl, fetchArticleImpl, translateServices, translateDeadlineMs } = deps
 
   const dispatch = async (endpoint: string, payload: unknown, signal?: AbortSignal): Promise<RpcResult<unknown>> => {
     try {
@@ -1510,6 +1540,8 @@ export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: 
 
       const ctx: EndpointCtx = {
         store: target, ready, config, log, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, fetchImpl, fetchArticleImpl, signal,
+        ...(translateServices === undefined ? {} : { translateServices }),
+        ...(translateDeadlineMs === undefined ? {} : { translateDeadlineMs }),
       }
       const outcome = await spec.to(payload, ctx)
       const { result } = outcome

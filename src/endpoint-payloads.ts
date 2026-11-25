@@ -17,6 +17,7 @@ import { z } from 'zod'
 import { BACKFILL_LIMIT, isHttpUrl } from './shared.js'
 import { assignTunableValue, isTunableKey, parseTunableValue } from './settings-schema.js'
 import type { TunableOverrides } from './settings-schema.js'
+import { isTargetLanguage } from './translate-copy.js'
 
 /** 零入参端点：接受并忽略 payload（与阶段 5 之前的语义一致）。 */
 export const noPayload = z.unknown()
@@ -361,3 +362,27 @@ export const saveSettingsPayload = z.union([
   z.strictObject({ patch: tunablePatch }),
   z.strictObject({ resetToDefaults: z.literal(true) }),
 ])
+
+/**
+ * `translateBatch` 入参（R7 01，spec §5.1）。
+ *
+ * 本票只拒绝「空 items / 重复 id / 目标语言认不出 / 单条文本全空白」这几条明显的坏入参；
+ * 批大小（12 块）与总字符（6000）的完整边界留给 05 票按预算规则补齐（票面明确如此拆分）。
+ * id 必须是 `'b' + 块下标` —— 端点与客户端共用这一个编号协议，回包才能按号入座。
+ */
+export const translateBatchPayload = z.object({
+  target: z.string().min(1).refine(isTargetLanguage, { message: '不支持的目标语言' }),
+  title: z.string().max(2000).nullish(),
+  items: z.array(z.object({
+    id: z.string().regex(/^b\d+$/, 'id 必须是 b + 块下标'),
+    text: z.string().refine((value) => value.trim() !== '', { message: '待译文本不能为空' }),
+  })).min(1).max(12),
+}).superRefine((value, ctx) => {
+  const seen = new Set<string>()
+  for (const [index, item] of value.items.entries()) {
+    if (seen.has(item.id)) {
+      ctx.addIssue({ code: 'custom', path: ['items', index, 'id'], message: 'id 重复' })
+    }
+    seen.add(item.id)
+  }
+})
