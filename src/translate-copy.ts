@@ -34,8 +34,21 @@ export function targetLanguageInstructionOf(target: TargetLanguage): string {
   return entry.instruction
 }
 
-/** 模型侧失败的四类原因（spec §4.7 / D17）。 */
-export type TranslateFailureReason = 'timeout' | 'truncated' | 'empty' | 'unavailable'
+/**
+ * 模型侧失败的四类原因（spec §4.7 / D17）。
+ *
+ * 运行时常量 + 类型派生：宿主按 reason 回包、客户端按 reason 选文案 / 判重试，
+ * 两边都要能在运行时认出「这是不是四类之一」。只留一个 type 时，客户端只好手写
+ * `reason === 'timeout' || ...`，第五类出现时两处会悄悄分家。
+ */
+export const TRANSLATE_FAILURE_REASONS = ['timeout', 'truncated', 'empty', 'unavailable'] as const
+
+export type TranslateFailureReason = (typeof TRANSLATE_FAILURE_REASONS)[number]
+
+/** 认不出的值一律 false：不把未知 reason 当成某一类已知失败。 */
+export function isTranslateFailureReason(value: unknown): value is TranslateFailureReason {
+  return typeof value === 'string' && (TRANSLATE_FAILURE_REASONS as readonly string[]).includes(value)
+}
 
 /**
  * 四类失败文案**分开、不合并**：超时和截断对用户是两条不同的行动线索
@@ -54,6 +67,20 @@ export const TRANSLATE_BUTTON_TEXT = {
   stop: '停止',
   retranslate: '重译',
   continue: (remaining: number, total: number): string => '继续翻译（还剩 ' + remaining + '/' + total + '）',
+  /** 批级失败处的重试（R7 05）：只有一个按钮，点它重发整批。 */
+  retry: '重试',
+} as const
+
+/**
+ * 批级失败提示（R7 05 / spec §4.7）：文案模板与四类原因在这里拼一次。
+ *
+ * 单独成表的原因：失败原因（`timeout` 等）是 wire 枚举，用户看到的是中文句式。
+ * 若组件里写 `'本批翻译失败：' + reason`，就会把英文枚举直接漏到界面上；
+ * 而「停止」那句必须与批内那句共用同一个原因表，避免同一类失败在两处叫不同名字。
+ */
+export const TRANSLATE_FAILURE_UI = {
+  batch: (reason: TranslateFailureReason): string => '本批翻译失败：' + TRANSLATE_FAILURE_TEXT[reason],
+  stopped: (reason: TranslateFailureReason): string => '翻译已停止：' + TRANSLATE_FAILURE_TEXT[reason],
 } as const
 
 /** 标签文案（03/05 直接复用）。 */

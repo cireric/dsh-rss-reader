@@ -24,7 +24,10 @@ import { READING_FONT_SIZES, READING_LINE_WIDTHS } from '../preferences.js'
 import type { ReadingPreferences } from '../preferences.js'
 import type { ArticleState, TranslationEntry, TranslationMode } from './store.js'
 import { TranslationModeSwitcher, TranslationSegment, translatedBlockOf } from './translate-view.js'
-import { TARGET_LANGUAGES, TRANSLATE_BUTTON_TEXT, TRANSLATE_LABEL_TEXT, type TargetLanguage } from '../translate-copy.js'
+import {
+  TARGET_LANGUAGES, TRANSLATE_BUTTON_TEXT, TRANSLATE_FAILURE_UI, TRANSLATE_LABEL_TEXT,
+  type TargetLanguage, type TranslateFailureReason,
+} from '../translate-copy.js'
 import {
   translateCharsOf,
   TRANSLATE_BLOCK_MAX_CHARS,
@@ -631,7 +634,7 @@ function translateGeometryOf(box: HTMLElement): TranslateGeometry {
   return { container: rectOf(box), blocks }
 }
 
-export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress, expandedGroups, onExpandImageGroup, imagesExpanded, lightboxSrc, onOpenImage, onCloseLightbox, translation, translationMode, onTranslationMode, translateAvailable, translateTarget, onTranslateTarget, onTranslate, onStopTranslate }: {
+export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress, expandedGroups, onExpandImageGroup, imagesExpanded, lightboxSrc, onOpenImage, onCloseLightbox, translation, translationMode, onTranslationMode, translateAvailable, translateTarget, onTranslateTarget, onTranslate, onStopTranslate, onRetryBatch }: {
   article: ArticleState | undefined
   item: ItemView | undefined
   onBack: () => void
@@ -663,6 +666,11 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
    * store 的编排会在下一批前看到 token 已变而退出（spec §4.6 / D18）。
    */
   onStopTranslate: () => void
+  /**
+   * 重试一个失败批（R7 05）：参数是**批首块下标**，动作层按 entry.failures 找回整批 indices。
+   * 组件不缓存批次内容 —— 失败批的唯一真相在 store，组件只把用户点的那个批首交回去。
+   */
+  onRetryBatch: (headIndex: number) => void
   /**
    * 重试抓取当前正文页这一篇（R4-B4）。
    * 请求哪个条目由 store 按 `article.itemId` 决定，本组件只负责把用户意图交回去 ——
@@ -802,6 +810,16 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
    * 这一层派生放在渲染处，store 只保存用户选过的态 —— 否则「有没有译文」会被复制成第二个判据。
    */
   const effectiveMode: TranslationMode = translation === undefined ? 'original' : translationMode
+  /**
+   * 块下标 → 它所属的失败批（R7 05）。`failures` 以批首为键，渲染要按**块**找原因，
+   * 所以先摊平成「块 → { 批首, 原因 }」：同批每块位置显示原因，只有批首位置放重试按钮。
+   */
+  const failedBatchOf = new Map<number, { readonly head: number; readonly reason: TranslateFailureReason }>()
+  if (translation !== undefined) {
+    for (const [head, failure] of translation.failures) {
+      for (const index of failure.indices) failedBatchOf.set(index, { head, reason: failure.reason })
+    }
+  }
   /**
    * 标题三态（spec §4.5）：
    *  - 译文态：有译文标题且没有失败标记 ⇒ 译文标题；标题翻译失败 ⇒ 原文标题 + 角标；
@@ -1141,6 +1159,21 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
             </header>
           )}
           {/*
+            * 整篇停止提示（R7 05 / spec §4.7）：连续 3 批失败后不再发后续批，这句话放在正文
+            * 顶部（标题之后、正文之前），读者先知道「后面没有译文不是漏翻」。
+            * `stoppedReason` 是枚举，文案由 translate-copy 统一拼——不在组件里拼中文。
+            */}
+          {translation !== undefined && translation.status === 'failed' && translation.stoppedReason !== undefined && (
+            <div data-rss-translation-stopped role="alert" style={{
+              margin: '0 0 18px', padding: '8px 10px', borderRadius: 6,
+              color: 'var(--rss-error)',
+              border: '1px solid color-mix(in srgb, var(--rss-error) 32%, transparent)',
+              background: 'color-mix(in srgb, var(--rss-error) 6%, transparent)',
+            }}>
+              {TRANSLATE_FAILURE_UI.stopped(translation.stoppedReason)}
+            </div>
+          )}
+          {/*
             * 回退标签（R4-B3）：正文列标题 header 之后、正文块之前。
             * 用 role="note" 而不是 role="alert"：这不是错误态 —— 用户有内容可读，只是来源不是原站正文。
             * 原因行沿用 dsh-rss-meta 小字，文案按有无 failure 分两种；failure 原文照实显示（不吞、不改写）。
@@ -1205,6 +1238,28 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
                 </p>
               )
               /**
+               * 批级失败提示（R7 05 / spec §4.7）：失败批内**每个**可翻块位置都显示原因，
+               * 重试按钮只放在批首块位置（一个批一个按钮）。按钮点下去由动作层按批首找回整批
+               * indices，所以这里只交回 head，不在这里复制 indices —— 批次真相在 store。
+               */
+              const batchFailure = failedBatchOf.get(index)
+              const batchFailureNotice = batchFailure !== undefined && (
+                <p data-rss-translation-failure={index} className="dsh-rss-meta"
+                  style={{ margin: '0 0 1.1em', color: 'var(--rss-error)' }}>
+                  {TRANSLATE_FAILURE_UI.batch(batchFailure.reason)}
+                  {batchFailure.head === index && (
+                    <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
+                      data-rss-translation-retry={batchFailure.head}
+                      style={{ marginLeft: 8 }}
+                      // 整篇还在跑（后面批在飞）时禁用：批次必须串行，动作层也会再挡一次。
+                      disabled={translation?.status === 'running'}
+                      onClick={() => { onRetryBatch(batchFailure.head) }}>
+                      {TRANSLATE_BUTTON_TEXT.retry}
+                    </button>
+                  )}
+                </p>
+              )
+              /**
                * `data-rss-block` 是测量锚点（R7 04）：DOM 顺序与 displayBlocks 下标一一对应，
                * `translateGeometryOf` 按它把矩形喂给纯函数 pickBatch。译文段也住在这个包裹里，
                * 这样「块 + 自己的译文」始终是一个整体，不会与相邻块串段。
@@ -1213,6 +1268,7 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
                 <div key={blockKeyOf(index)} data-rss-block={index}>
                   {content}
                   {tooLongNotice}
+                  {batchFailureNotice}
                 </div>
               )
               /**
@@ -1263,6 +1319,18 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
               </div>
             )
           })}
+          {/*
+            * 「译自 {model}」（R7 05 / spec §4.4）：放在正文末尾、最后一段译文之后。
+            * model 用回包里的值（store 侧的 TranslationEntry.model），不读客户端设置——
+            * 显示设置里的模型会把「实际是谁译的」伪造成用户的选择。原文态没有译文内容，
+            * 不显示这行；有译文但还没收到任何回包 model 时也不编造。
+            */}
+          {translation !== undefined && translation.model !== undefined
+            && translation.blocks.size > 0 && effectiveMode !== 'original' && (
+            <p data-rss-translated-from className="dsh-rss-meta" style={{ margin: '18px 0 0' }}>
+              {TRANSLATE_LABEL_TEXT.translatedFrom(translation.model)}
+            </p>
+          )}
         </article>
       </div>
 

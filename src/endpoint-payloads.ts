@@ -364,10 +364,13 @@ export const saveSettingsPayload = z.union([
 ])
 
 /**
- * `translateBatch` 入参（R7 01，spec §5.1）。
+ * `translateBatch` 入参（R7 01 / 05，spec §5.1）。
  *
- * 本票只拒绝「空 items / 重复 id / 目标语言认不出 / 单条文本全空白」这几条明显的坏入参；
- * 批大小（12 块）与总字符（6000）的完整边界留给 05 票按预算规则补齐（票面明确如此拆分）。
+ * 六类明显坏入参一律 `bad-request`、且不触达模型：空 items、> 12 项、总字符 > 6000、
+ * 重复 id、文本全空白、目标语言不在枚举内。
+ *
+ * 「总字符」按 §4.3 的字符口径 = 可翻块文本长度之和（title 有独立的 2000 上限，不计入）：
+ * 单批预算 2000、单块 2000–6000 独占一批，所以 6000 是唯一合法的单批上限（一个长块）。
  * id 必须是 `'b' + 块下标` —— 端点与客户端共用这一个编号协议，回包才能按号入座。
  */
 export const translateBatchPayload = z.object({
@@ -379,11 +382,16 @@ export const translateBatchPayload = z.object({
   })).min(1).max(12),
 }).superRefine((value, ctx) => {
   const seen = new Set<string>()
+  let totalChars = 0
   for (const [index, item] of value.items.entries()) {
     if (seen.has(item.id)) {
       ctx.addIssue({ code: 'custom', path: ['items', index, 'id'], message: 'id 重复' })
     }
     seen.add(item.id)
+    totalChars += item.text.length
+  }
+  if (totalChars > 6000) {
+    ctx.addIssue({ code: 'custom', path: ['items'], message: '待译文本总字符超过单批 6000 上限' })
   }
 })
 
