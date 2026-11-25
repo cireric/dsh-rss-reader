@@ -6,7 +6,7 @@
  * 页面上下文里跑，是当初加沙箱要挡的事。取舍结论：**正文只走抽取视图**，想看原样就用
  * 「打开原站 ↗」在新标签页看——那是浏览器自己的上下文，没有沙箱折衷。
  */
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { edgeTopFor, readingRatioOf, restoreTopFor } from '../list-scroll.js'
 
 /**
@@ -22,7 +22,8 @@ import { foldOf, groupImageBlocks, type ImageFold, type ImageGroup } from '../im
 import { paragraphsOf } from '../html-text.js'
 import { READING_FONT_SIZES, READING_LINE_WIDTHS } from '../preferences.js'
 import type { ReadingPreferences } from '../preferences.js'
-import type { ArticleState } from './store.js'
+import type { ArticleState, TranslationEntry } from './store.js'
+import { TRANSLATE_BUTTON_TEXT } from '../translate-copy.js'
 // InlineRun 从 article-text.js 取，**不从 article.js**：后者 import 了 node:crypto 与 feed/fetch.js，
 // 而 client bundle 不许出现任何 node: 说明符（tsdown 不会因此报错，失败被推迟到浏览器运行期）。
 // 见 docs/pitfalls.md §1.7b。
@@ -585,10 +586,17 @@ function Lightbox({ src, onClose }: {
   )
 }
 
-export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress, expandedGroups, onExpandImageGroup, imagesExpanded, lightboxSrc, onOpenImage, onCloseLightbox }: {
+export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress, expandedGroups, onExpandImageGroup, imagesExpanded, lightboxSrc, onOpenImage, onCloseLightbox, translation, onTranslate }: {
   article: ArticleState | undefined
   item: ItemView | undefined
   onBack: () => void
+  /**
+   * 当前正文的译文（R7 01）：键是 `itemId:contentVersion:target`，由 index.tsx 从 store
+   * 现查后传入。组件不持有译文状态 —— 切条目 / 切面板回来才不会丢（spec §4.6）。
+   */
+  translation: TranslationEntry | undefined
+  /** 点「译」：动作在 store 的 translate-actions 里，组件只交回意图。 */
+  onTranslate: () => void
   /**
    * 重试抓取当前正文页这一篇（R4-B4）。
    * 请求哪个条目由 store 按 `article.itemId` 决定，本组件只负责把用户意图交回去 ——
@@ -913,6 +921,13 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
               <a className="dsh-rss-btn dsh-rss-btn--ghost" href={link} target="_blank" rel="noreferrer">打开原站 ↗</a>
             )}
             {/*
+              * 一键翻译（R7 01）。01 里**始终渲染**：可用性门禁（translateInfo.available）
+              * 是 02 的票；这里点了但没模型时，动作会把 failed 状态留在 store，界面不挂。
+              * 放在 Aa 左侧是 spec §4.1 的固定位置，别挪到「更多」里。
+              */}
+            <button type="button" className="dsh-rss-btn" data-rss-translate=""
+              title="翻译当前文章（首批最多 12 段）" onClick={onTranslate}>{TRANSLATE_BUTTON_TEXT.translate}</button>
+            {/*
               * 阅读偏好（M5 01）收在一个 <details> 里：三个 <select> 摊开摆会把这一行挤成两层，
               * 而它们是「调一次就一直用」的东西，不值得占常驻版面。与顶栏「更多」同一个面板样式。
               * 值一律走 store（onReading），本组件不持有状态 —— 否则重开插件就恢复不了。
@@ -1035,7 +1050,28 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
             // 症状是「有的块带 onOpenImage、有的不带」——灯箱入口时灵时不灵，极难看出来。
             // 语义没变：组覆盖 / 篇覆盖 / 偏好的裁决仍然只在 `fold.shouldRender` 那一处（决策 5）。
             if (group === undefined || fold.shouldRender(group.index)) {
-              return <ArticleBlockView key={blockKeyOf(index)} block={block} onOpenImage={onOpenImage} />
+              /**
+               * 译文段（R7 01）只跟在**它自己的原文块**后面：`translation.blocks` 以块下标为键，
+               * 不按数组顺序硬贴 —— 少给 / 错位时动作层已经把它丢掉（见 applyBatch）。
+               * 空 / 纯空白译文在动作层就不入 Map，这里再判一次 trim 是渲染层的最后一道
+               * 「不许出现空段落」的守卫。
+               */
+              const translated = translation?.blocks.get(index)
+              return (
+                <Fragment key={blockKeyOf(index)}>
+                  <ArticleBlockView block={block} onOpenImage={onOpenImage} />
+                  {translated !== undefined && translated.trim() !== '' && (
+                    <p data-rss-translation={index} style={{
+                      // 纯文本段落 + pre-wrap：保留模型回包里的换行（列表译文按行还原）。
+                      // 左边框与次要色是「这是译文，不是原文」的最低限度区分，不抢正文样式。
+                      margin: '0 0 1.1em', paddingLeft: 10,
+                      borderLeft: '3px solid color-mix(in srgb, currentColor 20%, transparent)',
+                      color: 'color-mix(in srgb, currentColor 72%, transparent)',
+                      whiteSpace: 'pre-wrap',
+                    }}>{translated}</p>
+                  )}
+                </Fragment>
+              )
             }
             // 折叠：只在组首块画提示，其余成员整块不渲染（组是原子的）
             if (group.blockIndexes[0] !== index) return null

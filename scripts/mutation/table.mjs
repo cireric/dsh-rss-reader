@@ -2605,8 +2605,12 @@ export const MUTATIONS = [
     // 注意 to 里**必须保留** `group === void 0 ||` 这一项：整个条件换成 `if (true)` 会让
     // 所有块都走 ArticleBlockView、折叠提示一条都不出现，症状虽然也是红，但变异落点从
     // 「折叠判定失效」漂成「分组逻辑被删」—— 判据证明的就不是这条变异要证明的事了。
-    from: "if (group === void 0 || fold.shouldRender(group.index)) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ArticleBlockView, {\n\t\t\t\t\t\t\t\t\t\tblock,\n\t\t\t\t\t\t\t\t\t\tonOpenImage\n\t\t\t\t\t\t\t\t\t}, blockKeyOf(index));\n\t\t\t\t\t\t\t\t\tif (group.blockIndexes[0] !== index) return null;",
-    to: "if (group === void 0 || true) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ArticleBlockView, {\n\t\t\t\t\t\t\t\t\t\tblock,\n\t\t\t\t\t\t\t\t\t\tonOpenImage\n\t\t\t\t\t\t\t\t\t}, blockKeyOf(index));\n\t\t\t\t\t\t\t\t\tif (group.blockIndexes[0] !== index) return null;" },
+    // ⚠️ 2026-11-25（R7 01）再锚：译文段把 `ArticleBlockView` 分支包进 Fragment，产物首行仍是
+    // `if (group === void 0 || fold.shouldRender(...)) {`，但后面的 return 形态变了 ⇒ 旧的
+    // 多行 from 命中 0 次。这里改用**判定本身**那一行做锚，语义不变：把 `fold.shouldRender(...)`
+    // 换成 true 之后，折叠分支永远进不去 ⇒ 折叠偏好下照样渲染 <img>。
+    from: "if (group === void 0 || fold.shouldRender(group.index)) {",
+    to: "if (group === void 0 || true) {" },
   { id: 'client-折叠提示可聚焦', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
     judgeTests: ['折叠提示不在 Tab 序里：tabIndex < 0，且不是 BUTTON / SUMMARY / INPUT / SELECT / TEXTAREA、不是带 href 的链接'],
@@ -3334,4 +3338,21 @@ export const MUTATIONS = [
     // 条件恒假是**行为变异**：missing 保持空数组，流程继续走宿主拼地址（不是崩溃）。
     from: 'if ((explore.draft[segment.name] ?? "").trim() === "" && !missing.includes(segment.name)) missing.push(segment.name);',
     to: 'if (false && (explore.draft[segment.name] ?? "").trim() === "" && !missing.includes(segment.name)) missing.push(segment.name);' },
+
+  // ── R7 01：一键翻译的块筛选与回包对齐（2026-11-25）────────────────────────
+  // 可翻块种类放宽：把 pre 也算进去 ⇒ 代码块会进请求、抢走编号，正文段落与翻译请求错位。
+  // 判据是 translate-blocks 的品类筛选用例（pre / img / table 不占编号）。
+  // from 照构建产物 lib/translate-blocks.js 的实际字节写，独立实测 OCCURRENCES=1。
+  { id: 'translate-可翻块把 pre 也算进去', file: 'lib/translate-blocks.js',
+    judges: ['translate-blocks.test.mjs'],
+    judgeTests: ['可翻块只取 p / h / quote / list；pre / img / table 不占编号'],
+    from: "const TRANSLATABLE_KINDS = new Set(['p', 'h', 'quote', 'list']);",
+    to: "const TRANSLATABLE_KINDS = new Set(['p', 'h', 'quote', 'list', 'pre']);" },
+  // 对齐放过重复 id：模型把同一条译文回两次时，条数碰巧相等就会通过校验，重复的那条
+  // 覆盖掉某一段、另一段永远没有译文。判据是「编号重复 ⇒ 整批失败」的用例。
+  { id: 'translate-对齐放过重复 id', file: 'lib/translate-blocks.js',
+    judges: ['translate-blocks.test.mjs'],
+    judgeTests: ['applyBatch：编号重复 ⇒ 整批失败（哪怕条数碰巧相等）'],
+    from: "        if (seen.has(item.id))\n            return { ok: false, reason: 'misaligned' };",
+    to: "        if (false)\n            return { ok: false, reason: 'misaligned' };" },
 ]
