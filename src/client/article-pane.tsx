@@ -22,7 +22,8 @@ import { foldOf, groupImageBlocks, type ImageFold, type ImageGroup } from '../im
 import { paragraphsOf } from '../html-text.js'
 import { READING_FONT_SIZES, READING_LINE_WIDTHS } from '../preferences.js'
 import type { ReadingPreferences } from '../preferences.js'
-import type { ArticleState, TranslationEntry } from './store.js'
+import type { ArticleState, TranslationEntry, TranslationMode } from './store.js'
+import { TranslationModeSwitcher, TranslationSegment, translatedBlockOf } from './translate-view.js'
 import { TARGET_LANGUAGES, TRANSLATE_BUTTON_TEXT, TRANSLATE_LABEL_TEXT, type TargetLanguage } from '../translate-copy.js'
 import {
   translateCharsOf,
@@ -302,16 +303,26 @@ function ArticleImage({ src, alt, caption, onOpen }: {
  * 只在存在非 text run 时才写字段），所以「没有 runs」是常态路径，不是兼容分支 —— 旧缓存、
  * 纯文本段落、R4 的回退摘要（`paragraphBlocks` 造的 p 块）全都走这里。
  */
-function ArticleBlockView({ block, onOpenImage }: {
+function ArticleBlockView({ block, onOpenImage, textOverride, itemOverride }: {
   block: Record<string, unknown>
   /** 点开这张图（灯箱）。图片块以外的块不读它。 */
   onOpenImage: (src: string) => void
+  /**
+   * 译文态（R7 03）：给了纯文本就替换本块文字，忽略 runs —— 译文是纯文本，没有内联语义（D8）。
+   * 只由可翻块（p / h / quote）传入；list 用 `itemOverride`，pre / img / table 永不传。
+   */
+  textOverride?: string
+  /** 译文态 list：按行拆好且**行数已校验**的译文条目（判据在 translate-view 的 translatedBlockOf）。 */
+  itemOverride?: readonly string[]
 }): ReactNode {
   const kind = typeof block['kind'] === 'string' ? block['kind'] : 'p'
   const text = typeof block['text'] === 'string' ? block['text'] : ''
   const runs = inlineRunsOf(block['runs'])
   /** 带内联语义就按 run 画，否则原样画 `text`（两条路的内容相同，只是前者有元素语义）。 */
-  const inline = (fallback: string): ReactNode => runs === undefined ? fallback : <InlineRunsView runs={runs} />
+  const inline = (fallback: string): ReactNode => {
+    if (textOverride !== undefined) return textOverride
+    return runs === undefined ? fallback : <InlineRunsView runs={runs} />
+  }
 
   if (kind === 'img') {
     const src = typeof block['src'] === 'string' ? block['src'] : ''
@@ -346,9 +357,11 @@ function ArticleBlockView({ block, onOpenImage }: {
 
   if (kind === 'list') {
     const ordered = block['ordered'] === true
-    const items = Array.isArray(block['items']) ? block['items'] : []
+    const originalItems = Array.isArray(block['items']) ? block['items'] : []
+    // 译文态：条目来自已经校验过行数的译文行；原文的 itemRuns 此时完全没有意义（文字已换）。
+    const items = itemOverride !== undefined ? itemOverride : originalItems
     // itemRuns 与 items 等长同序才用（判据见 itemRunGroupsOf）；否则整份退回纯文本。
-    const itemRuns = itemRunGroupsOf(block['itemRuns'], items.length)
+    const itemRuns = itemOverride === undefined ? itemRunGroupsOf(block['itemRuns'], originalItems.length) : undefined
     const ListTag = ordered ? 'ol' : 'ul'
     return (
       <ListTag style={{ margin: '0 0 1.1em', paddingLeft: '1.5em' }}>
@@ -618,7 +631,7 @@ function translateGeometryOf(box: HTMLElement): TranslateGeometry {
   return { container: rectOf(box), blocks }
 }
 
-export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress, expandedGroups, onExpandImageGroup, imagesExpanded, lightboxSrc, onOpenImage, onCloseLightbox, translation, translateAvailable, translateTarget, onTranslateTarget, onTranslate, onStopTranslate }: {
+export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress, expandedGroups, onExpandImageGroup, imagesExpanded, lightboxSrc, onOpenImage, onCloseLightbox, translation, translationMode, onTranslationMode, translateAvailable, translateTarget, onTranslateTarget, onTranslate, onStopTranslate }: {
   article: ArticleState | undefined
   item: ItemView | undefined
   onBack: () => void
@@ -627,6 +640,10 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
    * 现查后传入。组件不持有译文状态 —— 切条目 / 切面板回来才不会丢（spec §4.6）。
    */
   translation: TranslationEntry | undefined
+  /** 三态（R7 03）：值归 store 所有，本组件只照着画、把用户的切换交回去。 */
+  translationMode: TranslationMode
+  /** 点切换器 ⇒ 只改 store 里的显示态（动作层不发 rpc，验收 12）。 */
+  onTranslationMode: (mode: TranslationMode) => void
   /**
    * 翻译当前是否可用（R7 02，spec §4.1）：`translateInfo.available === true` 才渲染「译」按钮
    * 与 Aa 面板里的目标语言下拉。判据只由 store 持有，组件不自己再探一次。
@@ -780,7 +797,22 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
    * 里的 key 必须互不冲突。
    */
   const blockKeyOf = (at: number): string => articleItemId + ':' + at
-  const title = article?.title || item?.title
+  /**
+   * 实际生效的三态（R7 03）：**没有译文条目时一律按原文画**，切换器也不出现（spec §4.5）。
+   * 这一层派生放在渲染处，store 只保存用户选过的态 —— 否则「有没有译文」会被复制成第二个判据。
+   */
+  const effectiveMode: TranslationMode = translation === undefined ? 'original' : translationMode
+  /**
+   * 标题三态（spec §4.5）：
+   *  - 译文态：有译文标题且没有失败标记 ⇒ 译文标题；标题翻译失败 ⇒ 原文标题 + 角标；
+   *  - 对照态：**永远**原文标题（对照的用途是核对正文，标题不参与）；
+   *  - 原文态：原文标题。
+   */
+  const translatedTitle = effectiveMode === 'translated' && translation?.titleFailed !== true
+    ? translation?.title
+    : undefined
+  const title = translatedTitle !== undefined ? translatedTitle : (article?.title || item?.title)
+  const titleNotTranslated = effectiveMode === 'translated' && translation?.titleFailed === true
   const publishedAt = item?.publishedAt
   // R12：作者只由 src/author.ts 在读路径归一化；这里直接用投影值，不再加桩件守卫。
   const author = item?.author
@@ -997,6 +1029,14 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
               <span data-rss-translate-progress className="dsh-rss-meta" role="status">{TRANSLATE_LABEL_TEXT.progress(translation.done, translation.total)}</span>
             )}
             {/*
+              * 三态切换器（R7 03 / spec §4.5）：「有译文之后，工具栏出现」。
+              * 没有译文条目时整块不渲染 —— 切换器出现本身就在承诺「这里有译文可切」。
+              * 放在「译」与进度右侧、Aa 左侧：任务区里所有翻译控件连成一片，不打断阅读偏好的入口。
+              */}
+            {translation !== undefined && (
+              <TranslationModeSwitcher mode={effectiveMode} onChange={onTranslationMode} />
+            )}
+            {/*
               * 阅读偏好（M5 01）收在一个 <details> 里：三个 <select> 摊开摆会把这一行挤成两层，
               * 而它们是「调一次就一直用」的东西，不值得占常驻版面。与顶栏「更多」同一个面板样式。
               * 值一律走 store（onReading），本组件不持有状态 —— 否则重开插件就恢复不了。
@@ -1076,6 +1116,15 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
           {title && (
             <header style={{ marginBottom: 24 }}>
               <h1 className="dsh-rss-article-title">{title}</h1>
+              {/*
+                * 标题翻译失败角标（spec §4.5）：只在译文态出现 —— 对照态永远原文标题，
+                * 原文态本来就不该提「未翻译」。标题文本本身已经回落到原文，角标只是说明原因。
+                */}
+              {titleNotTranslated && (
+                <span data-rss-title-failed className="dsh-rss-meta" style={{ display: 'inline-block', marginTop: 4 }}>
+                  {TRANSLATE_LABEL_TEXT.titleNotTranslated}
+                </span>
+              )}
               {item !== undefined && (
                 <div className="dsh-rss-meta" style={{ marginTop: 8 }}>
                   {item.feedTitle}
@@ -1135,42 +1184,75 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
             // 症状是「有的块带 onOpenImage、有的不带」——灯箱入口时灵时不灵，极难看出来。
             // 语义没变：组覆盖 / 篇覆盖 / 偏好的裁决仍然只在 `fold.shouldRender` 那一处（决策 5）。
             if (group === undefined || fold.shouldRender(group.index)) {
+              const kind = typeof block['kind'] === 'string' ? block['kind'] : 'p'
+              /** 可翻块（D10）：只有它们的译文会替换 / 追加文本；pre / img / table 永远原样。 */
+              const translatable = kind === 'p' || kind === 'h' || kind === 'quote' || kind === 'list'
               /**
-               * 译文段（R7 01）只跟在**它自己的原文块**后面：`translation.blocks` 以块下标为键，
-               * 不按数组顺序硬贴 —— 少给 / 错位时动作层已经把它丢掉（见 applyBatch）。
-               * 空 / 纯空白译文在动作层就不入 Map，这里再判一次 trim 是渲染层的最后一道
-               * 「不许出现空段落」的守卫。
+               * 译文内容（R7 03）：`translation.blocks` 以块下标为键，不按数组顺序硬贴。
+               * 空 / 纯空白、list 行数不等都在 `translatedBlockOf` 里判成 undefined ⇒ 该块退回原文；
+               * 这是**唯一**的「译文能不能用」判据，译文态与对照态共用。
                */
               const translated = translation?.blocks.get(index)
+              const translatedContent = translated === undefined ? undefined : translatedBlockOf(block, translated)
               /**
                * 超长块（R7 04 / spec §4.3 第三档）：> 6000 字符不进任何批，原位说明原因。
                * 只在有本篇译文条目时出现 —— 没点「译」之前不该先给读者一排「未翻译」。
                */
               const tooLong = translation !== undefined && translateCharsOf(block) > TRANSLATE_BLOCK_MAX_CHARS
-              return (
-                /**
-                 * `data-rss-block` 是测量锚点（R7 04）：DOM 顺序与 displayBlocks 下标一一对应，
-                 * `translateGeometryOf` 按它把矩形喂给纯函数 pickBatch。译文段也住在这个包裹里，
-                 * 这样「块 + 自己的译文」始终是一个整体，不会与相邻块串段。
-                 */
+              const tooLongNotice = tooLong && (
+                <p data-rss-translation-too-long={index} className="dsh-rss-meta" style={{ margin: '0 0 1.1em' }}>
+                  {TRANSLATE_LABEL_TEXT.blockTooLong}
+                </p>
+              )
+              /**
+               * `data-rss-block` 是测量锚点（R7 04）：DOM 顺序与 displayBlocks 下标一一对应，
+               * `translateGeometryOf` 按它把矩形喂给纯函数 pickBatch。译文段也住在这个包裹里，
+               * 这样「块 + 自己的译文」始终是一个整体，不会与相邻块串段。
+               */
+              const blockBox = (content: ReactNode): ReactNode => (
                 <div key={blockKeyOf(index)} data-rss-block={index}>
-                  <ArticleBlockView block={block} onOpenImage={onOpenImage} />
-                  {translated !== undefined && translated.trim() !== '' && (
-                    <p data-rss-translation={index} style={{
-                      // 纯文本段落 + pre-wrap：保留模型回包里的换行（列表译文按行还原）。
-                      // 左边框与次要色是「这是译文，不是原文」的最低限度区分，不抢正文样式。
-                      margin: '0 0 1.1em', paddingLeft: 10,
-                      borderLeft: '3px solid color-mix(in srgb, currentColor 20%, transparent)',
-                      color: 'color-mix(in srgb, currentColor 72%, transparent)',
-                      whiteSpace: 'pre-wrap',
-                    }}>{translated}</p>
-                  )}
-                  {tooLong && (
-                    <p data-rss-translation-too-long={index} className="dsh-rss-meta" style={{ margin: '0 0 1.1em' }}>
-                      {TRANSLATE_LABEL_TEXT.blockTooLong}
-                    </p>
-                  )}
+                  {content}
+                  {tooLongNotice}
                 </div>
+              )
+              /**
+               * 译文态（spec §4.5）：可翻块换成译文纯文本；不可翻块原样渲染。
+               * 没有可用译文的可翻块（还没翻到 / 空白 / list 行数不等 / 超长）退回原文 ——
+               * 读者看到的永远是「有内容」的块，而不是一段空白。
+               */
+              if (effectiveMode === 'translated') {
+                return blockBox(
+                  <>
+                    {/* table 不翻，但必须让读者知道这不是漏翻（验收 D10）。 */}
+                    {kind === 'table' && (
+                      <p data-rss-table-not-translated className="dsh-rss-meta" style={{ margin: '0 0 6px' }}>
+                        {TRANSLATE_LABEL_TEXT.tableNotTranslated}
+                      </p>
+                    )}
+                    {translatable && translatedContent !== undefined ? (
+                      // pre-wrap 必须落在译文内容这一层：模型回包里的换行是排版信息（spec §4.5），
+                      // 普通段落默认折叠空白，整段译文会被压成一行。
+                      <div data-rss-translation={index} style={{ whiteSpace: 'pre-wrap' }}>
+                        <ArticleBlockView block={block} onOpenImage={onOpenImage}
+                          textOverride={translatedContent.text} itemOverride={translatedContent.items} />
+                      </div>
+                    ) : (
+                      <ArticleBlockView block={block} onOpenImage={onOpenImage} />
+                    )}
+                  </>,
+                )
+              }
+              /**
+               * 原文 / 对照态：原文块照旧渲染；对照态在它后面追加**自己的**译文段
+               * （pre / img / table 不产生译文段，只渲染一次 —— 本票第 3 条）。
+               */
+              return blockBox(
+                <>
+                  <ArticleBlockView block={block} onOpenImage={onOpenImage} />
+                  {effectiveMode === 'parallel' && translatable && translatedContent !== undefined && (
+                    <TranslationSegment index={index} content={translatedContent} ordered={block['ordered'] === true} />
+                  )}
+                </>,
               )
             }
             // 折叠：只在组首块画提示，其余成员整块不渲染（组是原子的）

@@ -1121,6 +1121,10 @@ export function createReader(store: ReaderStore): () => ReactNode {
             onOpenImage={setLightboxSrc}
             onCloseLightbox={() => setLightboxSrc(undefined)}
             translation={articleTranslation}
+            // 三态（R7 03）：值在 store，正文面只照着画；切换动作只改渲染态、不发 rpc。
+            translationMode={state.translationMode}
+            onTranslationMode={store.setTranslationMode}
+            // 可用性与目标语言（R7 02）：不可用时工具栏不渲染「译」与 Aa 语言下拉。
             translateAvailable={state.translationInfo?.available === true}
             translateTarget={state.translateTarget}
             onTranslateTarget={store.setTranslateTarget}
