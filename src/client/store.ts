@@ -186,6 +186,18 @@ export interface TranslationEntry {
   stoppedReason?: TranslateFailureReason
 }
 
+/**
+ * 首次外发确认框的待确认内容（R7 06 / spec §4.2）。
+ *
+ * 只放「确认框要显示的事实」：字符数与当前路由。真正的正文 / 几何留在组件与动作层 ——
+ * 对话框是模态的，读者确认时再量一次视口即可，不必把 DOMRect 存进 store。
+ */
+export interface TranslateConfirmRequest {
+  readonly chars: number
+  readonly provider: string
+  readonly model: string
+}
+
 /** 正文的三态（R7 03 / spec §4.5 / D5）：原文 / 译文 / 对照。 */
 export type TranslationMode = 'original' | 'translated' | 'parallel'
 
@@ -298,6 +310,14 @@ export interface ReaderState {
   translationMode: TranslationMode
   /** 可用性探测结果（R7 02）：面板加载时探一次；undefined = 还没探到（按钮先不渲染）。 */
   translationInfo: TranslateInfo | undefined
+  /**
+   * 首次外发确认框的待确认内容（R7 06 / spec §4.2）：undefined = 没有框。
+   *
+   * 放 store 而不是 ArticleView 的 `useState`：`t` 键与工具栏按钮必须走**同一个**请求入口
+   * （键盘路径不经过组件），确认态跟着 store 才能在两条入口之间保持一致。
+   * 取消 / 离开正文时清空，不写 settings、不发 rpc。
+   */
+  translateConfirm: TranslateConfirmRequest | undefined
   /**
    * 翻译目标语言（R7 02 / spec §5.3）：与 `viewPreferences.translateTarget` 同一份状态。
    * `Aa` 面板与设置页「显示」分区共读这一位；切换只影响新译文，旧译文按语言分键保留。
@@ -484,7 +504,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   let state: ReaderState = {
     items: [], feeds: [], folders: [], tags: [], unread: 0, unreadSplit: undefined, filter: 'all',
     selectedId: undefined, loading: true, error: undefined, undo: undefined,
-    view: 'list', layout: 'list', markAllRange: 'all', displayWindow: 'all', accountWindow: 'all', showUnread: DEFAULT_VIEW_PREFERENCES.showUnread, settings: undefined, settingsError: undefined, settingsWarningDismissed: false, explore: undefined, article: undefined, translations: new Map(), translationMode: 'original', translationInfo: undefined, translateTarget: DEFAULT_TARGET_LANGUAGE, notice: undefined,
+    view: 'list', layout: 'list', markAllRange: 'all', displayWindow: 'all', accountWindow: 'all', showUnread: DEFAULT_VIEW_PREFERENCES.showUnread, settings: undefined, settingsError: undefined, settingsWarningDismissed: false, explore: undefined, article: undefined, translations: new Map(), translationMode: 'original', translationInfo: undefined, translateConfirm: undefined, translateTarget: DEFAULT_TARGET_LANGUAGE, notice: undefined,
     importReport: undefined, discovery: undefined, feedsBusy: false,
     navSelection: { kind: 'virtual' }, perFeedUnread: {}, navVisible: true,
     reading: DEFAULT_READING_PREFERENCES, duplicates: {},
@@ -881,7 +901,11 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   const settingsActions = createSettingsActions({ get, set, rpc: deps.rpc, log: deps.log })
 
   // 翻译域（R7 01）：只写 translations；正文块本身归 article，动作只读不写。
-  const translateActions = createTranslateActions({ get, set, rpc: deps.rpc, log: deps.log, persistView })
+  // R7 06：首次外发确认标记复用设置域的保存串行链（走 saveSettings 的 patch，不新开端点）。
+  const translateActions = createTranslateActions({
+    get, set, rpc: deps.rpc, log: deps.log, persistView,
+    saveNoticeAck: async () => (await settingsActions.saveSetting('translateNoticeAck', true)).ok,
+  })
 
   /**
    * 翻译路由保存（R7 02）：复用设置域的串行链，成功后**立刻**重探可用性 ——

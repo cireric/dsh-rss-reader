@@ -66,6 +66,11 @@ export interface TranslateActionHost {
   log: ReaderStoreDeps['log']
   /** 目标语言属于视图记忆（ViewPreferences.translateTarget），改动要走整份落盘。 */
   persistView: () => void
+  /**
+   * 写首次外发确认标记（R7 06 / spec §4.2）：走设置域的 saveSettings 串行链与 patch 白名单，
+   * 返回 false = 写盘失败。失败**不阻断**本次翻译（用户已经当面确认），但下次仍要再问。
+   */
+  saveNoticeAck: () => Promise<boolean>
 }
 
 /** 一场翻译的身份：token 用来判代，其余字段用来判「当前打开的还是不是这一篇」。 */
@@ -146,7 +151,7 @@ function requestItemsOf(blocks: readonly Record<string, unknown>[], indices: rea
 }
 
 export function createTranslateActions(host: TranslateActionHost) {
-  const { get, set, rpc, log, persistView } = host
+  const { get, set, rpc, log, persistView, saveNoticeAck } = host
 
   /** 场次代号：每次开始 / 停止都自增。旧场次拿着旧 token 回来时只许静默退出。 */
   let generation = 0
@@ -224,6 +229,9 @@ export function createTranslateActions(host: TranslateActionHost) {
     const session = active
     generation += 1
     active = undefined
+    // 确认框还开着时也一起收掉：离开正文 / 切面板 / 点「停止」都不该把「待外发」留到下一次。
+    // 取消语义由这里统一兜底 —— 只清状态，不写 settings、不发请求。
+    if (get().translateConfirm !== undefined) set({ translateConfirm: undefined })
     if (session === undefined) return
     const entry = get().translations.get(session.key)
     if (entry !== undefined && entry.status === 'running') storeEntry({ ...entry, status: 'stopped' })
@@ -241,15 +249,31 @@ export function createTranslateActions(host: TranslateActionHost) {
   }
 
   /**
-   * `t` 的三态循环（D14）。无译文时**什么都不做**：06 票才把「无译文 ⇒ 触发翻译」接上，
-   * 本票先保持「按 t 无事发生」，避免在 06 之前多出一个未经确认的外发入口。
+   * `t` 键（D14 / 验收 14）：无译文 ⇒ 等同点「译」（首次仍弹确认框）；有译文 ⇒ 三态循环。
+   *
+   * 视图守卫在这里再挡一次（不只是 routeKey 的守卫）：正文未加载 / 失败时没有可翻块，
+   * 也不该因为一次按键产生外发。判据与工具栏按钮同源：都走 `requestTranslate` / `continueTranslate`，
+   * 键盘与鼠标不允许各造一条外发入口。
    */
   const cycleTranslationMode = (): void => {
     const state = get()
+    if (state.view !== 'article') return
     const article = state.article
-    if (article === undefined || article.itemId === undefined || article.contentVersion === undefined) return
-    if (translationEntryOf(state, article.itemId, article.contentVersion) === undefined) return
-    setTranslationMode(nextTranslationMode(state.translationMode))
+    if (article === undefined || article.loading === true || article.failure !== undefined) return
+    if (article.itemId === undefined || article.contentVersion === undefined || article.blocks === undefined) return
+    const entry = translationEntryOf(state, article.itemId, article.contentVersion, state.translateTarget)
+    // 「有译文」按实际产出的块判：空条目（一开就被停止 / 全批失败）不算有译文，
+    // 否则按 t 会去切一个没有内容的译文态。
+    if (entry !== undefined && entry.blocks.size > 0) {
+      setTranslationMode(nextTranslationMode(state.translationMode))
+      return
+    }
+    if (state.translationInfo?.available !== true) return
+    if (entry !== undefined && entry.status === 'stopped' && entry.total - entry.done > 0) {
+      void continueTranslate()
+      return
+    }
+    void requestTranslate()
   }
 
   /**
@@ -258,15 +282,20 @@ export function createTranslateActions(host: TranslateActionHost) {
    * 批次选择每一轮都重新走 `pickBatch`：第一批带视口矩形；后续只给文档顺序（rect 全 undefined），
    * 于是「其余批按文档顺序」不依赖用户此刻滚到了哪里。`settled` 集合保证前进，不会重发。
    *
+   * 两种入场方式共用这一条编排（06 / spec §4.1 / D19）：
+   *  - `fresh`：清空该 key 的 blocks / done / failures / 标题，整篇重发（首次「译」与「重译」）；
+   *  - `continue`：以现有 entry.blocks 为已译集，并跳过失败批（那些块有各自的重试按钮），
+   *    只补从没尝试过的剩余批；done/total/failures 原样保留。
+   *
    * 失败（R7 05）按**批**处理：这一批的块记进 `failures` 并退出后续选择（否则下一轮会原地
-   * 重选同一批），其余批继续；只有连续 3 批失败才整篇 `status: 'failed'`。同一 key 上已有
-   * 的译文会被继承 —— 重试 / 继续翻译只补还没成功的块，不把已译成果清空。
+   * 重选同一批），其余批继续；只有连续 3 批失败才整篇 `status: 'failed'`。
    */
   const run = async (
     session: TranslateSession,
     blocks: readonly Record<string, unknown>[],
     plan: TranslateArticlePlan,
     geometry: TranslateGeometry | undefined,
+    mode: 'fresh' | 'continue',
   ): Promise<void> => {
     const chars = blocks.map((block) => translateCharsOf(block))
     /** 后续批的候选：只有可翻且不超长的块，矩形缺席 ⇒ 纯文档顺序。 */
@@ -274,23 +303,35 @@ export function createTranslateActions(host: TranslateActionHost) {
     const article = get().article
     const title = articleTitleOf(article)
     const prior = get().translations.get(session.key)
+    // `continue` 才有「继承」；`fresh` 必须从空集开始，否则「重译」会继续跳过旧块、变成假重译。
+    const resumeEntry = mode === 'continue' ? prior : undefined
     // pickBatch 的 `translated` 语义是「别再自动选到」：已成功块 + 失败批块都在里面。
-    const settled = new Set<number>(prior?.blocks.keys() ?? [])
-    // 已经整篇完成过的条目再点「译」时不重发空批：done 已到分母，没有剩余块可选。
-    if (prior !== undefined && prior.status === 'done' && prior.done >= plan.totalBlocks) {
-      for (const index of plan.eligibleBlocks) settled.add(index)
+    const settled = new Set<number>(resumeEntry?.blocks.keys() ?? [])
+    if (resumeEntry !== undefined) {
+      for (const failure of resumeEntry.failures.values()) {
+        for (const index of failure.indices) settled.add(index)
+      }
     }
-    let entry: TranslationEntry = {
-      key: session.key,
-      ...(prior?.title === undefined ? {} : { title: prior.title }),
-      ...(prior?.titleFailed === undefined ? {} : { titleFailed: prior.titleFailed }),
-      blocks: new Map(prior?.blocks ?? []),
-      failures: new Map(),
-      done: prior?.done ?? 0,
-      total: plan.totalBlocks,
-      status: 'running',
-      ...(prior?.model === undefined ? {} : { model: prior.model }),
-    }
+    let entry: TranslationEntry = resumeEntry === undefined
+      ? {
+        key: session.key,
+        blocks: new Map(),
+        failures: new Map(),
+        done: 0,
+        total: plan.totalBlocks,
+        status: 'running',
+      }
+      : {
+        key: session.key,
+        ...(resumeEntry.title === undefined ? {} : { title: resumeEntry.title }),
+        ...(resumeEntry.titleFailed === undefined ? {} : { titleFailed: resumeEntry.titleFailed }),
+        blocks: new Map(resumeEntry.blocks),
+        failures: new Map(resumeEntry.failures),
+        done: resumeEntry.done,
+        total: plan.totalBlocks,
+        status: 'running',
+        ...(resumeEntry.model === undefined ? {} : { model: resumeEntry.model }),
+      }
     storeEntry(entry)
 
     let consecutiveFailures = 0
@@ -510,13 +551,20 @@ export function createTranslateActions(host: TranslateActionHost) {
   }
 
   /**
-   * 点「译」：整篇可翻字符 > 30000 直接拒绝并提示，不发任何请求。
-   * 否则开始一场新翻译（先中止旧的），先发视口批，再串行发完剩余批。
+   * 一场翻译的公共入口（06 / spec §4.1 / §4.6 / D18）：校验上限与空文章、维持全局单任务，
+   * 然后交给 `run`。`fresh` = 清空重译；`continue` = 接着现有进度补剩余批。
+   *
+   * 「开始任何一场新翻译前先中止旧的」只在这一处做：先 `stopTranslate()` 让旧场 token 失效，
+   * 再发新 token。任何新入口（按钮 / t / 继续 / 重译）都绕不过这条 —— 复制第二份判断就会出现
+   * 「两个动作各中止一次、或各漏一次」的漂移。
    */
-  const startTranslate = async (geometry?: TranslateGeometry): Promise<void> => {
+  const beginSession = async (
+    mode: 'fresh' | 'continue',
+    geometry?: TranslateGeometry,
+  ): Promise<void> => {
     const state = get()
     const article = state.article
-    if (article === undefined || article.loading === true) return
+    if (article === undefined || article.loading === true || article.failure !== undefined) return
     if (article.itemId === undefined || article.contentVersion === undefined || article.blocks === undefined) return
     const target = state.translateTarget
     const key = translationKeyOf(article.itemId, article.contentVersion, target)
@@ -527,18 +575,17 @@ export function createTranslateActions(host: TranslateActionHost) {
       set({ notice: TRANSLATE_LIMIT_TEXT.articleTooLong(plan.chars, TRANSLATE_ARTICLE_MAX_CHARS) })
       return
     }
-    // 没有可翻块、也没有超长块可标：按钮本该禁用（02 票），这里再从动作层挡一次空跑。
+    // 没有可翻块、也没有超长块可标：按钮本该禁用，这里再从动作层挡一次空跑。
     if (plan.totalBlocks === 0 && plan.overlongBlocks.length === 0) return
 
-    // 全局单任务：同一篇正在跑时忽略重复点击（没有停止按钮时重复点只会白花两份钱）；
-    // 换了一篇则先中止旧场次（D7 / D18）。
+    // 全局单任务：同一篇正在跑时忽略重复点击（重复点只会白花两份钱）；换了一篇则先中止旧场次。
     const prior = active
     if (prior !== undefined && prior.key === key && get().translations.get(key)?.status === 'running') return
     if (prior !== undefined) stopTranslate()
 
-    // 有译文时默认落「译文」（spec §4.5 / D5）。只在**开始一场翻译**时切一次：
-    // 若每批回包都切，用户看到一半切去「对照」会被下一批硬拽回「译文」。
-    setTranslationMode('translated')
+    // 有译文时默认落「译文」（spec §4.5 / D5）。只在**全新一场**时切一次：继续翻译时用户
+    // 可能正停在原文 / 对照态核对进度，不该被一次「继续」硬拽回译文。
+    if (mode === 'fresh') setTranslationMode('translated')
 
     generation += 1
     const session: TranslateSession = {
@@ -549,11 +596,93 @@ export function createTranslateActions(host: TranslateActionHost) {
       target,
     }
     active = session
-    await run(session, article.blocks, plan, geometry)
+    await run(session, article.blocks, plan, geometry, mode)
+  }
+
+  /**
+   * 点「译」（或按 `t`）的第一个入口（R7 06 / spec §4.2）：
+   * 首次外发前先弹确认框；已确认过则直接开始。确认框只写 store 状态，取消不留任何副作用。
+   */
+  const requestTranslate = async (geometry?: TranslateGeometry): Promise<void> => {
+    const state = get()
+    const article = state.article
+    if (article === undefined || article.loading === true || article.failure !== undefined) return
+    if (article.itemId === undefined || article.contentVersion === undefined || article.blocks === undefined) return
+    if (state.translationInfo?.available !== true) return
+    const plan = articleTranslatePlanOf(article.blocks)
+    if (plan.tooLong) {
+      set({ notice: TRANSLATE_LIMIT_TEXT.articleTooLong(plan.chars, TRANSLATE_ARTICLE_MAX_CHARS) })
+      return
+    }
+    if (plan.totalBlocks === 0 && plan.overlongBlocks.length === 0) return
+    const route = state.translationInfo.route
+    if (route === undefined) {
+      // 可用性说 true 却没有路由是宿主契约被破坏：不编造 provider/model 去填确认框，也不外发。
+      log('warn', '[rss-reader] 翻译可用但没有路由，无法确认外发对象')
+      return
+    }
+    // 只有明确 `true` 才跳过确认：settings 还没取到（undefined）时按「没确认过」处理，宁可多问一次。
+    if (state.settings?.effective.translateNoticeAck !== true) {
+      set({ translateConfirm: { chars: plan.chars, provider: route.provider, model: route.model } })
+      return
+    }
+    await beginSession('fresh', geometry)
+  }
+
+  /**
+   * 确认外发（R7 06）：先写 `settings.json` 的翻译确认标记，再开始翻译。
+   *
+   * 写标记失败**不阻断**本次翻译 —— 用户已经当面确认过这次外发，此时反悔只会让人以为按钮坏了；
+   * 但要留 warn，且标记没写成功意味着下次仍会再问（如实反映「没记住」）。
+   */
+  const confirmTranslate = async (geometry?: TranslateGeometry): Promise<void> => {
+    const pending = get().translateConfirm
+    if (pending === undefined) return
+    // 先清框再写盘：确认按钮不可重复触发，且写盘失败也不会把模态留在屏幕上。
+    set({ translateConfirm: undefined })
+    try {
+      if (!(await saveNoticeAck())) {
+        log('warn', '[rss-reader] 写入翻译外发确认标记失败，本次照常翻译，下次仍会提示')
+      }
+    } catch (failure) {
+      log('warn', '[rss-reader] 写入翻译外发确认标记失败，本次照常翻译，下次仍会提示', failure)
+    }
+    await beginSession('fresh', geometry)
+  }
+
+  /** 取消外发确认（spec §4.2）：什么都不做，不留状态 —— 不写 settings、不发 rpc。 */
+  const cancelTranslate = (): void => {
+    if (get().translateConfirm === undefined) return
+    set({ translateConfirm: undefined })
+  }
+
+  /**
+   * 「继续翻译（还剩 N/M）」：以现有进度续跑，已译块与失败批都不重发（spec §4.1 / D19）。
+   * 只对 `stopped` 生效；`done` / `failed` 的下一步是「重译」或逐批重试，不在本动作里混着做。
+   */
+  const continueTranslate = async (geometry?: TranslateGeometry): Promise<void> => {
+    const state = get()
+    const article = state.article
+    if (article === undefined || article.itemId === undefined || article.contentVersion === undefined) return
+    const entry = translationEntryOf(state, article.itemId, article.contentVersion, state.translateTarget)
+    if (entry === undefined || entry.status !== 'stopped') return
+    if (entry.total - entry.done <= 0) return
+    await beginSession('continue', geometry)
+  }
+
+  /** 「重译」：清空该 key 的 blocks / done / failures / 标题后整篇重发（spec §4.1 / D19）。 */
+  const retranslate = async (geometry?: TranslateGeometry): Promise<void> => {
+    await beginSession('fresh', geometry)
+  }
+
+  /** 旧入口：与「首次点译且已确认」等价（仅供既有调用点；新代码走 requestTranslate）。 */
+  const startTranslate = async (geometry?: TranslateGeometry): Promise<void> => {
+    await beginSession('fresh', geometry)
   }
 
   return {
-    startTranslate, stopTranslate, retryBatch, loadTranslateInfo, setTranslateTarget,
+    startTranslate, requestTranslate, confirmTranslate, cancelTranslate,
+    continueTranslate, retranslate, stopTranslate, retryBatch, loadTranslateInfo, setTranslateTarget,
     setTranslationMode, cycleTranslationMode,
   }
 }

@@ -355,8 +355,9 @@ export function routeKey(event: KeyboardEvent, ctx: KeyRoutingCtx): void {
       })
       break
     }
-    // t = 三态循环（R7 03 / D14 / 验收 14）：只在正文页；有没有译文由动作层判，
-    // 无译文时什么都不做（06 票才把「触发翻译」接上）。键被吃掉但不产生别的副作用。
+    // t = 三态循环（R7 03 / 06，D14 / 验收 14）：只在正文页。无译文时**触发翻译**
+    //（首次仍走确认框）；有译文时循环 原文 → 译文 → 对照。视图守卫与「正文已加载」判据
+    // 都在动作层（cycleTranslationMode）再挡一次 —— 键盘与按钮共用同一条外发入口。
     case 'cycleTranslation':
       if (view !== 'article') return
       run(() => store.cycleTranslationMode())

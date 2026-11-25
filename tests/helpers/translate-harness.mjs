@@ -132,6 +132,10 @@ async function waitFor(predicate, { timeout = 2000, interval = 5, label = '条�
 export async function mount({
   items = [itemOf('a')], articles = {}, translateBatch,
   translateInfo = AVAILABLE_TRANSLATE_INFO, preferences = undefined,
+  // R7 06：设置快照里的「首次外发已确认」标记。默认 true 表示「这个用户以前确认过」：
+  // 01–05 的用例关注的是分批 / 失败 / 三态，不该被 06 的首次确认框统一改变前置条件；
+  // 06 自己的确认用例显式传 false。
+  noticeAck = true,
 } = {}) {
   const { JSDOM } = STACK
   const globalSnapshot = {}
@@ -173,7 +177,7 @@ export async function mount({
     }
   }
   const settings = {
-    effective: { ...TUNABLE_DEFAULTS },
+    effective: { ...TUNABLE_DEFAULTS, translateNoticeAck: noticeAck },
     defaults: { ...TUNABLE_DEFAULTS },
     version: '0.1.0',
     dataDir: '/tmp/rss-reader',
@@ -247,8 +251,11 @@ export async function mount({
   RpcErrorClass = exportsObj.RpcError
   const createStore = () => exportsObj.createReaderStore({ rpc })
   const store = createStore()
-  const root = createRoot(win.document.getElementById('root'))
-  root.render(React.createElement(exportsObj.createReader(store)))
+  const container = win.document.getElementById('root')
+  const Reader = exportsObj.createReader(store)
+  let root = createRoot(container)
+  const renderReader = () => { root.render(React.createElement(Reader)) }
+  renderReader()
 
   const nextTask = () => new Promise((resolve) => {
     if (typeof win.MessageChannel !== 'function') { setTimeout(resolve, 0); return }
@@ -272,9 +279,24 @@ export async function mount({
   await settle()
 
   const press = (key, shiftKey = false) => {
+    // 真浏览器里 keydown 的 target 是**当前焦点元素**（document 只负责接收冒泡）。键盘路由的
+    // isTypingTarget 判的正是 target —— 一律从 document 派发会让「输入框聚焦不响应」永远测不到。
+    const target = win.document.activeElement ?? win.document
     const event = new win.KeyboardEvent('keydown', { key, shiftKey, bubbles: true, cancelable: true })
-    win.document.dispatchEvent(event)
+    target.dispatchEvent(event)
     return event.defaultPrevented
+  }
+  /**
+   * 模拟「切到会话再切回」：卸载阅读器组件、用**同一个 store** 重新挂载。
+   * store 随插件 fiber 存活（spec §4.6），所以译文 / 进度 / view 都该还在；
+   * 而组件里的 useState 全部归零 —— 这正是验收 10 要区分的两件事。
+   */
+  const remount = async () => {
+    root.unmount()
+    root = createRoot(container)
+    renderReader()
+    await waitFor(() => container.childNodes.length > 0, { label: 'Reader 重新上屏' })
+    await settle()
   }
   let cleaned = false
   const cleanup = () => {
@@ -290,7 +312,7 @@ export async function mount({
   const $ = (selector) => win.document.querySelector(selector)
   const $$ = (selector) => [...win.document.querySelectorAll(selector)]
   const calls = (endpoint) => requests.filter((entry) => entry.endpoint === endpoint)
-  return { win, store, requests, calls, createStore, exports: exportsObj, press, settle, waitFor, cleanup, $, $$ }
+  return { win, store, requests, calls, createStore, exports: exportsObj, press, settle, waitFor, cleanup, remount, $, $$ }
 }
 
 /** 打开某条目正文页并等它渲染完成。 */

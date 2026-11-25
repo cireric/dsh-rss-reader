@@ -3424,4 +3424,21 @@ export const MUTATIONS = [
     judgeTests: ['R7 05 连续失败计数清零：失败 → 成功 → 失败 → 失败 → 成功 仍然跑完全篇'],
     from: '\t\t\t\t\tconsecutiveFailures = 0;',
     to: '\t\t\t\t\tvoid 0;' },
+
+  // ── R7 06：首次外发确认、中止与继续（2026-11-25）────────────────────────
+  // 「取消」仍然开始翻译：用户明确点了取消，正文还是被发给了模型 —— 这是隐私承诺的直接破口。
+  // 判据是确认框用例里「取消 ⇒ 零 translateBatch / 零 saveSettings / 无状态」。
+  // from 照构建产物 lib/client.js 的实际字节写，独立实测 OCCURRENCES=1。
+  { id: 'translate-取消确认仍发请求', file: 'lib/client.js',
+    judges: ['translate-confirm.test.mjs'],
+    judgeTests: ['R7 06 首次点「译」：确认框写清路由与字符数；取消零副作用'],
+    from: '\t\t\tconst cancelTranslate = () => {\n\t\t\t\tif (get().translateConfirm === void 0) return;\n\t\t\t\tset({ translateConfirm: void 0 });\n\t\t\t};',
+    to: '\t\t\tconst cancelTranslate = () => {\n\t\t\t\tif (get().translateConfirm === void 0) return;\n\t\t\t\tset({ translateConfirm: void 0 });\n\t\t\t\tvoid beginSession("fresh");\n\t\t\t};' },
+  // 「继续翻译」不把已译块放进 settled：点一次继续会把前几批原样重发，用户为同一段文字付第二遍钱。
+  // 判据是中止用例里「继续只补剩余块，已译块不重发」。
+  { id: 'translate-继续重发已译块', file: 'lib/client.js',
+    judges: ['translate-abort.test.mjs'],
+    judgeTests: ['R7 06 停止：在途批跑完不再发下一批；继续只补剩余块，已译块不重发'],
+    from: '\t\t\t\tconst settled = new Set(resumeEntry?.blocks.keys() ?? []);',
+    to: '\t\t\t\tconst settled = new Set([]);' },
 ]
