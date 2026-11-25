@@ -198,6 +198,7 @@ test('R7 05 批失败：其余批继续，失败处显示原因 + 批首一个�
     const retries = h.$$('[data-rss-translation-retry]')
     assert.equal(retries.length, 1, '一个失败批只能有一个重试按钮')
     assert.equal(retries[0].getAttribute('data-rss-translation-retry'), '0', '重试按钮放在批首块位置')
+    assert.equal(retries[0].getAttribute('aria-label'), '重试本批翻译', '批级重试按钮必须有可读标签（spec §5.6）')
 
     retries[0].click()
     await h.waitFor(() => translationOf(h)?.failures.size === 0, { label: '重试成功' })
@@ -210,6 +211,48 @@ test('R7 05 批失败：其余批继续，失败处显示原因 + 批首一个�
     assert.equal(after.blocks.size, 3, '重试不覆盖 / 不清空已成功的 b2')
     assert.equal(after.done, 3)
     assert.equal(after.status, 'done')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R7 05 首批失败后重试：重试请求再带 title；回包无 title ⇒ 显示「标题未翻译」', skip, async () => {
+  // spec §4.3：标题随第一批发送。首批失败后 firstBatch 已经翻页，重试该批必须**再带一次**标题，
+  // 否则标题永远没有第二次机会（评审修复 A6）。这里让首批失败、重试成功且回包故意不带 title。
+  const blocks = [{ kind: 'p', text: '段落' }]
+  let calls = 0
+  const h = await mount({
+    items: [itemOf('a')],
+    articles: { a: articleOf('a', blocks) },
+    translateBatch: async (payload) => {
+      calls += 1
+      if (calls === 1) return failureOf('timeout')
+      return {
+        value: {
+          model: 'fake/m',
+          items: payload.items.map((item) => ({ id: item.id, text: '译:' + item.text })),
+        },
+      }
+    },
+  })
+  try {
+    await openArticle(h, 'a')
+    h.$('[data-rss-translate]').click()
+    await h.waitFor(() => {
+      const entry = translationOf(h)
+      return entry?.status === 'done' && entry.failures.size === 1
+    }, { label: '首批失败收尾' })
+    await h.settle()
+    assert.equal(h.calls('translateBatch')[0].payload.title, '文章 a', '首批本来就带标题')
+
+    h.$('[data-rss-translation-retry]').click()
+    await h.waitFor(() => translationOf(h)?.failures.size === 0, { label: '重试成功' })
+    await h.settle()
+    const retried = h.calls('translateBatch')[1].payload
+    assert.equal(retried.title, '文章 a', '重试首批必须再次带上标题')
+    assert.equal(translationOf(h).titleFailed, true, '带标题的批次成功但回包没有标题 ⇒ 标题未翻译')
+    assert.equal(translationOf(h).title, undefined)
+    assert.equal(h.$('[data-rss-title-failed]').textContent, '标题未翻译')
   } finally {
     h.cleanup()
   }

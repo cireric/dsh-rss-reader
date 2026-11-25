@@ -22,8 +22,9 @@ import { foldOf, groupImageBlocks, type ImageFold, type ImageGroup } from '../im
 import { paragraphsOf } from '../html-text.js'
 import { READING_FONT_SIZES, READING_LINE_WIDTHS } from '../preferences.js'
 import type { ReadingPreferences } from '../preferences.js'
-import type { ArticleState, TranslateConfirmRequest, TranslationEntry, TranslationMode } from './store.js'
+import { hasTranslations, type ArticleState, type TranslateConfirmRequest, type TranslationEntry, type TranslationMode } from './store.js'
 import { TranslationModeSwitcher, TranslationSegment, translatedBlockOf } from './translate-view.js'
+import { translateGeometryOf } from './translate-geometry.js'
 import {
   TARGET_LANGUAGES, TRANSLATE_BUTTON_TEXT, TRANSLATE_FAILURE_UI, TRANSLATE_LABEL_TEXT,
   translateNoticeText,
@@ -31,11 +32,10 @@ import {
 } from '../translate-copy.js'
 import {
   articleTranslatePlanOf,
+  isTranslatableBlock,
   translateCharsOf,
   TRANSLATE_BLOCK_MAX_CHARS,
-  type TranslateBlockRect,
   type TranslateGeometry,
-  type TranslateRect,
 } from '../translate-blocks.js'
 import { ConfirmDialog } from './confirm-dialog.js'
 // InlineRun 从 article-text.js 取，**不从 article.js**：后者 import 了 node:crypto 与 feed/fetch.js，
@@ -612,31 +612,6 @@ function Lightbox({ src, onClose }: {
   )
 }
 
-/** `getBoundingClientRect()` → 纯函数认的四个数（DOMRect 不进 translate-blocks）。 */
-function rectOf(element: Element): TranslateRect {
-  const rect = element.getBoundingClientRect()
-  return { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right }
-}
-
-/**
- * 量当前正文的视口几何（spec §4.3）：滚动容器 + 每个块的矩形。
- *
- * 块锚点是渲染层打的 `data-rss-block={块下标}`（见下面 displayBlocks.map）。用锚点而不是把 ref
- * 数组抬到 React 里：块下标本来就是渲染的唯一身份，锚点让「DOM 顺序 === displayBlocks 下标」
- * 成为可核对的事实；图片折叠只让成员返回 null，剩下的锚点仍带着原下标。
- */
-function translateGeometryOf(box: HTMLElement): TranslateGeometry {
-  const blocks: TranslateBlockRect[] = []
-  for (const node of box.querySelectorAll<HTMLElement>('[data-rss-block]')) {
-    const raw = node.getAttribute('data-rss-block')
-    if (raw === null) continue
-    const index = Number(raw)
-    if (!Number.isInteger(index) || index < 0) continue
-    blocks.push({ index, rect: rectOf(node) })
-  }
-  return { container: rectOf(box), blocks }
-}
-
 export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress, expandedGroups, onExpandImageGroup, imagesExpanded, lightboxSrc, onOpenImage, onCloseLightbox, translation, translationMode, onTranslationMode, translateAvailable, translateTarget, onTranslateTarget, onTranslate, onContinueTranslate, onRetranslate, translateConfirm, onConfirmTranslate, onCancelTranslate, onStopTranslate, onRetryBatch }: {
   article: ArticleState | undefined
   item: ItemView | undefined
@@ -819,10 +794,12 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
    */
   const blockKeyOf = (at: number): string => articleItemId + ':' + at
   /**
-   * 实际生效的三态（R7 03）：**没有译文条目时一律按原文画**，切换器也不出现（spec §4.5）。
+   * 实际生效的三态（R7 03 / 评审修复 A4）：**没有可用译文时一律按原文画**，切换器也不出现
+   * （spec §4.5）。判据是 `hasTranslations`（blocks.size > 0），不是「条目存在」——
+   * 全批失败 / 首批未回时条目仍然存在（要显示进度与重试按钮），但它没有任何译文可切。
    * 这一层派生放在渲染处，store 只保存用户选过的态 —— 否则「有没有译文」会被复制成第二个判据。
    */
-  const effectiveMode: TranslationMode = translation === undefined ? 'original' : translationMode
+  const effectiveMode: TranslationMode = hasTranslations(translation) ? translationMode : 'original'
   /**
    * 块下标 → 它所属的失败批（R7 05）。`failures` 以批首为键，渲染要按**块**找原因，
    * 所以先摊平成「块 → { 批首, 原因 }」：同批每块位置显示原因，只有批首位置放重试按钮。
@@ -1107,10 +1084,10 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
             )}
             {/*
               * 三态切换器（R7 03 / spec §4.5）：「有译文之后，工具栏出现」。
-              * 没有译文条目时整块不渲染 —— 切换器出现本身就在承诺「这里有译文可切」。
-              * 放在「译」与进度右侧、Aa 左侧：任务区里所有翻译控件连成一片，不打断阅读偏好的入口。
+              * 判据是 `hasTranslations`（至少一块真的回填了译文），不是「有翻译条目」——
+              * 全批失败时条目存在，但一个译文都没有，切换器出现就是在承诺一份不存在的内容。
               */}
-            {translation !== undefined && (
+            {hasTranslations(translation) && (
               <TranslationModeSwitcher mode={effectiveMode} onChange={onTranslationMode} />
             )}
             {/*
@@ -1278,7 +1255,7 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
             if (group === undefined || fold.shouldRender(group.index)) {
               const kind = typeof block['kind'] === 'string' ? block['kind'] : 'p'
               /** 可翻块（D10）：只有它们的译文会替换 / 追加文本；pre / img / table 永远原样。 */
-              const translatable = kind === 'p' || kind === 'h' || kind === 'quote' || kind === 'list'
+              const translatable = isTranslatableBlock(block)
               /**
                * 译文内容（R7 03）：`translation.blocks` 以块下标为键，不按数组顺序硬贴。
                * 空 / 纯空白、list 行数不等都在 `translatedBlockOf` 里判成 undefined ⇒ 该块退回原文；
@@ -1309,6 +1286,7 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
                   {batchFailure.head === index && (
                     <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
                       data-rss-translation-retry={batchFailure.head}
+                      aria-label="重试本批翻译"
                       style={{ marginLeft: 8 }}
                       // 整篇还在跑（后面批在飞）时禁用：批次必须串行，动作层也会再挡一次。
                       disabled={translation?.status === 'running'}

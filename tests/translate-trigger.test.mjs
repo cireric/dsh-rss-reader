@@ -131,3 +131,43 @@ test('R7 06 可翻块为 0：按钮禁用、title 说明原因、点击零请求
     h.cleanup()
   }
 })
+
+/**
+ * 只让 0 号块落在视口里：容器 0..80，块高 50、间距 100（与 translate-progress 同一条夹具）。
+ * 其余元素返回零矩形 —— jsdom 没有布局，本用例只关心选批。
+ */
+function stubArticleViewport(h) {
+  h.win.Element.prototype.getBoundingClientRect = function () {
+    const block = this.getAttribute?.('data-rss-block')
+    if (block !== null && block !== undefined) {
+      const index = Number(block)
+      const top = 10 + index * 100
+      return { top, bottom: top + 50, left: 0, right: 600 }
+    }
+    if (this.getAttribute?.('data-rss-scroll') === 'article') {
+      return { top: 0, bottom: 80, left: 0, right: 600 }
+    }
+    return { top: 0, bottom: 0, left: 0, right: 0 }
+  }
+}
+
+test('R7 06 t 与点「译」共用视口几何：首批只含屏幕内可见块', skip, async () => {
+  const blocks = [
+    { kind: 'p', text: '第一段' },
+    { kind: 'p', text: '第二段' },
+    { kind: 'p', text: '第三段' },
+  ]
+  const h = await mount({ items: [itemOf('a')], articles: { a: articleOf('a', blocks) } })
+  try {
+    await openArticle(h, 'a')
+    stubArticleViewport(h)
+    h.press('t')
+    await h.waitFor(() => h.calls('translateBatch').length >= 1, { label: 't 触发首批' })
+    const first = h.calls('translateBatch')[0].payload
+    assert.deepEqual(first.items.map((item) => item.id), ['b0'],
+      '屏幕内只有 b0：键盘路径也必须量几何（不能退化成文档顺序 b0/b1/b2）')
+    await h.waitFor(() => [...h.store.get().translations.values()][0]?.status === 'done', { label: '翻译完成' })
+  } finally {
+    h.cleanup()
+  }
+})

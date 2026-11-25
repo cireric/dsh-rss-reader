@@ -11,7 +11,7 @@
  */
 import type { ReactNode } from 'react'
 import { TRANSLATE_MODE_TEXT } from '../translate-copy.js'
-import type { TranslationMode } from './store.js'
+import { TRANSLATION_MODES, type TranslationMode } from './store.js'
 
 /** 译文内容的稳定标记：值 = 正文块下标（测试与排查都按它定位，不认组件树形状）。 */
 const TRANSLATION_ATTR = 'data-rss-translation'
@@ -55,7 +55,7 @@ export function TranslationModeSwitcher({ mode, onChange }: {
   return (
     <div data-rss-translation-modes="" role="group" aria-label="译文显示方式"
       style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
-      {(['original', 'translated', 'parallel'] as const).map((entry) => (
+      {TRANSLATION_MODES.map((entry) => (
         <button key={entry} type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
           data-rss-translation-mode={entry}
           aria-pressed={mode === entry}

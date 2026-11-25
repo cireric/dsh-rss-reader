@@ -9,7 +9,13 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { applyBatch, translatableBlocksOf, translatableTextOf } from '../lib/translate-blocks.js'
+import {
+  applyBatch,
+  blockIndexOfTranslateId,
+  translatableBlocksOf,
+  translatableTextOf,
+  translateBlockIdOf,
+} from '../lib/translate-blocks.js'
 
 /** 一份覆盖全部七种块的夹具：只有 p / h / quote / list 这四种可翻。 */
 const BLOCKS = [
@@ -80,4 +86,16 @@ test('applyBatch：空 / 纯空白译文不算失败，但该块没有译文（�
   assert.equal(result.title, undefined, '纯空白标题等于没有标题')
   assert.equal(result.blocks.has(0), false, '空译文不产生空段落')
   assert.equal(result.blocks.get(2), '\n世界\n', '非空译文原样保留（含换行）')
+})
+
+test('块编号只有一套编解码：b + 下标 ⇄ 下标，非法 id 认不出就 undefined', () => {
+  assert.equal(translateBlockIdOf(0), 'b0')
+  assert.equal(translateBlockIdOf(42), 'b42')
+  assert.equal(blockIndexOfTranslateId('b0'), 0)
+  assert.equal(blockIndexOfTranslateId('b42'), 42)
+  assert.equal(blockIndexOfTranslateId('b'), undefined, '没有下标不算编号')
+  assert.equal(blockIndexOfTranslateId('x1'), undefined)
+  assert.equal(blockIndexOfTranslateId('b1x'), undefined, '尾部杂物不许被正则前缀放过')
+  assert.equal(blockIndexOfTranslateId('b-1'), undefined)
+  assert.equal(blockIndexOfTranslateId('b01'), undefined, '前导零不是规范形式：b01 与 b1 会解码成同一下标')
 })

@@ -152,6 +152,14 @@ export interface ExploreState {
 export interface TranslationBatchFailure {
   readonly indices: readonly number[]
   readonly reason: TranslateFailureReason
+  /**
+   * 这次失败是否来自「带标题的第一批」。
+   *
+   * 标题只随第一批发送（spec §4.3）；首批失败后整批要能手动重试，而重试时必须把标题再带上，
+   * 否则标题永远没有第二次机会（评审修复 A6）。后续批的失败记录不带这个标记，重试它们时
+   * 不许顺手发标题 —— 那会让「标题只随第一批」变成「随便哪一批都发」。
+   */
+  readonly carriesTitle?: boolean
 }
 
 /**
@@ -196,6 +204,17 @@ export interface TranslateConfirmRequest {
   readonly chars: number
   readonly provider: string
   readonly model: string
+}
+
+/**
+ * 这条译文是否「有译文可用」：至少一个块成功回填。
+ *
+ * 判据只留这一份：渲染层（切换器是否出现、三态是否回落原文）与动作层（`t` 该循环三态还是
+ * 触发翻译）必须给同一个答案。全批失败 / 首批未回时条目仍然存在（有进度、有失败按钮），
+ * 但 `blocks.size === 0` —— 只看「条目存在」会让切换器承诺一份并不存在的译文。
+ */
+export function hasTranslations(entry: TranslationEntry | undefined): boolean {
+  return entry !== undefined && entry.blocks.size > 0
 }
 
 /** 正文的三态（R7 03 / spec §4.5 / D5）：原文 / 译文 / 对照。 */

@@ -321,3 +321,32 @@ test('R7 03 list 行数不等 / 空白译文：整块退回原文，不渲染空
     h.cleanup()
   }
 })
+
+test('R7 03 无译文（全批失败）：切换器不出现、正文按原文渲染', skip, async () => {
+  // 一条可翻 + 一张表：若渲染层只看「有条目」就会落译文态（表格会挂「表格未翻译」），
+  // 但 blocks.size === 0 —— 没有任何译文可切，必须完全按原文画（评审修复 A4）。
+  const blocks = [
+    { kind: 'p', text: '段落一' },
+    { kind: 'table', header: ['列'], rows: [['值']] },
+  ]
+  const h = await mount({
+    items: [itemOf('a')],
+    articles: { a: articleOf('a', blocks) },
+    translateBatch: async () => ({
+      error: { code: 'translate-failed', message: '模型失败', details: { reason: 'empty' } },
+    }),
+  })
+  try {
+    const body = await openArticle(h, 'a')
+    h.$('[data-rss-translate]').click()
+    await h.waitFor(() => translationOf(h)?.status === 'done', { label: '失败批收尾' })
+    await h.settle()
+    assert.equal(translationOf(h).blocks.size, 0, '全批失败没有任何译文块')
+    assert.equal(h.$('[data-rss-translation-modes]'), null, '没有译文时切换器不许出现')
+    assert.equal(h.$('[data-rss-table-not-translated]'), null, '无译文时不许落译文态（表格未翻译标记不出现）')
+    assert.match(body.textContent, /段落一/, '正文必须原样显示原文')
+    assert.equal(h.$('.dsh-rss-article-title').textContent, '文章 a')
+  } finally {
+    h.cleanup()
+  }
+})

@@ -100,8 +100,13 @@ test('正常返回：模型流拼成 JSON 后按 b 下标还原，回包带 mode
   assert.equal(llm.calls[0].model, 'm')
   assert.match(llm.calls[0].system, /Simplified Chinese/, 'prompt 必须使用语言表的英文语言名')
   const prompt = llm.calls[0].messages[0].content[0].text
+  // 2026-11-25 真机实测：适配器会丢掉 system，所以指令必须在 user 消息里，payload 放最后。
+  assert.match(prompt, /You are a translation engine/)
+  assert.match(prompt, /Output JSON only/, 'user 消息必须明确只输出 JSON、不要解释')
   assert.match(prompt, /b0/)
   assert.match(prompt, /World/)
+  assert.ok(prompt.indexOf('Output JSON only') < prompt.indexOf('{"title":"Hello"'), '指令在 payload 之前，payload 放最后')
+  assert.ok(prompt.trimEnd().endsWith('}]}'), 'payload 之后不许再跟说明文字')
   assert.equal(typeof llm.calls[0].maxTokens, 'number')
 })
 
@@ -174,4 +179,17 @@ test('入参拒绝：空 items / 重复 id 一律 bad-request，且不触达模�
     assert.equal(result.error.code, 'bad-request', JSON.stringify(payload))
   }
   assert.equal(llm.calls.length, 0, '坏入参必须在触达模型之前被拒')
+})
+
+test('system 被适配器丢弃也能工作：指令与请求 JSON 都在 user 消息里（2026-11-25 真机 wb 实测）', async () => {
+  const reply = JSON.stringify({ items: [{ id: 'b0', text: '你好世界' }] })
+  const llm = fakeLlm(textChunks(reply))
+  const dispatch = dispatchWith({ services: { llm, agentDefaultModel: route() } })
+  // 假适配器只读 user（与真机那条 wb/deepseek-v4.1-flash 的行为一致：system 根本没到模型）。
+  const result = await dispatch('translateBatch', { target: 'zh-CN', items: [{ id: 'b0', text: 'Hello' }] })
+  assert.equal(result.ok, true, JSON.stringify(result))
+  const user = llm.calls[0].messages[0].content[0].text
+  assert.match(user, /You are a translation engine/, '指令必须不依赖 system 也能到达模型')
+  assert.match(user, /Return only a JSON object/)
+  assert.match(user, /"items":\[\{"id":"b0","text":"Hello"\}\]/, '请求 JSON 必须原样在 user 里')
 })

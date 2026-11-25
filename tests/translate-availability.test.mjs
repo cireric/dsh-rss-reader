@@ -125,6 +125,32 @@ test('服务 / 模型目录取不到也归 no-model（不是 llm-unmounted）', 
   } finally { h.cleanup() }
 })
 
+test('providers 非空但所有模型目录为空 ⇒ no-model（没配 key 的代理不算可用）', async () => {
+  // spec §1.1 的判据：没配 key 的代理 `listModels(provider)` 返回空。providers 非空只说明
+  // 适配器挂上了，目录里一个模型都没有时点「译」必然 unavailable —— 文章面不许出按钮。
+  const llm = fakeLlm({ models: {} })
+  const h = harness({ services: { llm, ...fakeSession() } })
+  try {
+    const info = await launch(h)
+    assert.equal(info.available, false)
+    assert.equal(info.reason, 'no-model')
+    assert.deepEqual(info.providers, [], '模型目录如实为空，设置页据此显示没有可选模型')
+  } finally { h.cleanup() }
+})
+
+test('默认路由的 provider 目录为空（别的 provider 有模型）⇒ no-model', async () => {
+  // 不能因为「目录里还有别的模型」就放行：会话默认指向的 provider 取不到模型时，
+  // 这条默认路由兑现不了，必须回 no-model 而不是 available。
+  const llm = fakeLlm({ providers: [{ id: 'p' }, { id: 'q' }], models: { q: [{ id: 'other' }] } })
+  const h = harness({ services: { llm, ...fakeSession() } })
+  try {
+    const info = await launch(h)
+    assert.equal(info.available, false)
+    assert.equal(info.reason, 'no-model')
+    assert.deepEqual(info.providers, [{ provider: 'q', models: [{ id: 'other', efforts: [] }] }])
+  } finally { h.cleanup() }
+})
+
 test('回落会话默认但 modelCatalog().default 不存在 ⇒ no-default-route', async () => {
   const h = harness({ services: { llm: fakeLlm(), ...fakeSession({ catalogDefault: null }) } })
   try {

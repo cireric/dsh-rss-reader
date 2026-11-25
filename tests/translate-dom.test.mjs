@@ -71,7 +71,8 @@ test('R7 01 首批上限：最多 12 块、合计不超过 2000 字符（先到�
   try {
     await openArticle(h, 'a')
     h.$('[data-rss-translate]').click()
-    await h.waitFor(() => h.calls('translateBatch').length === 1, { label: '发出 translateBatch' })
+    // 15 块会很快发出两批（12 + 3）：等「至少一条」再读第一条，避免 === 1 的轮询竞态。
+    await h.waitFor(() => h.calls('translateBatch').length >= 1, { label: '发出 translateBatch' })
     assert.equal(h.calls('translateBatch')[0].payload.items.length, 12, '最多 12 块')
 
     // 第二篇：第一段 1500 字，第二段 600 字 —— 2000 字符上限从第二段起就切不动。
@@ -84,7 +85,8 @@ test('R7 01 首批上限：最多 12 块、合计不超过 2000 字符（先到�
     try {
       await openArticle(h2, 'a')
       h2.$('[data-rss-translate]').click()
-      await h2.waitFor(() => h2.calls('translateBatch').length === 1, { label: '发出 translateBatch' })
+      // 1500 字一块 + 600/短块一批：两条也可能在第一次轮询前就都发完，等「至少一条」。
+      await h2.waitFor(() => h2.calls('translateBatch').length >= 1, { label: '发出 translateBatch' })
       const items = h2.calls('translateBatch')[0].payload.items
       assert.equal(items.length, 1, '超过 2000 字符上限的块不能被硬塞进同一批')
       assert.equal(items[0].text.length, 1500)
