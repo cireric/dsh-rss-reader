@@ -61,6 +61,18 @@ export const TRANSLATE_LABEL_TEXT = {
   blockTooLong: '段落过长未翻译',
   titleNotTranslated: '标题未翻译',
   translatedFrom: (model: string): string => '译自 ' + model,
+  /** 进度（spec §4.8）：X = 已完成批里的块数，Y = 全篇可翻块数（不含超长块）。 */
+  progress: (done: number, total: number): string => '已译 ' + done + '/' + total + ' 块',
+} as const
+
+/**
+ * 整篇上限提示（spec §4.3 / D3）。
+ *
+ * 把字符数与上限都写进文案：只说「文章太长」用户没法判断差多少，也无从决定要不要手动删减。
+ */
+export const TRANSLATE_LIMIT_TEXT = {
+  articleTooLong: (chars: number, limit: number): string =>
+    '正文共 ' + chars + ' 字符，超过单篇 ' + limit + ' 字符上限，本次不翻译',
 } as const
 
 /**
