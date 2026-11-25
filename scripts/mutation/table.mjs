@@ -3371,4 +3371,22 @@ export const MUTATIONS = [
     judgeTests: ['单块 2000 < 字符 ≤ 6000 ⇒ 独占一批（该批放宽到 6000）'],
     from: 'if ((chars[first] ?? 0) > TRANSLATE_BATCH_MAX_CHARS)',
     to: 'if ((chars[first] ?? 0) > TRANSLATE_BLOCK_MAX_CHARS)' },
+
+  // ── R7 03：三态与译文渲染（2026-11-25）────────────────────────────────────
+  // 对照态被当成译文态：`effectiveMode !== 'original'` 让 parallel 也走「原文让位给译文」
+  // 的分支，对照态就不再是「原文 + 紧跟自己的译文」，读者核对不了原文。
+  // 判据是「三态切换」用例里对照态必须还能看到原文段落。
+  // from 照构建产物 lib/client.js 的实际字节写，独立实测 OCCURRENCES=1。
+  { id: 'translate-对照态被当成译文态', file: 'lib/client.js',
+    judges: ['translate-view.test.mjs'],
+    judgeTests: ['R7 03 三态切换：原文 / 对照 / 译文互换，且不发任何 rpc'],
+    from: 'if (effectiveMode === "translated") return blockBox(',
+    to: 'if (effectiveMode !== "original") return blockBox(' },
+  // list 译文行数不校验：两条原文配一条译文时会把一行硬贴成列表，读者分不清哪条对哪条。
+  // 判据是「list 行数不等 ⇒ 整块退回原文」的用例。
+  { id: 'translate-list行数不校验', file: 'lib/client.js',
+    judges: ['translate-view.test.mjs'],
+    judgeTests: ['R7 03 list 行数不等 / 空白译文：整块退回原文，不渲染空段落'],
+    from: 'if (lines.length !== items.length) return void 0;',
+    to: 'if (false) return void 0;' },
 ]

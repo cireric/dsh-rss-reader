@@ -355,6 +355,12 @@ export function routeKey(event: KeyboardEvent, ctx: KeyRoutingCtx): void {
       })
       break
     }
+    // t = 三态循环（R7 03 / D14 / 验收 14）：只在正文页；有没有译文由动作层判，
+    // 无译文时什么都不做（06 票才把「触发翻译」接上）。键被吃掉但不产生别的副作用。
+    case 'cycleTranslation':
+      if (view !== 'article') return
+      run(() => store.cycleTranslationMode())
+      break
     // r：刷新未读计数（只重取本地视图，不抓取 —— 规格不变量 1）
     case 'refreshCount': run(() => { void store.refreshCount() }); break
     case 'manageFeeds': run(() => store.toggleFeeds()); break

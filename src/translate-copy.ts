@@ -65,6 +65,13 @@ export const TRANSLATE_LABEL_TEXT = {
   progress: (done: number, total: number): string => '已译 ' + done + '/' + total + ' 块',
 } as const
 
+/** 三态切换器的按钮文案（R7 03 / spec §4.5）：顺序即 `t` 的循环顺序，别在组件里另抄一份。 */
+export const TRANSLATE_MODE_TEXT = {
+  original: '原文',
+  translated: '译文',
+  parallel: '对照',
+} as const
+
 /**
  * 整篇上限提示（spec §4.3 / D3）。
  *

@@ -29,7 +29,13 @@ import {
   type TranslateGeometry,
   type TranslateRequestItem,
 } from '../translate-blocks.js'
-import type { ReaderState, ReaderStoreDeps, TranslationEntry } from './store.js'
+import {
+  nextTranslationMode,
+  type ReaderState,
+  type ReaderStoreDeps,
+  type TranslationEntry,
+  type TranslationMode,
+} from './store.js'
 
 /** 内存键：条目 + 正文版本 + 目标语言（spec §4.6 / D11）。 */
 export function translationKeyOf(itemId: string, contentVersion: string, target: TargetLanguage): string {
@@ -153,6 +159,29 @@ export function createTranslateActions(host: TranslateActionHost) {
     if (session === undefined) return
     const entry = get().translations.get(session.key)
     if (entry !== undefined && entry.status === 'running') storeEntry({ ...entry, status: 'stopped' })
+  }
+
+  /**
+   * 手动选三态（R7 03 / spec §4.5）。
+   *
+   * **只改渲染状态**：不碰 translations、不发任何 rpc ——「切到译文再切回原文」是纯视图动作
+   * （验收 12 / 本票第 7 条），重新翻译只能走「译 / 重译」。
+   */
+  const setTranslationMode = (mode: TranslationMode): void => {
+    if (get().translationMode === mode) return
+    set({ translationMode: mode })
+  }
+
+  /**
+   * `t` 的三态循环（D14）。无译文时**什么都不做**：06 票才把「无译文 ⇒ 触发翻译」接上，
+   * 本票先保持「按 t 无事发生」，避免在 06 之前多出一个未经确认的外发入口。
+   */
+  const cycleTranslationMode = (): void => {
+    const state = get()
+    const article = state.article
+    if (article === undefined || article.itemId === undefined || article.contentVersion === undefined) return
+    if (translationEntryOf(state, article.itemId, article.contentVersion) === undefined) return
+    setTranslationMode(nextTranslationMode(state.translationMode))
   }
 
   /**
@@ -290,6 +319,10 @@ export function createTranslateActions(host: TranslateActionHost) {
     if (prior !== undefined && prior.key === key && get().translations.get(key)?.status === 'running') return
     if (prior !== undefined) stopTranslate()
 
+    // 有译文时默认落「译文」（spec §4.5 / D5）。只在**开始一场翻译**时切一次：
+    // 若每批回包都切，用户看到一半切去「对照」会被下一批硬拽回「译文」。
+    setTranslationMode('translated')
+
     generation += 1
     const session: TranslateSession = {
       token: generation,
@@ -302,5 +335,5 @@ export function createTranslateActions(host: TranslateActionHost) {
     await run(session, article.blocks, plan, geometry)
   }
 
-  return { startTranslate, stopTranslate }
+  return { startTranslate, stopTranslate, setTranslationMode, cycleTranslationMode }
 }

@@ -1119,6 +1119,9 @@ export function createReader(store: ReaderStore): () => ReactNode {
             onOpenImage={setLightboxSrc}
             onCloseLightbox={() => setLightboxSrc(undefined)}
             translation={articleTranslation}
+            // 三态（R7 03）：值在 store，正文面只照着画；切换动作只改渲染态、不发 rpc。
+            translationMode={state.translationMode}
+            onTranslationMode={store.setTranslationMode}
             // 点击时把视口矩形交给动作层（R7 04）：选批是纯函数，组件只负责量。
             onTranslate={(geometry) => { void store.startTranslate(geometry) }}
             // 组件卸载（切面板 / 离开正文面）时中止后续批；在途那批允许跑完。

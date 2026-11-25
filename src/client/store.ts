@@ -158,6 +158,24 @@ export interface TranslationEntry {
   error?: string
 }
 
+/** 正文的三态（R7 03 / spec §4.5 / D5）：原文 / 译文 / 对照。 */
+export type TranslationMode = 'original' | 'translated' | 'parallel'
+
+/**
+ * 三态循环顺序：原文 → 译文 → 对照 → 原文（`t` 键的语义，D14）。
+ *
+ * 顺序只定义在这一处：切换器按它摆按钮、`t` 按它取下一个态。两处各写一份时，
+ * 按钮上看到的顺序与键盘走出来的顺序会悄悄分家，而没有任何断言会红。
+ */
+export const TRANSLATION_MODES: readonly TranslationMode[] = ['original', 'translated', 'parallel']
+
+/** `t` 的下一个态；认不出的值（理论上不可达）回落到原文，不抛错。 */
+export function nextTranslationMode(mode: TranslationMode): TranslationMode {
+  const at = TRANSLATION_MODES.indexOf(mode)
+  if (at < 0) return 'original'
+  return TRANSLATION_MODES[(at + 1) % TRANSLATION_MODES.length]
+}
+
 export interface ReaderState {
   items: ItemView[]
   feeds: FeedView[]
@@ -244,8 +262,12 @@ export interface ReaderState {
    * 不丢 —— 它挂在 store 上而不是组件 state 上。
    */
   translations: ReadonlyMap<string, TranslationEntry>
-  /** 三态（02/03 票接线；01 只渲染「原文 + 下方译文」的对照形态，不显示切换器）。 */
-  translationMode: 'original' | 'translated' | 'parallel'
+  /**
+   * 三态（R7 03）。它是**全局面板内**的显示偏好，不持久化：刷新即回原文。
+   * 有译文条目时正文面默认用它（动作层在翻译开始时置 'translated'）；没有译文时
+   * 正文面按 'original' 渲染且不显示切换器 —— 判据在渲染层，本字段不表达「有没有译文」。
+   */
+  translationMode: TranslationMode
   /** 可用性探测结果（02 票写入；01 不做门禁，保持 undefined）。 */
   translationInfo: TranslateInfo | undefined
   /** 导航选中（虚拟视图 / 某个具体源）。与 filter 叠加生效，见 NavSelection。 */
