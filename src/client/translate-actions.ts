@@ -11,9 +11,10 @@
  * 为什么动作住在独立文件而不是 store.ts：store 已经是 800 行的汇合点；翻译的写边界只有
  * `translations` 一个字段，独立成工厂后 02/03/05 扩展编排时不必在 store 里穿针。
  */
-import type { TranslateBatchResult } from '../shared.js'
+import type { TranslateBatchResult, TranslateInfo } from '../shared.js'
 import {
   DEFAULT_TARGET_LANGUAGE,
+  isTargetLanguage,
   type TargetLanguage,
   TRANSLATE_LIMIT_TEXT,
 } from '../translate-copy.js'
@@ -52,6 +53,8 @@ export interface TranslateActionHost {
   set: (patch: Partial<ReaderState>) => void
   rpc: ReaderStoreDeps['rpc']
   log: ReaderStoreDeps['log']
+  /** 目标语言属于视图记忆（ViewPreferences.translateTarget），改动要走整份落盘。 */
+  persistView: () => void
 }
 
 /** 一场翻译的身份：token 用来判代，其余字段用来判「当前打开的还是不是这一篇」。 */
@@ -104,7 +107,7 @@ function requestItemsOf(blocks: readonly Record<string, unknown>[], indices: rea
 }
 
 export function createTranslateActions(host: TranslateActionHost) {
-  const { get, set, rpc, log } = host
+  const { get, set, rpc, log, persistView } = host
 
   /** 场次代号：每次开始 / 停止都自增。旧场次拿着旧 token 回来时只许静默退出。 */
   let generation = 0
@@ -139,6 +142,36 @@ export function createTranslateActions(host: TranslateActionHost) {
     const entry = get().translations.get(session.key)
     if (entry !== undefined && entry.status === 'running') storeEntry({ ...entry, status: 'stopped' })
     if (active?.token === session.token) active = undefined
+  }
+
+  /**
+   * 读一次可用性探测（R7 02，spec §4.1）：面板加载时探一次，设置保存成功后由 store 再刷一次。
+   *
+   * 失败时不编造原因：保持上一份结果（通常是 undefined）→ 文章面不渲染「译」按钮，
+   * 设置页显示「正在探测」而不是一个假 reason。原因由宿主裁决，客户端只搬运。
+   */
+  const loadTranslateInfo = async (): Promise<void> => {
+    try {
+      const info = await rpc<TranslateInfo>('translateInfo', {})
+      if (info === null || typeof info !== 'object' || typeof info.available !== 'boolean') {
+        throw new Error('translateInfo 回包缺少 available')
+      }
+      set({ translationInfo: info })
+    } catch (failure) {
+      log('warn', '[rss-reader] 读取翻译可用性失败', failure)
+    }
+  }
+
+  /**
+   * 改目标语言（R7 02，spec §5.3）：`Aa` 面板与设置页共用这一个值。
+   *
+   * 落盘走既有的整份视图记忆通道（persistView），不新开端点：旧译文按
+   * `${itemId}:${contentVersion}:${target}` 分键，换语言既不冒充也不清空（spec 验收 13）。
+   */
+  const setTranslateTarget = (target: TargetLanguage): void => {
+    if (!isTargetLanguage(target) || get().translateTarget === target) return
+    set({ translateTarget: target })
+    persistView()
   }
 
   /**
@@ -272,7 +305,7 @@ export function createTranslateActions(host: TranslateActionHost) {
     const article = state.article
     if (article === undefined || article.loading === true) return
     if (article.itemId === undefined || article.contentVersion === undefined || article.blocks === undefined) return
-    const target = DEFAULT_TARGET_LANGUAGE
+    const target = state.translateTarget
     const key = translationKeyOf(article.itemId, article.contentVersion, target)
 
     const plan = articleTranslatePlanOf(article.blocks)
@@ -302,5 +335,5 @@ export function createTranslateActions(host: TranslateActionHost) {
     await run(session, article.blocks, plan, geometry)
   }
 
-  return { startTranslate, stopTranslate }
+  return { startTranslate, stopTranslate, loadTranslateInfo, setTranslateTarget }
 }

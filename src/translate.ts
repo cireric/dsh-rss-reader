@@ -15,6 +15,8 @@ import {
   type TranslateBatchResult,
   type TranslateInfo,
   type TranslateItem,
+  type TranslateModelView,
+  type TranslateProviderView,
   type TranslateRoute,
 } from './shared.js'
 import { applyBatch, type TranslateRequestItem } from './translate-blocks.js'
@@ -42,6 +44,8 @@ export interface TranslateLlmService {
 export interface TranslateLlmStreamOptions {
   readonly provider: string
   readonly model: string
+  /** 只在显式路由且该模型声明了同名 effort 时才出现（见 resolveTranslateRoute）。 */
+  readonly reasoningEffort?: string
   readonly messages: ReadonlyArray<{
     readonly role: 'user'
     readonly content: ReadonlyArray<{ readonly type: 'text'; readonly text: string }>
@@ -85,14 +89,124 @@ export interface TranslateBatchInput {
 }
 
 /**
- * 解析当前可用路由（01 只用会话默认）。
+ * 显式路由的原始值（R7 02，spec §4.4）：三个设置键，空串 = 未配置。
  *
- * 缺 llm / 没有 provider / 没有会话默认路由都返回 `available:false`，而不是抛错：
- * 02 的文章面要据此决定「没有译按钮」，设置页要据此显示原因。
- * 显式设置层（settings.json 的 provider+model）是 02 的事 —— 这里刻意只留一条回落路径，
- * 避免 01 提前长出第二个路由真相。
+ * provider 与 model **必须成对**：只有 model 没有 provider 视为未配置，回落会话默认。
  */
-export function resolveTranslateRoute(services: TranslateServices): TranslateInfo {
+export interface TranslateRouteSelection {
+  readonly provider: string
+  readonly model: string
+  readonly effort: string
+}
+
+/** 从 config 现读显式路由的唯一点：translateInfo / translateBatch 不各拼一份字段。 */
+export function translateRouteSelectionOf(config: {
+  readonly translateProvider: string
+  readonly translateModel: string
+  readonly translateEffort: string
+}): TranslateRouteSelection {
+  return {
+    provider: config.translateProvider,
+    model: config.translateModel,
+    effort: config.translateEffort,
+  }
+}
+
+/** 会话默认选择的形状（与 TranslateServices 里的声明同源，避免第二份结构）。 */
+type TranslateSelection = {
+  readonly provider: string
+  readonly model: string
+  readonly reasoningEffort?: string
+}
+
+/** 选择结果 → wire 路由；没有选择时 undefined（sessionDefault 可选）。 */
+function routeOfSelectionOrUndefined(selection: TranslateSelection | undefined): TranslateRoute | undefined {
+  return selection === undefined ? undefined : routeOfSelection(selection)
+}
+
+/** 选择结果 → wire 路由：effort 只在有值时出现（空串不是一种 effort）。 */
+function routeOfSelection(selection: TranslateSelection): TranslateRoute {
+  const effort = selection.reasoningEffort
+  return {
+    provider: selection.provider,
+    model: selection.model,
+    ...(effort === undefined || effort === '' ? {} : { effort }),
+  }
+}
+
+/** 服务返回的模型条目里，efforts 的 id 列表（缺省 = 该模型没有可选强度）。 */
+function effortsOf(model: { readonly reasoning?: { readonly efforts?: ReadonlyArray<{ readonly id: string }> } }): string[] {
+  return (model.reasoning?.efforts ?? []).map((entry) => entry.id)
+}
+
+/**
+ * 列出可用于设置页选择器的模型目录（R7 02）。
+ *
+ * 单个 provider 列不出模型（没配凭据 / 适配器报错）时**跳过该组**：这不该让整次探测失败 ——
+ * 其它 provider 仍可能可用。宿主侧不缓存这一份，缓存由 probeTranslateInfo 统一做。
+ */
+async function providerViewsOf(
+  llm: TranslateLlmService,
+  providers: ReadonlyArray<{ readonly id: string }>,
+): Promise<TranslateProviderView[]> {
+  const views: TranslateProviderView[] = []
+  for (const provider of providers) {
+    let models: ReadonlyArray<{
+      readonly id: string
+      readonly reasoning?: { readonly efforts?: ReadonlyArray<{ readonly id: string }> }
+    }>
+    try {
+      models = await llm.listModels(provider.id)
+    } catch {
+      // 单个 provider 的目录取不到 ≠ 整个 LLM 服务不可用：跳过它，让其它组照常可选。
+      continue
+    }
+    const mapped: TranslateModelView[] = models.map((model) => ({ id: model.id, efforts: effortsOf(model) }))
+    if (mapped.length > 0) views.push({ provider: provider.id, models: mapped })
+  }
+  return views
+}
+
+/** 会话目录里的默认路由（`modelCatalog().default`），取不到就是 undefined。 */
+async function sessionCatalogOf(services: TranslateServices): Promise<{ readonly default?: TranslateSelection } | undefined> {
+  const controller = services.sessionController
+  if (controller === undefined) return undefined
+  try {
+    return await controller.modelCatalog()
+  } catch {
+    // 目录服务在但读不出来：等价于「没有可证的默认路由」，由调用方回 no-default-route。
+    return undefined
+  }
+}
+
+/** 会话当前选择（`agentDefaultModel.currentSelection()`）；缺服务 / 抛错 / 形状不可信都回 undefined。 */
+function currentSelectionOf(services: TranslateServices): TranslateSelection | undefined {
+  const current = services.agentDefaultModel
+  if (current === undefined) return undefined
+  try {
+    const selection = current.currentSelection()
+    if (typeof selection.provider !== 'string' || selection.provider === ''
+      || typeof selection.model !== 'string' || selection.model === '') return undefined
+    return selection
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 解析当前可用路由（R7 02 两层：显式设置 > 会话默认，spec §4.4）。
+ *
+ * 为什么路由判定与可用性判定是**同一个函数**：两者若分开写，设置页说「可用」而 translateBatch
+ * 选不出路由（或反过来）时，用户会看到按钮却翻不了。这里一次把 `available` / `reason` /
+ * `route` 三件事同时定下来。
+ *
+ * 显式 effort 的规则：只在显式 provider+model 下生效；不在该模型 `reasoning.efforts` 里就
+ * **忽略字段继续**（不报错）—— 强度是可选微调，不该让整条翻译路由失效。
+ */
+export async function resolveTranslateRoute(
+  services: TranslateServices,
+  explicit?: TranslateRouteSelection,
+): Promise<TranslateInfo> {
   const llm = services.llm
   if (llm === undefined) return { available: false, reason: 'llm-unmounted' }
   let providers: ReadonlyArray<{ readonly id: string }>
@@ -103,24 +217,94 @@ export function resolveTranslateRoute(services: TranslateServices): TranslateInf
     return { available: false, reason: 'llm-unmounted' }
   }
   if (providers.length === 0) return { available: false, reason: 'no-provider' }
-  const current = services.agentDefaultModel
-  if (current === undefined) return { available: false, reason: 'no-default-route' }
-  let selection: { readonly provider: string; readonly model: string; readonly reasoningEffort?: string }
-  try {
-    selection = current.currentSelection()
-  } catch {
-    return { available: false, reason: 'no-default-route' }
+
+  const providerViews = await providerViewsOf(llm, providers)
+  const catalog = await sessionCatalogOf(services)
+  const currentSelection = currentSelectionOf(services)
+  // 设置页首项要显示「跟随会话默认（当前模型名）」：先取会话当前选择，没有服务时退回目录默认。
+  const sessionDefault = routeOfSelectionOrUndefined(currentSelection ?? catalog?.default)
+
+  const explicitProvider = explicit?.provider.trim() ?? ''
+  const explicitModel = explicit?.model.trim() ?? ''
+  if (explicitProvider !== '' && explicitModel !== '') {
+    const group = providerViews.find((entry) => entry.provider === explicitProvider)
+    const model = group?.models.find((entry) => entry.id === explicitModel)
+    if (model === undefined) {
+      // 显式路由指向一个目录里不存在的模型：不悄悄回落到会话默认（那会翻成另一条路由），
+      // 设置页据此显示原因并让用户重选。
+      return {
+        available: false,
+        reason: 'no-model',
+        providers: providerViews,
+        ...(sessionDefault === undefined ? {} : { sessionDefault }),
+      }
+    }
+    const requestedEffort = explicit?.effort.trim() ?? ''
+    const effort = requestedEffort !== '' && model.efforts.includes(requestedEffort) ? requestedEffort : undefined
+    return {
+      available: true,
+      route: {
+        provider: explicitProvider,
+        model: explicitModel,
+        ...(effort === undefined ? {} : { effort }),
+      },
+      providers: providerViews,
+      ...(sessionDefault === undefined ? {} : { sessionDefault }),
+    }
   }
-  if (typeof selection.provider !== 'string' || selection.provider === ''
-    || typeof selection.model !== 'string' || selection.model === '') {
-    return { available: false, reason: 'no-default-route' }
+
+  // 回落会话默认：需要「当前选择」（agentDefaultModel）与「目录里确有默认路由」（modelCatalog）
+  // 两件事同时成立，否则 route 只是一个无法兑现的名字。
+  if (currentSelection === undefined || catalog?.default === undefined) {
+    return { available: false, reason: 'no-default-route', providers: providerViews }
   }
-  const route: TranslateRoute = {
-    provider: selection.provider,
-    model: selection.model,
-    ...(selection.reasoningEffort === undefined ? {} : { effort: selection.reasoningEffort }),
+  return {
+    available: true,
+    route: routeOfSelection(currentSelection),
+    providers: providerViews,
+    ...(sessionDefault === undefined ? {} : { sessionDefault }),
   }
-  return { available: true, route }
+}
+
+/** 探测结果缓存时长（spec §4.1 / §4.4）：30 秒。 */
+export const TRANSLATE_INFO_CACHE_MS = 30_000
+
+/**
+ * 30 s 内存缓存（spec §4.1 / §4.4）。
+ *
+ * 为什么必须缓存：面板加载探一次，设置页也要读同一份；不缓存时每开一次面板都要把
+ * `listModels` 全目录拉一遍。时钟从参数注入，测试用假 now 走完 30 秒，不 sleep。
+ */
+let translateInfoCache: { readonly at: number; readonly info: TranslateInfo } | undefined
+
+/** `saveSettings` 成功后调用（spec §4.1）：下一次探测必须看到新的设置值。 */
+export function invalidateTranslateInfoCache(): void {
+  translateInfoCache = undefined
+}
+
+export interface TranslateInfoProbeOptions {
+  readonly explicit?: TranslateRouteSelection
+  /** 测试接缝：默认 Date.now。 */
+  readonly now?: () => number
+}
+
+/**
+ * `translateInfo` 端点真正的实现：缓存 + 解析。
+ *
+ * 缓存的是**整份探测结果**（含模型目录）；显式路由变了但没清缓存时最多陈旧 30 秒，
+ * 所以 saveSettings 成功必须显式失效（见 endpoints.ts 的 saveSettings）。
+ */
+export async function probeTranslateInfo(
+  services: TranslateServices,
+  options: TranslateInfoProbeOptions = {},
+): Promise<TranslateInfo> {
+  const now = options.now ?? Date.now
+  const at = now()
+  const cached = translateInfoCache
+  if (cached !== undefined && at >= cached.at && at - cached.at < TRANSLATE_INFO_CACHE_MS) return cached.info
+  const info = await resolveTranslateRoute(services, options.explicit)
+  translateInfoCache = { at: now(), info }
+  return info
 }
 
 /**
@@ -209,13 +393,18 @@ function jsonPayloadOf(text: string): string {
 /**
  * 跑一批翻译。纯函数式：入参只有已解析 payload 与注入的服务，不读任何全局状态。
  *
+ * @param options.selection 显式路由（settings.json 三键）。缺省 = 只回落会话默认。
  * @param options.deadlineMs 60s 的测试接缝：永不结束的流必须能被短 deadline 打断。
  */
 export async function translateBatch(
   input: TranslateBatchInput,
-  options: { readonly services: TranslateServices; readonly deadlineMs?: number },
+  options: {
+    readonly services: TranslateServices
+    readonly selection?: TranslateRouteSelection
+    readonly deadlineMs?: number
+  },
 ): Promise<RpcResult<TranslateBatchResult>> {
-  const info = resolveTranslateRoute(options.services)
+  const info = await resolveTranslateRoute(options.services, options.selection)
   if (!info.available || info.route === undefined) return translateFailure('unavailable')
   const route = info.route
   const llm = options.services.llm
@@ -231,6 +420,7 @@ export async function translateBatch(
     const stream = llm.stream({
       provider: route.provider,
       model: route.model,
+      ...(route.effort === undefined ? {} : { reasoningEffort: route.effort }),
       messages: [{ role: 'user', content: [{ type: 'text', text: user }] }],
       system,
       maxTokens: maxTokensFor(chars),

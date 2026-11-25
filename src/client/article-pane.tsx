@@ -23,7 +23,7 @@ import { paragraphsOf } from '../html-text.js'
 import { READING_FONT_SIZES, READING_LINE_WIDTHS } from '../preferences.js'
 import type { ReadingPreferences } from '../preferences.js'
 import type { ArticleState, TranslationEntry } from './store.js'
-import { TRANSLATE_BUTTON_TEXT, TRANSLATE_LABEL_TEXT } from '../translate-copy.js'
+import { TARGET_LANGUAGES, TRANSLATE_BUTTON_TEXT, TRANSLATE_LABEL_TEXT, type TargetLanguage } from '../translate-copy.js'
 import {
   translateCharsOf,
   TRANSLATE_BLOCK_MAX_CHARS,
@@ -618,7 +618,7 @@ function translateGeometryOf(box: HTMLElement): TranslateGeometry {
   return { container: rectOf(box), blocks }
 }
 
-export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress, expandedGroups, onExpandImageGroup, imagesExpanded, lightboxSrc, onOpenImage, onCloseLightbox, translation, onTranslate, onStopTranslate }: {
+export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress, expandedGroups, onExpandImageGroup, imagesExpanded, lightboxSrc, onOpenImage, onCloseLightbox, translation, translateAvailable, translateTarget, onTranslateTarget, onTranslate, onStopTranslate }: {
   article: ArticleState | undefined
   item: ItemView | undefined
   onBack: () => void
@@ -627,6 +627,15 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
    * 现查后传入。组件不持有译文状态 —— 切条目 / 切面板回来才不会丢（spec §4.6）。
    */
   translation: TranslationEntry | undefined
+  /**
+   * 翻译当前是否可用（R7 02，spec §4.1）：`translateInfo.available === true` 才渲染「译」按钮
+   * 与 Aa 面板里的目标语言下拉。判据只由 store 持有，组件不自己再探一次。
+   */
+  translateAvailable: boolean
+  /** 目标语言（R7 02 / §5.3）：值与设置页「显示」分区共用 store 里的同一份。 */
+  translateTarget: TargetLanguage
+  /** 改目标语言：交给 store 落进 viewPreferences，组件不持有状态。 */
+  onTranslateTarget: (target: TargetLanguage) => void
   /**
    * 点「译」：动作在 store 的 translate-actions 里，组件只交回意图与**点击那一刻**量到的几何。
    * 几何不进 props / state：滚动位置随时在变，只有点击瞬间的视口才是「第一批翻哪些」的依据。
@@ -971,18 +980,19 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
               <a className="dsh-rss-btn dsh-rss-btn--ghost" href={link} target="_blank" rel="noreferrer">打开原站 ↗</a>
             )}
             {/*
-              * 一键翻译（R7 01 / 04）。01 里**始终渲染**：可用性门禁（translateInfo.available）
-              * 是 02 的票；这里点了但没模型时，动作会把 failed 状态留在 store，界面不挂。
-              * 放在 Aa 左侧是 spec §4.1 的固定位置，别挪到「更多」里。
+              * 一键翻译（R7 01 / 04）。**不可用时不渲染**（R7 02 / spec §4.1）：
+              * 连按钮都不该出现，而不是点了再说「没有模型」。放在 Aa 左侧是固定位置。
               *
               * 点击这一刻才量几何（R7 04）：滚动位置随时在变，渲染期缓存 rect 会在用户滚动后
               * 变成另一篇视角；`translateGeometryOf` 只读 DOM，选批仍是纯函数。
               */}
-            <button type="button" className="dsh-rss-btn" data-rss-translate=""
-              title="翻译当前文章（先译屏幕内的段落）" onClick={() => {
-                const box = boxRef.current
-                onTranslate(box === null ? undefined : translateGeometryOf(box))
-              }}>{TRANSLATE_BUTTON_TEXT.translate}</button>
+            {translateAvailable && (
+              <button type="button" className="dsh-rss-btn" data-rss-translate=""
+                title="翻译当前文章（先译屏幕内的段落）" onClick={() => {
+                  const box = boxRef.current
+                  onTranslate(box === null ? undefined : translateGeometryOf(box))
+                }}>{TRANSLATE_BUTTON_TEXT.translate}</button>
+            )}
             {translation !== undefined && translation.total > 0 && (
               <span data-rss-translate-progress className="dsh-rss-meta" role="status">{TRANSLATE_LABEL_TEXT.progress(translation.done, translation.total)}</span>
             )}
@@ -1030,6 +1040,22 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
                     onChange={(event) => onReading({ expandImages: !event.target.checked })} />
                   默认折叠图片
                 </label>
+                {/*
+                  * 翻译目标语言（R7 02 / spec §5.3）：与设置页「显示」分区共用同一个
+                  * viewPreferences.translateTarget。不可用时不渲染（spec §4.1）；
+                  * 语言表从 translate-copy 读，不在这里另抄一份语言名。
+                  */}
+                {translateAvailable && (
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    目标语言
+                    <select value={translateTarget} aria-label="翻译目标语言" data-rss-target-language=""
+                      onChange={(event) => onTranslateTarget(event.target.value as TargetLanguage)}>
+                      {TARGET_LANGUAGES.map((language) => (
+                        <option key={language.id} value={language.id}>{language.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                )}
               </div>
             </details>
           </div>

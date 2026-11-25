@@ -386,3 +386,12 @@ export const translateBatchPayload = z.object({
     seen.add(item.id)
   }
 })
+
+/**
+ * `translateInfo` 入参（R7 02，spec §5.1）：零参端点，`emptyAsObject` 是既有 wire 约定。
+ *
+ * 浏览器通道把「没有 payload」序列化成 `null`；设置页 / 面板加载探活都会走这条路，
+ * 所以必须接受 null / undefined，而不是回 bad-request。传别的垃圾（数组 / 数字）仍拒绝：
+ * 「没有参数」与「参数写坏了」是两件事。
+ */
+export const translateInfoPayload = z.preprocess(emptyAsObject, z.object({}))

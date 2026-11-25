@@ -7,6 +7,7 @@
  *
  * 零 node 依赖：客户端与宿主都要 import（client bundle 不许出现 node: 说明符）。
  */
+import type { TranslateInfo } from './shared.js'
 
 /** 支持的目标语言（spec §5.4 / D4）。`instruction` 是 prompt 里用的英文语言名。 */
 export const TARGET_LANGUAGES = [
@@ -82,3 +83,25 @@ export const TRANSLATE_LIMIT_TEXT = {
 export function translateNoticeText(provider: string, model: string, chars: number): string {
   return '翻译会把当前文章正文发送给 ' + provider + '/' + model + '，本次约 ' + chars + ' 字符，可能产生调用费用。'
 }
+
+/**
+ * 四类不可用原因的中文文案（R7 02，spec §4.1）。
+ *
+ * 文案归这里而不是设置页：原因枚举是 wire 契约的一部分，将来加第五类时只改这一处，
+ * 设置页与文章面不会各说各话。`Record<NonNullable<...>>` 让漏配一个新原因直接编译失败。
+ */
+export type TranslateUnavailableReason = NonNullable<TranslateInfo['reason']>
+
+export const TRANSLATE_UNAVAILABLE_TEXT: Record<TranslateUnavailableReason, string> = {
+  'llm-unmounted': 'LLM 服务未挂载（当前宿主没有提供模型服务）',
+  'no-provider': '没有可用的模型服务（provider 列表为空）',
+  'no-model': '设置的模型不在可用模型列表里，请重新选择',
+  'no-default-route': '没有可用的会话默认模型，请先选择具体模型',
+}
+
+/**
+ * 设置页「翻译」分区的常驻隐私提示（spec §4.2：不可关闭）。
+ *
+ * 不带字符数：设置页不知道当前文章；「本次约 N 字符」只在点「译」的确认框里由正文现算。
+ */
+export const TRANSLATE_SETTINGS_NOTICE = '翻译会把当前文章正文发送给所选模型，可能产生调用费用。'

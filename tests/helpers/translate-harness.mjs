@@ -68,6 +68,23 @@ const TUNABLE_DEFAULTS = {
   minRefreshIntervalMs: 600000,
   cleanupAfterDays: 30,
   rsshubBase: '',
+  translateProvider: '',
+  translateModel: '',
+  translateEffort: '',
+  translateNoticeAck: false,
+}
+
+/** R7 02 的默认探测结果：可用、跟随会话默认，并且带一份可选的模型目录。 */
+export const AVAILABLE_TRANSLATE_INFO = {
+  available: true,
+  route: { provider: 'p', model: 'm' },
+  sessionDefault: { provider: 'p', model: 'm' },
+  providers: [
+    { provider: 'p', models: [
+      { id: 'm', efforts: ['low', 'high'] },
+      { id: 'm2', efforts: [] },
+    ] },
+  ],
 }
 
 /** 条目夹具：客户端列表需要的字段一次给全，避免各用例各拼一份半成品。 */
@@ -112,7 +129,10 @@ async function waitFor(predicate, { timeout = 2000, interval = 5, label = '条�
  * @param articles    itemId → article 回包（或函数）
  * @param translateBatch 自定义翻译回包：接收 payload，返回 value 或 { error }
  */
-export async function mount({ items = [itemOf('a')], articles = {}, translateBatch } = {}) {
+export async function mount({
+  items = [itemOf('a')], articles = {}, translateBatch,
+  translateInfo = AVAILABLE_TRANSLATE_INFO, preferences = undefined,
+} = {}) {
   const { JSDOM } = STACK
   const globalSnapshot = {}
   for (const key of ['window', 'document', 'HTMLElement', 'Element', 'Node', 'KeyboardEvent', 'ResizeObserver', 'fetch']) {
@@ -164,8 +184,16 @@ export async function mount({ items = [itemOf('a')], articles = {}, translateBat
   const rpc = async (endpoint, payload) => {
     requests.push({ endpoint, payload })
     if (endpoint === 'settings') return { settings }
-    if (endpoint === 'viewPreferences') return { preferences: undefined }
+    if (endpoint === 'translateInfo') {
+      return typeof translateInfo === 'function' ? translateInfo() : translateInfo
+    }
+    if (endpoint === 'viewPreferences') return { preferences }
     if (endpoint === 'saveViewPreferences') return { preferences: payload?.preferences }
+    if (endpoint === 'saveSettings') {
+      // 只实现客户端设置页需要的形状：把 patch 合并进 effective 并回同形快照。
+      Object.assign(settings.effective, payload?.patch ?? {})
+      return { settings }
+    }
     if (endpoint === 'overview' || endpoint === 'refresh') return overviewNow()
     if (endpoint === 'markRead' || endpoint === 'unmarkRead') {
       const ids = Array.isArray(payload?.itemIds) ? payload.itemIds : []

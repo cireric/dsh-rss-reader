@@ -327,6 +327,12 @@ const CONTRACTS = {
     alsoValid: [withWindow({ itemId: 'a' })],
     invalid: [{}, { itemId: 5 }, { itemId: '' }, ...windowBadSamples({ itemId: 'a' })],
   },
+  // R7 02：可用性探测是零参端点（浏览器通道把缺省序列化成 null）；传数组 / 原始值仍是坏入参。
+  translateInfo: {
+    valid: {},
+    alsoValid: [null],
+    invalid: [[], 'x'],
+  },
   // R7 01：翻译一批。形状只判「目标语言在表内 / id 是 b+下标 / 文本非空 / id 不重复」；
   // 批大小与总字符的完整边界留给 05（票面明确拆分）。`title` 是可选的独立字段。
   translateBatch: {
@@ -392,7 +398,8 @@ test('入参声明：每条坏样本都被拒，并给出字段路径', () => {
   // 的 5 条（缺字段 / 空 namespace / 空 path / 缺 values / values 非字符串表）。
   // 168 = 161 + R7 01 的 translateBatch 7 条（缺 target / 空 items / 目标语言不在表内 /
   // id 不是 b+下标 / 文本全空白 / id 重复 / title 非字符串）。
-  assert.equal(checked, 168, '坏样本条数变了（当前 ' + checked + '）—— 检查契约表是否漏了必填字段')
+  // 170 = 168 + R7 02 的 translateInfo 2 条（数组 / 原始值不是对象）。
+  assert.equal(checked, 170, '坏样本条数变了（当前 ' + checked + '）—— 检查契约表是否漏了必填字段')
 })
 
 test('坏入参：每个接 payload 的端点，第一条坏样本都经 dispatch 回 bad-request', async () => {
@@ -414,7 +421,8 @@ test('坏入参：每个接 payload 的端点，第一条坏样本都经 dispatc
   // R9 02 加了 backfillHistory（有负例且经 dispatch 验过）：27 → 28。
   // R8b 03 加了 exploreCatalog / exploreBuildUrl（都有负例且经 dispatch 验过）：28 → 30。
   // R7 01 加了 translateBatch（有负例且经 dispatch 验过）：30 → 31。
-  assert.equal(covered.length, 31, '接 payload 的端点应当是 31 个，实际 ' + covered.length)
+  // R7 02 加了 translateInfo（零参端点，坏样本经 dispatch 验过）：31 → 32。
+  assert.equal(covered.length, 32, '接 payload 的端点应当是 32 个，实际 ' + covered.length)
 })
 
 test('坏入参：统一 bad-request 信封、details.issues 指出字段，且不触达 store', async () => {

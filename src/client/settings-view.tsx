@@ -2,7 +2,8 @@
  * 设置页（R11 01 骨架 / 02 第一个可写参数 / 03 其余三个参数 / 04 手动清理 / 05 显示开关 /
  * 06 Agent 说明与关于区 / 07 恢复默认）。
  *
- * 六个分区：前五个按 spec D13 的顺序占位，R8a 01 在「显示」之后插入「RSSHub」；
+ * 七个分区：前五个按 spec D13 的顺序占位，R8a 01 在「显示」之后插入「RSSHub」，
+ * R7 02 在「显示」之后插入「翻译」；
  * ①「抓取与清理」的四行都是**可写**的数值输入框
  * （03 票补齐并发 / 自动刷新间隔 / 清理天数）；②「显示」是 05 票的两个视图开关
  * （默认折叠图片 / 显示未读计数）；04 票在「清理天数」行右侧加「立即清理」：先预演（dryRun）
@@ -29,10 +30,16 @@
  */
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { AGENT_APPROVAL_NOTE, AGENT_HELP } from '../agent-help.js'
-import type { CleanupResult, ReadOnlySettingView, RsshubTestResult, SettingsSnapshot } from '../shared.js'
+import type { CleanupResult, ReadOnlySettingView, RsshubTestResult, SettingsSnapshot, TranslateInfo } from '../shared.js'
 import { changedNumberTunableKeys, parseTunableValue, TUNABLE_RANGES, type NumberTunableKey, type TunableKey } from '../settings-schema.js'
 import type { ReadingPreferences } from '../preferences.js'
-import type { ResetSettingsResult, SaveSettingResult } from './settings-actions.js'
+import type { ResetSettingsResult, SaveSettingResult, TranslateRouteSettingsPatch } from './settings-actions.js'
+import {
+  TARGET_LANGUAGES,
+  TRANSLATE_SETTINGS_NOTICE,
+  TRANSLATE_UNAVAILABLE_TEXT,
+  type TargetLanguage,
+} from '../translate-copy.js'
 import { ConfirmDialog } from './confirm-dialog.js'
 import { RsshubSettingRow } from './rsshub-setting-row.js'
 import { useSettingsDraft } from './settings-draft.js'
@@ -63,8 +70,16 @@ export interface SettingsViewProps {
   showUnread: boolean
   /** 改「显示未读计数」：store 会整份落盘，重开面板后保持。 */
   onShowUnread: (value: boolean) => void
+  /** 翻译可用性探测结果（R7 02）：设置页「翻译」分区据此显示原因 / 模型选择器。 */
+  translationInfo: TranslateInfo | undefined
+  /** 翻译目标语言（R7 02 / §5.3）：与正文页 Aa 面板共用同一份视图偏好。 */
+  translateTarget: TargetLanguage
+  /** 改目标语言：store 会经 saveViewPreferences 整份落盘。 */
+  onTranslateTarget: (target: TargetLanguage) => void
+  /** 一次保存翻译路由三键（provider / model / effort），成功后 store 会刷新探测结果。 */
+  onSaveTranslateRoute: (patch: TranslateRouteSettingsPatch) => Promise<SaveSettingResult>
   /** 逐项保存：由 store 的保存串行链执行，返回是否成功与失败的当下生效值。 */
-  onSave: (key: TunableKey, value: string | number) => Promise<SaveSettingResult>
+  onSave: (key: TunableKey, value: string | number | boolean) => Promise<SaveSettingResult>
   /** 页面级恢复默认：走同一条保存串行链，一次请求把四项恢复成默认值。 */
   onReset: () => Promise<ResetSettingsResult>
   /** RSSHub 探活（R8a 01）：只把地址交给宿主；返回可展示的结论。 */
@@ -88,12 +103,14 @@ export interface SettingsViewProps {
 }
 
 /**
- * 五个分区与顺序（D13）。集中成一份表而不是五段手写 JSX：顺序本身是验收项（C13），
+ * 分区与顺序（D13 + R8a 01 + R7 02）。集中成一份表而不是逐段手写 JSX：顺序本身是验收项（C13），
  * 后续票往里填内容时只改对应分区的子节点，不会顺手把顺序挪了。
  */
 const SECTIONS = [
   { key: 'fetch', title: '抓取与清理' },
   { key: 'display', title: '显示' },
+  // R7 02：翻译分区常驻（spec §4.2），放在显示与 RSSHub 之间。
+  { key: 'translate', title: '翻译' },
   // R8a 01：RSSHub 实例地址在「显示」之后、「Agent 说明」之前（票面顺序）。
   { key: 'rsshub', title: 'RSSHub' },
   { key: 'feedOrder', title: '订阅源顺序' },
@@ -365,10 +382,125 @@ function readOnlyText(entry: ReadOnlySettingView): string {
   return String(entry.value)
 }
 
+/** 模型下拉 option 的 value：provider 与 model 一起编码，避免「选了 model 却丢 provider」的中间态。 */
+function modelOptionValue(provider: string, model: string): string {
+  return JSON.stringify([provider, model])
+}
+
+/** 解码模型 option；认不出返回 undefined（被篡改的 DOM 当作「没选」，不抛）。 */
+function modelOfOption(value: string): { readonly provider: string; readonly model: string } | undefined {
+  try {
+    const parsed: unknown = JSON.parse(value)
+    if (Array.isArray(parsed) && typeof parsed[0] === 'string' && typeof parsed[1] === 'string') {
+      return { provider: parsed[0], model: parsed[1] }
+    }
+  } catch {
+    // 非 JSON 的 option value 不是用户能输入的东西；回 undefined 由调用方当「跟随会话默认」。
+  }
+  return undefined
+}
+
+/**
+ * 「翻译」分区（R7 02，spec §4.2 / §4.4 / §5.2）。
+ *
+ * 永远可见：不可用时显示中文原因；只要模型目录列得出来，就同时保留选择器 ——
+ * 否则「设置里存了一个已下线的模型」（no-model）会变成死结：页面只说原因，用户却改不了。
+ * 选具体模型后才出现思考强度（该模型没有 efforts 就不渲染），留空 = 回落。
+ */
+function TranslateSettingSection(props: {
+  readonly settings: SettingsSnapshot | undefined
+  readonly info: TranslateInfo | undefined
+  readonly onSaveRoute: SettingsViewProps['onSaveTranslateRoute']
+}): ReactNode {
+  const { settings, info, onSaveRoute } = props
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | undefined>(undefined)
+  const effective = settings?.effective
+  const provider = effective?.translateProvider ?? ''
+  const model = effective?.translateModel ?? ''
+  const effort = effective?.translateEffort ?? ''
+  const groups = info?.providers ?? []
+  const flattened = groups.flatMap((group) => group.models.map((entry) => ({ provider: group.provider, model: entry })))
+  const selected = flattened.find((entry) => entry.provider === provider && entry.model.id === model)
+
+  const save = async (patch: TranslateRouteSettingsPatch): Promise<void> => {
+    setSaving(true)
+    setError(undefined)
+    const result = await onSaveRoute(patch)
+    setSaving(false)
+    if (!result.ok) setError('保存失败：' + result.message)
+  }
+
+  return (
+    <div data-rss-translate-settings="">
+      {/* spec §4.2：同一句外发提示常驻，不可关闭。 */}
+      <p className="dsh-rss-settings-help">{TRANSLATE_SETTINGS_NOTICE}</p>
+      {info === undefined ? (
+        <p className="dsh-rss-settings-help" role="status">正在探测模型可用性…</p>
+      ) : (
+        <>
+          {info.available === false && (
+            <p className="dsh-rss-settings-error" role="status" data-rss-translate-reason={info.reason ?? 'no-default-route'}>
+              {TRANSLATE_UNAVAILABLE_TEXT[info.reason ?? 'no-default-route']}
+            </p>
+          )}
+          {groups.length > 0 && (
+            <div className="dsh-rss-settings-row" data-rss-translate-route="">
+              <label className="dsh-rss-settings-label">
+                模型
+                <select className="dsh-rss-settings-input" aria-label="翻译模型" data-rss-translate-model=""
+                  disabled={saving || settings === undefined}
+                  value={provider !== '' && model !== '' ? modelOptionValue(provider, model) : ''}
+                  onChange={(event) => {
+                    const picked = modelOfOption(event.target.value)
+                    void save(picked === undefined
+                      ? { translateProvider: '', translateModel: '', translateEffort: '' }
+                      : { translateProvider: picked.provider, translateModel: picked.model, translateEffort: '' })
+                  }}>
+                  {/* 首项：跟随会话默认（当前模型名）。名字来自宿主探测结果，客户端不猜。 */}
+                  <option value="">跟随会话默认（{info.sessionDefault?.model ?? '未配置'}）</option>
+                  {groups.map((group) => (
+                    <optgroup key={group.provider} label={group.provider}>
+                      {group.models.map((entry) => (
+                        <option key={entry.id} value={modelOptionValue(group.provider, entry.id)}>{entry.id}</option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+              </label>
+              {selected !== undefined && selected.model.efforts.length > 0 && (
+                <label className="dsh-rss-settings-label">
+                  思考强度
+                  <select className="dsh-rss-settings-input" aria-label="翻译思考强度" data-rss-translate-effort=""
+                    disabled={saving}
+                    value={selected.model.efforts.includes(effort) ? effort : ''}
+                    onChange={(event) => {
+                      void save({ translateProvider: selected.provider, translateModel: selected.model.id, translateEffort: event.target.value })
+                    }}>
+                    <option value="">跟随模型默认</option>
+                    {selected.model.efforts.map((entry) => <option key={entry} value={entry}>{entry}</option>)}
+                  </select>
+                </label>
+              )}
+              {selected !== undefined && selected.model.efforts.length === 0 && (
+                <p className="dsh-rss-settings-help">该模型不支持思考强度设置</p>
+              )}
+            </div>
+          )}
+          {error !== undefined && (
+            <p className="dsh-rss-settings-error" role="alert" data-rss-translate-save-error="">{error}</p>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
 export function SettingsView(props: SettingsViewProps): ReactNode {
   const {
     settings, error, warningDismissed, onClose, onDismissWarning,
     reading, onReading, showUnread, onShowUnread,
+    translationInfo, translateTarget, onTranslateTarget, onSaveTranslateRoute,
     onSave, onReset, onTestRsshub, onCleanupPreview, onCleanup, onManageFeeds,
     exploreAvailable, onExplore,
   } = props
@@ -545,11 +677,32 @@ export function SettingsView(props: SettingsViewProps): ReactNode {
                 checked={showUnread}
                 onChange={onShowUnread}
               />
+              {/* R7 02 / spec §5.3：与正文页 Aa 面板共用同一个 translateTarget（同一个落盘通道）。 */}
+              <div className="dsh-rss-settings-row" data-rss-setting="translateTarget">
+                <label className="dsh-rss-settings-label">
+                  翻译目标语言
+                  <select className="dsh-rss-settings-input" aria-label="翻译目标语言" data-rss-display-language=""
+                    value={translateTarget}
+                    onChange={(event) => onTranslateTarget(event.target.value as TargetLanguage)}>
+                    {TARGET_LANGUAGES.map((language) => (
+                      <option key={language.id} value={language.id}>{language.label}</option>
+                    ))}
+                  </select>
+                </label>
+                <p className="dsh-rss-settings-help">正文页「译」默认翻成这个语言</p>
+              </div>
               {/* D14 ② 末尾指针：排版控件不在本页重复一套。 */}
               <p className="dsh-rss-settings-help" data-rss-display-pointer="">
                 字号 / 栏宽 / 主题在正文页的 Aa 面板调整
               </p>
             </>
+          )}
+          {section.key === 'translate' && (
+            <TranslateSettingSection
+              settings={settings}
+              info={translationInfo}
+              onSaveRoute={onSaveTranslateRoute}
+            />
           )}
           {section.key === 'rsshub' && (
             <>

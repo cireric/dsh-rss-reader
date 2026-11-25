@@ -110,6 +110,26 @@ export interface Config {
    * `settings-schema.ts` 的 `parseTunableValue`；这里只声明默认值与类型。
    */
   rsshubBase: string
+  /**
+   * 翻译的显式路由（R7 02，spec §4.4 / §5.2）：`provider` + `model` **必须成对**，
+   * 只有 model 没有 provider 等于未配置，回落会话默认。
+   *
+   * 这里不校验「这个 provider/model 是否存在」：合法路由由模型目录（llm.listProviders /
+   * listModels）在运行期裁决，把目录抄进设置 schema 就是第二份真相，模型装删一次两边就会分家。
+   * 校验只做形状（trim 后 ≤ 200 字符），见 settings-schema.ts 的 parseTunableValue。
+   */
+  translateProvider: string
+  translateModel: string
+  /**
+   * 翻译的思考强度（R7 02）：只在显式 provider+model 生效；不在该模型 efforts 列表里时
+   * 忽略该字段继续（不报错，见 translate.ts 的 resolveTranslateRoute）。
+   */
+  translateEffort: string
+  /**
+   * 首次外发确认标记（R7 02 / 06）：只由确认框写入 `true`，**不是用户可调项**，
+   * 所以设置页不展示开关（它仍进可写白名单，06 票要经 saveSettings 写）。
+   */
+  translateNoticeAck: boolean
 }
 
 export const Config: z<Config> = z.object({
@@ -133,4 +153,9 @@ export const Config: z<Config> = z.object({
   maxItemsShown: z.number().default(300),
   logFile: z.string().default(''),
   rsshubBase: z.string().default(''),
+  // R7 02：翻译路由三键 + 首次外发确认标记（默认全部「未配置 / 未确认」）
+  translateProvider: z.string().default(''),
+  translateModel: z.string().default(''),
+  translateEffort: z.string().default(''),
+  translateNoticeAck: z.boolean().default(false),
 })

@@ -6,6 +6,7 @@
  * `saveViewPreferences` 端点调用；它和 wire 形状挤在 shared.ts 里时，改一次归一化规则要在
  * 42 个导出里找位置。本模块是纯函数 + 常量，**host 与 client 都可直接 import**（无 node 依赖）。
  */
+import { DEFAULT_TARGET_LANGUAGE, isTargetLanguage, type TargetLanguage } from './translate-copy.js'
 
 /**
  * 视图记忆：面板重开后要恢复起来的那几项（两列布局任务 7 + R2-01）。
@@ -38,6 +39,13 @@ export interface ViewPreferences {
    * 默认 `true` = 改动前的既有行为（规格 §5 不变量 8「未读计数可隐藏」，不是默认隐藏）。
    */
   showUnread: boolean
+  /**
+   * 翻译目标语言（R7 02 / spec §5.3）：`Aa` 面板与设置页「显示」分区共用这一个值。
+   *
+   * 必填字段 + 默认值（与 showUnread / reading 同形）：旧配置没有它 ⇒ 归一化补 `zh-CN`。
+   * 认不出的值回落默认，不猜语言（语言表与判据都在 translate-copy.ts，只有一份）。
+   */
+  translateTarget: TargetLanguage
   /** 正文排版（M5 01）。旧配置没有这个键 ⇒ 归一化时补默认值，不许因为缺字段就回落整份记忆。 */
   reading: ReadingPreferences
   /**
@@ -107,6 +115,7 @@ export const DEFAULT_VIEW_PREFERENCES: ViewPreferences = {
   filter: 'all',
   navVisible: true,
   showUnread: true,
+  translateTarget: DEFAULT_TARGET_LANGUAGE,
   reading: DEFAULT_READING_PREFERENCES,
 }
 
@@ -188,6 +197,12 @@ export function sanitizeViewPreferences(
     ? source['showUnread']
     : DEFAULT_VIEW_PREFERENCES.showUnread
 
+  // 翻译目标语言（R7 02）：只认语言表里的 id，认不出回落默认 —— 与显示开关同一条
+  // 「一次坏值只抹掉它自己」的规则；语言表本身不在这里复制第二份。
+  const translateTarget = isTargetLanguage(source['translateTarget'])
+    ? source['translateTarget']
+    : DEFAULT_TARGET_LANGUAGE
+
   const readingRaw = source['reading']
   const readingSource = typeof readingRaw === 'object' && readingRaw !== null && !Array.isArray(readingRaw)
     ? (readingRaw as Record<string, unknown>)
@@ -231,6 +246,7 @@ export function sanitizeViewPreferences(
     filter,
     navVisible,
     showUnread,
+    translateTarget,
     reading,
     ...(lastItemId === undefined ? {} : { lastItemId }),
     ...(lastListScrollTop === undefined ? {} : { lastListScrollTop }),

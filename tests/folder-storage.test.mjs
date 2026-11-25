@@ -334,7 +334,7 @@ test('视图记忆可保存文件夹选中；文件夹删除后回落虚拟视�
     })
     assert.deepEqual(ctx.store.viewPreferences(), {
       navSelection: { kind: 'folder', folder: '技术' }, filter: 'unread', navVisible: false, showUnread: true,
-      reading: DEFAULT_READING_PREFERENCES,
+      translateTarget: 'zh-CN', reading: DEFAULT_READING_PREFERENCES,
     }, '文件夹选中项必须能持久化并读回')
 
     await ctx.store.deleteFolder('技术')
