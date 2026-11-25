@@ -22,19 +22,22 @@ import { foldOf, groupImageBlocks, type ImageFold, type ImageGroup } from '../im
 import { paragraphsOf } from '../html-text.js'
 import { READING_FONT_SIZES, READING_LINE_WIDTHS } from '../preferences.js'
 import type { ReadingPreferences } from '../preferences.js'
-import type { ArticleState, TranslationEntry, TranslationMode } from './store.js'
+import type { ArticleState, TranslateConfirmRequest, TranslationEntry, TranslationMode } from './store.js'
 import { TranslationModeSwitcher, TranslationSegment, translatedBlockOf } from './translate-view.js'
 import {
   TARGET_LANGUAGES, TRANSLATE_BUTTON_TEXT, TRANSLATE_FAILURE_UI, TRANSLATE_LABEL_TEXT,
+  translateNoticeText,
   type TargetLanguage, type TranslateFailureReason,
 } from '../translate-copy.js'
 import {
+  articleTranslatePlanOf,
   translateCharsOf,
   TRANSLATE_BLOCK_MAX_CHARS,
   type TranslateBlockRect,
   type TranslateGeometry,
   type TranslateRect,
 } from '../translate-blocks.js'
+import { ConfirmDialog } from './confirm-dialog.js'
 // InlineRun 从 article-text.js 取，**不从 article.js**：后者 import 了 node:crypto 与 feed/fetch.js，
 // 而 client bundle 不许出现任何 node: 说明符（tsdown 不会因此报错，失败被推迟到浏览器运行期）。
 // 见 docs/pitfalls.md §1.7b。
@@ -634,7 +637,7 @@ function translateGeometryOf(box: HTMLElement): TranslateGeometry {
   return { container: rectOf(box), blocks }
 }
 
-export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress, expandedGroups, onExpandImageGroup, imagesExpanded, lightboxSrc, onOpenImage, onCloseLightbox, translation, translationMode, onTranslationMode, translateAvailable, translateTarget, onTranslateTarget, onTranslate, onStopTranslate, onRetryBatch }: {
+export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress, expandedGroups, onExpandImageGroup, imagesExpanded, lightboxSrc, onOpenImage, onCloseLightbox, translation, translationMode, onTranslationMode, translateAvailable, translateTarget, onTranslateTarget, onTranslate, onContinueTranslate, onRetranslate, translateConfirm, onConfirmTranslate, onCancelTranslate, onStopTranslate, onRetryBatch }: {
   article: ArticleState | undefined
   item: ItemView | undefined
   onBack: () => void
@@ -661,6 +664,16 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
    * 几何不进 props / state：滚动位置随时在变，只有点击瞬间的视口才是「第一批翻哪些」的依据。
    */
   onTranslate: (geometry: TranslateGeometry | undefined) => void
+  /** 「继续翻译（还剩 N/M）」：以现有进度续跑，已译块不重发（R7 06 / D19）。 */
+  onContinueTranslate: (geometry: TranslateGeometry | undefined) => void
+  /** 「重译」：清空该 key 的译文后整篇重发（R7 06 / D19），不绑快捷键。 */
+  onRetranslate: (geometry: TranslateGeometry | undefined) => void
+  /** 首次外发确认框的待确认内容；undefined = 不显示（R7 06 / spec §4.2）。 */
+  translateConfirm: TranslateConfirmRequest | undefined
+  /** 确认外发：组件在确认那一刻再量一次视口，然后交给动作层写标记 + 开始翻译。 */
+  onConfirmTranslate: (geometry: TranslateGeometry | undefined) => void
+  /** 取消外发：只清确认态，不写 settings、不发 rpc。 */
+  onCancelTranslate: () => void
   /**
    * 停止后续批（R7 04）：组件卸载 = 离开正文面 / 切面板。在途那一批允许跑完，
    * store 的编排会在下一批前看到 token 已变而退出（spec §4.6 / D18）。
@@ -841,6 +854,39 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
   // 只按**已缓存的正文**估：加载中 / 抓取失败时 readingBlocks 为空 ⇒ 0 ⇒ 界面不出现任何数字。
   // 刻意不拿 summary 或源里的 excerpt 去凑 —— 回退内容不是原站正文，不给它编一个时长（R4-B5）。
   const readMinutes = estimateReadingMinutes(readingBlocks)
+  /**
+   * 翻译按钮的状态机（R7 06 / spec §4.1 / D19）：
+   *  无条目 → 译；在译 → 停止；中止且还有剩余 → 继续；完成 / 失败 → 重译（次要样式）。
+   *
+   * 「还剩 N/M」与进度同一口径（total - done）：done 是**成功回填的块数**，失败批不计入，
+   * 所以读者看到的剩余量就是继续之后真正会补的批（失败批另有重试按钮，不混进这句文案）。
+   */
+  const translatePlan = articleTranslatePlanOf(article?.blocks ?? [])
+  const translateEmpty = translatePlan.totalBlocks === 0 && translatePlan.overlongBlocks.length === 0
+  const translateRemaining = translation === undefined ? 0 : Math.max(0, translation.total - translation.done)
+  const translateButtonState: 'translate' | 'stop' | 'continue' | 'retranslate' = translation === undefined
+    ? 'translate'
+    : translation.status === 'running'
+      ? 'stop'
+      : translation.status === 'stopped' && translateRemaining > 0
+        ? 'continue'
+        : 'retranslate'
+  const translateButtonText = translateButtonState === 'translate'
+    ? TRANSLATE_BUTTON_TEXT.translate
+    : translateButtonState === 'stop'
+      ? TRANSLATE_BUTTON_TEXT.stop
+      : translateButtonState === 'continue'
+        ? TRANSLATE_BUTTON_TEXT.continue(translateRemaining, translation?.total ?? 0)
+        : TRANSLATE_BUTTON_TEXT.retranslate
+  const translateButtonTitle = translateEmpty
+    ? '这篇没有可翻译的正文'
+    : translateButtonState === 'translate'
+      ? '翻译当前文章（先译屏幕内的段落）'
+      : translateButtonState === 'stop'
+        ? '停止后续批次（在途一批会跑完）'
+        : translateButtonState === 'continue'
+          ? '继续翻译剩余段落（已译块不重发）'
+          : '重新翻译整篇（会重新调用模型）'
 
   /**
    * 本组件自己拿到滚动容器 —— 右下角那两个按钮要作用在它上面。
@@ -853,6 +899,8 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
    * （keyboard-routing.ts 的 focusScrollBox，理由见那里：现取还能覆盖容器换节点的情况）。
    */
   const boxRef = useRef<HTMLDivElement | null>(null)
+  /** 「译」按钮的 ref：确认框关闭后把焦点还给触发它的控件（与设置页三处确认框同一条约定）。 */
+  const translateButtonRef = useRef<HTMLButtonElement | null>(null)
   /**
    * 「钉住底部」意图。
    *
@@ -1030,18 +1078,29 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
               <a className="dsh-rss-btn dsh-rss-btn--ghost" href={link} target="_blank" rel="noreferrer">打开原站 ↗</a>
             )}
             {/*
-              * 一键翻译（R7 01 / 04）。**不可用时不渲染**（R7 02 / spec §4.1）：
+              * 一键翻译（R7 01 / 04 / 06）。**不可用时不渲染**（R7 02 / spec §4.1）：
               * 连按钮都不该出现，而不是点了再说「没有模型」。放在 Aa 左侧是固定位置。
               *
+              * 状态机（D19）：译 → 停止（在译）→ 继续翻译（中止且还有剩余）→ 重译（完成 / 失败）。
               * 点击这一刻才量几何（R7 04）：滚动位置随时在变，渲染期缓存 rect 会在用户滚动后
               * 变成另一篇视角；`translateGeometryOf` 只读 DOM，选批仍是纯函数。
+              * 可翻块为 0（全图片 / 无正文）时禁用并说明原因（spec §4.1）。
               */}
             {translateAvailable && (
-              <button type="button" className="dsh-rss-btn" data-rss-translate=""
-                title="翻译当前文章（先译屏幕内的段落）" onClick={() => {
+              <button ref={translateButtonRef} type="button"
+                className={'dsh-rss-btn' + (translateButtonState === 'retranslate' ? ' dsh-rss-btn--ghost' : '')}
+                data-rss-translate="" data-rss-translate-state={translateButtonState}
+                disabled={translateEmpty}
+                aria-label={translateButtonText}
+                title={translateButtonTitle}
+                onClick={() => {
                   const box = boxRef.current
-                  onTranslate(box === null ? undefined : translateGeometryOf(box))
-                }}>{TRANSLATE_BUTTON_TEXT.translate}</button>
+                  const geometry = box === null ? undefined : translateGeometryOf(box)
+                  if (translateButtonState === 'stop') { onStopTranslate(); return }
+                  if (translateButtonState === 'continue') { onContinueTranslate(geometry); return }
+                  if (translateButtonState === 'retranslate') { onRetranslate(geometry); return }
+                  onTranslate(geometry)
+                }}>{translateButtonText}</button>
             )}
             {translation !== undefined && translation.total > 0 && (
               <span data-rss-translate-progress className="dsh-rss-meta" role="status">{TRANSLATE_LABEL_TEXT.progress(translation.done, translation.total)}</span>
@@ -1363,6 +1422,34 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
         * 只在正文真的画出来时可能打开（入口是正文里的图），但这里不另加 `bodyState` 判断：
         * 折叠 / 换篇 / 按 `i` 三条路径都会把它清掉，多一个守卫就多一处可能与那三条分家的判定。
         */}
+      {/*
+        * 首次外发确认（R7 06 / spec §4.2）。共享 ConfirmDialog 的三条出口：
+        *   取消 / Esc ⇒ 只清 store 里的待确认态，不写 settings、不发 rpc；
+        *   确认 ⇒ 动作层先写 `translateNoticeAck = true`（走 saveSettings patch）再开始翻译。
+        * 文案里的 provider/model/字符数在**点「译」那一刻**算好（store 的 translateConfirm），
+        * 不在这里按渲染时设置重算 —— 用户在框开着时切了模型，不能出现「说的是 A、发的是 B」。
+        */}
+      {translateConfirm !== undefined && (
+        <ConfirmDialog
+          titleId="rss-translate-confirm-title"
+          title="翻译外发确认"
+          rootAttrs={{ 'data-rss-translate-confirm': '' }}
+          cardAttrs={{ 'data-rss-translate-confirm-card': '' }}
+          confirmAttrs={{ 'data-rss-translate-confirm-ok': '', 'aria-label': '确认外发并开始翻译' }}
+          cancelAttrs={{ 'data-rss-translate-confirm-cancel': '', 'aria-label': '取消翻译外发' }}
+          confirmLabel="开始翻译"
+          returnFocus={() => { translateButtonRef.current?.focus() }}
+          onCancel={onCancelTranslate}
+          onConfirm={() => {
+            const box = boxRef.current
+            onConfirmTranslate(box === null ? undefined : translateGeometryOf(box))
+          }}
+        >
+          <p data-rss-translate-notice className="dsh-rss-confirm-note">
+            {translateNoticeText(translateConfirm.provider, translateConfirm.model, translateConfirm.chars)}
+          </p>
+        </ConfirmDialog>
+      )}
       {lightboxSrc !== undefined && <Lightbox src={lightboxSrc} onClose={onCloseLightbox} />}
     </div>
   )

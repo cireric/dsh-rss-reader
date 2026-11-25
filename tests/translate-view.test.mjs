@@ -184,7 +184,7 @@ test('R7 03 三态切换：原文 / 对照 / 译文互换，且不发任何 rpc'
   }
 })
 
-test('R7 03 无译文时按 t 无事发生，也不触发翻译', skip, async () => {
+test('R7 03 / 06 无译文时按 t 触发翻译（首次确认由 06 的用例单独覆盖）', skip, async () => {
   const h = await mount({
     items: [itemOf('a')],
     articles: { a: articleOf('a', VIEW_BLOCKS) },
@@ -193,10 +193,11 @@ test('R7 03 无译文时按 t 无事发生，也不触发翻译', skip, async ()
   try {
     await openArticle(h, 'a')
     h.press('t')
+    await h.waitFor(() => h.calls('translateBatch').length === 1, { label: 't 触发翻译' })
+    await h.waitFor(() => translationOf(h)?.status === 'done', { label: '翻译完成' })
     await h.settle()
-    assert.equal(h.store.get().translationMode, 'original', '无译文时 t 不切态')
-    assert.equal(h.$('[data-rss-translation-modes]'), null)
-    assert.equal(h.calls('translateBatch').length, 0, '本票 t 不接触发翻译（06 票才接）')
+    assert.equal(h.store.get().translationMode, 'translated', '开始翻译后有译文默认落「译文」')
+    assert.ok(h.$('[data-rss-translation-modes]') !== null, '翻译完成后切换器出现')
   } finally {
     h.cleanup()
   }

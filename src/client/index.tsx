@@ -762,7 +762,10 @@ export function createReader(store: ReaderStore): () => ReactNode {
       // 放这条 effect 而不是 `back` 里，是因为它同时覆盖「Esc 回列表后重开同一篇」那条路径
       // （`closeArticle` 只改 view、刻意保留 article ⇒ 那一刻 articleItemId 不变）。
       setLightboxSrc(undefined)
-    }, [articleItemId, state.view])
+      // 首次外发确认框同理（R7 06）：换条目 / 离开正文时，待确认的正文与字符数已经不属于
+      // 眼前这一篇了，必须收掉 —— 否则回来点「译」会拿着旧文章的字符数去确认新文章的外发。
+      store.cancelTranslate()
+    }, [articleItemId, state.view, store])
 
     // 键盘流：挂在 document 上 + 输入框守卫（24 个 action 的判据与路由都在 keyboard-routing.ts）。
     // 原实现挂在面板根节点并要求其持有焦点，导致「必须先点一下页面」才响应（用户实测）。
@@ -1133,7 +1136,13 @@ export function createReader(store: ReaderStore): () => ReactNode {
             translateTarget={state.translateTarget}
             onTranslateTarget={store.setTranslateTarget}
             // 点击时把视口矩形交给动作层（R7 04）：选批是纯函数，组件只负责量。
-            onTranslate={(geometry) => { void store.startTranslate(geometry) }}
+            // R7 06：入口改走 requestTranslate —— 首次外发先弹确认框，t 键与按钮共用这一条。
+            onTranslate={(geometry) => { void store.requestTranslate(geometry) }}
+            onContinueTranslate={(geometry) => { void store.continueTranslate(geometry) }}
+            onRetranslate={(geometry) => { void store.retranslate(geometry) }}
+            translateConfirm={state.translateConfirm}
+            onConfirmTranslate={(geometry) => { void store.confirmTranslate(geometry) }}
+            onCancelTranslate={store.cancelTranslate}
             // 组件卸载（切面板 / 离开正文面）时中止后续批；在途那批允许跑完。
             onStopTranslate={store.stopTranslate}
             // 失败批的重试（R7 05）：组件只交回批首下标，整批 indices 由动作层从 store 找回。
