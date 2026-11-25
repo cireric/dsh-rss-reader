@@ -119,19 +119,17 @@ type TranslateSelection = {
   readonly reasoningEffort?: string
 }
 
-/** 选择结果 → wire 路由；没有选择时 undefined（sessionDefault 可选）。 */
-function routeOfSelectionOrUndefined(selection: TranslateSelection | undefined): TranslateRoute | undefined {
-  return selection === undefined ? undefined : routeOfSelection(selection)
-}
-
-/** 选择结果 → wire 路由：effort 只在有值时出现（空串不是一种 effort）。 */
-function routeOfSelection(selection: TranslateSelection): TranslateRoute {
-  const effort = selection.reasoningEffort
-  return {
-    provider: selection.provider,
-    model: selection.model,
-    ...(effort === undefined || effort === '' ? {} : { effort }),
-  }
+/**
+ * 会话默认 → 翻译路由：只取 provider+model，**不带 reasoningEffort**（spec §4.4）。
+ *
+ * 2026-11-25 真机实测（票 07）：`agentDefaultModel.currentSelection()` 会带上会话的
+ * `reasoningEffort: 'max'`，而翻译请求与推理共用同一个 `maxTokens` 预算 —— 同一个
+ * 12 块 / 1223 字的批，带 effort 时 20.1 s 被 max-tokens 截断，不带 effort 时 9.8 s
+ * 正常返回（同批 A/B）。思考强度只属于设置里 `translateEffort` 的显式路由；会话默认
+ * 不该把它外溢到翻译，否则用户在别处调高的推理强度会悄悄吃掉译文预算。
+ */
+function routeOfSessionDefault(selection: TranslateSelection): TranslateRoute {
+  return { provider: selection.provider, model: selection.model }
 }
 
 /** 服务返回的模型条目里，efforts 的 id 列表（缺省 = 该模型没有可选强度）。 */
@@ -222,7 +220,9 @@ export async function resolveTranslateRoute(
   const catalog = await sessionCatalogOf(services)
   const currentSelection = currentSelectionOf(services)
   // 设置页首项要显示「跟随会话默认（当前模型名）」：先取会话当前选择，没有服务时退回目录默认。
-  const sessionDefault = routeOfSelectionOrUndefined(currentSelection ?? catalog?.default)
+  // 两者都只提供 provider+model（见 routeOfSessionDefault 的真机证据）。
+  const defaultSelection = currentSelection ?? catalog?.default
+  const sessionDefault = defaultSelection === undefined ? undefined : routeOfSessionDefault(defaultSelection)
 
   const explicitProvider = explicit?.provider.trim() ?? ''
   const explicitModel = explicit?.model.trim() ?? ''
@@ -273,7 +273,7 @@ export async function resolveTranslateRoute(
   }
   return {
     available: true,
-    route: routeOfSelection(currentSelection),
+    route: routeOfSessionDefault(currentSelection),
     providers: providerViews,
     ...(sessionDefault === undefined ? {} : { sessionDefault }),
   }

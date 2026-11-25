@@ -3365,6 +3365,14 @@ export const MUTATIONS = [
     judgeTests: ['回落会话默认但 modelCatalog().default 不存在 ⇒ no-default-route'],
     from: "    if (currentSelection === undefined || catalog?.default === undefined) {\n        return { available: false, reason: 'no-default-route', providers: providerViews };\n    }",
     to: "    if (currentSelection === undefined) {\n        return { available: false, reason: 'no-default-route', providers: providerViews };\n    }" },
+  // 会话默认把 reasoningEffort 带进翻译：2026-11-25 真机实测 effort:max 与正文共用输出预算，
+  // 同一个 12 块 / 1223 字的批带 effort 被 max-tokens 截断、不带 effort 正常。强度只属于显式
+  // 路由（spec §4.4）；判据是「回落会话默认只取 provider+model」——回包路由与流请求都不得带 effort。
+  { id: 'translate-会话默认带出 reasoningEffort', file: 'lib/translate.js',
+    judges: ['translate-availability.test.mjs'],
+    judgeTests: ['回落会话默认只取 provider+model：会话的 reasoningEffort 不外溢到翻译（真机 2026-11-25）'],
+    from: "function routeOfSessionDefault(selection) {\n    return { provider: selection.provider, model: selection.model };\n}",
+    to: "function routeOfSessionDefault(selection) {\n    return { provider: selection.provider, model: selection.model, ...(selection.reasoningEffort === undefined ? {} : { effort: selection.reasoningEffort }) };\n}" },
   // 保存设置后不清探测缓存：改完模型最多 30 秒内文章面按钮 / 设置页原因仍是旧结论。
   // 时钟固定在同一个值的用例只有「显式失效」能让它看到新服务 —— 正是这条变异要抓的。
   { id: 'translate-保存后不清缓存', file: 'lib/endpoints.js',

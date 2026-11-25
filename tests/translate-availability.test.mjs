@@ -193,6 +193,30 @@ test('只有 model 没有 provider ⇒ 视为未配置，回落会话默认', as
   } finally { h.cleanup() }
 })
 
+test('回落会话默认只取 provider+model：会话的 reasoningEffort 不外溢到翻译（真机 2026-11-25）', async () => {
+  // 真机：会话默认带 reasoningEffort: 'max'，同一个 12 块 / 1223 字的批，带 effort 时 20.1 s
+  // 被 max-tokens 截断、不带 effort 时 9.8 s 正常返回。强度只属于显式路由（spec §4.4），
+  // 会话默认不许把它带进翻译请求，否则别处调高的推理强度会悄悄吃掉译文预算。
+  const calls = []
+  const llm = {
+    listProviders: () => [{ id: 'p' }],
+    listModels: async () => [{ id: 'm' }],
+    stream(options) {
+      calls.push(options)
+      return (async function* stream() { for (const chunk of jsonChunks(JSON.stringify({ items: [{ id: 'b0', text: '你好' }] }))) yield chunk })()
+    },
+  }
+  const h = harness({ services: { llm, ...fakeSession({ selection: { provider: 'p', model: 'm', reasoningEffort: 'max' } }) } })
+  try {
+    const info = await launch(h)
+    assert.equal(info.available, true)
+    assert.deepEqual(info.route, { provider: 'p', model: 'm' }, '会话默认只提供 provider+model')
+    const result = await h.dispatch('translateBatch', { target: 'zh-CN', items: [{ id: 'b0', text: 'Hello' }] })
+    assert.equal(result.ok, true, JSON.stringify(result))
+    assert.equal('reasoningEffort' in calls[0], false, '会话默认的 reasoningEffort 不许出现在翻译流请求里')
+  } finally { h.cleanup() }
+})
+
 test('30s 缓存：窗口内不重探，过期后重探（假 now，不 sleep）', async () => {
   let clock = 1_000
   const llm = fakeLlm()
