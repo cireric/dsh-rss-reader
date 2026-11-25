@@ -6,7 +6,7 @@
  * 列表、正文、订阅管理与键盘接线，任一改动都要动同一个文件。
  */
 import { useEffect, useState } from 'react'
-import { ROUTE_PATH, type DiscoveryResult, type Endpoint, type FeedView, type FolderView, type ItemView, type OpmlImportResult, type RpcResult, type SearchQuery, type SettingsSnapshot, type TagView, type DuplicateHintView } from '../shared.js'
+import { ROUTE_PATH, type DiscoveryResult, type Endpoint, type ExploreRouteView, type FeedView, type FolderView, type ItemView, type OpmlImportResult, type RpcResult, type SearchQuery, type SettingsSnapshot, type TagView, type DuplicateHintView } from '../shared.js'
 import { DEFAULT_READING_PREFERENCES, DEFAULT_VIEW_PREFERENCES, sanitizeViewPreferences, validListScrollTop } from '../preferences.js'
 import type { ReadingPreferences, ViewPreferences } from '../preferences.js'
 import { clampScrollTop } from '../list-scroll.js'
@@ -59,6 +59,7 @@ import { createNavActions } from './nav-actions.js'
 import { createOpmlActions } from './opml-actions.js'
 import { createSearchActions } from './search-actions.js'
 import { createSettingsActions } from './settings-actions.js'
+import { createExploreActions } from './explore-actions.js'
 import { createTagActions } from './tag-actions.js'
 import {
   navRowsOf, navCursorKey, nextExpandedOf, memorableSelectionOf, VIRTUAL_VIEWS,
@@ -91,6 +92,54 @@ export interface ArticleState {
   frameable?: boolean
 }
 
+/**
+ * 探索域的整份状态（R8b 04）。`view: 'explore'` 时存在，关闭视图即整份丢弃（D14：不持久化）。
+ *
+ * 为什么用一个对象而不是散在 ReaderState 上：q / 筛选 / 分页 / 表单草稿彼此同生共死 ——
+ * 关掉探索必须一起消失，散字段会让「清了一半」成为可达状态。
+ */
+export interface ExploreState {
+  /** 已加载的路由行（分页**累计**，不是当前页）。 */
+  items: ExploreRouteView[]
+  /** 生效中的搜索词（空串 = 不生效）。表单里的输入草稿归组件局部，不在这里。 */
+  q: string
+  /** 单选分类（undefined = 不筛）；再点同类由视图翻译成 undefined。 */
+  category: string | undefined
+  /** 站点钻取（undefined = 全表）。 */
+  namespace: string | undefined
+  /** 整张目录的分类（宿主下发，供筛选项）。 */
+  categories: string[]
+  siteTotal: number | undefined
+  routeTotal: number | undefined
+  /** 当前筛选命中的路由数（与目录口径分开，D13）。 */
+  matched: number | undefined
+  loading: boolean
+  loadingMore: boolean
+  /** 目录取数失败的一句话（原样展示，不伪装成空列表）。 */
+  error: string | undefined
+  /** 续页游标：缺省 = 已到底。 */
+  nextCursor: string | undefined
+  /** 正在填参数的路由（undefined = 没选）。 */
+  selected: ExploreRouteView | undefined
+  /** 参数草稿（name → 值）。 */
+  draft: Record<string, string>
+  /**
+   * 选中这条路由时，官方 example 是否真的反推出至少一个值（spec §4.5）。
+   *
+   * 只在 `selectExploreRoute` 那一刻按 `prefillValues` 的结果定死：它是「实例给没给样本」
+   * 的事实，不该随用户往输入框里敲字变化。false + 模板有参数 ⇒ 表单提示「按官方文档填写」。
+   */
+  prefilled: boolean
+  /** 本地拦下的缺失必填参数名（点名用，不是唯一防线）。 */
+  missing: string[]
+  /** 宿主拼好的地址；undefined = 还没拼 / 表单已改。 */
+  builtUrl: string | undefined
+  building: boolean
+  adding: boolean
+  /** 「已添加 ✓」回执（D6：不关视图、不清表单）。 */
+  receipt: string | undefined
+}
+
 export interface ReaderState {
   items: ItemView[]
   feeds: FeedView[]
@@ -114,7 +163,7 @@ export interface ReaderState {
   /** 一键已读的撤销条。窗口到期由 armUndoExpiry 的定时器负责，所以这里不需要存时间戳。 */
   undo: { ids: string[] } | undefined
   /** 当前视图：列表 / 正文 / 订阅管理 / 设置（后两者同样在主栏内切换） */
-  view: 'list' | 'article' | 'feeds' | 'settings'
+  view: 'list' | 'article' | 'feeds' | 'settings' | 'explore'
   /**
    * 条目流的**视图密度**（GR 的两视图）：expanded 含条目描述/正文摘录，list 只有标题行。
    * 注意与上面的 view 是两条正交的轴：view 决定「看哪个面板」，layout 决定「条目流怎么排」。
@@ -154,6 +203,8 @@ export interface ReaderState {
   settings: SettingsSnapshot | undefined
   /** 设置页取数失败的一句话（与全局 error 分开：设置页自己要能说明为什么空着）。 */
   settingsError: string | undefined
+  /** 探索视图的整份状态（`view: 'explore'` 时存在；关闭即丢弃，D14）。 */
+  explore: ExploreState | undefined
   /** 启动时的读侧告警（坏文件隔离 / 坏值忽略）是否已被本次会话关掉（D17）。 */
   settingsWarningDismissed: boolean
   /** 最近一次导入的报告（坏源要逐条列出，不能只报总数） */
@@ -301,6 +352,7 @@ const browserDeps: ReaderStoreDeps = {
  * | 订阅 | `feeds` / `folders` / `discovery` / `feedsBusy` / `importReport` / `navSelection` / `navCursor` / `navVisible` / `foldedFolders` / `viewPreferences`（**deleteFolder 例外**：删掉当前所在文件夹时会把 `filter` 回落成 `all`，这条跨域写入登记在此） | addFeed / removeFeed / moveFeedOrder / importOpml / exportOpml / discover / createFolder / renameFolder / deleteFolder / moveFeedToFolder / selectNav / moveNavCursor / openNavCursor / toggleNav / toggleFolder / flushViewMemory | 改 navSelection 后必须走 persistView；**整份覆盖写必须带上当下的 selectedId**（否则一次普通导航就抹掉阅读位置）；选中 / j/k / 打开条目经 300ms 去抖写手记 lastItemId，面板卸载时 flush；退订只能经 `deleteSubscription`；selectNav 经列表域的 leaveTransientViews 写 `view` / `article`（切作用域退出正文与设置页） |
  * | 标签 | `tags` / 条目的 `tagIds` | createTag / renameTag / deleteTag / toggleItemTag | 乐观改 tagIds，失败回取当前页拉回真相（tagWrite 串行化 + tagEpoch 身份） |
 | 设置 | `settings` / `settingsError` / `settingsWarningDismissed` | loadSettings / openSettings / closeSettings / toggleSettings / dismissSettingsWarning | 只调 `settings` 端点取快照；`view: 'settings'` 是跨域呈现状态，与列表 / 订阅域同一条规则（左栏导航 / 切过滤 / 切档经列表域入口退出） |
+| 探索 | `explore`（目录页累计行 / q + category + namespace / loading / error / 表单草稿 / 回执 / 拼好的地址） | openExplore / closeExplore / setExploreQuery / loadMoreExplore / selectExploreRoute / setExploreDraftValue / buildExploreAddress / addExploreSubscription | 订阅只经 `addFeed`（订阅域入口），自己只写 `explore`；`view: 'explore'` 与设置页同一条跨域规则（左栏导航 / 切过滤 / 切档经列表域入口退出）；拼地址只调宿主端点，模板判据读 `explore-template.ts` |
  *
  * `view` / `article` 是跨域呈现状态：列表的 openArticle / retryArticle / closeArticle 与 setFilter、
  * 搜索的 submitSearch、导航的 selectNav（经列表域入口）、toggleFeeds 与设置域的 open/closeSettings
@@ -320,7 +372,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   let state: ReaderState = {
     items: [], feeds: [], folders: [], tags: [], unread: 0, unreadSplit: undefined, filter: 'all',
     selectedId: undefined, loading: true, error: undefined, undo: undefined,
-    view: 'list', layout: 'list', markAllRange: 'all', displayWindow: 'all', accountWindow: 'all', showUnread: DEFAULT_VIEW_PREFERENCES.showUnread, settings: undefined, settingsError: undefined, settingsWarningDismissed: false, article: undefined, notice: undefined,
+    view: 'list', layout: 'list', markAllRange: 'all', displayWindow: 'all', accountWindow: 'all', showUnread: DEFAULT_VIEW_PREFERENCES.showUnread, settings: undefined, settingsError: undefined, settingsWarningDismissed: false, explore: undefined, article: undefined, notice: undefined,
     importReport: undefined, discovery: undefined, feedsBusy: false,
     navSelection: { kind: 'virtual' }, perFeedUnread: {}, navVisible: true,
     reading: DEFAULT_READING_PREFERENCES, duplicates: {},
@@ -332,7 +384,17 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   }
   const listeners = new Set<() => void>()
   const emit = (): void => { for (const listener of listeners) listener() }
-  const set = (patch: Partial<ReaderState>): void => { state = { ...state, ...patch }; emit() }
+  const set = (patch: Partial<ReaderState>): void => {
+    state = { ...state, ...patch }
+    /**
+     * 探索状态是视图私有的（R8b 04 / D14）：凡是把 view 移出 explore 的写入，都整份丢弃。
+     *
+     * 为什么放在唯一写入口而不是只写在 closeExplore 里：Esc 之外还有工具栏的设置 / F（订阅管理）
+     * 两条离开路径；只在 Esc 清会让「关闭即清掉」只在一个入口成立，旧目录与表单草稿会一直占着内存。
+     */
+    if (state.view !== 'explore' && state.explore !== undefined) state = { ...state, explore: undefined }
+    emit()
+  }
 
   const get = (): ReaderState => state
   let listVersion = 0
@@ -704,6 +766,11 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   // 设置域（R11 01）：只读快照 + 视图开关。写路径是 02 票的 saveSettings。
   const settingsActions = createSettingsActions({ get, set, rpc: deps.rpc, log: deps.log })
 
+  // 探索域（R8b 04）：订阅只经 feedActions.addFeed（唯一入口），探索自己不碰 feeds 真相。
+  const exploreActions = createExploreActions({
+    get, set, rpc: deps.rpc, addFeed: feedActions.addFeed,
+  })
+
   return {
     subscribe: (listener: () => void): (() => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
     get, submitSearch: (query?: SearchQuery) => searchActions.submit(query),
@@ -720,6 +787,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     ...folderActions,
     ...tagActions,
     ...settingsActions,
+    ...exploreActions,
   }
 }
 

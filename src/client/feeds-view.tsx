@@ -73,6 +73,7 @@ export function FeedsView({
   onCreateFolder, onRenameFolder, onDeleteFolder, onMoveFeed, onMoveOrder,
   onBackfill,
   tags, onCreateTag, onRenameTag, onDeleteTag, onBack,
+  exploreAvailable, onExplore,
 }: {
   feeds: FeedView[]
   folders: FolderView[]
@@ -104,6 +105,10 @@ export function FeedsView({
   onRenameTag: (id: string, name: string) => void
   onDeleteTag: (id: string) => void
   onBack: () => void
+  /** 探索入口是否可见（R8b 04 / D11）：判据由入口按 settings 快照统一算好。 */
+  exploreAvailable: boolean
+  /** 打开探索视图（订阅管理页只发意图）。 */
+  onExplore: () => void
 }): ReactNode {
   const [draft, setDraft] = useState('')
   const [fileError, setFileError] = useState<string | undefined>(undefined)
@@ -254,6 +259,12 @@ export function FeedsView({
         <button type="button" className="dsh-rss-btn" data-rss-discover=""
           disabled={busy || draft.trim() === ''}
           onClick={() => { onDiscover(draft.trim()) }}>发现候选</button>
+        {/* R8b 04 / D11：未配置实例时入口整个不渲染（与设置页那条同一判据）。 */}
+        {exploreAvailable && (
+          <button type="button" className="dsh-rss-btn" data-rss-explore-open="" onClick={onExplore}>
+            浏览路由表
+          </button>
+        )}
       </div>
 
       {/* 说明文案提前讲清边界（R3-4）：排序只是显示先后，OPML 标准没有顺序字段，别把它当备份。 */}

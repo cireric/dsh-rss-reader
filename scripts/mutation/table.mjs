@@ -743,8 +743,8 @@ export const MUTATIONS = [
     ],
     // 2026-11-22 R11 01：入口改名 leaveTransientViews 并多收一类 settings，锚点按产物重锚；
     // 本条只抹掉「正文退出」，settings 分支留着 —— 否则两条判定会被同一条变异一起带走。
-    from: '\t\t\tconst leaveTransientViews = () => {\n\t\t\t\tconst view = get().view;\n\t\t\t\tif (view === "article") set({\n\t\t\t\t\tview: "list",\n\t\t\t\t\tarticle: void 0\n\t\t\t\t});\n\t\t\t\telse if (view === "settings") set({ view: "list" });\n\t\t\t};',
-    to: '\t\t\tconst leaveTransientViews = () => {\n\t\t\t\tconst view = get().view;\n\t\t\t\tif (view === "article") {\n\t\t\t\t} else if (view === "settings") set({ view: "list" });\n\t\t\t};' },
+    from: '\t\t\tconst leaveTransientViews = () => {\n\t\t\t\tconst view = get().view;\n\t\t\t\tif (view === "article") set({\n\t\t\t\t\tview: "list",\n\t\t\t\t\tarticle: void 0\n\t\t\t\t});\n\t\t\t\telse if (view === "settings") set({ view: "list" });\n\t\t\t\telse if (view === "explore") set({\n\t\t\t\t\tview: "list",\n\t\t\t\t\texplore: void 0\n\t\t\t\t});\n\t\t\t};',
+    to: '\t\t\tconst leaveTransientViews = () => {\n\t\t\t\tconst view = get().view;\n\t\t\t\tif (view === "article") {\n\t\t\t\t} else if (view === "settings") set({ view: "list" });\n\t\t\t\telse if (view === "explore") set({\n\t\t\t\t\tview: "list",\n\t\t\t\t\texplore: void 0\n\t\t\t\t});\n\t\t\t};' },
   // 每源未读数的**键域**（2026-10-10）。左栏角标按 feeds 表逐行渲染，键域必须严格 = feeds 表：
   // 删掉「以 feeds 表铺 0」后，0 未读的源会丢键，那一行变成「角标空白」而不是「角标 0」——
   // 界面上无从分辨，是最贵的那类沉默失败。非等价变异：丢键后取值变 undefined，两条测试会红。
@@ -3243,4 +3243,95 @@ export const MUTATIONS = [
     judgeTests: ['R14 恢复视图：恢复到某个源时，首屏之后按源重取一次（重开面板不回到「全局页里的 2 条」）'],
     from: 'if (!get().search && get().navSelection.kind !== "virtual") {',
     to: 'if (false) {' },
+
+  // ── R8b 02：路由目录的取表与实例键缓存（2026-11-24）──────────────────────
+  // 缓存键去掉实例：所有实例共用一份投影 ⇒ 换实例后探索仍显示旧站点的路由，而拼地址用的是
+  // 新实例 base —— 正是 spec §4.7 点名禁止的「旧实例投影拼新实例地址」。B12 的换实例用例
+  // 同时断言「按新实例请求」与「拿到新实例的表」，键一常量化当场翻红。
+  { id: 'explore-换实例仍用旧表', file: 'lib/explore-catalog-fetch.js',
+    judges: ['explore-catalog-fetch.test.mjs'],
+    judgeTests: ['换实例按新实例拉表：旧实例投影不会被拿去拼新实例地址'],
+    from: '    const cacheKey = origin;',
+    to: "    const cacheKey = 'rsshub';" },
+  // 私网放行：把 trustedTarget 顺手带进目录拉取，fetch 层的地址策略就不再拦 127.0.0.1 的实例。
+  // B19 走真实 fetchFeed（其余用例才注入桩），原因从「拒绝访问内网地址」变成连接失败或别的
+  // 错误；「只带 60s / 16MiB」那条同时会因 limits 多出一个键翻红。
+  { id: 'explore-私网放行', file: 'lib/explore-catalog-fetch.js',
+    judges: ['explore-catalog-fetch.test.mjs'],
+    judgeTests: ['私网实例被拒：原因指向内网地址，不是实例故障', '出网只带 60s / 16MiB 专用预算，不带 trustedTarget'],
+    from: '        timeoutMs: CATALOG_TIMEOUT_MS,\n        maxBytes: CATALOG_MAX_BYTES,',
+    to: '        timeoutMs: CATALOG_TIMEOUT_MS,\n        maxBytes: CATALOG_MAX_BYTES,\n        trustedTarget: true,' },
+  // ── R8b 01：路由目录投影 / 检索 / 拼地址（2026-11-24）────────────────────────
+  // 分类落到站点级：投影时用实例的 site.categories 覆盖路由级 categories。夹具里站点级
+  // categories 全为空、路由级有值（D7 的判据），于是 category=programming 从命中 2 条变 0 条。
+  // from 照构建产物 lib/explore-catalog.js 的实际字节写（pitfalls 一、1.4）。
+  { id: 'explore-分类落到站点级', file: 'lib/explore-catalog.js',
+    judges: ['explore-catalog.test.mjs'],
+    judgeTests: ['query：category 只看路由级 categories —— 夹具站点级分类为空（B5 / D7）'],
+    from: '            const view = projectRoute(namespace, siteName, routeValue);',
+    to: '            const view = projectRoute(namespace, siteName, routeValue);\n            if (view !== undefined)\n                view.categories = categoriesOf(siteValue[\'categories\']);' },
+  // 站点名不参与搜索：q 只剩路由名 / 路径两个匹配面。实测的站点名常是中文（知乎）而 namespace
+  // 是拉丁（zhihu），去掉站点名后「搜知乎」从 1 条变 0 条 —— B3 / D8 的判据。
+  { id: 'explore-站点名不参与搜索', file: 'lib/explore-catalog.js',
+    judges: ['explore-catalog.test.mjs'],
+    judgeTests: ['query：q 对站点名 OR 路由名 OR 路径模板，大小写不敏感（B3 / B4）'],
+    from: '            const hit = row.siteName.toLowerCase().includes(q)\n                || row.name.toLowerCase().includes(q)',
+    to: '            const hit = false\n                || row.name.toLowerCase().includes(q)' },
+  // 缺必填也拼地址：缺参时不再分型失败，而是把 :param 原样留在地址里。用户会订到一个
+  // 指向错误路由的地址，失败要等 addFeed 才暴露（spec §4.5 / B14）。
+  { id: 'explore-缺必填也拼地址', file: 'lib/explore-catalog.js',
+    judges: ['explore-catalog.test.mjs'],
+    judgeTests: ['buildExploreUrl：必填缺失 ⇒ 分型失败并点名缺的参数（B14）'],
+    from: "            return { kind: 'missing', parameter: segment.name };",
+    to: "            filled.push(':' + segment.name);\n            continue;" },
+  // 可选段不省略：缺值时压入空串，地址里出现空段（`//`）而不是让整段消失（B15）。
+  { id: 'explore-可选段不省略', file: 'lib/explore-catalog.js',
+    judges: ['explore-catalog.test.mjs'],
+    judgeTests: ['buildExploreUrl：可选参数缺值 ⇒ 整段省略，不留空段 / undefined（B15）'],
+    from: '            if (segment.optional)\n                continue;',
+    to: "            if (segment.optional) {\n                filled.push('');\n                continue;\n            }" },
+  // 坏条目照收：去掉 path / name 的逐条形状校验。numericPath（path=42）与 missingName 会被
+  // 收进索引，invalid 从 5 掉到 2、total 从 3 涨到 5 —— B20 的判据当场翻红。
+  { id: 'explore-坏条目照收', file: 'lib/explore-catalog.js',
+    judges: ['explore-catalog.test.mjs'],
+    judgeTests: ['projectCatalog：坏站点 / 坏路由逐条跳过，invalid 计数，整表仍可用（B20）'],
+    from: "    if (typeof path !== 'string' || path === '' || typeof name !== 'string')\n        return undefined;",
+    to: '    if (false)\n        return undefined;' },
+
+  // ── R8b 03：探索端点的接线（2026-11-24）────────────────────────────────
+  // 分页上限失效：越界 limit 原样放行。夹具里 110 条路由，limit=500 时一次回全部 110 条，
+  // 「上限夹到 100」的判据当场翻红 —— 浏览器端收到的是整张表（B18 的病象）。
+  // from 照构建产物 lib/endpoints.js 的实际字节写（pitfalls 一、1.4），独立实测 OCCURRENCES=1。
+  { id: 'explore-没有分页上限', file: 'lib/endpoints.js',
+    judges: ['explore-endpoints.test.mjs'],
+    judgeTests: ['limit：默认 30、上限 100 夹取不拒绝，非正整数是形状错误（B18 的前半）'],
+    from: '            const limit = Math.min(input.limit ?? CATALOG_PAGE_DEFAULT, CATALOG_PAGE_MAX);',
+    to: '            const limit = input.limit ?? CATALOG_PAGE_DEFAULT;' },
+  // 游标栅栏失效：失配时不再拒绝，而是当成「没有游标」从第一页开始。B7 / B8 的用例会看到
+  // 200 + 第一页（界面无限追加重复行），而不是 bad-request。
+  { id: 'explore-游标不复位', file: 'lib/endpoints.js',
+    judges: ['explore-endpoints.test.mjs'],
+    judgeTests: ['游标栅栏：换 q / category / namespace 或乱码一律 bad-request，绝不回第一页（B7 / B8）'],
+    from: "                if (position === undefined)\n                    return fail('bad-request', '分页游标与当前筛选不匹配，请重新加载');",
+    to: "                if (false)\n                    return fail('bad-request', '分页游标与当前筛选不匹配，请重新加载');" },
+  // 未配置也请求：空地址不再回 not-configured，而是落一个公共实例去拉表。B9 的两条判据
+  // （错误码 not-configured + 零请求）同时翻红 —— 这正是 D11「未配置就不可用」的反面。
+  { id: 'explore-未配置也请求', file: 'lib/endpoints.js',
+    judges: ['explore-endpoints.test.mjs'],
+    judgeTests: ['未配置实例：两个端点都回可读错误，且一个网络请求都不发（B9）'],
+    from: "        return { ok: false, result: fail('not-configured', '未配置 RSSHub 实例地址，无法浏览路由表') };",
+    to: "        return { ok: true, base: 'https://rsshub.app' };" },
+
+  // ── R8b 04：客户端探索视图（2026-11-24）────────────────────────────────────
+  // 必填参数本地拦截失效：`missing` 永远收不到值 ⇒ 空着必填也发 exploreBuildUrl。
+  // 宿主的 B14 仍会拒（400），但用户在界面上先看到一次无谓往返，且「缺哪个参数」的点名
+  // 从本地即时反馈退化成服务端错误条。DOM 用例同时断言「零请求」与「点名 user」。
+  // explore-template.ts 被内联进 lib/client.js（不是 lib/explore-template.js），
+  // from 按构建产物 lib/client.js 的实际字节写（pitfalls 一、1.4），独立实测 OCCURRENCES=1。
+  { id: 'explore-客户端不拦缺参', file: 'lib/client.js',
+    judges: ['explore-view-dom.test.mjs'],
+    judgeTests: ['R8b 04 参数表单：按 example 预填；必填留空本地拦截并点名（不调 exploreBuildUrl）'],
+    // 条件恒假是**行为变异**：missing 保持空数组，流程继续走宿主拼地址（不是崩溃）。
+    from: 'if ((explore.draft[segment.name] ?? "").trim() === "" && !missing.includes(segment.name)) missing.push(segment.name);',
+    to: 'if (false && (explore.draft[segment.name] ?? "").trim() === "" && !missing.includes(segment.name)) missing.push(segment.name);' },
 ]

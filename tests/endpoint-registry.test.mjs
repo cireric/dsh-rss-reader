@@ -28,10 +28,11 @@ const ROUND = '2026-10-11T09:00:00.000Z'
 test('端点名字表非空、无重复、全为非空字符串', () => {
   // R3 02 新增 reorderFeeds 端点：28 → 29；R11 01 新增 settings：29 → 30；
   // R11 02 新增写端点 saveSettings：30 → 31；R8a 01 新增 testRsshub：31 → 32；
-  // R9 02 新增 backfillHistory：32 → 33。
+  // R9 02 新增 backfillHistory：32 → 33；R8b 03 新增只读的探索端点 exploreCatalog /
+  // exploreBuildUrl：33 → 35。
   // 这个数字是「端点表变更必须显形」的判据本身。
-  assert.equal(ENDPOINT_NAMES.length, 33)
-  assert.equal(new Set(ENDPOINT_NAMES).size, 33)
+  assert.equal(ENDPOINT_NAMES.length, 35)
+  assert.equal(new Set(ENDPOINT_NAMES).size, 35)
   for (const name of ENDPOINT_NAMES) assert.equal(typeof name, 'string')
 })
 
