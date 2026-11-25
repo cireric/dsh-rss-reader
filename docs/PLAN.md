@@ -122,7 +122,7 @@
 
 ### 第三批 4 — R8b：RSSHub 路由表探索
 
-- **状态**：**已完成**（`.scratch/r8b-explore/issues/` 5/5 `resolved`；集成分支 `r8b-explore`）。
+- **状态**：**已完成**（`.scratch/r8b-explore/issues/` 5/5 `resolved`；已合入 main `f7c8274`，开发分支已清理）。
 - **前置 spike（已完成，2026-11-24 实测）**：`rsshub.rssforever.com/api/namespace` → 200 · **1589 站 / 3288 路由 / 28 分类**；裸 3 289 636 B · gzip 638 090 B；首拉 23.5 s（裸）/ **8.9 s**（gzip，本机经代理）。`example` 3026/3288、`parameters` 2092/3288、路由级 `categories` 2940/3288（站点级仅 206 站且与站内路由完全一致）。参数语法 `:name` 1341 / `:name?` 1624 / `{.+}` 类 126（其中 118 是 `.+`·`.*`）。**「可选段后跟必填段」实测 0 例** ⇒ 省略可选段 = 从尾部剥，无需特例。
 - **拍板（D1–D15，见 spec §11）**：独立 `view: 'explore'`；单级扁平 + 站点名钻取；目录缓存 12 h 硬编码不设键；拉表专用 60 s / 16 MiB；constraint 不校验正则；订阅后不关视图；分类只按**路由级**；搜站点名命中该站全部路由；三筛 AND；分类单选；未配置实例入口不可见；下发行裁剪（丢 `description` / `location` / `maintainers` / `radar`）；`siteTotal`·`routeTotal` 与 `matched` 分口径；视图状态不持久化。
 - **交付**：`src/explore-catalog.ts`（投影 / 检索 / 游标栅栏 / 拼地址）、`src/explore-template.ts`（模板解析 + example 预填，host 与 client 共用一份）、`src/explore-catalog-fetch.ts`（取表 + 12 h 实例键缓存）、端点 `exploreCatalog` / `exploreBuildUrl`（33 → 35）、客户端 `view: 'explore'`（探索视图 + 两处入口 + 连续订阅）。
