@@ -3372,4 +3372,19 @@ export const MUTATIONS = [
     judgeTests: ['saveSettings 成功后探测缓存立即失效（不用等 30s）'],
     from: "            invalidateTranslateInfoCache();\n            return ok({ settings: outcome.snapshot });",
     to: "            void 0;\n            return ok({ settings: outcome.snapshot });" },
+  // ── R7 04：视口选批与长块三档（2026-11-25）────────────────────────────────
+  // 视口优先退化成「永远从文档第一块取」：用户点「译」时屏幕里的块不再先翻，D7 的
+  // 可感知承诺（先看到眼前这段）落空。判据是纯函数用例里「块覆盖视口时只取它」。
+  { id: 'translate-视口优先退化成从头取', file: 'lib/translate-blocks.js',
+    judges: ['translate-batch.test.mjs'],
+    judgeTests: ['块比视口长（矩形完全覆盖视口）也算可见，且按文档顺序排第一批'],
+    from: 'const pool = visible.length > 0 ? visible : candidates;',
+    to: 'const pool = candidates;' },
+  // 2000–6000 的块不再独占一批：它会被当普通块塞进批里，但字符上限又装不下，
+  // 结果是整块被静默跳过（进度永远差一块）。判据是「长块只能一个人一批」。
+  { id: 'translate-长块不独占一批', file: 'lib/translate-blocks.js',
+    judges: ['translate-batch.test.mjs'],
+    judgeTests: ['单块 2000 < 字符 ≤ 6000 ⇒ 独占一批（该批放宽到 6000）'],
+    from: 'if ((chars[first] ?? 0) > TRANSLATE_BATCH_MAX_CHARS)',
+    to: 'if ((chars[first] ?? 0) > TRANSLATE_BLOCK_MAX_CHARS)' },
 ]

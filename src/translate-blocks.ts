@@ -12,6 +12,20 @@
 /** 可翻译的正文块种类（D10）：`pre` / `img` / `table` 不翻、也不占编号。 */
 const TRANSLATABLE_KINDS: ReadonlySet<string> = new Set(['p', 'h', 'quote', 'list'])
 
+/**
+ * 一批的硬上限（spec §4.3 / D15）：12 块且 2000 字符，先到先切。
+ *
+ * 放在这个零依赖模块里，是因为视口选批（`pickBatch`）与串行编排（`translate-actions`）必须
+ * 用同一组数；两处各写一份时，「纯函数认为一批能装 12 块、动作层只发 10 块」这种漂移不会有
+ * 任何测试翻红。
+ */
+export const TRANSLATE_BATCH_MAX_BLOCKS = 12
+export const TRANSLATE_BATCH_MAX_CHARS = 2000
+/** 单块 2000–6000 独占一批；> 6000 不进任何批（spec §4.3 三档）。 */
+export const TRANSLATE_BLOCK_MAX_CHARS = 6000
+/** 单篇可翻字符上限（spec §4.3 / D3）：> 30000 直接拒绝，不静默截断。 */
+export const TRANSLATE_ARTICLE_MAX_CHARS = 30000
+
 /** 回包里一条译文的 wire 形状（请求与响应共用）。 */
 export interface TranslateRequestItem {
   readonly id: string
@@ -50,6 +64,17 @@ export function translatableTextOf(block: Record<string, unknown>): string {
   }
   const text = block['text']
   return typeof text === 'string' ? text : ''
+}
+
+/**
+ * 一个块参与批次计量的字符数：空白块记 0。
+ *
+ * 端点明确拒绝 `text` 全空白的条目（spec §5.1），把空白块的 `length` 当成可翻字符会让
+ * 「计划里 3 块、实际发出去 2 块」——进度永远差一块。01 的 firstBatchOf 也是同一条判据。
+ */
+export function translateCharsOf(block: Record<string, unknown>): number {
+  const text = translatableTextOf(block)
+  return text.trim() === '' ? 0 : text.length
 }
 
 /** 可翻块的下标数组（升序，与正文块下标一致）。 */
@@ -111,4 +136,135 @@ export function applyBatch(
   }
   const title = typeof response.title === 'string' && response.title.trim() !== '' ? response.title : undefined
   return { ok: true, ...(title === undefined ? {} : { title }), blocks }
+}
+
+/** 视口矩形（`getBoundingClientRect` 的最小投影；DOM 只负责量，纯函数不认 DOMRect）。 */
+export interface TranslateRect {
+  readonly top: number
+  readonly bottom: number
+  readonly left: number
+  readonly right: number
+}
+
+/**
+ * 一个可翻块的测量结果。
+ *
+ * `index` 是**正文块下标**（不是可翻块序号）：请求 id 是 `b + 块下标`，选批结果也回这个下标，
+ * 中间再转一次序号必然出错。`rect` 缺席 = 这个块量不到（尚未渲染 / 浏览器没布局），按不可见处。
+ */
+export interface TranslateBlockRect {
+  readonly index: number
+  readonly rect: TranslateRect | undefined
+}
+
+/** DOM 层量到的整份视口几何；`pickBatch` 的入参由它和一个已翻集合拼成。 */
+export interface TranslateGeometry {
+  readonly container: TranslateRect
+  readonly blocks: ReadonlyArray<TranslateBlockRect>
+}
+
+/** `pickBatch` 的全部输入：DOM 层只填矩形与字符数，判定本身不碰 DOM。 */
+export interface PickBatchInput {
+  /** 可翻块的矩形，按文档顺序；不可翻块不必出现。 */
+  readonly rects: ReadonlyArray<TranslateBlockRect>
+  /** 滚动容器矩形；undefined = 没量到容器（按「可见集为空」退化）。 */
+  readonly container: TranslateRect | undefined
+  /** 已翻块下标：跨批续选时跳过它们。 */
+  readonly translated: ReadonlySet<number>
+  /** 每块字符数，按**正文块下标**取值（与请求里的 text.length 同口径）。 */
+  readonly chars: ReadonlyArray<number>
+}
+
+/** 两个矩形是否有非空交集。贴边（bottom === top）不算可见，避免零高度块污染可见集。 */
+function intersects(a: TranslateRect, b: TranslateRect): boolean {
+  return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top
+}
+
+/** 从候选下标里按「先到先切」取一批；2000–6000 的块独占一批。 */
+function batchFrom(indices: readonly number[], chars: ReadonlyArray<number>): number[] {
+  const first = indices[0]
+  if (first === undefined) return []
+  // 2000 < 单块 ≤ 6000：独占一批，本批放宽到 6000。> 6000 已在候选过滤里被排除。
+  if ((chars[first] ?? 0) > TRANSLATE_BATCH_MAX_CHARS) return [first]
+  const batch: number[] = []
+  let totalChars = 0
+  for (const index of indices) {
+    const blockChars = chars[index] ?? 0
+    // 遇到长块就截断当前批，但**不跳过它**去装后面的短块 —— 那会打乱正文顺序。
+    if (blockChars > TRANSLATE_BATCH_MAX_CHARS) break
+    if (batch.length >= TRANSLATE_BATCH_MAX_BLOCKS) break
+    if (totalChars + blockChars > TRANSLATE_BATCH_MAX_CHARS) break
+    batch.push(index)
+    totalChars += blockChars
+  }
+  return batch
+}
+
+/**
+ * 视口选批（spec §4.3 / §5.5）：点「译」时先翻当前屏幕里看得见的块。
+ *
+ * 判据顺序：
+ *   1. 过滤掉已翻块、空块与 > 6000 的超长块；
+ *   2. 与滚动容器矩形求交，交到的块按文档顺序优先成批；
+ *   3. 可见集为空（停在顶部 / 尚未渲染完）⇒ 从第一个剩余块开始取一批。
+ *
+ * 这是纯函数：入参只有矩形与数字，jsdom 之外也能单测。DOM 层（article-pane）只负责量矩形，
+ * 不许在这里读 `window` / `document`。
+ */
+export function pickBatch(input: PickBatchInput): number[] {
+  const candidates = [...input.rects]
+    .filter((entry) => Number.isInteger(entry.index) && entry.index >= 0)
+    .sort((a, b) => a.index - b.index)
+    .filter((entry) => {
+      if (input.translated.has(entry.index)) return false
+      const blockChars = input.chars[entry.index] ?? 0
+      return blockChars > 0 && blockChars <= TRANSLATE_BLOCK_MAX_CHARS
+    })
+  const container = input.container
+  const visible = container === undefined
+    ? []
+    : candidates.filter((entry) => entry.rect !== undefined && intersects(entry.rect, container))
+  const pool = visible.length > 0 ? visible : candidates
+  return batchFrom(pool.map((entry) => entry.index), input.chars)
+}
+
+/** 整篇翻译的静态计划（spec §4.3 / D3）：字符总数、可翻块数、超长块与上限判定。 */
+export interface TranslateArticlePlan {
+  /** 可翻块文本长度之和（含超长块；上限判断用这个口径）。 */
+  readonly chars: number
+  /** 可翻且不超长、非空白的块数 —— 进度分母 Y（不含超长块）。 */
+  readonly totalBlocks: number
+  /** > 6000 的块下标：不参与任何批次，原位标「段落过长未翻译」。 */
+  readonly overlongBlocks: readonly number[]
+  /** 会真正进入批次的块下标（升序）。 */
+  readonly eligibleBlocks: readonly number[]
+  /** 是否超过单篇 30000 字符上限；用 `>`，恰好 30000 必须放行。 */
+  readonly tooLong: boolean
+}
+
+/**
+ * 从正文块算出整篇计划。
+ *
+ * 空白块不计入 `totalBlocks`：端点明确拒绝 `text` 全空白的条目（spec §5.1），把它算进分母
+ * 会让进度永远差几块、完成态永远到不了。它也不进批次 —— 与 01 的 firstBatchOf 同一条判据。
+ */
+export function articleTranslatePlanOf(blocks: readonly Record<string, unknown>[]): TranslateArticlePlan {
+  let chars = 0
+  const overlongBlocks: number[] = []
+  const eligibleBlocks: number[] = []
+  for (const index of translatableBlocksOf(blocks)) {
+    const block = blocks[index]
+    if (block === undefined) continue
+    const length = translateCharsOf(block)
+    chars += length
+    if (length > TRANSLATE_BLOCK_MAX_CHARS) overlongBlocks.push(index)
+    else if (length > 0) eligibleBlocks.push(index)
+  }
+  return {
+    chars,
+    totalBlocks: eligibleBlocks.length,
+    overlongBlocks,
+    eligibleBlocks,
+    tooLong: chars > TRANSLATE_ARTICLE_MAX_CHARS,
+  }
 }

@@ -1124,7 +1124,10 @@ export function createReader(store: ReaderStore): () => ReactNode {
             translateAvailable={state.translationInfo?.available === true}
             translateTarget={state.translateTarget}
             onTranslateTarget={store.setTranslateTarget}
-            onTranslate={() => { void store.startTranslate() }}
+            // 点击时把视口矩形交给动作层（R7 04）：选批是纯函数，组件只负责量。
+            onTranslate={(geometry) => { void store.startTranslate(geometry) }}
+            // 组件卸载（切面板 / 离开正文面）时中止后续批；在途那批允许跑完。
+            onStopTranslate={store.stopTranslate}
             canPrev={store.canStepArticle(-1)}
             canNext={store.canStepArticle(1)}
             onPrev={() => { store.stepArticle(-1) }}

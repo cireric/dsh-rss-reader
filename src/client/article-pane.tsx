@@ -6,7 +6,7 @@
  * 页面上下文里跑，是当初加沙箱要挡的事。取舍结论：**正文只走抽取视图**，想看原样就用
  * 「打开原站 ↗」在新标签页看——那是浏览器自己的上下文，没有沙箱折衷。
  */
-import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { edgeTopFor, readingRatioOf, restoreTopFor } from '../list-scroll.js'
 
 /**
@@ -23,7 +23,14 @@ import { paragraphsOf } from '../html-text.js'
 import { READING_FONT_SIZES, READING_LINE_WIDTHS } from '../preferences.js'
 import type { ReadingPreferences } from '../preferences.js'
 import type { ArticleState, TranslationEntry } from './store.js'
-import { TARGET_LANGUAGES, TRANSLATE_BUTTON_TEXT, type TargetLanguage } from '../translate-copy.js'
+import { TARGET_LANGUAGES, TRANSLATE_BUTTON_TEXT, TRANSLATE_LABEL_TEXT, type TargetLanguage } from '../translate-copy.js'
+import {
+  translateCharsOf,
+  TRANSLATE_BLOCK_MAX_CHARS,
+  type TranslateBlockRect,
+  type TranslateGeometry,
+  type TranslateRect,
+} from '../translate-blocks.js'
 // InlineRun 从 article-text.js 取，**不从 article.js**：后者 import 了 node:crypto 与 feed/fetch.js，
 // 而 client bundle 不许出现任何 node: 说明符（tsdown 不会因此报错，失败被推迟到浏览器运行期）。
 // 见 docs/pitfalls.md §1.7b。
@@ -586,7 +593,32 @@ function Lightbox({ src, onClose }: {
   )
 }
 
-export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress, expandedGroups, onExpandImageGroup, imagesExpanded, lightboxSrc, onOpenImage, onCloseLightbox, translation, translateAvailable, translateTarget, onTranslateTarget, onTranslate }: {
+/** `getBoundingClientRect()` → 纯函数认的四个数（DOMRect 不进 translate-blocks）。 */
+function rectOf(element: Element): TranslateRect {
+  const rect = element.getBoundingClientRect()
+  return { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right }
+}
+
+/**
+ * 量当前正文的视口几何（spec §4.3）：滚动容器 + 每个块的矩形。
+ *
+ * 块锚点是渲染层打的 `data-rss-block={块下标}`（见下面 displayBlocks.map）。用锚点而不是把 ref
+ * 数组抬到 React 里：块下标本来就是渲染的唯一身份，锚点让「DOM 顺序 === displayBlocks 下标」
+ * 成为可核对的事实；图片折叠只让成员返回 null，剩下的锚点仍带着原下标。
+ */
+function translateGeometryOf(box: HTMLElement): TranslateGeometry {
+  const blocks: TranslateBlockRect[] = []
+  for (const node of box.querySelectorAll<HTMLElement>('[data-rss-block]')) {
+    const raw = node.getAttribute('data-rss-block')
+    if (raw === null) continue
+    const index = Number(raw)
+    if (!Number.isInteger(index) || index < 0) continue
+    blocks.push({ index, rect: rectOf(node) })
+  }
+  return { container: rectOf(box), blocks }
+}
+
+export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress, expandedGroups, onExpandImageGroup, imagesExpanded, lightboxSrc, onOpenImage, onCloseLightbox, translation, translateAvailable, translateTarget, onTranslateTarget, onTranslate, onStopTranslate }: {
   article: ArticleState | undefined
   item: ItemView | undefined
   onBack: () => void
@@ -595,8 +627,6 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
    * 现查后传入。组件不持有译文状态 —— 切条目 / 切面板回来才不会丢（spec §4.6）。
    */
   translation: TranslationEntry | undefined
-  /** 点「译」：动作在 store 的 translate-actions 里，组件只交回意图。 */
-  onTranslate: () => void
   /**
    * 翻译当前是否可用（R7 02，spec §4.1）：`translateInfo.available === true` 才渲染「译」按钮
    * 与 Aa 面板里的目标语言下拉。判据只由 store 持有，组件不自己再探一次。
@@ -606,6 +636,16 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
   translateTarget: TargetLanguage
   /** 改目标语言：交给 store 落进 viewPreferences，组件不持有状态。 */
   onTranslateTarget: (target: TargetLanguage) => void
+  /**
+   * 点「译」：动作在 store 的 translate-actions 里，组件只交回意图与**点击那一刻**量到的几何。
+   * 几何不进 props / state：滚动位置随时在变，只有点击瞬间的视口才是「第一批翻哪些」的依据。
+   */
+  onTranslate: (geometry: TranslateGeometry | undefined) => void
+  /**
+   * 停止后续批（R7 04）：组件卸载 = 离开正文面 / 切面板。在途那一批允许跑完，
+   * store 的编排会在下一批前看到 token 已变而退出（spec §4.6 / D18）。
+   */
+  onStopTranslate: () => void
   /**
    * 重试抓取当前正文页这一篇（R4-B4）。
    * 请求哪个条目由 store 按 `article.itemId` 决定，本组件只负责把用户意图交回去 ——
@@ -783,6 +823,16 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
   /** 待恢复的比例（M5 02）：内容长高时按它重算位置，直到用户自己滚走。 */
   const restoreRatioRef = useRef<number | undefined>(undefined)
 
+  /**
+   * 卸载中止（R7 04 / D18）：组件卸载 = 切面板 / 离开正文面，后续批必须停。
+   *
+   * 用 ref 转发而不是把 `onStopTranslate` 直接放进依赖数组：父组件回调身份一旦变化，
+   * effect 的 cleanup 会跟着跑一次 —— 那会在一次普通重渲染里把正在跑的翻译停掉。
+   */
+  const onStopTranslateRef = useRef(onStopTranslate)
+  useEffect(() => { onStopTranslateRef.current = onStopTranslate }, [onStopTranslate])
+  useEffect(() => () => { onStopTranslateRef.current() }, [])
+
   /** 贴到底部，并记下这次是我们写的（供 handleScroll 区分用户滚动）。 */
   const pinToBottom = useCallback((box: HTMLDivElement): void => {
     box.scrollTop = edgeTopFor(box.scrollHeight - box.clientHeight, 'bottom')
@@ -930,12 +980,21 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
               <a className="dsh-rss-btn dsh-rss-btn--ghost" href={link} target="_blank" rel="noreferrer">打开原站 ↗</a>
             )}
             {/*
-              * 一键翻译（R7 01 / R7 02 门禁）。不可用时**不渲染**（spec §4.1）：
+              * 一键翻译（R7 01 / 04）。**不可用时不渲染**（R7 02 / spec §4.1）：
               * 连按钮都不该出现，而不是点了再说「没有模型」。放在 Aa 左侧是固定位置。
+              *
+              * 点击这一刻才量几何（R7 04）：滚动位置随时在变，渲染期缓存 rect 会在用户滚动后
+              * 变成另一篇视角；`translateGeometryOf` 只读 DOM，选批仍是纯函数。
               */}
             {translateAvailable && (
               <button type="button" className="dsh-rss-btn" data-rss-translate=""
-                title="翻译当前文章（首批最多 12 段）" onClick={onTranslate}>{TRANSLATE_BUTTON_TEXT.translate}</button>
+                title="翻译当前文章（先译屏幕内的段落）" onClick={() => {
+                  const box = boxRef.current
+                  onTranslate(box === null ? undefined : translateGeometryOf(box))
+                }}>{TRANSLATE_BUTTON_TEXT.translate}</button>
+            )}
+            {translation !== undefined && translation.total > 0 && (
+              <span data-rss-translate-progress className="dsh-rss-meta" role="status">{TRANSLATE_LABEL_TEXT.progress(translation.done, translation.total)}</span>
             )}
             {/*
               * 阅读偏好（M5 01）收在一个 <details> 里：三个 <select> 摊开摆会把这一行挤成两层，
@@ -1083,8 +1142,18 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
                * 「不许出现空段落」的守卫。
                */
               const translated = translation?.blocks.get(index)
+              /**
+               * 超长块（R7 04 / spec §4.3 第三档）：> 6000 字符不进任何批，原位说明原因。
+               * 只在有本篇译文条目时出现 —— 没点「译」之前不该先给读者一排「未翻译」。
+               */
+              const tooLong = translation !== undefined && translateCharsOf(block) > TRANSLATE_BLOCK_MAX_CHARS
               return (
-                <Fragment key={blockKeyOf(index)}>
+                /**
+                 * `data-rss-block` 是测量锚点（R7 04）：DOM 顺序与 displayBlocks 下标一一对应，
+                 * `translateGeometryOf` 按它把矩形喂给纯函数 pickBatch。译文段也住在这个包裹里，
+                 * 这样「块 + 自己的译文」始终是一个整体，不会与相邻块串段。
+                 */
+                <div key={blockKeyOf(index)} data-rss-block={index}>
                   <ArticleBlockView block={block} onOpenImage={onOpenImage} />
                   {translated !== undefined && translated.trim() !== '' && (
                     <p data-rss-translation={index} style={{
@@ -1096,12 +1165,21 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
                       whiteSpace: 'pre-wrap',
                     }}>{translated}</p>
                   )}
-                </Fragment>
+                  {tooLong && (
+                    <p data-rss-translation-too-long={index} className="dsh-rss-meta" style={{ margin: '0 0 1.1em' }}>
+                      {TRANSLATE_LABEL_TEXT.blockTooLong}
+                    </p>
+                  )}
+                </div>
               )
             }
             // 折叠：只在组首块画提示，其余成员整块不渲染（组是原子的）
             if (group.blockIndexes[0] !== index) return null
-            return <ImageFoldHint key={blockKeyOf(index)} group={group} onExpand={onExpandImageGroup} />
+            return (
+              <div key={blockKeyOf(index)} data-rss-block={index}>
+                <ImageFoldHint group={group} onExpand={onExpandImageGroup} />
+              </div>
+            )
           })}
         </article>
       </div>

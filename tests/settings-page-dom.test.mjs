@@ -66,6 +66,11 @@ const TUNABLE_DEFAULTS = {
   minRefreshIntervalMs: 600000,
   cleanupAfterDays: 30,
   rsshubBase: '',
+  // R7 02：设置快照必须与宿主同形；翻译分区读这三个键。
+  translateProvider: '',
+  translateModel: '',
+  translateEffort: '',
+  translateNoticeAck: false,
 }
 
 /** 本轮 mount 的收尾函数登记表：afterEach 统一清（未决 handle 会拖死变异判定）。 */
