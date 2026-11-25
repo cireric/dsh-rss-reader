@@ -3441,4 +3441,23 @@ export const MUTATIONS = [
     judgeTests: ['R7 06 停止：在途批跑完不再发下一批；继续只补剩余块，已译块不重发'],
     from: '\t\t\t\tconst settled = new Set(resumeEntry?.blocks.keys() ?? []);',
     to: '\t\t\t\tconst settled = new Set([]);' },
+
+  // ── R7 评审修复（2026-11-25）────────────────────────────────────────────
+  // 整篇上限从 `>` 改成 `>=`：恰好 30000 字符的文章会被拒绝 —— spec §4.3 / D3 明写「> 30000」才拒，
+  // 30000 必须正常分 15 批。判据是纯函数计划用例与「30000 字符跑 15 批」的客户端用例。
+  // from 照构建产物 lib/translate-blocks.js 的实际字节写，独立实测 OCCURRENCES=1。
+  { id: 'translate-整篇上限边界少放行1字符', file: 'lib/translate-blocks.js',
+    judges: ['translate-batch.test.mjs', 'translate-progress.test.mjs'],
+    judgeTests: ['整篇计划：30000 字符正常、30001 拒绝（> 而不是 >=）', 'R7 04 进度：30000 字符恰好放行，15 批从 1/15 走到 15/15'],
+    from: 'tooLong: chars > TRANSLATE_ARTICLE_MAX_CHARS,',
+    to: 'tooLong: chars >= TRANSLATE_ARTICLE_MAX_CHARS,' },
+  // 首次外发确认闸门被短路：translateNoticeAck 永远视为已确认，确认框不再弹 ——
+  // 用户从未同意就把当前文章正文发给第三方模型（spec §4.2 隐私承诺的直接破口）。
+  // 判据是确认框用例里「首次点译先弹框，取消零请求 / 零 saveSettings / 零状态」。
+  // from 照构建产物 lib/client.js 的实际字节写，独立实测 OCCURRENCES=1。
+  { id: 'translate-首次确认闸门短路', file: 'lib/client.js',
+    judges: ['translate-confirm.test.mjs'],
+    judgeTests: ['R7 06 首次点「译」：确认框写清路由与字符数；取消零副作用'],
+    from: 'if (state.settings?.effective.translateNoticeAck !== true) {',
+    to: 'if (false) {' },
 ]

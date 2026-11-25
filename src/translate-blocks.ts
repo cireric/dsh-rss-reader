@@ -32,6 +32,27 @@ export interface TranslateRequestItem {
   readonly text: string
 }
 
+/**
+ * 块下标 → 请求 id（spec §5.1 的 `b<下标>` 协议）。
+ *
+ * 编码与解码只留这一对函数：端点声明、宿主解析、客户端拼请求、客户端解析回包都要用同一个
+ * 编号协议；四处各写一遍 `'b' + index` / `/^b(\d+)$/` 时，只要有一处漂移（例如允许 `b01`，
+ * 或把下标当成可翻块序号），错位译文就会安静地贴到别的段落上。
+ */
+export function translateBlockIdOf(index: number): string {
+  return 'b' + index
+}
+
+/** 请求 id → 块下标；认不出（不是规范的 `b<非负整数>`）返回 undefined，不猜。 */
+export function blockIndexOfTranslateId(id: string): number | undefined {
+  // 只认规范形式：`b01` 与 `b1` 解码成同一下标时，两个不同 id 会通过「重复 id」检查后
+  // 在 Map 里互相覆盖 —— 那正是这条编解码要消灭的错位。
+  const match = /^b(0|[1-9]\d*)$/.exec(id)
+  if (match === null || match[1] === undefined) return undefined
+  const index = Number(match[1])
+  return Number.isSafeInteger(index) ? index : undefined
+}
+
 /** 一次回包对齐的结果：成功给出标题与「块下标 → 译文」，失败只有一种原因（整批失败）。 */
 export type ApplyBatchResult =
   | {
@@ -130,9 +151,9 @@ export function applyBatch(
   const blocks = new Map<number, string>()
   for (const item of items) {
     if (item.text.trim() === '') continue
-    const match = /^b(\d+)$/.exec(item.id)
-    if (match === null) continue
-    blocks.set(Number(match[1]), item.text)
+    const index = blockIndexOfTranslateId(item.id)
+    if (index === undefined) continue
+    blocks.set(index, item.text)
   }
   const title = typeof response.title === 'string' && response.title.trim() !== '' ? response.title : undefined
   return { ok: true, ...(title === undefined ? {} : { title }), blocks }
