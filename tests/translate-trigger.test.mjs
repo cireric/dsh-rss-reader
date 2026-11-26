@@ -43,13 +43,13 @@ test('R7 06 t 无译文：首次弹确认框；取消零请求，确认后开始
     h.$('[data-rss-translate-confirm-ok]').click()
     await h.waitFor(() => h.calls('translateBatch').length === 1, { label: '确认后开始翻译' })
     await h.waitFor(() => translationOf(h)?.status === 'done', { label: '翻译完成' })
-    assert.equal(h.store.get().translationMode, 'translated', '开始翻译后默认落译文态')
+    assert.equal(h.store.get().translationMode, 'parallel', '开始翻译后默认落对照态')
   } finally {
     h.cleanup()
   }
 })
 
-test('R7 06 t 有译文：原文 → 译文 → 对照 循环且不发 rpc', skip, async () => {
+test('R7 06 t 有译文：原文 ↔ 对照 循环且不发 rpc', skip, async () => {
   const h = await mount({ items: [itemOf('a')], articles: { a: articleOf('a', BLOCKS) } })
   try {
     await openArticle(h, 'a')
@@ -59,17 +59,14 @@ test('R7 06 t 有译文：原文 → 译文 → 对照 循环且不发 rpc', ski
     await h.settle()
     const requestsBefore = h.requests.length
 
-    assert.equal(h.store.get().translationMode, 'translated')
-    h.press('t')
-    await h.settle()
-    assert.equal(h.store.get().translationMode, 'parallel', '译文 → 对照')
+    assert.equal(h.store.get().translationMode, 'parallel', '默认对照')
     h.press('t')
     await h.settle()
     assert.equal(h.store.get().translationMode, 'original', '对照 → 原文')
     h.press('t')
     await h.settle()
-    assert.equal(h.store.get().translationMode, 'translated', '原文 → 译文')
-    assert.equal(h.requests.length, requestsBefore, '三态循环只改渲染，一条 rpc 都不许发')
+    assert.equal(h.store.get().translationMode, 'parallel', '原文 → 对照')
+    assert.equal(h.requests.length, requestsBefore, '两态循环只改渲染，一条 rpc 都不许发')
   } finally {
     h.cleanup()
   }
@@ -79,8 +76,9 @@ test('R7 06 t 输入控件聚焦时不触发', skip, async () => {
   const h = await mount({ items: [itemOf('a')], articles: { a: articleOf('a', BLOCKS) } })
   try {
     await openArticle(h, 'a')
-    const language = h.$('[data-rss-target-language]')
-    assert.ok(language !== null, 'Aa 面板里应有目标语言下拉')
+    // 工具栏里随便一个可聚焦的表单控件都行（下拉键盘可聚焦，但不属于文本输入）。
+    const language = h.$('[data-rss-translate-language]')
+    assert.ok(language !== null, '工具栏里应有目标语言下拉')
     language.focus()
     h.press('t')
     await h.settle()

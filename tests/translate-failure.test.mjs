@@ -216,48 +216,6 @@ test('R7 05 批失败：其余批继续，失败处显示原因 + 批首一个�
   }
 })
 
-test('R7 05 首批失败后重试：重试请求再带 title；回包无 title ⇒ 显示「标题未翻译」', skip, async () => {
-  // spec §4.3：标题随第一批发送。首批失败后 firstBatch 已经翻页，重试该批必须**再带一次**标题，
-  // 否则标题永远没有第二次机会（评审修复 A6）。这里让首批失败、重试成功且回包故意不带 title。
-  const blocks = [{ kind: 'p', text: '段落' }]
-  let calls = 0
-  const h = await mount({
-    items: [itemOf('a')],
-    articles: { a: articleOf('a', blocks) },
-    translateBatch: async (payload) => {
-      calls += 1
-      if (calls === 1) return failureOf('timeout')
-      return {
-        value: {
-          model: 'fake/m',
-          items: payload.items.map((item) => ({ id: item.id, text: '译:' + item.text })),
-        },
-      }
-    },
-  })
-  try {
-    await openArticle(h, 'a')
-    h.$('[data-rss-translate]').click()
-    await h.waitFor(() => {
-      const entry = translationOf(h)
-      return entry?.status === 'done' && entry.failures.size === 1
-    }, { label: '首批失败收尾' })
-    await h.settle()
-    assert.equal(h.calls('translateBatch')[0].payload.title, '文章 a', '首批本来就带标题')
-
-    h.$('[data-rss-translation-retry]').click()
-    await h.waitFor(() => translationOf(h)?.failures.size === 0, { label: '重试成功' })
-    await h.settle()
-    const retried = h.calls('translateBatch')[1].payload
-    assert.equal(retried.title, '文章 a', '重试首批必须再次带上标题')
-    assert.equal(translationOf(h).titleFailed, true, '带标题的批次成功但回包没有标题 ⇒ 标题未翻译')
-    assert.equal(translationOf(h).title, undefined)
-    assert.equal(h.$('[data-rss-title-failed]').textContent, '标题未翻译')
-  } finally {
-    h.cleanup()
-  }
-})
-
 test('R7 05 连续 3 批失败 ⇒ 整篇停止，不再发第 4 批，顶部显示最后原因', skip, async () => {
   // 3000 字 > 2000 ⇒ 每块独占一批；四批里只允许前三批发出。
   const blocks = Array.from({ length: 4 }, (_, index) => ({ kind: 'p', text: '段'.repeat(3000) + index }))
@@ -413,6 +371,63 @@ test('R7 05 RpcError：browserRpc 保留 code / details，message 仍是逐字�
     })
   } finally {
     globalThis.fetch = originalFetch
+    h.cleanup()
+  }
+})
+
+test('R7 优化 按钮状态机：无译文→译；缺块→继续翻译（只补缺块）；全译完→重译', skip, async () => {
+  // 两块各 3000 字 ⇒ 每块独占一批。b0 成功、b1 首次失败 ⇒ 停在「还缺一块」。
+  const blocks = [
+    { kind: 'p', text: '甲'.repeat(3000) },
+    { kind: 'p', text: '乙'.repeat(3000) },
+  ]
+  let b1Attempts = 0
+  const h = await mount({
+    items: [itemOf('a')],
+    articles: { a: articleOf('a', blocks) },
+    translateBatch: async (payload) => {
+      if (payload.items.some((item) => item.id === 'b1')) {
+        b1Attempts += 1
+        if (b1Attempts === 1) return failureOf('timeout')
+      }
+      return successOf(payload)
+    },
+  })
+  try {
+    await openArticle(h, 'a')
+    const button = () => h.$('[data-rss-translate]')
+    assert.equal(button().getAttribute('data-rss-translate-state'), 'translate', '没有译文时是「译」')
+    assert.equal(button().textContent, '译')
+
+    button().click()
+    await h.waitFor(() => translationOf(h)?.status === 'done' && translationOf(h)?.failures.size === 1,
+      { label: '首批失败收尾' })
+    await h.settle()
+    // 只译成 1/2：按钮必须是「继续翻译（还剩 1/2）」，不是「重译」。
+    assert.equal(button().getAttribute('data-rss-translate-state'), 'continue')
+    assert.match(button().textContent, /^继续翻译（还剩 1\/2）$/)
+    assert.equal(translationOf(h).done, 1)
+    assert.equal(translationOf(h).total, 2)
+
+    // 点继续：只发缺的那一块，已译的 b0 不许重发；失败记录随重排清空。
+    const before = h.calls('translateBatch').length
+    button().click()
+    await h.waitFor(() => h.calls('translateBatch').length > before, { label: '继续翻译发出请求' })
+    const continued = h.calls('translateBatch')[before].payload
+    assert.deepEqual(continued.items.map((item) => item.id), ['b1'], '继续翻译只补没译成的块')
+    await h.waitFor(() => translationOf(h)?.failures.size === 0 && translationOf(h)?.done === 2,
+      { label: '补齐' })
+    await h.settle()
+    assert.equal(button().getAttribute('data-rss-translate-state'), 'retranslate', '全译完后按钮变「重译」')
+    assert.equal(button().textContent, '重译')
+
+    // 重译：整篇重发（这里只验证语义：会清空后重新发全部块）。
+    const beforeRetry = h.calls('translateBatch').length
+    button().click()
+    await h.waitFor(() => h.calls('translateBatch').length > beforeRetry, { label: '重译发出请求' })
+    assert.deepEqual(h.calls('translateBatch')[beforeRetry].payload.items.map((item) => item.id), ['b0'],
+      '重译从第一块重新开始（首批只含 b0）')
+  } finally {
     h.cleanup()
   }
 })

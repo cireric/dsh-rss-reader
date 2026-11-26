@@ -23,7 +23,7 @@ import { paragraphsOf } from '../html-text.js'
 import { READING_FONT_SIZES, READING_LINE_WIDTHS } from '../preferences.js'
 import type { ReadingPreferences } from '../preferences.js'
 import { hasTranslations, type ArticleState, type TranslateConfirmRequest, type TranslationEntry, type TranslationMode } from './store.js'
-import { TranslationModeSwitcher, TranslationSegment, translatedBlockOf } from './translate-view.js'
+import { TranslationPending, TranslationSegment, TranslationToggle, translatedBlockOf } from './translate-view.js'
 import { translateGeometryOf } from './translate-geometry.js'
 import {
   TARGET_LANGUAGES, TRANSLATE_BUTTON_TEXT, TRANSLATE_FAILURE_UI, TRANSLATE_LABEL_TEXT,
@@ -612,7 +612,7 @@ function Lightbox({ src, onClose }: {
   )
 }
 
-export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress, expandedGroups, onExpandImageGroup, imagesExpanded, lightboxSrc, onOpenImage, onCloseLightbox, translation, translationMode, onTranslationMode, translateAvailable, translateTarget, onTranslateTarget, onTranslate, onContinueTranslate, onRetranslate, translateConfirm, onConfirmTranslate, onCancelTranslate, onStopTranslate, onRetryBatch }: {
+export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress, expandedGroups, onExpandImageGroup, imagesExpanded, lightboxSrc, onOpenImage, onCloseLightbox, translation, translationPending, translationMode, onTranslationMode, translateAvailable, translateTarget, onTranslateTarget, onTranslate, onContinueTranslate, onRetranslate, translateConfirm, onConfirmTranslate, onCancelTranslate, onStopTranslate, onRetryBatch }: {
   article: ArticleState | undefined
   item: ItemView | undefined
   onBack: () => void
@@ -621,6 +621,11 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
    * 现查后传入。组件不持有译文状态 —— 切条目 / 切面板回来才不会丢（spec §4.6）。
    */
   translation: TranslationEntry | undefined
+  /**
+   * 正在飞的那一批的块下标（R7 优化）：在这些块下方显示「正在翻译」占位。
+   * 传 `undefined` = 没有在飞的批；原文态不显示（用户明确选了只看原文）。
+   */
+  translationPending: readonly number[] | undefined
   /** 三态（R7 03）：值归 store 所有，本组件只照着画、把用户的切换交回去。 */
   translationMode: TranslationMode
   /** 点切换器 ⇒ 只改 store 里的显示态（动作层不发 rpc，验收 12）。 */
@@ -801,6 +806,17 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
    */
   const effectiveMode: TranslationMode = hasTranslations(translation) ? translationMode : 'original'
   /**
+   * 在飞的批（R7 优化）：Set 只在这里建一次。原文态不显示 —— 用户选了「只看原文」时，
+   * 一排转圈只会打断阅读；进度仍在工具栏的「已译 X/Y」里。
+   */
+  const pendingBlocks: ReadonlySet<number> = new Set(translationPending ?? [])
+  /**
+   * 允许画占位的条件：这一篇已经有译文，或者这一篇正在翻第一批。
+   * 只看 `hasTranslations` 会让「第一批还没回来」时一个图标都不显示 —— 那正是最需要指示的时刻。
+   */
+  const showsPendingSlots = translation !== undefined && translationMode !== 'original'
+    && (hasTranslations(translation) || translation.status === 'running')
+  /**
    * 块下标 → 它所属的失败批（R7 05）。`failures` 以批首为键，渲染要按**块**找原因，
    * 所以先摊平成「块 → { 批首, 原因 }」：同批每块位置显示原因，只有批首位置放重试按钮。
    */
@@ -811,16 +827,10 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
     }
   }
   /**
-   * 标题三态（spec §4.5）：
-   *  - 译文态：有译文标题且没有失败标记 ⇒ 译文标题；标题翻译失败 ⇒ 原文标题 + 角标；
-   *  - 对照态：**永远**原文标题（对照的用途是核对正文，标题不参与）；
-   *  - 原文态：原文标题。
+   * 标题：永远原文标题（2026-11-26 删掉纯译文态后，双语对照里标题不参与翻译；
+   * 标题翻译能力仍保留在宿主端点，客户端不再发送标题）。
    */
-  const translatedTitle = effectiveMode === 'translated' && translation?.titleFailed !== true
-    ? translation?.title
-    : undefined
-  const title = translatedTitle !== undefined ? translatedTitle : (article?.title || item?.title)
-  const titleNotTranslated = effectiveMode === 'translated' && translation?.titleFailed === true
+  const title = article?.title || item?.title
   const publishedAt = item?.publishedAt
   // R12：作者只由 src/author.ts 在读路径归一化；这里直接用投影值，不再加桩件守卫。
   const author = item?.author
@@ -840,14 +850,26 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
    */
   const translatePlan = articleTranslatePlanOf(article?.blocks ?? [])
   const translateEmpty = translatePlan.totalBlocks === 0 && translatePlan.overlongBlocks.length === 0
-  const translateRemaining = translation === undefined ? 0 : Math.max(0, translation.total - translation.done)
-  const translateButtonState: 'translate' | 'stop' | 'continue' | 'retranslate' = translation === undefined
-    ? 'translate'
-    : translation.status === 'running'
-      ? 'stop'
-      : translation.status === 'stopped' && translateRemaining > 0
-        ? 'continue'
-        : 'retranslate'
+  /**
+   * 「还剩多少块」按**实际回填的译文块**算（`blocks.size`），不是按「发出去多少块」。
+   * 模型对某块回空 / 对齐失败时那一块没有译文，读者看到的缺口就是它 —— 继续翻译要补的也是它。
+   */
+  const translateRemaining = translation === undefined ? 0 : Math.max(0, translation.total - translation.blocks.size)
+  /**
+   * 按钮只表达**下一步该做什么**（2026-11-26 用户拍板）：
+   *  - 没有任何译文（含一条都没成功）⇒ 「译」，从头开始；
+   *  - 在跑 ⇒ 「停止」；
+   *  - 有译文但还缺块（停止 / 批失败 / 空回包）⇒ 「继续翻译」，只补缺的块；
+   *  - 全部译完 ⇒ 「重译」——唯一真实场景是**换了模型想用新路由重翻同一篇**（D20 不因换模型作废旧译文）。
+   */
+  const translateButtonState: 'translate' | 'stop' | 'continue' | 'retranslate' =
+    translation === undefined || (translation.blocks.size === 0 && translation.status !== 'running')
+      ? 'translate'
+      : translation.status === 'running'
+        ? 'stop'
+        : translateRemaining > 0
+          ? 'continue'
+          : 'retranslate'
   const translateButtonText = translateButtonState === 'translate'
     ? TRANSLATE_BUTTON_TEXT.translate
     : translateButtonState === 'stop'
@@ -1055,10 +1077,24 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
               <a className="dsh-rss-btn dsh-rss-btn--ghost" href={link} target="_blank" rel="noreferrer">打开原站 ↗</a>
             )}
             {/*
+              * 目标语言（2026-11-26 用户拍板：按就近原则从设置页 / Aa 面板挪到「译」旁边）。
+              * 不配文字 label —— 下拉里就是语言名，`aria-label` 留给读屏器；不可用时不渲染。
+              */}
+            {translateAvailable && (
+              <select className="dsh-rss-translate-language" value={translateTarget}
+                aria-label="翻译目标语言" data-rss-translate-language=""
+                onChange={(event) => onTranslateTarget(event.target.value as TargetLanguage)}>
+                {TARGET_LANGUAGES.map((language) => (
+                  <option key={language.id} value={language.id}>{language.label}</option>
+                ))}
+              </select>
+            )}
+            {/*
               * 一键翻译（R7 01 / 04 / 06）。**不可用时不渲染**（R7 02 / spec §4.1）：
               * 连按钮都不该出现，而不是点了再说「没有模型」。放在 Aa 左侧是固定位置。
               *
-              * 状态机（D19）：译 → 停止（在译）→ 继续翻译（中止且还有剩余）→ 重译（完成 / 失败）。
+              * 状态机（D19，2026-11-26 用户拍板）：无译文 ⇒「译」；在译 ⇒「停止」；缺块 ⇒「继续翻译」
+              * （只补没译成的块）；全译完 ⇒「重译」（换模型后想重翻同一篇的唯一入口）。
               * 点击这一刻才量几何（R7 04）：滚动位置随时在变，渲染期缓存 rect 会在用户滚动后
               * 变成另一篇视角；`translateGeometryOf` 只读 DOM，选批仍是纯函数。
               * 可翻块为 0（全图片 / 无正文）时禁用并说明原因（spec §4.1）。
@@ -1083,12 +1119,12 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
               <span data-rss-translate-progress className="dsh-rss-meta" role="status">{TRANSLATE_LABEL_TEXT.progress(translation.done, translation.total)}</span>
             )}
             {/*
-              * 三态切换器（R7 03 / spec §4.5）：「有译文之后，工具栏出现」。
+              * 原文 / 译文 单枚切换（2026-11-26 用户拍板，替代原来的三枚）。
               * 判据是 `hasTranslations`（至少一块真的回填了译文），不是「有翻译条目」——
-              * 全批失败时条目存在，但一个译文都没有，切换器出现就是在承诺一份不存在的内容。
+              * 全批失败时条目存在，但一个译文都没有，按钮出现就是在承诺一份不存在的内容。
               */}
             {hasTranslations(translation) && (
-              <TranslationModeSwitcher mode={effectiveMode} onChange={onTranslationMode} />
+              <TranslationToggle mode={effectiveMode === 'original' ? 'original' : 'parallel'} onChange={onTranslationMode} />
             )}
             {/*
               * 阅读偏好（M5 01）收在一个 <details> 里：三个 <select> 摊开摆会把这一行挤成两层，
@@ -1134,22 +1170,6 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
                     onChange={(event) => onReading({ expandImages: !event.target.checked })} />
                   默认折叠图片
                 </label>
-                {/*
-                  * 翻译目标语言（R7 02 / spec §5.3）：与设置页「显示」分区共用同一个
-                  * viewPreferences.translateTarget。不可用时不渲染（spec §4.1）；
-                  * 语言表从 translate-copy 读，不在这里另抄一份语言名。
-                  */}
-                {translateAvailable && (
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    目标语言
-                    <select value={translateTarget} aria-label="翻译目标语言" data-rss-target-language=""
-                      onChange={(event) => onTranslateTarget(event.target.value as TargetLanguage)}>
-                      {TARGET_LANGUAGES.map((language) => (
-                        <option key={language.id} value={language.id}>{language.label}</option>
-                      ))}
-                    </select>
-                  </label>
-                )}
               </div>
             </details>
           </div>
@@ -1174,11 +1194,6 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
                 * 标题翻译失败角标（spec §4.5）：只在译文态出现 —— 对照态永远原文标题，
                 * 原文态本来就不该提「未翻译」。标题文本本身已经回落到原文，角标只是说明原因。
                 */}
-              {titleNotTranslated && (
-                <span data-rss-title-failed className="dsh-rss-meta" style={{ display: 'inline-block', marginTop: 4 }}>
-                  {TRANSLATE_LABEL_TEXT.titleNotTranslated}
-                </span>
-              )}
               {item !== undefined && (
                 <div className="dsh-rss-meta" style={{ marginTop: 8 }}>
                   {item.feedTitle}
@@ -1306,41 +1321,22 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
                   {content}
                   {tooLongNotice}
                   {batchFailureNotice}
+                  {/* 译文段的位置就是这一批正在跑的位置：原文下方一个转圈，翻好自动换成译文。 */}
+                  {showsPendingSlots && pendingBlocks.has(index) && <TranslationPending index={index} />}
                 </div>
               )
-              /**
-               * 译文态（spec §4.5）：可翻块换成译文纯文本；不可翻块原样渲染。
-               * 没有可用译文的可翻块（还没翻到 / 空白 / list 行数不等 / 超长）退回原文 ——
-               * 读者看到的永远是「有内容」的块，而不是一段空白。
-               */
-              if (effectiveMode === 'translated') {
-                return blockBox(
-                  <>
-                    {/* table 不翻，但必须让读者知道这不是漏翻（验收 D10）。 */}
-                    {kind === 'table' && (
-                      <p data-rss-table-not-translated className="dsh-rss-meta" style={{ margin: '0 0 6px' }}>
-                        {TRANSLATE_LABEL_TEXT.tableNotTranslated}
-                      </p>
-                    )}
-                    {translatable && translatedContent !== undefined ? (
-                      // pre-wrap 必须落在译文内容这一层：模型回包里的换行是排版信息（spec §4.5），
-                      // 普通段落默认折叠空白，整段译文会被压成一行。
-                      <div data-rss-translation={index} style={{ whiteSpace: 'pre-wrap' }}>
-                        <ArticleBlockView block={block} onOpenImage={onOpenImage}
-                          textOverride={translatedContent.text} itemOverride={translatedContent.items} />
-                      </div>
-                    ) : (
-                      <ArticleBlockView block={block} onOpenImage={onOpenImage} />
-                    )}
-                  </>,
-                )
-              }
               /**
                * 原文 / 对照态：原文块照旧渲染；对照态在它后面追加**自己的**译文段
                * （pre / img / table 不产生译文段，只渲染一次 —— 本票第 3 条）。
                */
               return blockBox(
                 <>
+                  {/* table 不翻，但必须让读者知道这不是漏翻（spec §4.5 / D10）；只在对照态明示。 */}
+                  {effectiveMode === 'parallel' && kind === 'table' && (
+                    <p data-rss-table-not-translated className="dsh-rss-meta" style={{ margin: '0 0 6px' }}>
+                      {TRANSLATE_LABEL_TEXT.tableNotTranslated}
+                    </p>
+                  )}
                   <ArticleBlockView block={block} onOpenImage={onOpenImage} />
                   {effectiveMode === 'parallel' && translatable && translatedContent !== undefined && (
                     <TranslationSegment index={index} content={translatedContent} ordered={block['ordered'] === true} />

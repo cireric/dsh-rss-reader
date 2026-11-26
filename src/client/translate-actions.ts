@@ -133,13 +133,6 @@ function modelOfResult(result: TranslateBatchResult): string | undefined {
   return typeof result.model === 'string' && result.model.trim() !== '' ? result.model : undefined
 }
 
-/** 正文标题（只发一次；空白标题不发）。 */
-function articleTitleOf(article: ReaderState['article']): string | undefined {
-  return article !== undefined && typeof article.title === 'string' && article.title.trim() !== ''
-    ? article.title
-    : undefined
-}
-
 /** 正文块下标 → 请求项；空白块不发送（端点会整批 bad-request）。 */
 function requestItemsOf(blocks: readonly Record<string, unknown>[], indices: readonly number[]): TranslateRequestItem[] {
   const items: TranslateRequestItem[] = []
@@ -156,42 +149,31 @@ function requestItemsOf(blocks: readonly Record<string, unknown>[], indices: rea
 /**
  * 一批成功回包 → 新条目（评审修复 B6）。
  *
- * 自动编排与手动重试此前各写了一份「写 blocks / 清失败记录 / 标题 / model / done」的逐行代码；
- * 两份一旦有一处漏改（例如只在一处处理 titleFailed），同一份回包会在两条路径里产生不同状态。
+ * 自动编排与手动重试此前各写了一份「写 blocks / 清失败记录 / model / done」的逐行代码；
+ * 两份一旦有一处漏改，同一份回包会在两条路径里产生不同状态。
  * 这里只做落库投影，不决定 status 的终态：调用方成功后该继续（running）还是完成（done）由它自己定。
  *
- * @param titleSent 这一批是否带了标题：只有带标题的批次**成功**且回包无标题时才置 titleFailed
- *                   （spec §4.3 —— 后续批回包里没有 title 是正常现象，不能据此判标题失败）。
  * @param head 失败批的批首下标：成功即清掉这条失败记录。
  */
 function appliedEntryOf(
   entry: TranslationEntry,
   result: TranslateBatchResult,
   requestedIds: ReadonlySet<string>,
-  options: { readonly titleSent: boolean; readonly head: number },
+  options: { readonly head: number },
 ): TranslationEntry | undefined {
   const translatedBlocks = translatedBlocksOf(result, requestedIds)
   // 回包结构不可用（id 不属于本批 / 重复 / 字段类型错）：由调用方按「没有返回可用译文」记批失败。
   if (translatedBlocks === undefined) return undefined
   const nextBlocks = new Map(entry.blocks)
   for (const [index, text] of translatedBlocks) nextBlocks.set(index, text)
-  let nextTitle = entry.title
-  let nextTitleFailed = entry.titleFailed
-  if (options.titleSent) {
-    const resultTitle = typeof result.title === 'string' && result.title.trim() !== '' ? result.title : undefined
-    if (resultTitle === undefined) nextTitleFailed = true
-    else nextTitle = resultTitle
-  }
   const nextFailures = new Map(entry.failures)
   nextFailures.delete(options.head)
   const resultModel = modelOfResult(result)
   return {
     ...entry,
-    ...(nextTitle === undefined ? {} : { title: nextTitle }),
-    ...(nextTitleFailed === undefined ? {} : { titleFailed: nextTitleFailed }),
     blocks: nextBlocks,
     failures: nextFailures,
-    done: entry.done + requestedIds.size,
+    done: nextBlocks.size,
     status: 'running',
     // 多批回包的 model 可能不同：取最后一条非空回包（见 TranslationEntry.model 的注释）。
     ...(resultModel === undefined ? {} : { model: resultModel }),
@@ -233,6 +215,21 @@ export function createTranslateActions(host: TranslateActionHost) {
   }
 
   /**
+   * 标记「这一批正在飞」：正文面据此在每组原文下方画 loading 占位（R7 优化）。
+   *
+   * 为什么不放进 `TranslationEntry`：条目在每批回包时会被整份替换（appliedEntryOf），
+   * pending 若跟着走就得在每个出口各清一次；独立字段只有「发请求 / 请求落地」两个写入点。
+   */
+  const markPending = (key: string, indices: readonly number[]): void => {
+    set({ translatePending: { key, indices: [...indices] } })
+  }
+
+  /** 只清自己那一篇的占位：另一篇若已接手，别把它的 spinner 抹掉。 */
+  const clearPending = (key: string): void => {
+    if (get().translatePending?.key === key) set({ translatePending: undefined })
+  }
+
+  /**
    * 走全局单任务队列发一条翻译请求。
    *
    * 排队期间可能已经被停止 / 被新场次取代：真正出队时再查一次 token，旧场次不许再发。
@@ -240,7 +237,7 @@ export function createTranslateActions(host: TranslateActionHost) {
    */
   const requestQueued = (
     session: TranslateSession,
-    payload: { readonly target: TargetLanguage; readonly title?: string; readonly items: readonly TranslateRequestItem[] },
+    payload: { readonly target: TargetLanguage; readonly items: readonly TranslateRequestItem[] },
   ): Promise<
     | { readonly kind: 'ok'; readonly result: TranslateBatchResult }
     | { readonly kind: 'failed'; readonly failure: unknown }
@@ -321,6 +318,9 @@ export function createTranslateActions(host: TranslateActionHost) {
    */
   const setTranslateTarget = (target: TargetLanguage): void => {
     if (!isTargetLanguage(target) || get().translateTarget === target) return
+    // 换语言 = 换一篇要译的东西：在飞的那一场属于旧语言，必须停掉后续批（在途那批允许跑完，
+    // 结果写回旧语言的键，切回去还能看见）。不停的话旧语言会继续烧后面所有批。
+    if (active !== undefined && active.target !== target) stopTranslate()
     set({ translateTarget: target })
     persistView()
   }
@@ -337,6 +337,8 @@ export function createTranslateActions(host: TranslateActionHost) {
     // 确认框还开着时也一起收掉：离开正文 / 切面板 / 点「停止」都不该把「待外发」留到下一次。
     // 取消语义由这里统一兜底 —— 只清状态，不写 settings、不发请求。
     if (get().translateConfirm !== undefined) set({ translateConfirm: undefined })
+    // 停止 = 立刻收起 loading 占位；在途那批仍会跑完并写回结果（A3），但界面不再转圈。
+    set({ translatePending: undefined })
     if (session === undefined) return
     const entry = get().translations.get(session.key)
     if (entry !== undefined && entry.status === 'running') storeEntry({ ...entry, status: 'stopped' })
@@ -367,16 +369,18 @@ export function createTranslateActions(host: TranslateActionHost) {
     if (article === undefined || article.loading === true || article.failure !== undefined) return
     if (article.itemId === undefined || article.contentVersion === undefined || article.blocks === undefined) return
     const entry = translationEntryOf(state, article.itemId, article.contentVersion, state.translateTarget)
-    // 「有译文」按实际产出的块判（hasTranslations）：空条目（一开就被停止 / 全批失败）不算有译文，
-    // 否则按 t 会去切一个没有内容的译文态。
-    if (hasTranslations(entry)) {
-      setTranslationMode(nextTranslationMode(state.translationMode))
+    if (state.translationInfo?.available !== true) return
+    // 正在译：`t` 什么都不做。否则会走 requestTranslate → beginSession 把在飞的一场中止重来，
+    // 用户按一下「切换显示」就白烧掉一批（甚至整篇重发）。
+    if (entry !== undefined && entry.status === 'running') return
+    // 与工具栏同一套判定（2026-11-26）：有缺块且没在跑 ⇒ 继续补；有译文且完整 ⇒ 切两态；
+    // 一条译文都没有 ⇒ 从头开始。键盘与鼠标不允许各造一条状态机。
+    if (entry !== undefined && entry.status !== 'running' && entry.total - entry.blocks.size > 0) {
+      void continueTranslate(geometry)
       return
     }
-    if (state.translationInfo?.available !== true) return
-    if (entry !== undefined && entry.status === 'stopped' && entry.total - entry.done > 0) {
-      // 与工具栏「继续」同一条入口：几何一起交回，键盘与鼠标的首批选择不许分家（评审修复 A2）。
-      void continueTranslate(geometry)
+    if (hasTranslations(entry)) {
+      setTranslationMode(nextTranslationMode(state.translationMode))
       return
     }
     void requestTranslate(geometry)
@@ -406,18 +410,13 @@ export function createTranslateActions(host: TranslateActionHost) {
     const chars = blocks.map((block) => translateCharsOf(block))
     /** 后续批的候选：只有可翻且不超长的块，矩形缺席 ⇒ 纯文档顺序。 */
     const documentOrder: TranslateBlockRect[] = plan.eligibleBlocks.map((index) => ({ index, rect: undefined }))
-    const article = get().article
-    const title = articleTitleOf(article)
     const prior = get().translations.get(session.key)
     // `continue` 才有「继承」；`fresh` 必须从空集开始，否则「重译」会继续跳过旧块、变成假重译。
     const resumeEntry = mode === 'continue' ? prior : undefined
-    // pickBatch 的 `translated` 语义是「别再自动选到」：已成功块 + 失败批块都在里面。
+    // pickBatch 的 `translated` 语义是「别再自动选到」：**只有已成功回填的块**。
+    // 失败批与空回包的块不在 blocks 里 ⇒ 继续翻译时会被重新选中重发（旧版把它们也塞进
+    // settled，结果「继续」只补从没试过的块，失败批永远留着 —— 用户实测 75/95 卡住）。
     const settled = new Set<number>(resumeEntry?.blocks.keys() ?? [])
-    if (resumeEntry !== undefined) {
-      for (const failure of resumeEntry.failures.values()) {
-        for (const index of failure.indices) settled.add(index)
-      }
-    }
     let entry: TranslationEntry = resumeEntry === undefined
       ? {
         key: session.key,
@@ -429,10 +428,8 @@ export function createTranslateActions(host: TranslateActionHost) {
       }
       : {
         key: session.key,
-        ...(resumeEntry.title === undefined ? {} : { title: resumeEntry.title }),
-        ...(resumeEntry.titleFailed === undefined ? {} : { titleFailed: resumeEntry.titleFailed }),
         blocks: new Map(resumeEntry.blocks),
-        failures: new Map(resumeEntry.failures),
+        failures: new Map(),
         done: resumeEntry.done,
         total: plan.totalBlocks,
         status: 'running',
@@ -441,8 +438,6 @@ export function createTranslateActions(host: TranslateActionHost) {
     storeEntry(entry)
 
     let consecutiveFailures = 0
-    /** 标题只随第一批发送；已经译过 / 已判失败就不再重复发（重试路径按失败记录的 carriesTitle 判断）。 */
-    const sendTitle = title !== undefined && entry.title === undefined && entry.titleFailed !== true
 
     /**
      * 本场是否已经被中止（停止 / 换条目 / 离开正文 / 组件卸载）。
@@ -457,17 +452,13 @@ export function createTranslateActions(host: TranslateActionHost) {
      *
      * 失败块放进 `settled` 是关键：它们没进 `blocks`，若不让 pickBatch 跳过，下一轮会
      * 立刻重新选中同一批，用户会看到「同一批无限重试」，而「其余批继续」永远轮不到。
-     *
-     * `titleCarrier` = 这一批带了标题（即本场第一批）。记在失败记录上，重试它时必须再带标题 ——
-     * 否则首批失败后标题永远没有第二次机会（评审修复 A6）。
      */
-    const failBatch = (batch: readonly number[], reason: TranslateFailureReason, titleCarrier: boolean): boolean => {
+    const failBatch = (batch: readonly number[], reason: TranslateFailureReason): boolean => {
       consecutiveFailures += 1
       const failures = new Map(entry.failures)
       failures.set(batch[0] ?? 0, {
         indices: [...batch],
         reason,
-        ...(titleCarrier ? { carriesTitle: true } : {}),
       })
       entry = { ...entry, failures, status: 'running' }
       storeEntry(entry)
@@ -493,18 +484,17 @@ export function createTranslateActions(host: TranslateActionHost) {
       translated: settled,
       chars,
     })
-    let firstBatch = true
     while (batch.length > 0) {
       if (stoppedNow()) { markStopped(session); return }
       const items = requestItemsOf(blocks, batch)
       // pickBatch 已经滤掉空块；走到这里还为空说明输入自相矛盾，不能发一个必被拒的空批次。
       if (items.length === 0) break
-      const withTitle = firstBatch && sendTitle
+      markPending(session.key, batch)
       const outcome = await requestQueued(session, {
         target: session.target,
-        ...(withTitle ? { title } : {}),
         items,
       })
+      clearPending(session.key)
       if (outcome.kind === 'aborted') { markStopped(session); return }
 
       if (outcome.kind === 'failed') {
@@ -522,10 +512,9 @@ export function createTranslateActions(host: TranslateActionHost) {
           if (active?.token === session.token) active = undefined
           return
         }
-        if (failBatch(batch, reason, withTitle)) return
+        if (failBatch(batch, reason)) return
         // 失败记录写回后若已被中止：如实标停，别把 running 留在界面上（评审修复 A3）。
         if (stoppedNow()) { markStopped(session); return }
-        firstBatch = false
         batch = nextBatch()
         continue
       }
@@ -533,14 +522,12 @@ export function createTranslateActions(host: TranslateActionHost) {
       // 成功回包：被同 key 的新场次取代 ⇒ 丢弃（新场次会按自己的进度重写）。
       if (!ownsSession(session)) return
       const nextEntry = appliedEntryOf(entry, outcome.result, new Set(items.map((item) => item.id)), {
-        titleSent: withTitle,
         head: batch[0] ?? 0,
       })
       if (nextEntry === undefined) {
         // 回包结构不可用（id 不属于本批 / 重复 / 字段类型错）：按「没有返回可用译文」记批失败。
-        if (failBatch(batch, 'empty', withTitle)) return
+        if (failBatch(batch, 'empty')) return
         if (stoppedNow()) { markStopped(session); return }
-        firstBatch = false
         batch = nextBatch()
         continue
       }
@@ -550,7 +537,6 @@ export function createTranslateActions(host: TranslateActionHost) {
       entry = nextEntry
       storeEntry(entry)
       for (const index of batch) settled.add(index)
-      firstBatch = false
 
       // 被停止 / 换条目 / 卸载：本批结果已经写回（钱不白花），状态如实 stopped，不再发下一批。
       if (stoppedNow()) { markStopped(session); return }
@@ -562,13 +548,8 @@ export function createTranslateActions(host: TranslateActionHost) {
     if (session.token !== generation) { markStopped(session); return }
     const latest = get().translations.get(session.key)
     if (latest !== undefined && latest.status === 'running') {
-      // 有失败批时不把 done 强行改成 total：进度必须如实显示「还有哪些块没译成」，
-      // 失败位置由 failures 长期指出，读者不会把「停在半路」误认为「全篇已译」。
-      storeEntry({
-        ...latest,
-        status: 'done',
-        ...(latest.failures.size > 0 ? {} : { done: plan.totalBlocks }),
-      })
+      // done 每批都按 blocks.size 如实写（失败批 / 空回包不计入），这里只改状态。
+      storeEntry({ ...latest, status: 'done' })
     }
     if (active?.token === session.token) active = undefined
   }
@@ -616,10 +597,6 @@ export function createTranslateActions(host: TranslateActionHost) {
       const latestRecord = latestEntry?.failures.get(headIndex)
       if (latestEntry === undefined || latestRecord === undefined) return
       if (latestEntry.status === 'running') return
-      const title = articleTitleOf(afterWait.article)
-      // 只有「首批那次尝试」的失败记录带 carriesTitle：重试它才再次带标题（A6）。
-      const sendTitle = latestRecord.carriesTitle === true && title !== undefined
-        && latestEntry.title === undefined && latestEntry.titleFailed !== true
 
       generation += 1
       session = {
@@ -632,11 +609,9 @@ export function createTranslateActions(host: TranslateActionHost) {
       ownerByKey.set(key, session.token)
       active = session
 
-      const outcome = await requestQueued(session, {
-        target,
-        ...(sendTitle ? { title } : {}),
-        items,
-      })
+      markPending(key, record.indices)
+      const outcome = await requestQueued(session, { target, items })
+      clearPending(key)
       // 被停止 / 被新场次取代：回包丢弃（A3 的「被取代」分支）。
       if (outcome.kind === 'aborted' || !ownsSession(session)) return
       if (outcome.kind === 'failed') {
@@ -648,11 +623,7 @@ export function createTranslateActions(host: TranslateActionHost) {
         // 重试仍失败：原因可能变了（例如上次 timeout、这次 truncated），按最新回包更新标签；
         // carriesTitle 必须保留，否则第二次重试会把标题弄丢。
         const failures = new Map(latest.failures)
-        failures.set(headIndex, {
-          indices: record.indices,
-          reason,
-          ...(record.carriesTitle === true ? { carriesTitle: true } : {}),
-        })
+        failures.set(headIndex, { indices: record.indices, reason })
         storeEntry({ ...latest, failures })
         return
       }
@@ -660,16 +631,11 @@ export function createTranslateActions(host: TranslateActionHost) {
       const latest = get().translations.get(key)
       if (latest === undefined) return
       const nextEntry = appliedEntryOf(latest, outcome.result, new Set(items.map((item) => item.id)), {
-        titleSent: sendTitle,
         head: headIndex,
       })
       if (nextEntry === undefined) {
         const failures = new Map(latest.failures)
-        failures.set(headIndex, {
-          indices: record.indices,
-          reason: 'empty',
-          ...(record.carriesTitle === true ? { carriesTitle: true } : {}),
-        })
+        failures.set(headIndex, { indices: record.indices, reason: 'empty' })
         storeEntry({ ...latest, failures })
         return
       }
@@ -731,12 +697,15 @@ export function createTranslateActions(host: TranslateActionHost) {
     // 等待期间原地重试 / 其它入口可能已经把剩余批补完：continue 不再启动一个 0 剩余的空场次。
     if (mode === 'continue') {
       const resumed = afterWait.translations.get(key)
-      if (resumed === undefined || resumed.status !== 'stopped' || resumed.total - resumed.done <= 0) return
+      // 2026-11-26：缺块可能来自停止、批失败或空回包，状态可能是 stopped / done / failed ——
+      // 判据只看「有没有缺块」，不再认某一种 status。
+      if (resumed === undefined || resumed.status === 'running' || resumed.total - resumed.blocks.size <= 0) return
     }
 
-    // 有译文时默认落「译文」（spec §4.5 / D5）。只在**全新一场**时切一次：继续翻译时用户
-    // 可能正停在原文 / 对照态核对进度，不该被一次「继续」硬拽回译文。
-    if (mode === 'fresh') setTranslationMode('translated')
+    // 有译文时默认落「对照」（2026-11-26 用户拍板：翻译＝原文段落下方直接给译文，可对照读）。
+    // 只在**全新一场**时切一次：继续翻译时用户可能正停在原文 / 译文态核对进度，
+    // 不该被一次「继续」硬拽回对照。
+    if (mode === 'fresh') setTranslationMode('parallel')
 
     generation += 1
     const session: TranslateSession = {
@@ -819,8 +788,9 @@ export function createTranslateActions(host: TranslateActionHost) {
     const article = state.article
     if (article === undefined || article.itemId === undefined || article.contentVersion === undefined) return
     const entry = translationEntryOf(state, article.itemId, article.contentVersion, state.translateTarget)
-    if (entry === undefined || entry.status !== 'stopped') return
-    if (entry.total - entry.done <= 0) return
+    if (entry === undefined || entry.status === 'running') return
+    // 「还缺多少」按实际回填的块算：停止 / 批失败 / 空回包留下的缺口都算。
+    if (entry.total - entry.blocks.size <= 0) return
     await beginSession('continue', geometry)
   }
 

@@ -35,10 +35,8 @@ import { changedNumberTunableKeys, parseTunableValue, TUNABLE_RANGES, type Numbe
 import type { ReadingPreferences } from '../preferences.js'
 import type { ResetSettingsResult, SaveSettingResult, TranslateRouteSettingsPatch } from './settings-actions.js'
 import {
-  TARGET_LANGUAGES,
   TRANSLATE_SETTINGS_NOTICE,
   TRANSLATE_UNAVAILABLE_TEXT,
-  type TargetLanguage,
 } from '../translate-copy.js'
 import { ConfirmDialog } from './confirm-dialog.js'
 import { RsshubSettingRow } from './rsshub-setting-row.js'
@@ -72,10 +70,6 @@ export interface SettingsViewProps {
   onShowUnread: (value: boolean) => void
   /** 翻译可用性探测结果（R7 02）：设置页「翻译」分区据此显示原因 / 模型选择器。 */
   translationInfo: TranslateInfo | undefined
-  /** 翻译目标语言（R7 02 / §5.3）：与正文页 Aa 面板共用同一份视图偏好。 */
-  translateTarget: TargetLanguage
-  /** 改目标语言：store 会经 saveViewPreferences 整份落盘。 */
-  onTranslateTarget: (target: TargetLanguage) => void
   /** 一次保存翻译路由三键（provider / model / effort），成功后 store 会刷新探测结果。 */
   onSaveTranslateRoute: (patch: TranslateRouteSettingsPatch) => Promise<SaveSettingResult>
   /** 逐项保存：由 store 的保存串行链执行，返回是否成功与失败的当下生效值。 */
@@ -448,7 +442,7 @@ function TranslateSettingSection(props: {
             <div className="dsh-rss-settings-row" data-rss-translate-route="">
               <label className="dsh-rss-settings-label">
                 模型
-                <select className="dsh-rss-settings-input" aria-label="翻译模型" data-rss-translate-model=""
+                <select className="dsh-rss-settings-input dsh-rss-settings-input--select" aria-label="翻译模型" data-rss-translate-model=""
                   disabled={saving || settings === undefined}
                   value={provider !== '' && model !== '' ? modelOptionValue(provider, model) : ''}
                   onChange={(event) => {
@@ -500,7 +494,7 @@ export function SettingsView(props: SettingsViewProps): ReactNode {
   const {
     settings, error, warningDismissed, onClose, onDismissWarning,
     reading, onReading, showUnread, onShowUnread,
-    translationInfo, translateTarget, onTranslateTarget, onSaveTranslateRoute,
+    translationInfo, onSaveTranslateRoute,
     onSave, onReset, onTestRsshub, onCleanupPreview, onCleanup, onManageFeeds,
     exploreAvailable, onExplore,
   } = props
@@ -677,20 +671,6 @@ export function SettingsView(props: SettingsViewProps): ReactNode {
                 checked={showUnread}
                 onChange={onShowUnread}
               />
-              {/* R7 02 / spec §5.3：与正文页 Aa 面板共用同一个 translateTarget（同一个落盘通道）。 */}
-              <div className="dsh-rss-settings-row" data-rss-setting="translateTarget">
-                <label className="dsh-rss-settings-label">
-                  翻译目标语言
-                  <select className="dsh-rss-settings-input" aria-label="翻译目标语言" data-rss-display-language=""
-                    value={translateTarget}
-                    onChange={(event) => onTranslateTarget(event.target.value as TargetLanguage)}>
-                    {TARGET_LANGUAGES.map((language) => (
-                      <option key={language.id} value={language.id}>{language.label}</option>
-                    ))}
-                  </select>
-                </label>
-                <p className="dsh-rss-settings-help">正文页「译」默认翻成这个语言</p>
-              </div>
               {/* D14 ② 末尾指针：排版控件不在本页重复一套。 */}
               <p className="dsh-rss-settings-help" data-rss-display-pointer="">
                 字号 / 栏宽 / 主题在正文页的 Aa 面板调整

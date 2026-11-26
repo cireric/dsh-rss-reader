@@ -41,14 +41,10 @@ test('R7 01 点「译」：只发可翻块、译文渲染在原文块下方', sk
 
     const request = h.calls('translateBatch')[0].payload
     assert.equal(request.target, 'zh-CN', '01 固定目标语言 zh-CN')
-    assert.equal(request.title, '文章 a', '标题随首批发送')
     assert.deepEqual(request.items.map((item) => item.id), ['b0', 'b2', 'b4'], 'pre / img 不占编号、不进入请求')
     assert.deepEqual(request.items.map((item) => item.text), ['第一段', '小标题', '甲\n乙'])
 
-    // R7 03 起有译文默认落「译文」态；01 的「原文块下方紧跟译文段」现在是**对照**态的形状
-    // （spec §4.5），所以先切到对照再核对本票的承诺 —— 断言语义不变，只是换了状态入口。
-    h.$('[data-rss-translation-mode="parallel"]').click()
-    await h.settle()
+    // 2026-11-26 起「对照」是默认态：原文块下方紧跟译文段就是本票承诺的形状，不用再切。
     const translations = h.$$('[data-rss-translation]')
     assert.equal(translations.length, 3, '不可翻块不产生译文段')
     assert.deepEqual(translations.map((node) => node.textContent), ['译:第一段', '译:小标题', '译:甲乙'],

@@ -87,17 +87,20 @@ export const TRANSLATE_FAILURE_UI = {
 export const TRANSLATE_LABEL_TEXT = {
   tableNotTranslated: '表格未翻译',
   blockTooLong: '段落过长未翻译',
-  titleNotTranslated: '标题未翻译',
   translatedFrom: (model: string): string => '译自 ' + model,
   /** 进度（spec §4.8）：X = 已完成批里的块数，Y = 全篇可翻块数（不含超长块）。 */
   progress: (done: number, total: number): string => '已译 ' + done + '/' + total + ' 块',
 } as const
 
-/** 三态切换器的按钮文案（R7 03 / spec §4.5）：顺序即 `t` 的循环顺序，别在组件里另抄一份。 */
-export const TRANSLATE_MODE_TEXT = {
+/**
+ * 单枚切换按钮的文案（2026-11-26 用户拍板：原文 / 译文 / 对照 三枚合成一枚）。
+ *
+ * 键是「点下去会切到哪个态」，所以按钮上写的永远是**目标**而不是当前态：
+ * 正在看对照时显示「原文」，正在看原文时显示「译文」。
+ */
+export const TRANSLATE_TOGGLE_TEXT = {
   original: '原文',
-  translated: '译文',
-  parallel: '对照',
+  parallel: '译文',
 } as const
 
 /**

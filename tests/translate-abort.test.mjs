@@ -262,7 +262,7 @@ test('R7 06 全局单任务：连点两次「译」只有一场在跑，请求�
   }
 })
 
-test('R7 06 重试也是一场翻译：重试在飞时点「重译」不许两批并发，done 不重复累计', skip, async () => {
+test('R7 06 重试也是一场翻译：重试在飞时点「继续翻译」不许两批并发，done 不重复累计', skip, async () => {
   // 两块各 3000 字 ⇒ 每块独占一批。第一场：b0 成功、b1 失败；随后手动重试 b1（闸门挂住）。
   const blocks = [
     { kind: 'p', text: '甲'.repeat(3000) },
@@ -301,22 +301,88 @@ test('R7 06 重试也是一场翻译：重试在飞时点「重译」不许两�
     h.$('[data-rss-translation-retry]').click()
     await h.waitFor(() => h.calls('translateBatch').length === 3, { label: '重试在飞' })
 
-    // 重试还挂着时点「重译」：beginSession 必须先中止并等这条在途请求落地，不能立刻发新批。
-    const retranslate = h.$('[data-rss-translate]')
-    assert.equal(retranslate.textContent, '重译')
-    retranslate.click()
+    // 重试还挂着时点「继续翻译」：beginSession 必须先中止并等这条在途请求落地，不能立刻发新批。
+    // 2026-11-26 起「还缺块」一律显示继续（不再显示重译），同一套全局单任务仍然适用。
+    const next = h.$('[data-rss-translate]')
+    assert.match(next.textContent, /^继续翻译/, '缺一块时按钮必须是继续翻译')
+    next.click()
     await h.settle()
     assert.equal(h.calls('translateBatch').length, 3, '重试在飞时不许再发新的一批')
 
     retryGate.release()
     await h.waitFor(() => translationOf(h)?.status === 'done' && translationOf(h)?.done === 2,
-      { label: '重译整篇完成' })
+      { label: '继续翻译完成' })
     await h.settle()
     assert.equal(maxInFlight, 1, '同一时刻只许一批在飞（重试也参与全局单任务）')
-    assert.equal(h.calls('translateBatch').length, 5, '重试 1 条 + 重译两批')
+    // 重试那一批落地时已经把 b1 补齐（status 变 done）⇒ 随后排到的「继续」发现没有缺块就不发请求。
+    assert.equal(h.calls('translateBatch').length, 3, '首场 2 批 + 重试 1 批；继续无缺块时不发')
     assert.equal(translationOf(h).done, 2, 'done 必须等于 total，旧重试回包不许重复累计')
     assert.equal(translationOf(h).total, 2)
     assert.equal(translationOf(h).blocks.size, 2)
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R7 优化 翻译途中换目标语言：旧语言不再发后续批，已译结果留在旧键', skip, async () => {
+  // 三块各 3000 字 ⇒ 每块独占一批。第一批成功后第二批发到一半时换语言。
+  const blocks = Array.from({ length: 3 }, (_, index) => ({ kind: 'p', text: '段'.repeat(3000) + index }))
+  const second = gateOf()
+  let calls = 0
+  const h = await mount({
+    items: [itemOf('a')],
+    articles: { a: articleOf('a', blocks) },
+    translateBatch: async (payload) => {
+      calls += 1
+      if (calls === 2) await second.gate
+      return successOf(payload)
+    },
+  })
+  try {
+    await openArticle(h, 'a')
+    h.$('[data-rss-translate]').click()
+    await h.waitFor(() => calls === 2, { label: '第二批在飞' })
+    h.store.setTranslateTarget('en')
+    await h.settle()
+    assert.equal(h.store.get().translateTarget, 'en', '语言立即生效')
+    second.release()
+    await h.settle()
+    // 在途那批允许跑完并写回旧语言键；之后不许再发第三批。
+    await h.waitFor(() => h.calls('translateBatch').length === 2 && h.store.get().translations.size === 1,
+      { label: '在途批落地' })
+    assert.equal(h.calls('translateBatch').length, 2, '换语言后旧语言不再发后续批')
+    const old = [...h.store.get().translations.entries()][0]
+    assert.ok(old[0].endsWith(':zh-CN'), '旧场次写回的是旧语言的键')
+    assert.equal(h.$('[data-rss-translate]').getAttribute('data-rss-translate-state'), 'translate',
+      '新语言没有译文 ⇒ 按钮回到「译」')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R7 优化 翻译途中按 t：不重启整篇', skip, async () => {
+  const first = gateOf()
+  let calls = 0
+  const h = await mount({
+    items: [itemOf('a')],
+    articles: { a: articleOf('a', MANY) },
+    translateBatch: async (payload) => {
+      calls += 1
+      if (calls === 1) await first.gate
+      return successOf(payload)
+    },
+  })
+  try {
+    await openArticle(h, 'a')
+    h.$('[data-rss-translate]').click()
+    await h.waitFor(() => calls === 1, { label: '第一批在飞' })
+    h.press('t')
+    await h.settle()
+    first.release()
+    await h.waitFor(() => translationOf(h)?.status === 'done', { label: '翻译完成' })
+    await h.settle()
+    // MANY = 3 批；按 t 若重启会多出整轮请求。
+    assert.equal(h.calls('translateBatch').length, 3, '在译时按 t 不许中止重发')
   } finally {
     h.cleanup()
   }

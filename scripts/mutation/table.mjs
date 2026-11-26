@@ -3401,11 +3401,13 @@ export const MUTATIONS = [
   // 的分支，对照态就不再是「原文 + 紧跟自己的译文」，读者核对不了原文。
   // 判据是「三态切换」用例里对照态必须还能看到原文段落。
   // from 照构建产物 lib/client.js 的实际字节写，独立实测 OCCURRENCES=1。
-  { id: 'translate-对照态被当成译文态', file: 'lib/client.js',
+  // 单枚切换按钮的方向写反：看对照时按钮该写「原文」，反过来会写成「译文」并按错误的态切换。
+  // 2026-11-26 三枚合成一枚后，原「对照态被当成译文态」的锚点已随译文态一起删除，这里重锚。
+  { id: 'translate-切换按钮方向写反', file: 'lib/client.js',
     judges: ['translate-view.test.mjs'],
-    judgeTests: ['R7 03 三态切换：原文 / 对照 / 译文互换，且不发任何 rpc'],
-    from: 'if (effectiveMode === "translated") return blockBox(',
-    to: 'if (effectiveMode !== "original") return blockBox(' },
+    judgeTests: ['R7 03 两态切换：原文 / 对照互换，且不发任何 rpc'],
+    from: 'const next = mode === "parallel" ? "original" : "parallel";',
+    to: 'const next = mode === "parallel" ? "parallel" : "original";' },
   // list 译文行数不校验：两条原文配一条译文时会把一行硬贴成列表，读者分不清哪条对哪条。
   // 判据是「list 行数不等 ⇒ 整块退回原文」的用例。
   { id: 'translate-list行数不校验', file: 'lib/client.js',

@@ -41,7 +41,7 @@ test('不可用：文章面没有「译」按钮、Aa 没有语言下拉、t 不
   try {
     await openArticle(h, 'a')
     assert.equal(h.$('[data-rss-translate]'), null, '不可用时「译」按钮必须**不存在**（不是 disabled）')
-    assert.equal(h.$('[data-rss-target-language]'), null, '不可用时 Aa 面板的目标语言下拉也不渲染')
+    assert.equal(h.$('[data-rss-translate-language]'), null, '不可用时工具栏的目标语言下拉也不渲染')
 
     h.press('t')
     await h.settle()
@@ -55,8 +55,8 @@ test('可用：渲染「译」按钮与语言下拉；切换语言写入 viewPre
     await openArticle(h, 'a')
     const button = h.$('[data-rss-translate]')
     assert.ok(button !== null, '可用时必须渲染「译」按钮')
-    const language = h.$('[data-rss-target-language]')
-    assert.ok(language !== null, '可用时 Aa 面板必须渲染目标语言下拉')
+    const language = h.$('[data-rss-translate-language]')
+    assert.ok(language !== null, '可用时工具栏必须渲染目标语言下拉')
     assert.equal(language.value, 'zh-CN', '默认目标语言是简体中文')
     assert.deepEqual([...language.options].map((option) => option.value), ['zh-CN', 'zh-TW', 'en', 'ja', 'ko'],
       '语言表来自 translate-copy 的五种语言')
@@ -71,21 +71,6 @@ test('可用：渲染「译」按钮与语言下拉；切换语言写入 viewPre
     h.$('[data-rss-translate]').click()
     await h.waitFor(() => h.calls('translateBatch').length === 1, { label: '发出翻译请求' })
     assert.equal(h.calls('translateBatch')[0].payload.target, 'en', 'translateBatch 的 target 必须跟随语言偏好')
-  } finally { h.cleanup() }
-})
-
-test('设置页显示分区：语言下拉与 Aa 共用同一个值，切换同样走 saveViewPreferences', skip, async () => {
-  const h = await mount({ items: [itemOf('a')], articles: { a: articleOf('a', BLOCKS) } })
-  try {
-    await openArticle(h, 'a')
-    await openSettings(h)
-    const language = h.$('[data-rss-display-language]')
-    assert.ok(language !== null, '设置页「显示」分区必须有同一个目标语言下拉')
-    assert.equal(language.value, 'zh-CN')
-    await choose(h, language, 'ja')
-    const writes = h.calls('saveViewPreferences')
-    assert.equal(writes[writes.length - 1].payload.preferences.translateTarget, 'ja')
-    assert.equal(h.store.get().translateTarget, 'ja')
   } finally { h.cleanup() }
 })
 
@@ -148,7 +133,7 @@ test('设置页翻译分区：模型选择器 + 思考强度；保存一次三�
   } finally { h.cleanup() }
 })
 
-test('刷新面板：translateTarget 从 viewPreferences 恢复，Aa 下拉显示上次选的语言', skip, async () => {
+test('刷新面板：translateTarget 从 viewPreferences 恢复，工具栏下拉显示上次选的语言', skip, async () => {
   const h = await mount({
     items: [itemOf('a')],
     articles: { a: articleOf('a', BLOCKS) },
@@ -159,7 +144,7 @@ test('刷新面板：translateTarget 从 viewPreferences 恢复，Aa 下拉显�
   })
   try {
     await openArticle(h, 'a')
-    const language = h.$('[data-rss-target-language]')
+    const language = h.$('[data-rss-translate-language]')
     assert.ok(language !== null)
     assert.equal(language.value, 'ko', '目标语言必须从视图记忆恢复，而不是回默认 zh-CN')
   } finally { h.cleanup() }

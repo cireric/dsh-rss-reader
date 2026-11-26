@@ -1,17 +1,18 @@
 /**
  * 译文视图（R7 03，spec §4.5 / §5.5）。
  *
- * 这个文件只做两件事：
- *   ① 三态切换器（原文 / 译文 / 对照）—— 只在有译文条目时由正文面渲染；
- *   ② 「译文 → 可渲染内容」的投影 —— 空译文、list 行数不等都在这里被判成「没有可用译文」。
+ * 这个文件只做三件事：
+ *   ① 原文 / 译文 的单枚切换按钮 —— 只在有译文条目时由正文面渲染；
+ *   ② 「译文 → 可渲染内容」的投影 —— 空译文、list 行数不等都在这里被判成「没有可用译文」；
+ *   ③ 翻译中的 loading 占位。
  *
- * 为什么投影必须与渲染分开：对照态与译文态都要回答「这一块的译文能不能用」，两处各写一份
- * 时，同一条回包在两种模式下会给出不同结论（例如对照态硬贴两行、译文态又退回原文）。
+ * 为什么投影必须与渲染分开：切换回原文、对照两种摆法都要回答「这一块的译文能不能用」，
+ * 两处各写一份时，同一条回包会给出不同结论（例如一处硬贴两行、另一处又退回原文）。
  * 判据收在这里一处，正文面只负责按模式摆位置。
  */
 import type { ReactNode } from 'react'
-import { TRANSLATE_MODE_TEXT } from '../translate-copy.js'
-import { TRANSLATION_MODES, type TranslationMode } from './store.js'
+import { TRANSLATE_TOGGLE_TEXT } from '../translate-copy.js'
+import type { TranslationMode } from './store.js'
 
 /** 译文内容的稳定标记：值 = 正文块下标（测试与排查都按它定位，不认组件树形状）。 */
 const TRANSLATION_ATTR = 'data-rss-translation'
@@ -43,25 +44,21 @@ export function translatedBlockOf(
 }
 
 /**
- * 三态切换器（spec §4.5 / §5.6）。
+ * 原文 / 译文 的单枚切换（2026-11-26 用户拍板：三枚按钮合成一枚）。
  *
- * 三枚都是真正的 `<button type="button">`：可 Tab 到达、空格 / 回车可激活；`aria-pressed`
- * 把当前态暴露给读屏器。没有译文时**不渲染本组件**（判据在正文面，避免两处各判一次）。
+ * 按钮写的是**点下去会切到哪个态**：看对照时显示「原文」，看原文时显示「译文」。
+ * 没有译文时**不渲染本组件**（判据在正文面，避免两处各判一次）。
  */
-export function TranslationModeSwitcher({ mode, onChange }: {
+export function TranslationToggle({ mode, onChange }: {
   mode: TranslationMode
   onChange: (mode: TranslationMode) => void
 }): ReactNode {
+  const next: TranslationMode = mode === 'parallel' ? 'original' : 'parallel'
   return (
-    <div data-rss-translation-modes="" role="group" aria-label="译文显示方式"
-      style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
-      {TRANSLATION_MODES.map((entry) => (
-        <button key={entry} type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
-          data-rss-translation-mode={entry}
-          aria-pressed={mode === entry}
-          onClick={() => { onChange(entry) }}>{TRANSLATE_MODE_TEXT[entry]}</button>
-      ))}
-    </div>
+    <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
+      data-rss-translation-toggle={next}
+      aria-label={next === 'original' ? '显示原文' : '显示译文'}
+      onClick={() => { onChange(next) }}>{TRANSLATE_TOGGLE_TEXT[next]}</button>
   )
 }
 
@@ -96,4 +93,19 @@ export function TranslationSegment({ index, content, ordered }: {
     )
   }
   return <div {...{ [TRANSLATION_ATTR]: String(index) }} style={style}>{content.text}</div>
+}
+
+/**
+ * 「正在翻译」占位（R7 优化，2026-11-26）。
+ *
+ * 放在译文段本该出现的位置：读者不用盯着工具栏的 X/Y 才知道这一批在跑，也不会误以为
+ * 「这一段没翻」。`role="status"` + `aria-label` 让读屏器也能听到进度；动画本身是装饰，
+ * `prefers-reduced-motion` 下去掉旋转（见 index.tsx 的样式）。
+ */
+export function TranslationPending({ index }: { index: number }): ReactNode {
+  return (
+    <p data-rss-translation-pending={index} role="status" aria-label="正在翻译" className="dsh-rss-translate-pending">
+      <span className="dsh-rss-spinner" aria-hidden="true" />
+    </p>
+  )
 }

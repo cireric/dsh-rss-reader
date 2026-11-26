@@ -152,14 +152,6 @@ export interface ExploreState {
 export interface TranslationBatchFailure {
   readonly indices: readonly number[]
   readonly reason: TranslateFailureReason
-  /**
-   * 这次失败是否来自「带标题的第一批」。
-   *
-   * 标题只随第一批发送（spec §4.3）；首批失败后整批要能手动重试，而重试时必须把标题再带上，
-   * 否则标题永远没有第二次机会（评审修复 A6）。后续批的失败记录不带这个标记，重试它们时
-   * 不许顺手发标题 —— 那会让「标题只随第一批」变成「随便哪一批都发」。
-   */
-  readonly carriesTitle?: boolean
 }
 
 /**
@@ -170,8 +162,6 @@ export interface TranslationBatchFailure {
  */
 export interface TranslationEntry {
   readonly key: string
-  title?: string
-  titleFailed?: boolean
   readonly blocks: ReadonlyMap<number, string>
   /**
    * 失败批：键 = 批首块下标。批失败不影响已完成块，也不让整篇立刻失败；
@@ -217,16 +207,15 @@ export function hasTranslations(entry: TranslationEntry | undefined): boolean {
   return entry !== undefined && entry.blocks.size > 0
 }
 
-/** 正文的三态（R7 03 / spec §4.5 / D5）：原文 / 译文 / 对照。 */
-export type TranslationMode = 'original' | 'translated' | 'parallel'
+/** 正文的两态（2026-11-26 用户拍板）：原文 / 对照（原文 + 下层译文）。纯「译文」态已删除。 */
+export type TranslationMode = 'original' | 'parallel'
 
 /**
- * 三态循环顺序：原文 → 译文 → 对照 → 原文（`t` 键的语义，D14）。
+ * 两态的取值域：原文 → 对照 → 原文（`t` 键的语义，D14）。
  *
- * 顺序只定义在这一处：切换器按它摆按钮、`t` 按它取下一个态。两处各写一份时，
- * 按钮上看到的顺序与键盘走出来的顺序会悄悄分家，而没有任何断言会红。
+ * 只定义在这一处：切换按钮与 `t` 都按它走，别在组件里另抄一份。
  */
-export const TRANSLATION_MODES: readonly TranslationMode[] = ['original', 'translated', 'parallel']
+export const TRANSLATION_MODES: readonly TranslationMode[] = ['original', 'parallel']
 
 /** `t` 的下一个态；认不出的值（理论上不可达）回落到原文，不抛错。 */
 export function nextTranslationMode(mode: TranslationMode): TranslationMode {
@@ -342,6 +331,13 @@ export interface ReaderState {
    * `Aa` 面板与设置页「显示」分区共读这一位；切换只影响新译文，旧译文按语言分键保留。
    */
   translateTarget: TargetLanguage
+  /**
+   * 正在飞的那一批的块下标（R7 优化：翻译中的 loading 指示）。
+   *
+   * `key` 是这一篇的译文键：切条目 / 换语言后旧场次的占位不该画到新正文上，渲染层按 key 比对。
+   * `undefined` = 没有在飞的批（空闲 / 已停）。
+   */
+  translatePending: { readonly key: string; readonly indices: readonly number[] } | undefined
   /** 导航选中（虚拟视图 / 某个具体源）。与 filter 叠加生效，见 NavSelection。 */
   navSelection: NavSelection
   /** 导航**光标**（左栏键盘高亮所在行）。与 navSelection 是两件事，见 NavCursor。 */
@@ -523,7 +519,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   let state: ReaderState = {
     items: [], feeds: [], folders: [], tags: [], unread: 0, unreadSplit: undefined, filter: 'all',
     selectedId: undefined, loading: true, error: undefined, undo: undefined,
-    view: 'list', layout: 'list', markAllRange: 'all', displayWindow: 'all', accountWindow: 'all', showUnread: DEFAULT_VIEW_PREFERENCES.showUnread, settings: undefined, settingsError: undefined, settingsWarningDismissed: false, explore: undefined, article: undefined, translations: new Map(), translationMode: 'original', translationInfo: undefined, translateConfirm: undefined, translateTarget: DEFAULT_TARGET_LANGUAGE, notice: undefined,
+    view: 'list', layout: 'list', markAllRange: 'all', displayWindow: 'all', accountWindow: 'all', showUnread: DEFAULT_VIEW_PREFERENCES.showUnread, settings: undefined, settingsError: undefined, settingsWarningDismissed: false, explore: undefined, article: undefined, translations: new Map(), translationMode: 'original', translationInfo: undefined, translateConfirm: undefined, translateTarget: DEFAULT_TARGET_LANGUAGE, translatePending: undefined, notice: undefined,
     importReport: undefined, discovery: undefined, feedsBusy: false,
     navSelection: { kind: 'virtual' }, perFeedUnread: {}, navVisible: true,
     reading: DEFAULT_READING_PREFERENCES, duplicates: {},

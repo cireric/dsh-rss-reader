@@ -129,6 +129,9 @@ const STYLE = `
   border:1px solid var(--rss-line); }
 .dsh-rss-window:disabled { opacity:.55; }
 .dsh-rss-window-hint { font-size:11px; color:var(--rss-muted); }
+/* R7：正文工具栏的目标语言下拉（与「译」相邻，裸下拉不带文字 label；不可用时不渲染）。 */
+.dsh-rss-translate-language { font:inherit; font-size:12px; padding:1px 4px; border-radius:4px;
+  color:inherit; background:var(--rss-bg); border:1px solid var(--rss-line); max-width:100%; }
 .dsh-rss-actions { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
 .dsh-rss-settings { position:relative; }
 .dsh-rss-settings > summary::-webkit-details-marker { display:none; }
@@ -165,6 +168,16 @@ const STYLE = `
 /* R8a：实例地址是整条 URL，数值行的 6.5em 只够显示到 https://rsshub。
    仍允许在窄面板里收缩（max-width），否则整行会横向溢出。 */
 .dsh-rss-settings-input--url { width:20em; max-width:100%; }
+/* R7：模型下拉的选项是模型 id（最长见过 31 字符），数值行的 6.5em 只显示得出「deepsee」。
+   用内容宽度而不是再写一个 em 常量：选项变长时不会又截断；窄面板仍靠 max-width 收缩。 */
+.dsh-rss-settings-input--select { width:auto; min-width:12em; max-width:100%; }
+/* R7：翻译中的占位（同译文段的位置）。动画是装饰，读屏器靠 aria-label「正在翻译」。 */
+.dsh-rss-translate-pending { display:flex; align-items:center; min-height:18px; margin:0 0 1.1em; padding-left:10px; }
+.dsh-rss-spinner { width:12px; height:12px; border-radius:50%;
+  border:2px solid color-mix(in srgb, currentColor 22%, transparent); border-top-color:var(--rss-accent);
+  animation:dsh-rss-spin .8s linear infinite; }
+@keyframes dsh-rss-spin { to { transform:rotate(360deg) } }
+@media (prefers-reduced-motion: reduce) { .dsh-rss-spinner { animation:none; border-top-color:currentColor; opacity:.55 } }
 .dsh-rss-settings-saved { font-size:12px; color:var(--rss-accent); }
 .dsh-rss-settings-error { flex-basis:100%; margin:0; font-size:12px; color:var(--rss-error); line-height:1.45; }
 /* R11 03：非整分钟的「= 90123 ms」只在这个前提下出现（整分钟不显示，D14.2）。 */
@@ -862,6 +875,11 @@ export function createReader(store: ReaderStore): () => ReactNode {
     const articleTranslation = state.article === undefined
       ? undefined
       : translationEntryOf(state, state.article.itemId, state.article.contentVersion, state.translateTarget)
+    /** 在飞的批（R7 优化）：key 必须与当前这篇的译文键一致，否则旧场次的占位会画到别的文章上。 */
+    const articleTranslationPending = state.translatePending !== undefined
+      && articleTranslation !== undefined && state.translatePending.key === articleTranslation.key
+      ? state.translatePending.indices
+      : undefined
     const tagTarget = state.view === 'article'
       ? activeArticle
       : state.items.find((item) => item.id === state.selectedId)
@@ -1128,10 +1146,11 @@ export function createReader(store: ReaderStore): () => ReactNode {
             onOpenImage={setLightboxSrc}
             onCloseLightbox={() => setLightboxSrc(undefined)}
             translation={articleTranslation}
+            translationPending={articleTranslationPending}
             // 三态（R7 03）：值在 store，正文面只照着画；切换动作只改渲染态、不发 rpc。
             translationMode={state.translationMode}
             onTranslationMode={store.setTranslationMode}
-            // 可用性与目标语言（R7 02）：不可用时工具栏不渲染「译」与 Aa 语言下拉。
+            // 可用性与目标语言（R7 02）：不可用时工具栏不渲染语言下拉与「译」按钮。
             translateAvailable={state.translationInfo?.available === true}
             translateTarget={state.translateTarget}
             onTranslateTarget={store.setTranslateTarget}
@@ -1177,8 +1196,6 @@ export function createReader(store: ReaderStore): () => ReactNode {
             showUnread={state.showUnread}
             onShowUnread={(value) => store.setShowUnread(value)}
             translationInfo={state.translationInfo}
-            translateTarget={state.translateTarget}
-            onTranslateTarget={store.setTranslateTarget}
             onSaveTranslateRoute={(patch) => store.saveTranslateRoute(patch)}
             onClose={() => store.closeSettings()}
             onDismissWarning={() => store.dismissSettingsWarning()}
