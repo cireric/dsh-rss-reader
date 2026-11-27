@@ -30,10 +30,10 @@
  */
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { AGENT_APPROVAL_NOTE, AGENT_HELP } from '../agent-help.js'
-import type { CleanupResult, ReadOnlySettingView, RsshubTestResult, SettingsSnapshot, TranslateInfo } from '../shared.js'
+import type { CleanupResult, ReadOnlySettingView, RsshubSettingsSnapshot, RsshubTestResult, SettingsSnapshot, TranslateInfo } from '../shared.js'
 import { changedNumberTunableKeys, parseTunableValue, TUNABLE_RANGES, type NumberTunableKey, type TunableKey } from '../settings-schema.js'
 import type { ReadingPreferences } from '../preferences.js'
-import type { ResetSettingsResult, SaveSettingResult, TranslateRouteSettingsPatch } from './settings-actions.js'
+import type { ResetSettingsResult, SaveRsshubSettingsResult, SaveSettingResult, TranslateRouteSettingsPatch } from './settings-actions.js'
 import {
   TRANSLATE_SETTINGS_NOTICE,
   TRANSLATE_UNAVAILABLE_TEXT,
@@ -56,6 +56,10 @@ export interface SettingsViewProps {
   settings: SettingsSnapshot | undefined
   /** 取数失败的一句话（与全局 error 分开，页面自己说明为什么空着）。 */
   error: string | undefined
+  /** RSSHub 实例池快照（R15 01）：住在 config.json，与 settings 快照分开取。 */
+  rsshub: RsshubSettingsSnapshot | undefined
+  /** 实例池取数失败的一句话（分区内展示，不把整页打成错误）。 */
+  rsshubError: string | undefined
   /** 警示条是否已被本次会话关掉（D17：可关闭，不阻断）。 */
   warningDismissed: boolean
   onClose: () => void
@@ -78,11 +82,13 @@ export interface SettingsViewProps {
   onReset: () => Promise<ResetSettingsResult>
   /** RSSHub 探活（R8a 01）：只把地址交给宿主；返回可展示的结论。 */
   onTestRsshub: (base: string) => Promise<RsshubTestResult>
+  /** 保存整份 RSSHub 实例池（R15 01）：增 / 删 / 排序都提交新数组。 */
+  onSaveRsshub: (instances: string[]) => Promise<SaveRsshubSettingsResult>
   /** 「去订阅管理页」：走既有 toggleFeeds，设置页不复制排序控件（D15）。 */
   onManageFeeds: () => void
   /**
-   * 探索入口是否可见（R8b 04 / D11）：判据由入口统一算好（同一份 settings 快照的
-   * `effective.rsshubBase`），设置页不再自己解析一次地址。
+   * 探索入口是否可见（R8b 04 / D11 → R15 01）：判据由入口统一算好（生效实例池非空），
+   * 设置页不再自己解析地址。
    */
   exploreAvailable: boolean
   /** 打开探索视图（设置页只发意图，不复制探索状态）。 */
@@ -493,9 +499,10 @@ function TranslateSettingSection(props: {
 export function SettingsView(props: SettingsViewProps): ReactNode {
   const {
     settings, error, warningDismissed, onClose, onDismissWarning,
+    rsshub, rsshubError,
     reading, onReading, showUnread, onShowUnread,
     translationInfo, onSaveTranslateRoute,
-    onSave, onReset, onTestRsshub, onCleanupPreview, onCleanup, onManageFeeds,
+    onSave, onReset, onTestRsshub, onSaveRsshub, onCleanupPreview, onCleanup, onManageFeeds,
     exploreAvailable, onExplore,
   } = props
   const box = useRef<HTMLDivElement | null>(null)
@@ -687,8 +694,9 @@ export function SettingsView(props: SettingsViewProps): ReactNode {
           {section.key === 'rsshub' && (
             <>
               <RsshubSettingRow
-                value={settings?.effective.rsshubBase}
-                onSave={onSave}
+                snapshot={rsshub}
+                error={rsshubError}
+                onSave={onSaveRsshub}
                 onTest={onTestRsshub}
               />
               {/* R8b 04 / D11：未配置实例时入口整个不渲染（同一个判据也管订阅管理页那一处）。 */}

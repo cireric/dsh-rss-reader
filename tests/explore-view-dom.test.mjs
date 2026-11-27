@@ -137,6 +137,8 @@ async function mount({ rsshubBase = 'https://rsshub.example', catalog, build, ad
     defaults: { ...TUNABLE_DEFAULTS },
     version: '0.1.0', dataDir: '/tmp/rss-reader', settingsPath: '/tmp/rss-reader/settings.json', readOnly: [],
   }
+  // R15 01：探索入口看的是实例池快照（宿主已把坏项丢掉）。夹具用 rsshubBase 模拟一条池子记录。
+  const rsshubInstances = /^https?:\/\//.test(rsshubBase) ? [rsshubBase] : []
   const overview = { feeds: [], items: [], folders: [], tags: [], unread: 0, perFeedUnread: {}, refreshed: false }
   const ok = (value) => ({ ok: true, status: 200, json: async () => ({ ok: true, value }) })
   const failEnvelope = (error) => ({ ok: true, status: 200, json: async () => ({ ok: false, error }) })
@@ -146,6 +148,9 @@ async function mount({ rsshubBase = 'https://rsshub.example', catalog, build, ad
     const body = JSON.parse(init.body)
     requests.push({ endpoint: body.endpoint, payload: body.payload })
     if (body.endpoint === 'settings') return ok({ settings: settingsState })
+    if (body.endpoint === 'rsshubSettings') {
+      return ok({ rsshub: { instances: rsshubInstances, hiddenNamespaces: [], hideNsfw: true } })
+    }
     if (body.endpoint === 'viewPreferences') return ok({ preferences: undefined })
     if (body.endpoint === 'saveViewPreferences') return ok({ preferences: body.payload?.preferences })
     if (body.endpoint === 'overview' || body.endpoint === 'refresh') return ok(overview)
@@ -219,6 +224,7 @@ async function mount({ rsshubBase = 'https://rsshub.example', catalog, build, ad
   await settle()
   // 面板挂载会补取一次设置快照（入口可见性判据），等它落地再断言入口。
   await waitFor(() => store.get().settings !== undefined, { label: 'settings 快照' })
+  await waitFor(() => store.get().rsshubSettings !== undefined, { label: '实例池快照' })
 
   const press = (key, shiftKey = false) => {
     const event = new win.KeyboardEvent('keydown', { key, shiftKey, bubbles: true, cancelable: true })

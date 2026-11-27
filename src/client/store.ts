@@ -6,7 +6,7 @@
  * 列表、正文、订阅管理与键盘接线，任一改动都要动同一个文件。
  */
 import { useEffect, useState } from 'react'
-import { ROUTE_PATH, type DiscoveryResult, type Endpoint, type ExploreRouteView, type FeedView, type FolderView, type ItemView, type OpmlImportResult, type RpcResult, type SearchQuery, type SettingsSnapshot, type TagView, type DuplicateHintView, type TranslateInfo } from '../shared.js'
+import { ROUTE_PATH, type DiscoveryResult, type Endpoint, type ExploreRouteView, type FeedView, type FolderView, type ItemView, type OpmlImportResult, type RpcResult, type RsshubSettingsSnapshot, type SearchQuery, type SettingsSnapshot, type TagView, type DuplicateHintView, type TranslateInfo } from '../shared.js'
 import { DEFAULT_READING_PREFERENCES, DEFAULT_VIEW_PREFERENCES, sanitizeViewPreferences, validListScrollTop } from '../preferences.js'
 import type { ReadingPreferences, ViewPreferences } from '../preferences.js'
 import { clampScrollTop } from '../list-scroll.js'
@@ -215,6 +215,13 @@ export interface ReaderState {
   settings: SettingsSnapshot | undefined
   /** 设置页取数失败的一句话（与全局 error 分开：设置页自己要能说明为什么空着）。 */
   settingsError: string | undefined
+  /**
+   * RSSHub 实例池快照（R15 01）：设置页的池子列表与探索入口的可见性共用这一份。
+   * 它来自 `rsshubSettings` 端点（config.json），与 settings.json 的标量快照是两处数据。
+   */
+  rsshubSettings: RsshubSettingsSnapshot | undefined
+  /** 实例池取数失败的一句话（分区内展示，不把整页打成错误）。 */
+  rsshubSettingsError: string | undefined
   /** 探索视图的整份状态（`view: 'explore'` 时存在；关闭即丢弃，D14）。 */
   explore: ExploreState | undefined
   /** 启动时的读侧告警（坏文件隔离 / 坏值忽略）是否已被本次会话关掉（D17）。 */
@@ -407,7 +414,7 @@ const browserDeps: ReaderStoreDeps = {
  * | 搜索 | `search` / `searchRevision` / `searchRequest` / `searchPages` | submitSearch / loadSearch / resetSearchPage | 借列表的 items / selectedId / nextCursor / loading 展示；**不许**改 filter |
  * | 订阅 | `feeds` / `folders` / `discovery` / `feedsBusy` / `importReport` / `navSelection` / `navCursor` / `navVisible` / `foldedFolders` / `viewPreferences`（**deleteFolder 例外**：删掉当前所在文件夹时会把 `filter` 回落成 `all`，这条跨域写入登记在此） | addFeed / removeFeed / moveFeedOrder / importOpml / exportOpml / discover / createFolder / renameFolder / deleteFolder / moveFeedToFolder / selectNav / moveNavCursor / openNavCursor / toggleNav / toggleFolder / flushViewMemory | 改 navSelection 后必须走 persistView；**整份覆盖写必须带上当下的 selectedId**（否则一次普通导航就抹掉阅读位置）；选中 / j/k / 打开条目经 300ms 去抖写手记 lastItemId，面板卸载时 flush；退订只能经 `deleteSubscription`；selectNav 经列表域的 leaveTransientViews 写 `view` / `article`（切作用域退出正文与设置页） |
  * | 标签 | `tags` / 条目的 `tagIds` | createTag / renameTag / deleteTag / toggleItemTag | 乐观改 tagIds，失败回取当前页拉回真相（tagWrite 串行化 + tagEpoch 身份） |
-| 设置 | `settings` / `settingsError` / `settingsWarningDismissed` | loadSettings / openSettings / closeSettings / toggleSettings / dismissSettingsWarning | 只调 `settings` 端点取快照；`view: 'settings'` 是跨域呈现状态，与列表 / 订阅域同一条规则（左栏导航 / 切过滤 / 切档经列表域入口退出） |
+| 设置 | `settings` / `settingsError` / `settingsWarningDismissed` / `rsshubSettings` / `rsshubSettingsError` | loadSettings / loadRsshubSettings / openSettings / closeSettings / toggleSettings / dismissSettingsWarning | 只调 `settings` / `rsshubSettings` 两个端点取快照；`view: 'settings'` 是跨域呈现状态，与列表 / 订阅域同一条规则（左栏导航 / 切过滤 / 切档经列表域入口退出） |
 | 探索 | `explore`（目录页累计行 / q + category + namespace / loading / error / 表单草稿 / 回执 / 拼好的地址） | openExplore / closeExplore / setExploreQuery / loadMoreExplore / selectExploreRoute / setExploreDraftValue / buildExploreAddress / addExploreSubscription | 订阅只经 `addFeed`（订阅域入口），自己只写 `explore`；`view: 'explore'` 与设置页同一条跨域规则（左栏导航 / 切过滤 / 切档经列表域入口退出）；拼地址只调宿主端点，模板判据读 `explore-template.ts` |
  *
  * `view` / `article` 是跨域呈现状态：列表的 openArticle / retryArticle / closeArticle 与 setFilter、
@@ -428,7 +435,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   let state: ReaderState = {
     items: [], feeds: [], folders: [], tags: [], unread: 0, unreadSplit: undefined, filter: 'all',
     selectedId: undefined, loading: true, error: undefined, undo: undefined,
-    view: 'list', layout: 'list', markAllRange: 'all', displayWindow: 'all', accountWindow: 'all', showUnread: DEFAULT_VIEW_PREFERENCES.showUnread, settings: undefined, settingsError: undefined, settingsWarningDismissed: false, explore: undefined, article: undefined, translations: new Map(), translationMode: 'original', translationInfo: undefined, translateConfirm: undefined, translateTarget: DEFAULT_TARGET_LANGUAGE, translatePending: undefined, notice: undefined,
+    view: 'list', layout: 'list', markAllRange: 'all', displayWindow: 'all', accountWindow: 'all', showUnread: DEFAULT_VIEW_PREFERENCES.showUnread, settings: undefined, settingsError: undefined, rsshubSettings: undefined, rsshubSettingsError: undefined, settingsWarningDismissed: false, explore: undefined, article: undefined, translations: new Map(), translationMode: 'original', translationInfo: undefined, translateConfirm: undefined, translateTarget: DEFAULT_TARGET_LANGUAGE, translatePending: undefined, notice: undefined,
     importReport: undefined, discovery: undefined, feedsBusy: false,
     navSelection: { kind: 'virtual' }, perFeedUnread: {}, navVisible: true,
     reading: DEFAULT_READING_PREFERENCES, duplicates: {},

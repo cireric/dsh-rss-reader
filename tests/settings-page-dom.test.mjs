@@ -90,7 +90,7 @@ async function waitFor(predicate, { timeout = 2000, interval = 5, label = '条�
  * 起一个 DOM 环境 + 渲染真实 Reader。返回的对象与 scroll-dom.test.mjs 的同名夹具同形
  * （press / settle / waitFor / store），但只桩本票会碰到的端点。
  */
-async function mount({ settings, saveSettings, testRsshub, items, cleanupStub, article, prefs = { value: undefined, writes: [] } } = {}) {
+async function mount({ settings, saveSettings, testRsshub, rsshubPool, saveRsshubSettings, items, cleanupStub, article, prefs = { value: undefined, writes: [] } } = {}) {
   const { JSDOM } = STACK
   const globalSnapshot = {}
   for (const key of ['window', 'document', 'HTMLElement', 'Element', 'Node', 'KeyboardEvent', 'ResizeObserver', 'fetch']) {
@@ -137,6 +137,8 @@ async function mount({ settings, saveSettings, testRsshub, items, cleanupStub, a
     }
   }
   let settingsState = settings ?? { effective: { ...TUNABLE_DEFAULTS }, defaults: { ...TUNABLE_DEFAULTS } }
+  // R15 01：实例池快照与 settings 分开取（池子住在 config.json）。默认空池。
+  let rsshubState = rsshubPool ?? { instances: [], hiddenNamespaces: [], hideNsfw: true }
   const ok = (value) => ({ ok: true, status: 200, json: async () => ({ ok: true, value }) })
   // 宿主通道的真实形态：HTTP 200 + 信封 ok:false（browserRpc 先看 response.ok 再看信封）。
   const failEnvelope = (error) => ({ ok: true, status: 200, json: async () => ({ ok: false, error }) })
@@ -146,6 +148,17 @@ async function mount({ settings, saveSettings, testRsshub, items, cleanupStub, a
     const body = JSON.parse(init.body)
     requests.push({ endpoint: body.endpoint, payload: body.payload })
     if (body.endpoint === 'settings') return ok({ settings: settingsState })
+    if (body.endpoint === 'rsshubSettings') return ok({ rsshub: rsshubState })
+    if (body.endpoint === 'saveRsshubSettings') {
+      // 桩与宿主同形：坏项由宿主丢弃；用例可以整体改写回包（失败 / 延迟）。
+      if (saveRsshubSettings !== undefined) {
+        const custom = await saveRsshubSettings(body.payload)
+        if (custom?.error !== undefined) return failEnvelope(custom.error)
+        if (custom?.rsshub !== undefined) { rsshubState = custom.rsshub; return ok({ rsshub: rsshubState }) }
+      }
+      rsshubState = { ...rsshubState, instances: [...(body.payload?.instances ?? [])] }
+      return ok({ rsshub: rsshubState })
+    }
     if (body.endpoint === 'saveSettings') {
       // 桩默认按 patch 合并生效值并回同形快照；用例可以用 saveSettings 选项改写（失败 / 延迟）。
       if (saveSettings !== undefined) {
@@ -946,128 +959,200 @@ test('R11 07 恢复默认失败：确认框保留并显示错误，生效值不�
   }
 })
 
-// ── R8a 01：RSSHub 分区（spec §4.1 / D1–D3）──────────────────────────────────
+// ── R15 01：RSSHub 实例池（spec §4.1.1 / §4.1.2 / §4.1.6 / A5–A6）────────────
+//
+// 这一组钉的是设置页的**用户动作**：增 / 删 / 上下移 / 测试连接 / 推荐卡片。
+// 之前单地址输入框的验收项（失焦保存、恢复默认清空）已被实例池替代 —— 旧路径 `rsshubBase`
+// 只保留在 settings.json 的迁移读取里，界面不再展示第二套地址状态。
 
-test('R8a 01 RSSHub 分区：地址输入 + 测试连接 + 恢复默认；未配置时测试按钮禁用并说明候选不出现', async () => {
+const RECOMMENDED_HUBS = ['https://hub.slarker.me', 'https://rsshub.rss.tips', 'https://rsshub.cups.moe']
+
+/** 宿主读端点的同一形状（子集）：测试只关心 instances。 */
+function rsshubPoolOf(instances) {
+  return { instances, hiddenNamespaces: [], hideNsfw: true }
+}
+
+test('R15 01 实例池：空池展示 3 个推荐实例但默认零写入，且说明未配置的后果', async () => {
   const h = await mount()
-  await openSettings(h)
-  const section = h.$('[data-rss-settings-section="rsshub"]')
-  assert.ok(section !== null, '「RSSHub」分区必须存在')
-  const input = section.querySelector('[data-rss-setting-input="rsshubBase"]')
-  assert.ok(input !== null, '分区必须有地址输入框')
-  assert.equal(input.value, '', '未配置时输入框为空（默认空串 = 功能关闭）')
-  const testButton = section.querySelector('[data-rss-rsshub-test]')
-  assert.ok(testButton !== null, '分区必须有「测试连接」按钮')
-  assert.equal(testButton.disabled, true, '未配置时测试按钮必须禁用')
-  assert.match(section.textContent ?? '', /未配置时 RSSHub 候选不出现/, '必须说明未配置时的后果')
-  const reset = section.querySelector('[data-rss-rsshub-reset]')
-  assert.ok(reset !== null, '分区必须有「恢复默认（清空）」')
-  assert.equal(reset.disabled, true, '没有可清空的地址时恢复默认禁用')
+  try {
+    await openSettings(h)
+    const section = h.$('[data-rss-settings-section="rsshub"]')
+    assert.ok(section !== null, '「RSSHub」分区必须存在')
+    assert.equal(section.querySelectorAll('[data-rss-rsshub-instance]').length, 0, '空池没有实例行')
 
-  // 测试按钮跟随草稿：输入一个合法地址即可测试，不必先保存；清空按钮仍只跟随已保存值。
-  const inputElement = section.querySelector('[data-rss-setting-input="rsshubBase"]')
-  setControlValue(h.win, inputElement, 'https://rsshub.example')
-  await h.settle()
-  assert.equal(testButton.disabled, false, '草稿是合法地址时测试按钮启用（不必先保存）')
-  assert.equal(reset.disabled, true, '草稿不算已保存值，清空按钮仍禁用')
-})
-
-test('R8a 01 RSSHub 分区：官方实例列表链接指向 docs.rsshub.app，新窗口打开且断开 opener，并说明公共实例可能失效', async () => {
-  const h = await mount()
-  await openSettings(h)
-  const note = h.$('[data-rss-rsshub-instances]')
-  assert.ok(note !== null, 'RSSHub 分区必须有官方实例列表的说明行（D1）')
-  const link = note.querySelector('a')
-  assert.ok(link !== null, '说明行里必须有「官方实例列表」链接')
-  assert.equal(link.getAttribute('href'), 'https://docs.rsshub.app/guide/instances', 'href 必须是官方实例文档')
-  assert.equal(link.getAttribute('target'), '_blank', '列表在文档站，新窗口打开')
-  assert.match(link.getAttribute('rel') ?? '', /noopener/, 'target=_blank 必须带 noopener（rel 里含 noopener）')
-  assert.match(note.textContent ?? '', /社区维护/, '必须说明公共实例由社区维护')
-  assert.match(note.textContent ?? '', /可能失效/, '必须说明公共实例可能失效')
-})
-
-test('R8a 01 RSSHub 保存：失焦提交合法地址，走 saveSettings 串行链并显示「已保存 ✓」', async () => {
-  const h = await mount()
-  await openSettings(h)
-  const input = h.$('[data-rss-setting-input="rsshubBase"]')
-  input.focus()
-  setControlValue(h.win, input, ' https://rsshub.example/ ')
-  input.blur()
-  await waitForSaved(h, 'rsshubBase')
-  const saves = h.requests.filter((entry) => entry.endpoint === 'saveSettings')
-  assert.deepEqual(saves.map((entry) => entry.payload), [{ patch: { rsshubBase: 'https://rsshub.example' } }],
-    '保存的是归一后的地址（trim / 去尾斜杠），且只有这一个键')
-  assert.equal(h.store.get().settings.effective.rsshubBase, 'https://rsshub.example',
-    '成功后用回包覆盖权威值')
-  assert.equal(h.$('[data-rss-setting-saved="rsshubBase"]').textContent, '已保存 ✓')
-})
-
-test('R8a 01 RSSHub 非法地址：就地红字 + 零请求 + 输入保留', async () => {
-  const h = await mount()
-  await openSettings(h)
-  const input = h.$('[data-rss-setting-input="rsshubBase"]')
-  for (const bad of ['https://rsshub.example/api', 'ftp://rsshub.example', 'not a url']) {
-    input.focus()
-    setControlValue(h.win, input, bad)
-    input.blur()
-    await h.waitFor(() => h.$('[data-rss-setting-error="rsshubBase"]') !== null,
-      { label: bad + ' 的就地红字' })
-    assert.equal(h.requests.filter((entry) => entry.endpoint === 'saveSettings').length, 0,
-      '非法地址必须零请求：' + bad)
-    assert.equal(input.value, bad, '非法输入必须保留')
+    const card = section.querySelector('[data-rss-rsshub-recommend]')
+    assert.ok(card !== null, '空池必须展示「推荐实例」卡片')
+    for (const url of RECOMMENDED_HUBS) {
+      assert.match(card.textContent ?? '', new RegExp(url.replace(/\./g, '\\.')), '推荐卡片必须列出 ' + url)
+    }
+    const enable = card.querySelector('[data-rss-rsshub-recommend-enable]')
+    assert.ok(enable !== null, '推荐卡片必须有「启用这 3 个」')
+    assert.equal(enable.disabled, false, '空池时推荐卡片可点')
+    assert.equal(h.requests.filter((entry) => entry.endpoint === 'saveRsshubSettings').length, 0,
+      '打开设置页不许自动写入推荐实例（未配置 = 零请求的隐私边界）')
+    assert.match(section.textContent ?? '', /未配置时 RSSHub 候选不出现/, '必须说明未配置时功能关闭')
+    assert.equal(section.querySelector('[data-rss-rsshub-reset]').disabled, true, '空池时清空按钮禁用')
+  } finally {
+    h.cleanup()
   }
-  assert.equal(h.store.get().settings.effective.rsshubBase, '', '本地校验失败不许改权威值')
 })
 
-test('R8a 01 测试连接：配置后按钮可用，请求 testRsshub {base} 并在原地显示结果', async () => {
-  const h = await mount({
-    settings: {
-      effective: { ...TUNABLE_DEFAULTS, rsshubBase: 'https://rsshub.example' },
-      defaults: { ...TUNABLE_DEFAULTS },
-    },
-  })
-  await openSettings(h)
-  const section = h.$('[data-rss-settings-section="rsshub"]')
-  const button = section.querySelector('[data-rss-rsshub-test]')
-  assert.equal(button.disabled, false, '已配置时测试按钮必须可用')
-  button.click()
-  await h.waitFor(() => h.$('[data-rss-rsshub-result]') !== null, { label: '测试结果上屏' })
-  const calls = h.requests.filter((entry) => entry.endpoint === 'testRsshub')
-  assert.deepEqual(calls.map((entry) => entry.payload), [{ base: 'https://rsshub.example' }],
-    '探活只把地址交给宿主，浏览器不直连实例')
-  assert.match(h.$('[data-rss-rsshub-result]').textContent, /测试通过/, '通过时显示宿主回包文案')
+test('R15 01 读侧告警：坏项被宿主丢弃时在分区内说明（不把整页打成错误）', async () => {
+  const warning = '已忽略 1 条无效项（网络地址只支持 http(s) 源站）'
+  const h = await mount({ rsshubPool: { ...rsshubPoolOf(['https://ok.example']), warning } })
+  try {
+    await openSettings(h)
+    const note = h.$('[data-rss-rsshub-warning]')
+    assert.ok(note !== null, '有告警时必须显示一行说明')
+    assert.match(note.textContent ?? '', /已忽略 1 条无效项/)
+    assert.equal(h.store.get().settingsError, undefined, '告警不是整页错误')
+  } finally {
+    h.cleanup()
+  }
 })
 
-test('R8a 01 测试连接失败：把宿主的可读原因原地展示，不改保存值', async () => {
+test('R15 01 添加实例：保存归一后的地址并显示「已保存 ✓」，输入框清空', async () => {
+  const h = await mount()
+  try {
+    await openSettings(h)
+    const input = h.$('[data-rss-rsshub-add-input]')
+    assert.ok(input !== null, '必须有「添加实例」输入框')
+    setControlValue(h.win, input, ' https://rsshub.example/ ')
+    h.$('[data-rss-rsshub-add]').click()
+    await h.waitFor(() => h.store.get().rsshubSettings?.instances.length === 1, { label: '实例池保存回包' })
+
+    const saves = h.requests.filter((entry) => entry.endpoint === 'saveRsshubSettings')
+    assert.deepEqual(saves.map((entry) => entry.payload), [{ instances: ['https://rsshub.example'] }],
+      '保存的是归一后的地址（trim / 去尾斜杠）')
+    assert.equal(h.$('[data-rss-rsshub-instance="0"] [data-rss-rsshub-instance-url]').textContent,
+      'https://rsshub.example', '新实例必须出现在列表里')
+    assert.ok(h.$('[data-rss-rsshub-saved]') !== null, '成功后显示「已保存 ✓」')
+    assert.equal(input.value, '', '成功后输入框清空')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R15 01 非法地址：就地红字 + 零请求 + 输入保留', async () => {
+  const h = await mount()
+  try {
+    await openSettings(h)
+    const input = h.$('[data-rss-rsshub-add-input]')
+    for (const bad of ['https://rsshub.example/api', 'ftp://rsshub.example', 'not a url', '']) {
+      setControlValue(h.win, input, bad)
+      h.$('[data-rss-rsshub-add]').click()
+      await h.waitFor(() => h.$('[data-rss-rsshub-draft-error]') !== null, { label: bad + ' 的就地红字' })
+      assert.equal(h.requests.filter((entry) => entry.endpoint === 'saveRsshubSettings').length, 0,
+        '非法地址必须零请求：' + bad)
+      assert.equal(input.value, bad, '非法输入必须保留')
+    }
+    assert.deepEqual(h.store.get().rsshubSettings?.instances, [], '本地校验失败不许改权威值')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R15 01 上限：已有 5 条时添加按钮禁用，界面说明「最多 5 个」（A6 的界面侧）', async () => {
+  const five = Array.from({ length: 5 }, (_, index) => 'https://hub' + index + '.example')
+  const h = await mount({ rsshubPool: rsshubPoolOf(five) })
+  try {
+    await openSettings(h)
+    const section = h.$('[data-rss-settings-section="rsshub"]')
+    assert.equal(section.querySelectorAll('[data-rss-rsshub-instance]').length, 5)
+    assert.equal(section.querySelector('[data-rss-rsshub-add]').disabled, true, '满 5 条后不许再加第 6 条')
+    assert.match(section.textContent ?? '', /最多 5 个/, '必须说明上限')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R15 01 排序与删除：上移 / 下移 / 删除都保存整份新顺序', async () => {
+  const pool = ['https://a.example', 'https://b.example', 'https://c.example']
+  const h = await mount({ rsshubPool: rsshubPoolOf(pool) })
+  try {
+    await openSettings(h)
+    h.$('[data-rss-rsshub-down="0"]').click()
+    await h.waitFor(() => h.store.get().rsshubSettings?.instances[0] === 'https://b.example', { label: '下移生效' })
+    let saves = h.requests.filter((entry) => entry.endpoint === 'saveRsshubSettings')
+    assert.deepEqual(saves.at(-1).payload, { instances: ['https://b.example', 'https://a.example', 'https://c.example'] },
+      '下移只交换相邻两项，整份数组按新顺序提交')
+
+    h.$('[data-rss-rsshub-remove="1"]').click()
+    await h.waitFor(() => h.store.get().rsshubSettings?.instances.length === 2, { label: '删除生效' })
+    saves = h.requests.filter((entry) => entry.endpoint === 'saveRsshubSettings')
+    assert.deepEqual(saves.at(-1).payload, { instances: ['https://b.example', 'https://c.example'] },
+      '删除后仍是整份数组，不留空洞')
+    assert.equal(h.$('[data-rss-rsshub-instance="2"]'), null, '第三行必须消失')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R15 01 测试连接：探的是该行实例，结果原地展示且不改保存值', async () => {
+  const h = await mount({ rsshubPool: rsshubPoolOf(['https://a.example', 'https://b.example']) })
+  try {
+    await openSettings(h)
+    h.$('[data-rss-rsshub-test="1"]').click()
+    await h.waitFor(() => h.$('[data-rss-rsshub-result]') !== null, { label: '测试结果上屏' })
+    const calls = h.requests.filter((entry) => entry.endpoint === 'testRsshub')
+    assert.deepEqual(calls.map((entry) => entry.payload), [{ base: 'https://b.example' }],
+      '探活只把这一行的地址交给宿主，浏览器不直连实例')
+    assert.match(h.$('[data-rss-rsshub-result]').textContent, /测试通过/)
+    assert.equal(h.requests.filter((entry) => entry.endpoint === 'saveRsshubSettings').length, 0,
+      '探活不是保存：不许写盘')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R15 01 测试连接失败：把宿主的可读原因原地展示', async () => {
   const h = await mount({
-    settings: {
-      effective: { ...TUNABLE_DEFAULTS, rsshubBase: 'https://rsshub.example' },
-      defaults: { ...TUNABLE_DEFAULTS },
-    },
+    rsshubPool: rsshubPoolOf(['https://rsshub.example']),
     testRsshub: async () => ({ passed: false, message: '连接失败：HTTP 500' }),
   })
-  await openSettings(h)
-  h.$('[data-rss-rsshub-test]').click()
-  await h.waitFor(() => h.$('[data-rss-rsshub-result]') !== null, { label: '失败结果上屏' })
-  assert.match(h.$('[data-rss-rsshub-result]').textContent, /HTTP 500/, '失败原因必须可读')
-  assert.equal(h.store.get().settings.effective.rsshubBase, 'https://rsshub.example', '探活不改配置')
+  try {
+    await openSettings(h)
+    h.$('[data-rss-rsshub-test="0"]').click()
+    await h.waitFor(() => h.$('[data-rss-rsshub-result]') !== null, { label: '失败结果上屏' })
+    assert.match(h.$('[data-rss-rsshub-result]').textContent, /HTTP 500/, '失败原因必须可读')
+    assert.deepEqual(h.store.get().rsshubSettings?.instances, ['https://rsshub.example'], '探活不改配置')
+  } finally {
+    h.cleanup()
+  }
 })
 
-test('R8a 01 恢复默认（清空）：发一次 patch rsshubBase（空串），不另写保存路径', async () => {
-  const h = await mount({
-    settings: {
-      effective: { ...TUNABLE_DEFAULTS, rsshubBase: 'https://rsshub.example' },
-      defaults: { ...TUNABLE_DEFAULTS },
-    },
-  })
-  await openSettings(h)
-  h.$('[data-rss-rsshub-reset]').click()
-  await h.waitFor(() => h.store.get().settings.effective.rsshubBase === '', { label: '清空生效' })
-  const saves = h.requests.filter((entry) => entry.endpoint === 'saveSettings')
-  assert.deepEqual(saves.map((entry) => entry.payload), [{ patch: { rsshubBase: '' } }],
-    '清空复用同一条 saveSettings 写路径')
-  assert.equal(h.$('[data-rss-setting-input="rsshubBase"]').value, '', '输入框跟随权威值清空')
-  assert.equal(h.$('[data-rss-rsshub-reset]').disabled, true, '清空后恢复默认按钮变禁用')
+test('R15 01 推荐卡片「启用这 3 个」：点按才一次写入推荐的 3 条', async () => {
+  const h = await mount()
+  try {
+    await openSettings(h)
+    h.$('[data-rss-rsshub-recommend-enable]').click()
+    await h.waitFor(() => h.store.get().rsshubSettings?.instances.length === 3, { label: '推荐实例写入' })
+    const saves = h.requests.filter((entry) => entry.endpoint === 'saveRsshubSettings')
+    assert.deepEqual(saves.map((entry) => entry.payload), [{ instances: RECOMMENDED_HUBS }],
+      '一次写入 3 个推荐实例，顺序与卡片一致')
+    assert.equal(h.$('[data-rss-rsshub-instance="0"] [data-rss-rsshub-instance-url]').textContent,
+      RECOMMENDED_HUBS[0], '写入后列表立刻显示')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R15 01 RSSHub 分区：官方实例列表链接指向 docs.rsshub.app，新窗口打开且断开 opener', async () => {
+  const h = await mount()
+  try {
+    await openSettings(h)
+    const note = h.$('[data-rss-rsshub-instances]')
+    assert.ok(note !== null, 'RSSHub 分区必须有官方实例列表的说明行')
+    const link = note.querySelector('a')
+    assert.ok(link !== null, '说明行里必须有「官方实例列表」链接')
+    assert.equal(link.getAttribute('href'), 'https://docs.rsshub.app/guide/instances', 'href 必须是官方实例文档')
+    assert.equal(link.getAttribute('target'), '_blank', '列表在文档站，新窗口打开')
+    assert.match(link.getAttribute('rel') ?? '', /noopener/, 'target=_blank 必须带 noopener（rel 里含 noopener）')
+    assert.match(note.textContent ?? '', /社区维护/, '必须说明公共实例由社区维护')
+    assert.match(note.textContent ?? '', /可能失效/, '必须说明公共实例可能失效')
+  } finally {
+    h.cleanup()
+  }
 })
 
 // ── R11 04：手动清理 = 预演 → 确认 → 执行（spec D27–D27.1 / 验收 C19）─────────────

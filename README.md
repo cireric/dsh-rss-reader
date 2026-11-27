@@ -72,8 +72,8 @@ bash scripts/gate.sh      # L1 一键门禁：build → build:client → typeche
 | 文件 | 内容 |
 |---|---|
 | `rss.db` | 条目库、标签关联、阅读进度与链接键（`node:sqlite`；DDL 在 `src/storage/db.ts`，v1/v2/v3/v4 旧库启动时自动升级到 v5） |
-| `config.json` | 订阅源、文件夹目录与视图偏好 |
-| `settings.json` | 设置页可调参数的稀疏覆盖层（四个数值参数 + RSSHub 实例地址 + 翻译路由三键与首次外发确认标记；只存用户改过的键；权限 0600；与 `config.json` / `rss.db` 同目录；不存在 = 全部跟随插件配置） |
+| `config.json` | 订阅源、文件夹目录、视图偏好与 RSSHub 实例池（0–5 条，`rsshub.instances`） |
+| `settings.json` | 设置页可调参数的稀疏覆盖层（四个数值参数 + 遗留 RSSHub 实例地址 `rsshubBase`（只在 `config.json` 没有实例池时作为单元素池读取，界面已不再编辑）+ 翻译路由三键与首次外发确认标记；只存用户改过的键；权限 0600；与 `config.json` / `rss.db` 同目录；不存在 = 全部跟随插件配置） |
 | `reader-YYYY-MM-DD.log` | 刷新日志（按天分文件，保留 14 天；UTC 日期） |
 
 订阅的唯一真相是 `config.json`：它不在（而库里还有条目）时装载**响亮失败**，不会静默给出空面板。

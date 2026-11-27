@@ -234,6 +234,22 @@ const CONTRACTS = {
       { resetToDefaults: false },
     ],
   },
+  // R15 01：实例池读端点零入参；写端点只判「instances 是字符串数组」，上限与逐条地址合法性
+  // 归 handler / 控制器（否则「最多 5 个」的提示会变成通用 bad-request）。
+  rsshubSettings: { valid: { anything: 1 }, invalid: [] },
+  saveRsshubSettings: {
+    valid: { instances: [] },
+    alsoValid: [
+      { instances: ['https://rsshub.example'] },
+      { instances: ['https://a.example', 'https://b.example'], hiddenNamespaces: ['nsfw'], hideNsfw: false },
+    ],
+    invalid: [
+      {},
+      { instances: 'https://rsshub.example' },
+      { instances: [1] },
+      { instances: [], hideNsfw: 'true' },
+    ],
+  },
   // R8a 01：探活入参只有 base（形状归声明，地址合法性归 handler 的唯一判据）。
   testRsshub: {
     valid: { base: 'https://rsshub.example' },
@@ -399,7 +415,8 @@ test('入参声明：每条坏样本都被拒，并给出字段路径', () => {
   // 168 = 161 + R7 01 的 translateBatch 7 条（缺 target / 空 items / 目标语言不在表内 /
   // id 不是 b+下标 / 文本全空白 / id 重复 / title 非字符串）。
   // 170 = 168 + R7 02 的 translateInfo 2 条（数组 / 原始值不是对象）。
-  assert.equal(checked, 170, '坏样本条数变了（当前 ' + checked + '）—— 检查契约表是否漏了必填字段')
+  // 174 = 170 + R15 01 的 saveRsshubSettings 4 条（缺 instances / 非数组 / 非字符串项 / hideNsfw 非布尔）。
+  assert.equal(checked, 174, '坏样本条数变了（当前 ' + checked + '）—— 检查契约表是否漏了必填字段')
 })
 
 test('坏入参：每个接 payload 的端点，第一条坏样本都经 dispatch 回 bad-request', async () => {
@@ -422,7 +439,8 @@ test('坏入参：每个接 payload 的端点，第一条坏样本都经 dispatc
   // R8b 03 加了 exploreCatalog / exploreBuildUrl（都有负例且经 dispatch 验过）：28 → 30。
   // R7 01 加了 translateBatch（有负例且经 dispatch 验过）：30 → 31。
   // R7 02 加了 translateInfo（零参端点，坏样本经 dispatch 验过）：31 → 32。
-  assert.equal(covered.length, 32, '接 payload 的端点应当是 32 个，实际 ' + covered.length)
+  // R15 01 加了 saveRsshubSettings（有负例且经 dispatch 验过）：32 → 33。
+  assert.equal(covered.length, 33, '接 payload 的端点应当是 33 个，实际 ' + covered.length)
 })
 
 test('坏入参：统一 bad-request 信封、details.issues 指出字段，且不触达 store', async () => {

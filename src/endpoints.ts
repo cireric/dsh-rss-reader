@@ -1,5 +1,5 @@
 /**
- * 浏览器半的读写通道：37 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
+ * 浏览器半的读写通道：39 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
  *
  * 原先这里是一个 switch：每臂各自手写 payload 解析、各自记得把未读账并进回包 ——
  * interface 的复杂度 ≈ implementation 的复杂度。现在「一个端点」是一个 module：
@@ -32,6 +32,7 @@ import {
   renameTagPayload,
   reorderFeedsPayload,
   saveReadingProgressPayload,
+  saveRsshubSettingsPayload,
   saveSettingsPayload,
   saveViewPreferencesPayload,
   scopePayload,
@@ -45,6 +46,7 @@ import {
 import type { createSearch } from './search.js'
 import type { Config } from './config.js'
 import type { SettingsControl } from './settings-control.js'
+import type { RsshubSettingsControl } from './rsshub-settings.js'
 import { EXTRACTOR_REVISION, contentVersionOf, fetchArticle, blocksToText } from './article.js'
 import { BackfillError, backfillHistory } from './backfill.js'
 import { rebuildItem } from './domain.js'
@@ -104,6 +106,11 @@ export interface EndpointDeps {
    */
   readonly settings?: SettingsControl
   /**
+   * RSSHub 实例池的内存态（R15 01）。与 settings 同理显式注入：池子住在 config.json，
+   * 不属于 ReaderStore 的条目 / 订阅契约。缺省只发生在测试桩没装配它时。
+   */
+  readonly rsshubSettings?: RsshubSettingsControl
+  /**
    * RSSHub 探活用的抓取实现（R8a 01）：默认 `fetchFeed`，测试注入桩件。
    * 与 subscribe 的 `options.fetchImpl` 同一手法 —— 否则「超时 / 非 2xx / 非 JSON」只能真出网才能测。
    */
@@ -148,6 +155,7 @@ export interface EndpointCtx {
   readonly lastRefreshCompletedAt: () => number | undefined
   readonly searchItems?: ReturnType<typeof createSearch>['run']
   readonly settings?: SettingsControl
+  readonly rsshubSettings?: RsshubSettingsControl
   readonly fetchImpl?: typeof fetchFeed
   readonly fetchArticleImpl?: typeof fetchArticle
   readonly articleAttempts: Map<string, number>
@@ -539,6 +547,15 @@ const CATALOG_PAGE_MAX = 100
  * 差别只在文案；地址判据仍只有 `parseRsshubBase` 这一份，不在这里重写协议 / 路径的规则。
  */
 function exploreBaseOf(ctx: EndpointCtx): { ok: true; base: string } | { ok: false; result: RpcResult<never> } {
+  // R15 01：实例池是唯一真相。空池 = 功能关闭（A5）；池子的第 1 条就是首选实例。
+  if (ctx.rsshubSettings !== undefined) {
+    const poolBase = ctx.rsshubSettings.instances()[0]
+    if (poolBase === undefined) {
+      return { ok: false, result: fail('not-configured', '实例池为空（未配置 RSSHub 实例），无法浏览路由表') }
+    }
+    return { ok: true, base: poolBase }
+  }
+  // 缺省分支只服务测试桩（历史用例只给 config.rsshubBase）：判据仍是同一个 parseRsshubBase。
   const base = parseRsshubBase(ctx.config.rsshubBase)
   if (base === '') {
     return { ok: false, result: fail('not-configured', '未配置 RSSHub 实例地址，无法浏览路由表') }
@@ -550,6 +567,19 @@ function exploreBaseOf(ctx: EndpointCtx): { ok: true; base: string } | { ok: fal
     }
   }
   return { ok: true, base }
+}
+
+/**
+ * 当前生效的实例池（顺序即优先级）。
+ *
+ * 生产路径永远注入 `ctx.rsshubSettings`；缺省分支只服务测试桩（历史用例只给 config.rsshubBase）。
+ * 这里刻意把**原始**遗留值交给 subscribe —— 它自己会用 `parseRsshubBase` 再验一次并给出
+ * 「地址不合法」的可读警告（profile patch 能绕过 saveSettings 的入参校验，这条警告不能丢）。
+ */
+function rsshubPoolOf(ctx: EndpointCtx): string[] {
+  if (ctx.rsshubSettings !== undefined) return ctx.rsshubSettings.instances()
+  const base = ctx.config.rsshubBase.trim()
+  return base === '' ? [] : [base]
 }
 
 /**
@@ -621,7 +651,7 @@ function catalogPageOf(
 }
 
 /**
- * 端点表：37 个端点一处声明（每项的 `payload` 是入参形状的唯一声明）。
+ * 端点表：39 个端点一处声明（每项的 `payload` 是入参形状的唯一声明）。
  *
  * 穷尽性由 `Record<Endpoint, EndpointSpec>` 保证 —— 名字表（shared.ts 的 ENDPOINT_NAMES）
  * 加了新端点而这里没跟上，编译就不过。这是本文件里唯一需要「加端点时改的地方」。
@@ -1010,8 +1040,8 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       const result = await discoverCandidates(raw, {
         limits: { timeoutMs: ctx.config.timeoutMs, maxBytes: ctx.config.maxBytes, trustedTarget: true },
         concurrency: 1,
-        // R8a 03：实例地址每次现读 ctx.config（settings 保存后直接改内存，不需要重启）。
-        rsshubBase: ctx.config.rsshubBase,
+        // R8a 03 / R15 01：实例地址每次现读生效实例池的首选；空池 = 功能关闭（零 Radar 请求）。
+        rsshubBase: rsshubPoolOf(ctx)[0] ?? '',
         // fetchImpl 与 testRsshub 同一手法：端点测要能桩住页面与实例两组出网。
         fetchImpl: ctx.fetchImpl,
         // Radar 的「命中/跳过」明细要能出现在宿主日志里；只走日志，不进回包（spec §6）。
@@ -1256,6 +1286,44 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         return ok({ passed: false, message: '响应里没有可用的 Radar 规则（空响应或只有站点名的空壳）' })
       }
       return ok({ passed: false, message: decoded.reason + '（这个地址可能不是 RSSHub 实例）' })
+    },
+  }),
+
+  /**
+   * RSSHub 实例池的**只读**快照（R15 01）：生效实例池 + 隐藏列表 + hideNsfw + 读侧告警。
+   *
+   * 与 `settings` 分开是刻意的：池子住在 `config.json`（用户订阅的同居者），不归 settings.json
+   * 的标量覆盖层管。回包包一层 `rsshub` 便于 06 / 07 票往同一对象里加字段而不换端点。
+   */
+  rsshubSettings: defineEndpoint({
+    payload: noPayload,
+    to: async (_input, ctx) => {
+      if (ctx.rsshubSettings === undefined) return fail('not-ready', 'RSSHub 设置服务尚未就绪')
+      return ok({ rsshub: ctx.rsshubSettings.snapshot() })
+    },
+  }),
+
+  /**
+   * RSSHub 实例池的**写**端点（R15 01）：整份替换实例数组。
+   *
+   * 错误码分两种：超过 5 条 / 形状不对是 `bad-request`（文件与内存都不碰）；
+   * 写盘失败是 `write-failed` —— 用户要去查磁盘 / 权限，而不是改自己输入的地址。
+   * 坏地址逐条丢弃并回包 `warning`，不让一条手滑的地址把整份池子拒掉。
+   */
+  saveRsshubSettings: defineEndpoint({
+    payload: saveRsshubSettingsPayload,
+    invalidMessage: 'saveRsshubSettings 需要 instances（字符串数组）',
+    to: async (input, ctx) => {
+      if (ctx.rsshubSettings === undefined) return fail('not-ready', 'RSSHub 设置服务尚未就绪')
+      const outcome = ctx.rsshubSettings.save({
+        instances: input.instances,
+        ...(input.hiddenNamespaces === undefined ? {} : { hiddenNamespaces: input.hiddenNamespaces }),
+        ...(input.hideNsfw === undefined ? {} : { hideNsfw: input.hideNsfw }),
+      })
+      if (!outcome.ok) {
+        return fail(outcome.reason === 'invalid' ? 'bad-request' : 'write-failed', outcome.message)
+      }
+      return ok({ rsshub: outcome.snapshot })
     },
   }),
 
@@ -1558,7 +1626,7 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
  * 异常一律兜成 internal 信封 —— 不把 throw 泄进通道（调用方要的是带 code 的失败信封）。
  */
 export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: unknown, signal?: AbortSignal) => Promise<RpcResult<unknown>> {
-  const { config, log, ready, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, fetchImpl, fetchArticleImpl, translateServices, translateDeadlineMs, translateNow } = deps
+  const { config, log, ready, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, rsshubSettings, fetchImpl, fetchArticleImpl, translateServices, translateDeadlineMs, translateNow } = deps
 
   const dispatch = async (endpoint: string, payload: unknown, signal?: AbortSignal): Promise<RpcResult<unknown>> => {
     try {
@@ -1573,7 +1641,7 @@ export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: 
       if (spec === undefined) return fail('unknown-endpoint', '未知端点：' + endpoint)
 
       const ctx: EndpointCtx = {
-        store: target, ready, config, log, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, fetchImpl, fetchArticleImpl, signal,
+        store: target, ready, config, log, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, rsshubSettings, fetchImpl, fetchArticleImpl, signal,
         ...(translateServices === undefined ? {} : { translateServices }),
         ...(translateDeadlineMs === undefined ? {} : { translateDeadlineMs }),
         ...(translateNow === undefined ? {} : { translateNow }),

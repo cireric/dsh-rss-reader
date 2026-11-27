@@ -43,6 +43,8 @@ export const ENDPOINT_NAMES = [
   'settings', 'saveSettings',
   // R8a 01：RSSHub 实例的「测试连接」探活（宿主出网，浏览器不直连实例）。
   'testRsshub',
+  // R15 01：RSSHub 实例池（0–5 条）的读 / 写。写路径先落盘成功再改内存，见 rsshub-settings.ts。
+  'rsshubSettings', 'saveRsshubSettings',
   // R9 02：归档页回溯（宿主读归档页、逐篇抓正文与日期、写入条目库）。
   'backfillHistory',
   // R8b 03：探索的两个**只读**端点 —— 目录分页与地址拼装。整张路由表永不下发浏览器（D12）。
@@ -83,6 +85,22 @@ export interface ReadOnlySettingView {
 export interface RsshubTestResult {
   readonly passed: boolean
   readonly message: string
+}
+
+/**
+ * RSSHub 实例池快照（R15 01，spec §4.1.1 / §4.1.2 / §5）。
+ *
+ * `instances` 是**生效值**，不是文件原文：旧 `settings.json` 的 `rsshubBase` 在池子缺省时
+ * 会被折算成单元素池（A5）。`instances.length === 0` 是用户主动关闭 RSSHub —— 与「没配过」
+ * 的区别已经在宿主侧消化，客户端只看这一份结果。
+ *
+ * `warning` 只在读侧 / 写侧丢弃了坏项时出现（逐条丢弃、不让整份配置失效）；正常态缺席。
+ */
+export interface RsshubSettingsSnapshot {
+  instances: string[]
+  hiddenNamespaces: string[]
+  hideNsfw: boolean
+  warning?: string
 }
 
 /**
