@@ -70,3 +70,5 @@
       演练记录 `.scratch/r12-author/migration-rehearsal.md`。**快照保留作回滚点，别删**；
 - [x] 5. 版本号与 `CHANGELOG.md` 一致 —— `package.json` **0.3.0**，`CHANGELOG.md` 已建立 **0.3.0 — 2026-11-27** 小节，R1–R7 等未发布条目归入该版本；
 - [ ] 6. **发布动作（push / npm publish）另行授权** —— 本地 `main` 领先 `origin/main`（origin 在 `516a79b` / v0.2.0 tag）；本地 `v0.3.0` tag 已创建，未 push、无 npm publish。
+- [x] 7. R7 终检（2026-11-27）：`bash scripts/gate.sh` L1 全过（build / build:client / typecheck / test **1380/1380**）；全量变异 `407/407 · 0 幸存 · 恢复后基线绿`；`dev_reload_package` 前后 `[active]`、当日日志「装载失败」0 条、路由 401。
+
