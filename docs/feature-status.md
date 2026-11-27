@@ -1,6 +1,6 @@
 # 功能状态
 
-> 版本 **0.1.0**（本地 main 已含 R1–R7、R9、R11、R12、R14 与 R8a，尚未发版）· 更新 2026-11-27 · **本地 main 已合入 R7（merge `784a2fc`，代码基线 `26ab6ad`）、R9 / R14（merge `a59baf4`）、R11、R8a**，未 push（origin/main 停在 `516a79b`，即 v0.2.0 tag）· 未打新 tag、无 npm publish
+> 版本 **0.3.0**（本地 main 已含 R1–R7、R9、R11、R12、R14 与 R8a；0.3.0 为本地 release，未 push）· 更新 2026-11-27 · **本地 main 已合入 R7（merge `784a2fc`，代码基线 `26ab6ad`）、R9 / R14（merge `a59baf4`）、R11、R8a**，未 push（origin/main 停在 `516a79b`，即 v0.2.0 tag）· 本地 tag `v0.3.0` 随本次 release 创建，未 push、无 npm publish
 >
 > 状态词只有五个，按「证据离真机有多远」排：
 > **已落地**（代码在 `src/`、门槛绿）→ **隔离 smoke**（测试或合成夹具通过）→ **真机确认**（活体宿主装载过）→
@@ -59,7 +59,7 @@
   列表行 / 正文 header / 搜索的**观感**仍待你在真机上过一遍（步骤见 `.scratch/r12-author/issues/08-*.md` 与交接说明）。
   真机快照留在 `~/rss-backup-2026-11-22/`（v4，回滚用，别删）。
 
-## 发布前要做的事（2026-11-22 状态）
+## 发布前要做的事（2026-11-27 状态）
 
 - [x] 1. `bash scripts/gate.sh`（L1：build → build:client → typecheck → test）全绿 —— R1 05 票终检实测（L1 全过、`npm test` 806/806、`npm run test:perf` 11/11）；2026-11-21 复跑 `npm test` **806/806**；**R12 终检（2026-11-22）：build / build:client / typecheck 通过、`npm test` 983/983（0 skipped）**；
 - [x] 2. `npm run mutation -- --workers 1` 全量跑完 —— R1 05 票终检实测：应用 **272/272**、0 幸存、恢复后基线仍绿；**R12 终检（2026-11-22，`--workers 2`）：应用 342/342、0 幸存、恢复后基线仍绿**；
@@ -68,6 +68,5 @@
       快照 `~/rss-backup-2026-11-22/`（0700/0600，`verify-backup` 退出码 0，v4、580 条 / 7 源）；
       副本演练通过后才 reload（库 v4→v5、行数与已读/星标计数不变、`integrity_check=ok`）；
       演练记录 `.scratch/r12-author/migration-rehearsal.md`。**快照保留作回滚点，别删**；
-- [ ] 5. 版本号与 `CHANGELOG.md` 一致 —— `package.json` 仍是 `0.1.0`，而 R1–R4 已合入但**未发版**：
-      发版时要抬版本号并在 `CHANGELOG.md` 补对应小节（当前那条记为「未发布」）；
-- [ ] 6. **发布动作（打 tag / npm publish）另行授权** —— 本地 `main` 领先 `origin/main`（origin 在 `516a79b` / v0.2.0 tag），未 push、未打新 tag、无 npm publish。
+- [x] 5. 版本号与 `CHANGELOG.md` 一致 —— `package.json` **0.3.0**，`CHANGELOG.md` 已建立 **0.3.0 — 2026-11-27** 小节，R1–R7 等未发布条目归入该版本；
+- [ ] 6. **发布动作（push / npm publish）另行授权** —— 本地 `main` 领先 `origin/main`（origin 在 `516a79b` / v0.2.0 tag）；本地 `v0.3.0` tag 已创建，未 push、无 npm publish。

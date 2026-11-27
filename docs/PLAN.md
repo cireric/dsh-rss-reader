@@ -4,7 +4,7 @@
 > **状态词**：`已完成` / `进行中` / `未开工` / `待拍板` / `暂缓`。
 > **完成定义**：按 [AGENTS.md](../AGENTS.md) 的四道门槛（`build` / `build:client` / `typecheck` / `test`，关键判定另有 `mutation`）+ 真机三步（reload / 日志 / 路由）。本文件不抄门槛，只记结果与遗留。
 > **票据唯一真相**：`.scratch/<slug>/issues/`；本文件只做阶段索引，阶段内的行为规范、验收与变异归属看 spec / 票据，不在这里复制。
-> **基线**：main（v0.2.0 tag `516a79b` + R11 merge `68f0b12` + R8a merge `de72059` + R9/R14 merge `a59baf4` + R7 merge `784a2fc`，2026-11-27）——R1–R7、R8a、R9、R11、R12、R14 已合入；均未抬版本号、未 push。
+> **基线**：main（v0.2.0 tag `516a79b` + R11 merge `68f0b12` + R8a merge `de72059` + R9/R14 merge `a59baf4` + R7 merge `784a2fc`，2026-11-27）——R1–R7、R8a、R9、R11、R12、R14 已合入；R7 版本线为 0.3.0，未 push。
 > **定位变更**：自 2026-11-22 起本文件改为产品功能进度计划；原「架构候选」计划保存在 git 历史（`git show fd139c6:docs/PLAN.md`），不再在本文件维护。
 
 ## 总览
@@ -182,9 +182,9 @@
 
 ## 账目 / 已知不一致
 
-- **v0.2.0**：git tag `v0.2.0` 在 `516a79b`（2026-11-22），但 `package.json` 仍是 `0.1.0`，`CHANGELOG.md` 的 R1–R4 / R5 / R12 仍标「未发布」，`docs/feature-status.md` 仍写「版本 0.1.0…尚未发版」。代码状态不受影响，但发布账目要补，否则「v0.2.0 到底包含什么」不可追溯。
-- **R7 发布账目**：R7 已合入 main `784a2fc`（代码基线 `26ab6ad`）；`package.json` 仍 `0.1.0`，`CHANGELOG.md` 的 R7 小节仍标「未发布」，版本号与 tag 待拍板。
+- **v0.2.0**：git tag `v0.2.0` 在 `516a79b`（2026-11-22），该 tag 的 `package.json` 仍是 `0.1.0`；`0.3.0` 发布账目已建立（CHANGELOG 0.3.0 小节、package 0.3.0），历史 tag 内容不可改写。
+- **R7 发布账目**：R7 已合入 main `784a2fc`（代码基线 `26ab6ad`）；`package.json` 已抬到 `0.3.0`，`CHANGELOG.md` 已建立 `0.3.0 — 2026-11-27` 小节；本地 tag `v0.3.0` 已创建，未 push。
 - **R6 文档面**：`CHANGELOG.md` / `docs/feature-status.md` 已补 R6；`spec.md` 头已回填 `resolved（8/8）`。
 - **R6 真机**：三项观感未验（图片 640 限高、灯箱长截图溢出、Referer 实发）；不要因为 tag 已打就写成「真机全验」。
 - **R9 / R14 账目**：R9（评审修复 `e317e73`）与 R14（`6153927`）已合入 **main `a59baf4`**，**未打 tag、未 push**；`CHANGELOG.md` 已补两节，`docs/feature-status.md` 已加两行。真机与真实站点证据在 `.scratch/r9-archive/issues/04-real-device.md` 与 `.scratch/r14-feed-scope/issues/01-feed-scope.md`。
-- **R11 版本账目**：R11 已合入 `main`（`68f0b12`），但 `package.json` 仍 `0.1.0`、未打 tag；`CHANGELOG.md` 的 R11 小节仍标「未发布」。功能状态见 `docs/feature-status.md` 的 R11 行（真机验收可用 + 三项细项未复核）。
+- **R11 版本账目**：R11 已合入 `main`（`68f0b12`），随 `0.3.0` 一起发布；`CHANGELOG.md` 的 R11 小节已归入 0.3.0。功能状态见 `docs/feature-status.md` 的 R11 行（真机验收可用 + 三项细项未复核）。
