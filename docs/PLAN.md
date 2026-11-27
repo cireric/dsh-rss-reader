@@ -4,7 +4,7 @@
 > **状态词**：`已完成` / `进行中` / `未开工` / `待拍板` / `暂缓`。
 > **完成定义**：按 [AGENTS.md](../AGENTS.md) 的四道门槛（`build` / `build:client` / `typecheck` / `test`，关键判定另有 `mutation`）+ 真机三步（reload / 日志 / 路由）。本文件不抄门槛，只记结果与遗留。
 > **票据唯一真相**：`.scratch/<slug>/issues/`；本文件只做阶段索引，阶段内的行为规范、验收与变异归属看 spec / 票据，不在这里复制。
-> **基线**：main（v0.2.0 tag `516a79b` + R11 merge `68f0b12` + R8a merge `de72059` + R9/R14 merge `a59baf4`，2026-11-24）——R1–R6、R8a、R9、R11、R12、R14 已合入；均未抬版本号、未 push。
+> **基线**：main（v0.2.0 tag `516a79b` + R11 merge `68f0b12` + R8a merge `de72059` + R9/R14 merge `a59baf4` + R7 merge `784a2fc`，2026-11-27）——R1–R7、R8a、R9、R11、R12、R14 已合入；均未抬版本号、未 push。
 > **定位变更**：自 2026-11-22 起本文件改为产品功能进度计划；原「架构候选」计划保存在 git 历史（`git show fd139c6:docs/PLAN.md`），不再在本文件维护。
 
 ## 总览
@@ -27,7 +27,7 @@
 | R13 | `/rss` 命令 | 暂缓 | — | 与 4 个 Agent 工具重复 |
 | R14 | 订阅源范围宿主分页 | 已完成 | 1/1 `resolved` | 648 条库 / 27 条源：源页 27 无续页；1197/1197、全量变异 381/381 · 0 幸存 |
 
-**进度**：已交付 13 个阶段、65 张票（R1–R7、R11、R12、R8a、R9、R14、R8b）；**R7 已完成（7/7 `resolved`）**，R10/R13 暂缓。**当前阶段：R7 已收尾，待合入 main / 发布账目。**
+**进度**：已交付 13 个阶段、65 张票（R1–R7、R11、R12、R8a、R9、R14、R8b）；**R7 已完成（7/7 `resolved`）**，R10/R13 暂缓。**当前阶段：无（R7 已收尾并合入 main，待发布账目）。**
 
 ## 已完成阶段（留作上下文）
 
@@ -89,7 +89,7 @@
 
 ### R7 一键翻译
 
-- **状态**：已完成（`.scratch/r7-translate/issues/` 7/7 `resolved`；开发分支 `feat/r7-translate`，代码基线 commit `26ab6ad`（评审修复已提交），待合入 main）。
+- **状态**：已完成（`.scratch/r7-translate/issues/` 7/7 `resolved`；开发分支 `feat/r7-translate`，代码基线 commit `26ab6ad`，已合入 main `784a2fc`）。
 - **交付**：`src/translate.ts`（prompt 指令内联进 user / `maxTokensFor` / 60 s deadline / 流拼装 / 四类失败 / `resolveTranslateRoute` 两层路由与 `routeOfSessionDefault` 只取 provider+model）、`src/translate-blocks.ts`（可翻块筛选 / `applyBatch` 编号对齐 / 12 块 ×2000 字符分批 / 单块三档 / 30000 上限）、`src/translate-copy.ts`（5 语言与中文文案）、端点 `translateBatch` / `translateInfo`（35 → 37）、`src/client/translate-actions.ts`（串行编排 / 视口首批 / 失败批重试 / 连败 3 批停止 / 中止与继续 / 全局单任务）、`src/client/translate-entry.ts`（回包对齐 / 按块 model）、`src/client/translate-state.ts`（条目 / 两态共享状态）、`src/client/translate-toolbar.tsx`（工具栏控件）、`src/client/article-pane.tsx`（原文 / 对照两态与单枚切换、进度、失败批重试入口、翻译中占位）、首次外发确认框与设置页模型选择器、正文工具栏的裸语言下拉、`src/keys.ts` 的 `t`（原文 / 对照切换 / 缺块继续 / 无译文时触发）。
 - **证据**：`tests/translate-*.test.mjs` 12 个文件 101 条；全量 `npm test` **1380/1380**（本轮评审修复新增 5 条）；全量变异 **407/407 应用 · 0 幸存 · 恢复后基线仍绿**（评审修复后实跑，3 workers；R7 15/15 caught）；真机三步（`dev_reload_package` 前后 `[active]` / 当日 `reader-2026-11-25.log` 0 条「装载失败」/ `POST /rss-reader-api` 401）；真模型三篇（同一套 `articleTranslatePlanOf` / `pickBatch` 直调 `lib/translate.js`）：短 265 字 1 批 5.2 s、中 1896 字 2 批 27.2 s（批 0 在会话 effort:max 下 20.1 s truncated；同批显式无 effort A/B 9.8 s 成功，据此修掉会话 effort 外溢）、长 8235 字 8 批 94.5 s 全部成功（每批 4.6–15.7 s，id 全对齐、无空译文、`model=deepseek-v4.1-flash`）。
 - **遗留**：真实 GUI 观感未验（原文 / 对照切换、视口优先首批、确认框与进度条的浏览器实际观感；本轮只经 staging 直调 `translateBatch`，未在页面上点）；译文纯内存、刷新即丢，纯文本丢链接与内联样式，未做表格 / 图片 alt 翻译（spec 已知限制）；输出预算按字符估且与 reasoning 共用 `maxTokens`，超长批仍可能 truncated（真机样本已在 CHANGELOG 记）。
