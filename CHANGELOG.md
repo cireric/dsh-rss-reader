@@ -24,13 +24,14 @@
 
 ### 隐私与费用
 
-- 点「译」会把**当前文章的标题与正文**发送给所选模型服务（默认 = 会话当前模型）。这是唯一外发路径；插件不另存副本、不把正文写进日志。
+- 点「译」会把**当前文章的正文**发送给所选模型服务（默认 = 会话当前模型；2026-11-26 起客户端不再发送标题）。这是唯一外发路径；插件不另存副本、不把正文写进日志。
 - 每批一次模型调用，整篇可能连续多次；费用由所选模型服务按 token 计。
 
 ### 存储与升级
 
 - **无迁移、无 schema 变更**：库版本仍 v5，不建表、不加列；翻译结果不写库。
-- `settings.json` 新增三个稀疏键 `translateProvider` / `translateModel` / `translateEffort`（缺省 = 跟随会话默认）；`config.json` 不变。
+- `settings.json` 新增四个稀疏键：`translateProvider` / `translateModel` / `translateEffort`（缺省 = 跟随会话默认）与 `translateNoticeAck`（首次外发确认标记）。
+- `config.json` 的 `viewPreferences` 新增 `translateTarget`（默认 `zh-CN`，只认五种语言枚举）；旧配置缺字段时按默认归一化，不迁移、不升库版本。
 - **端点**：35 → 37（`translateBatch` / `translateInfo`）。
 
 ### 已知限制
