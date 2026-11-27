@@ -4,7 +4,7 @@
 > **状态词**：`已完成` / `进行中` / `未开工` / `待拍板` / `暂缓`。
 > **完成定义**：按 [AGENTS.md](../AGENTS.md) 的四道门槛（`build` / `build:client` / `typecheck` / `test`，关键判定另有 `mutation`）+ 真机三步（reload / 日志 / 路由）。本文件不抄门槛，只记结果与遗留。
 > **票据唯一真相**：`.scratch/<slug>/issues/`；本文件只做阶段索引，阶段内的行为规范、验收与变异归属看 spec / 票据，不在这里复制。
-> **基线**：main（v0.2.0 tag `516a79b` + R11 merge `68f0b12` + R8a merge `de72059` + R9/R14 merge `a59baf4` + R7 merge `784a2fc`，2026-11-27）——R1–R7、R8a、R9、R11、R12、R14 已合入；R7 版本线为 0.3.0，未 push。
+> **基线**：main（v0.2.0 tag `516a79b` + R11 merge `68f0b12` + R8a merge `de72059` + R9/R14 merge `a59baf4` + R7 merge `784a2fc`，2026-11-27）——R1–R7、R8a/R8b、R9、R11、R12、R14 已合入；R7 版本线为 0.3.0，未 push。
 > **定位变更**：自 2026-11-22 起本文件改为产品功能进度计划；原「架构候选」计划保存在 git 历史（`git show fd139c6:docs/PLAN.md`），不再在本文件维护。
 
 ## 总览
