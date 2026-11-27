@@ -1,5 +1,5 @@
 /**
- * 浏览器半的读写通道：39 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
+ * 浏览器半的读写通道：40 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
  *
  * 原先这里是一个 switch：每臂各自手写 payload 解析、各自记得把未读账并进回包 ——
  * interface 的复杂度 ≈ implementation 的复杂度。现在「一个端点」是一个 module：
@@ -27,6 +27,7 @@ import {
   noPayload,
   opmlImportPayload,
   overviewPayload,
+  probeFeedsPayload,
   removeFeedPayload,
   renameFolderPayload,
   renameTagPayload,
@@ -57,6 +58,7 @@ import { FolderError } from './folders.js'
 import { duplicateHintsOf, linkKeyOf, type DuplicateRow } from './duplicates.js'
 import { TagError } from './tags.js'
 import { discoverCandidates, validateSubscriptions } from './subscribe.js'
+import { probeFeeds } from './probe.js'
 import { decodeRadarResponse, radarRulesUrl } from './radar.js'
 import { fetchFeed } from './feed/fetch.js'
 import { parseRsshubBase, parseTunableValue } from './settings-schema.js'
@@ -662,7 +664,7 @@ function catalogPageOf(
 }
 
 /**
- * 端点表：39 个端点一处声明（每项的 `payload` 是入参形状的唯一声明）。
+ * 端点表：40 个端点一处声明（每项的 `payload` 是入参形状的唯一声明）。
  *
  * 穷尽性由 `Record<Endpoint, EndpointSpec>` 保证 —— 名字表（shared.ts 的 ENDPOINT_NAMES）
  * 加了新端点而这里没跟上，编译就不过。这是本文件里唯一需要「加端点时改的地方」。
@@ -1069,6 +1071,25 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       ctx.log('发现结果：' + raw + ' → 候选 ' + result.candidates.length + ' 条（页面 ' + pageCount
         + ' / RSSHub ' + rsshubCount + '），' + result.warnings.length + ' 条警告')
       return ok(result)
+    },
+  }),
+
+  /**
+   * **试读**（R15 10，spec §4.3.3 / A15）：只读探测，不写库、不改订阅。
+   *
+   * 出网与判定全在 probe.ts（那里复用 discover 的 checkCandidate）：端点只把已解析的 1–5 条
+   * 地址交出去。试读**不传 trustedTarget**：候选地址不是用户自己的订阅，内网目标必须由出网层拒绝；
+   * 失败原因统一成「目标被安全策略拒绝」，不回显 host / IP。
+   */
+  probeFeeds: defineEndpoint({
+    payload: probeFeedsPayload,
+    invalidMessage: 'probeFeeds 需要 1–5 条 http(s) 地址',
+    to: async (input, ctx) => {
+      const results = await probeFeeds(input.urls, {
+        fetchImpl: ctx.fetchImpl,
+        maxBytes: ctx.config.maxBytes,
+      })
+      return ok(results)
     },
   }),
 
