@@ -433,3 +433,82 @@ test('冷却（装配）：连续失败 2 次的实例被排到最后；10 分�
   assert.deepEqual(result.outcome.instancesAttempted, ['https://hub-c.test', 'https://hub-a.test'],
     '冷却到期必须恢复原顺序（永不恢复的变异会在这里露馅）')
 })
+
+// ── 条件请求只对准「上次成功的那台」（R15 评审 #7）──────────────────────────
+
+test('条件请求：记录实例仍在池中且排第一 ⇒ 照常带 ETag / Last-Modified（增量抓取不退化）', async () => {
+  const store = strictMemoryStore()
+  const feedUrl = 'https://hub-a.test/cond-ok/baoyu'
+  const pool = ['https://hub-a.test', 'https://hub-b.test']
+  await store.saveFeed(feedUrl, {
+    url: feedUrl,
+    title: '博客',
+    etag: '"old"',
+    lastModified: 'Mon, 01 Jan 2024 00:00:00 GMT',
+    // 内容版本已是最新：本轮不是「正文升级轮」，条件头该照常发。
+    contentRevision: 2,
+    rsshub: { namespace: 'cond-ok', path: '/cond-ok/baoyu', instance: 'https://hub-a.test' },
+  })
+  const { impl, calls } = fetchStub({
+    [feedUrl]: { kind: 'not-modified', etag: '"old"', lastModified: 'Mon, 01 Jan 2024 00:00:00 GMT' },
+  })
+
+  const outcomes = await refreshFeeds([feedUrl], store, { ...BASE_OPTIONS, instances: pool, fetchFeedImpl: impl })
+
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0].validators, { etag: '"old"', lastModified: 'Mon, 01 Jan 2024 00:00:00 GMT' },
+    '候选第一个就是上次成功的那台 ⇒ 条件头必须照带，否则每轮都全量重抓')
+  assert.equal(outcomes[0].status, 'not-modified')
+})
+
+test('条件请求：记录实例不在池中 ⇒ 第一个候选不得带它的条件头（防止 304 被记成新实例成功）', async () => {
+  // 病象：旧判据是「本次第一个候选 ⇒ 带 validators」。当记录里的实例被移出池子 / 正在冷却时，
+  // 第一个候选并不是上次成功的那台，却仍带上它的 ETag —— 别的实例回 304 会被当成成功，
+  // 并把 rsshub.instance 记成一台根本没取过内容的实例。
+  const store = strictMemoryStore()
+  const feedUrl = 'https://gone.test/cond-gone/baoyu'
+  const pool = ['https://hub-a.test', 'https://hub-b.test']
+  await store.saveFeed(feedUrl, {
+    url: feedUrl,
+    title: '博客',
+    etag: '"old"',
+    lastModified: 'Mon, 01 Jan 2024 00:00:00 GMT',
+    contentRevision: 2,
+    rsshub: { namespace: 'cond-gone', path: '/cond-gone/baoyu', instance: 'https://gone.test' },
+  })
+  const { impl, calls } = fetchStub({
+    ['https://hub-a.test/cond-gone/baoyu']: {
+      kind: 'ok', body: rss('来自池首'), finalUrl: 'https://hub-a.test/cond-gone/baoyu',
+    },
+  })
+
+  const outcomes = await refreshFeeds([feedUrl], store, { ...BASE_OPTIONS, instances: pool, fetchFeedImpl: impl })
+
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0].validators, {},
+    '记录实例已不在池中 ⇒ 第一个候选不是它，绝不能带它的 ETag / Last-Modified')
+  assert.equal(outcomes[0].status, 'added')
+  assert.equal(store.feed(feedUrl).rsshub.instance, 'https://hub-a.test', '只记实际取到内容的实例')
+})
+
+test('条件请求：老记录没有 rsshub.instance ⇒ 任何候选都不带条件头（宁可多一次 200）', async () => {
+  const store = strictMemoryStore()
+  const feedUrl = 'https://hub-a.test/cond-legacy/baoyu'
+  const pool = ['https://hub-a.test', 'https://hub-b.test']
+  await store.saveFeed(feedUrl, {
+    url: feedUrl,
+    title: '博客',
+    etag: '"old"',
+    lastModified: 'Mon, 01 Jan 2024 00:00:00 GMT',
+    contentRevision: 2,
+    // 有 rsshub 来源（namespace/path）但没记过 instance：老记录升级后的形状。
+    rsshub: { namespace: 'cond-legacy', path: '/cond-legacy/baoyu' },
+  })
+  const { impl, calls } = fetchStub({
+    [feedUrl]: { kind: 'ok', body: rss('老记录'), finalUrl: feedUrl },
+  })
+
+  await refreshFeeds([feedUrl], store, { ...BASE_OPTIONS, instances: pool, fetchFeedImpl: impl })
+
+  assert.deepEqual(calls[0].validators, {}, '没有 instance 事实就没有「上次成功的那台」，条件头一律不带')
+})

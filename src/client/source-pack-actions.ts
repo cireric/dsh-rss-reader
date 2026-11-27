@@ -54,6 +54,13 @@ export interface SourcePackState {
   saving: boolean
   /** 勾选待导入的条目 URL。真源是清单本身，这里只存 URL（条目被删时随之清理）。 */
   selected: string[]
+  /**
+   * 行内编辑的草稿（spec §4.3.1「用户可增 / 删 / 改分类与备注」）。
+   *
+   * `undefined` = 没有正在编辑的行；有值时只改这一条的 `category` / `note`，
+   * 保存仍走 `saveSourcePack` 整份替换（不新增端点、不复制落盘路径）。
+   */
+  editing: { url: string; category: string; note: string } | undefined
   /** 导入请求在飞（按钮禁用、勾选冻结）。 */
   importing: boolean
   /** 上一次导入的逐条结果，宿主回包原样保存（界面不二次加工）。 */
@@ -86,6 +93,7 @@ function emptySourcePack(): SourcePackState {
     notice: undefined,
     saving: false,
     selected: [],
+    editing: undefined,
     importing: false,
     importReport: undefined,
     formOpen: false,
@@ -107,6 +115,8 @@ function withSnapshot(state: SourcePackState, snapshot: SourcePackSnapshot): Sou
     warning: snapshot.warning,
     loading: false,
     selected: state.selected.filter((url) => present.has(url)),
+    // 编辑中的条目被整份替换掉时，草稿必须一起消失：否则「保存」会指向一个不存在的 URL。
+    editing: state.editing !== undefined && present.has(state.editing.url) ? state.editing : undefined,
   }
 }
 
@@ -147,6 +157,7 @@ export function createSourcePackActions(host: SourcePackActionHost) {
         : {
             ...existing, loading: true, error: undefined, notice: undefined,
             formOpen: false, probe: undefined, probing: false, saving: false,
+            editing: undefined,
             // 不清 importing：离开视图不会中止在飞请求，重开时必须如实显示「导入中…」。
             importReport: undefined,
           },
@@ -333,6 +344,64 @@ export function createSourcePackActions(host: SourcePackActionHost) {
     await saveEntries(state.entries.filter((entry) => entry.url !== url), { notice: '已删除' })
   }
 
+  /** 打开某一行的行内编辑：草稿取该条当前的分类 / 备注（缺省 = 空串）。 */
+  const openSourcePackEditor = (url: string): void => {
+    const state = get().sourcePack
+    if (state === undefined) return
+    const entry = state.entries.find((item) => item.url === url)
+    if (entry === undefined) return
+    set({
+      sourcePack: {
+        ...state,
+        editing: { url, category: entry.category ?? '', note: entry.note ?? '' },
+        error: undefined,
+        notice: undefined,
+      },
+    })
+  }
+
+  const setSourcePackEditDraft = (patch: Partial<{ category: string; note: string }>): void => {
+    const state = get().sourcePack
+    if (state === undefined || state.editing === undefined) return
+    set({ sourcePack: { ...state, editing: { ...state.editing, ...patch } } })
+  }
+
+  const cancelSourcePackEdit = (): void => {
+    const state = get().sourcePack
+    if (state === undefined || state.editing === undefined) return
+    set({ sourcePack: { ...state, editing: undefined } })
+  }
+
+  /**
+   * 保存行内编辑（spec §4.3.1）：只重建被编辑的那一条的 `category` / `note`，其余条目原样带上。
+   *
+   * 为什么走整份替换：`saveSourcePack` 的契约就是整份清单（与 saveViewPreferences 同型）；
+   * 在这里另造一个「改一条」的增量端点会让落盘出现第二条路径。
+   * 空串 = 用户主动清空该字段 ⇒ 键不落盘（wire 形状里「没有」与「空串」必须可区分）。
+   */
+  const saveSourcePackEdit = async (): Promise<void> => {
+    const state = get().sourcePack
+    if (state === undefined || state.saving || state.editing === undefined) return
+    const { url, category, note } = state.editing
+    if (!state.entries.some((entry) => entry.url === url)) {
+      // 条目在编辑期间被别的操作删掉了：草稿已无对象，安静收起来（不是一次保存）。
+      set({ sourcePack: { ...state, editing: undefined } })
+      return
+    }
+    const categoryText = category.trim()
+    const noteText = note.trim()
+    const entries = state.entries.map((entry) => {
+      if (entry.url !== url) return entry
+      // 逐字段重建而不是展开旧对象再删键：undefined 不许作为一个键落到 wire 上。
+      const next: CuratedSourceEntry = { url: entry.url, addedAt: entry.addedAt }
+      if (entry.title !== undefined) next.title = entry.title
+      if (categoryText !== '') next.category = categoryText
+      if (noteText !== '') next.note = noteText
+      return next
+    })
+    await saveEntries(entries, { notice: '已保存 ✓' })
+  }
+
   /** 恢复内置快照：只补缺失 URL（宿主算），不清用户自己的条目。 */
   const restoreSourcePackSeed = async (): Promise<void> => {
     const state = get().sourcePack
@@ -367,6 +436,8 @@ export function createSourcePackActions(host: SourcePackActionHost) {
         sourcePack: {
           ...next,
           saving: false,
+          // 任何一次整份保存落地后编辑态都结束：清单已经被宿主回包替换，旧草稿不再指向可保存的对象。
+          editing: undefined,
           ...(options.closeForm === true
             ? { formOpen: false, probe: undefined, draft: { url: '', title: '', category: '', note: '' } }
             : {}),
@@ -391,5 +462,6 @@ export function createSourcePackActions(host: SourcePackActionHost) {
     importSelectedSourcePack,
     openSourcePackForm, closeSourcePackForm, setSourcePackDraft,
     probeSourcePackUrl, saveSourcePackDraft, removeSourcePackEntry, restoreSourcePackSeed,
+    openSourcePackEditor, setSourcePackEditDraft, cancelSourcePackEdit, saveSourcePackEdit,
   }
 }

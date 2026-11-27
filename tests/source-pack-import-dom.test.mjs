@@ -133,6 +133,10 @@ async function mountView(state, overrides = {}) {
     onProbe: () => {},
     onSave: () => {},
     onRemove: (url) => { calls.push(['remove', url]) },
+    onEdit: () => {},
+    onEditDraft: () => {},
+    onEditSave: () => {},
+    onEditCancel: () => {},
     onToggleSelect: (url) => { calls.push(['toggle', url]) },
     onImport: () => { calls.push(['import']) },
     onRestoreSeed: () => {},
@@ -237,5 +241,65 @@ test('导入结果逐条上屏：新增 / 已存在汇总、失败带原因、�
     assert.equal(view.$$('[data-rss-pack-entry]').length, 2, '结果块不影响源包清单：条目仍然在')
   } finally {
     view.cleanup()
+  }
+})
+
+/** 受控 input 写值并派发 React 认的 input 事件（原生 setter 绕过 value tracker，pitfalls §2.11）。 */
+function typeInto(win, element, value) {
+  const setter = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value')?.set
+  if (setter === undefined) throw new Error('找不到 INPUT 的 value setter')
+  setter.call(element, value)
+  element.dispatchEvent(new win.Event('input', { bubbles: true }))
+}
+
+test('行内编辑：点「编辑」上报 URL；编辑态回填并可改分类 / 备注、保存与取消各自回调（spec §4.3.1）', skip, async () => {
+  const entries = [
+    ENTRY('https://a.example/feed', { category: '科技', note: '旧备注' }),
+    ENTRY('https://b.example/feed', { category: '播客' }),
+  ]
+  const calls = []
+  const view = await mountView(packState({ entries }), {
+    onEdit: (url) => { calls.push(['edit', url]) },
+    onEditDraft: (patch) => { calls.push(['draft', patch]) },
+    onEditSave: () => { calls.push(['save']) },
+    onEditCancel: () => { calls.push(['cancel']) },
+  })
+  try {
+    const editButtons = view.$$('[data-rss-pack-edit]')
+    assert.equal(editButtons.length, 2, '每条都有自己的编辑入口')
+    editButtons[0].click()
+    assert.deepEqual(calls.at(-1), ['edit', 'https://a.example/feed'], '编辑按钮只上报条目 URL，草稿由动作层持有')
+  } finally {
+    view.cleanup()
+  }
+
+  const editing = await mountView(packState({
+    entries,
+    editing: { url: 'https://a.example/feed', category: '科技', note: '旧备注' },
+  }), {
+    onEditDraft: (patch) => { calls.push(['draft', patch]) },
+    onEditSave: () => { calls.push(['save']) },
+    onEditCancel: () => { calls.push(['cancel']) },
+  })
+  try {
+    const form = editing.$('[data-rss-pack-edit-form]')
+    assert.ok(form !== null, '编辑态必须只在那一条下面展开表单')
+    assert.equal(editing.$$('[data-rss-pack-edit-form]').length, 1, '同时只编辑一条')
+
+    const category = editing.$('[data-rss-pack-edit-category]')
+    const note = editing.$('[data-rss-pack-edit-note]')
+    assert.equal(category?.value, '科技', '分类输入回填当前值')
+    assert.equal(note?.value, '旧备注', '备注输入回填当前值')
+
+    typeInto(editing.win, category, '科学')
+    assert.deepEqual(calls.at(-1), ['draft', { category: '科学' }], '输入即上报草稿 patch（受控输入）')
+    typeInto(editing.win, note, '新备注')
+    assert.deepEqual(calls.at(-1), ['draft', { note: '新备注' }])
+
+    editing.$('[data-rss-pack-edit-save]').click()
+    editing.$('[data-rss-pack-edit-cancel]').click()
+    assert.deepEqual(calls.slice(-2), [['save'], ['cancel']], '保存 / 取消各自回动作层，组件不直调 RPC')
+  } finally {
+    editing.cleanup()
   }
 })

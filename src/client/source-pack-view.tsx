@@ -21,6 +21,11 @@ export interface SourcePackViewProps {
   readonly onProbe: () => void
   readonly onSave: (force?: boolean) => void
   readonly onRemove: (url: string) => void
+  /** 行内编辑（spec §4.3.1：可改分类与备注）。 */
+  readonly onEdit: (url: string) => void
+  readonly onEditDraft: (patch: Partial<{ category: string; note: string }>) => void
+  readonly onEditSave: () => void
+  readonly onEditCancel: () => void
   readonly onToggleSelect: (url: string) => void
   readonly onImport: () => void
   readonly onRestoreSeed: () => void
@@ -170,7 +175,7 @@ function ImportReportBlock(props: { readonly report: NonNullable<SourcePackState
 }
 
 export function SourcePackView(props: SourcePackViewProps): ReactNode {
-  const { state, onQuery, onCategory, onOpenForm, onCloseForm, onDraft, onProbe, onSave, onRemove, onToggleSelect, onImport, onRestoreSeed, onBack } = props
+  const { state, onQuery, onCategory, onOpenForm, onCloseForm, onDraft, onProbe, onSave, onRemove, onEdit, onEditDraft, onEditSave, onEditCancel, onToggleSelect, onImport, onRestoreSeed, onBack } = props
   const categories = categoriesOf(state.entries)
   const visible = visibleEntriesOf(state)
   const hasFilters = state.q.trim() !== '' || state.category !== undefined
@@ -248,24 +253,56 @@ export function SourcePackView(props: SourcePackViewProps): ReactNode {
       )}
 
       <ul className="dsh-rss-pack-list">
-        {visible.map((entry) => (
-          <li key={entry.url} className="dsh-rss-pack-row" data-rss-pack-entry={entry.url}>
-            <div className="dsh-rss-pack-row-head">
-              <label className="dsh-rss-pack-check">
-                <input type="checkbox" data-rss-pack-select={entry.url}
-                  checked={state.selected.includes(entry.url)} disabled={state.importing}
-                  aria-label={'选择 ' + (entry.title ?? entry.url)}
-                  onChange={() => { onToggleSelect(entry.url) }} />
-              </label>
-              <span className="dsh-rss-pack-name" title={entry.title ?? entry.url}>{entry.title ?? entry.url}</span>
-              <span className="dsh-rss-pack-badge">{entry.category ?? '未分类'}</span>
-              <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" data-rss-pack-remove=""
-                disabled={state.saving} onClick={() => { onRemove(entry.url) }}>删除</button>
-            </div>
-            <code className="dsh-rss-pack-url" data-rss-pack-url-text="">{entry.url}</code>
-            {entry.note !== undefined && <div className="dsh-rss-pack-note-line">{entry.note}</div>}
-          </li>
-        ))}
+        {visible.map((entry) => {
+          const editing = state.editing !== undefined && state.editing.url === entry.url
+          return (
+            <li key={entry.url} className="dsh-rss-pack-row" data-rss-pack-entry={entry.url}>
+              <div className="dsh-rss-pack-row-head">
+                <label className="dsh-rss-pack-check">
+                  <input type="checkbox" data-rss-pack-select={entry.url}
+                    checked={state.selected.includes(entry.url)} disabled={state.importing}
+                    aria-label={'选择 ' + (entry.title ?? entry.url)}
+                    onChange={() => { onToggleSelect(entry.url) }} />
+                </label>
+                <span className="dsh-rss-pack-name" title={entry.title ?? entry.url}>{entry.title ?? entry.url}</span>
+                <span className="dsh-rss-pack-badge">{entry.category ?? '未分类'}</span>
+                {/* 两个写动作放一个容器里，由容器自己 margin-left:auto 推到行尾；
+                    逐个按钮写 margin-left:auto 会在两枚按钮之间也撑出一段空白。 */}
+                <span className="dsh-rss-pack-actions">
+                  <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" data-rss-pack-edit=""
+                    disabled={state.saving} onClick={() => { onEdit(entry.url) }}>编辑</button>
+                  <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" data-rss-pack-remove=""
+                    disabled={state.saving} onClick={() => { onRemove(entry.url) }}>删除</button>
+                </span>
+              </div>
+              <code className="dsh-rss-pack-url" data-rss-pack-url-text="">{entry.url}</code>
+              {editing ? (
+                <div className="dsh-rss-pack-form" data-rss-pack-edit-form="">
+                  <label className="dsh-rss-pack-field">
+                    <span className="dsh-rss-pack-field-label">分类（留空 = 未分类）</span>
+                    <input className="dsh-rss-pack-input" data-rss-pack-edit-category=""
+                      value={state.editing?.category ?? ''}
+                      onChange={(event) => { onEditDraft({ category: event.target.value }) }} />
+                  </label>
+                  <label className="dsh-rss-pack-field">
+                    <span className="dsh-rss-pack-field-label">备注（留空 = 清除备注）</span>
+                    <input className="dsh-rss-pack-input" data-rss-pack-edit-note=""
+                      value={state.editing?.note ?? ''}
+                      onChange={(event) => { onEditDraft({ note: event.target.value }) }} />
+                  </label>
+                  <div className="dsh-rss-pack-form-actions">
+                    <button type="button" className="dsh-rss-btn dsh-rss-btn--primary" data-rss-pack-edit-save=""
+                      disabled={state.saving} onClick={onEditSave}>{state.saving ? '保存中…' : '保存'}</button>
+                    <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" data-rss-pack-edit-cancel=""
+                      disabled={state.saving} onClick={onEditCancel}>取消</button>
+                  </div>
+                </div>
+              ) : (
+                entry.note !== undefined && <div className="dsh-rss-pack-note-line">{entry.note}</div>
+              )}
+            </li>
+          )
+        })}
       </ul>
       <p className="dsh-rss-meta dsh-rss-pack-footnote">
         这里是清单，不是订阅：删除条目不会退订；勾选条目后「导入所选」才会进订阅（失败源逐条列原因、不入库）。

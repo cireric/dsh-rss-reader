@@ -75,6 +75,8 @@ import { READER_KEY_HELP, READER_HELP_SCOPE_LABEL } from '../keys.js'
 // 收窄留在共享文件里会让 host 编译不过（2026-11-13 实测 tsc 7.0.2 TS2304）。
 import { nextScrollTop, SCROLL_ATTR } from '../list-scroll.js'
 import { isElementNode } from './element-node.js'
+// R15 06：hideNsfw 的默认值只有 rsshub-prefs.ts 一处（缺省 = 隐藏 NSFW）。
+import { effectiveHideNsfw } from '../rsshub-prefs.js'
 
 export const inject = ['slots']
 
@@ -250,6 +252,7 @@ const STYLE = `
 .dsh-rss-explore-field-label { font-size:12px; color:var(--rss-muted); }
 .dsh-rss-explore-form-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
 .dsh-rss-explore-url { flex:1 1 240px; font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size:12px; overflow-wrap:anywhere; }
 /* R15 08 精选源：结构与探索页同族（纵向、可换行），但列表行是「清单条目」而不是路由行。 */
 .dsh-rss-pack-page { flex:1; min-height:0; overflow-y:auto; padding:12px clamp(12px, 2vw, 28px) 24px; }
 .dsh-rss-pack-head { display:flex; align-items:center; flex-wrap:wrap; gap:8px 12px; }
@@ -276,7 +279,7 @@ const STYLE = `
   font-family:ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap:anywhere; }
 .dsh-rss-pack-note, .dsh-rss-pack-note-line { margin-top:4px; font-size:12px; color:var(--rss-muted);
   overflow-wrap:anywhere; }
-.dsh-rss-pack-row-head button { margin-left:auto; }
+.dsh-rss-pack-row-head .dsh-rss-pack-actions { margin-left:auto; display:inline-flex; gap:6px; }
 .dsh-rss-pack-footnote { margin-top:16px; }
 .dsh-rss-pack-check { display:inline-flex; align-items:center; flex:0 0 auto; }
 .dsh-rss-pack-check input { margin:0; }
@@ -285,7 +288,7 @@ const STYLE = `
 .dsh-rss-pack-import-line { margin-top:3px; overflow-wrap:anywhere; }
 .dsh-rss-pack-import-failed { margin-top:6px; color:var(--rss-error); }
 .dsh-rss-pack-notice { margin-top:8px; font-size:12px; color:var(--rss-accent);
-  font-size:12px; overflow-wrap:anywhere; }
+  overflow-wrap:anywhere; }
 .dsh-rss-row { border-bottom:1px solid var(--rss-line); }
 .dsh-rss-row:hover, [data-rss-nav-row]:hover { background:var(--rss-hover); }
 .dsh-rss-row[data-rss-selected], [data-rss-nav-selected] { background:var(--rss-selected); }
@@ -1234,7 +1237,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
           <ExploreView
             state={state.explore}
             onQuery={store.setExploreQuery}
-            hideNsfw={state.rsshubSettings?.hideNsfw ?? true}
+            hideNsfw={effectiveHideNsfw(state.rsshubSettings?.hideNsfw)}
             onlyRunnable={state.onlyRunnable}
             onToggleHideNsfw={(hideNsfw) => { void store.setExploreHideNsfw(hideNsfw) }}
             onHideNamespace={(namespace) => { void store.hideExploreNamespace(namespace) }}
@@ -1258,6 +1261,10 @@ export function createReader(store: ReaderStore): () => ReactNode {
             onProbe={() => { void store.probeSourcePackUrl() }}
             onSave={(force) => { void store.saveSourcePackDraft(force === true) }}
             onRemove={(url) => { void store.removeSourcePackEntry(url) }}
+            onEdit={store.openSourcePackEditor}
+            onEditDraft={store.setSourcePackEditDraft}
+            onEditSave={() => { void store.saveSourcePackEdit() }}
+            onEditCancel={store.cancelSourcePackEdit}
             onToggleSelect={store.toggleSourcePackSelection}
             onImport={() => { void store.importSelectedSourcePack() }}
             onRestoreSeed={() => { void store.restoreSourcePackSeed() }}

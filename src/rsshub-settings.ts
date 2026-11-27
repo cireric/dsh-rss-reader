@@ -15,8 +15,8 @@
 import type { Config as ConfigShape } from './config.js'
 import { parseRsshubBase } from './settings-schema.js'
 import type { RsshubSettingsSnapshot } from './shared.js'
+import { DEFAULT_HIDE_NSFW, RSSHUB_INSTANCE_MAX, normalizeHiddenNamespaces } from './rsshub-prefs.js'
 import {
-  RSSHUB_INSTANCE_MAX,
   readConfigFile,
   writeConfigFile,
   type ReaderConfigFile,
@@ -100,7 +100,7 @@ function readInitialState(
       return { state: cloneState(file.rsshub), warning: warnings.length === 0 ? undefined : warnings.join('；'), legacy: false }
     }
     return {
-      state: { instances: legacyInstancesOf(config), hiddenNamespaces: [], hideNsfw: true },
+      state: { instances: legacyInstancesOf(config), hiddenNamespaces: [], hideNsfw: DEFAULT_HIDE_NSFW },
       warning: warnings.length === 0 ? undefined : warnings.join('；'),
       legacy: true,
     }
@@ -109,7 +109,7 @@ function readInitialState(
     const warning = `订阅文件无法读取（${message}），实例池暂按旧设置显示`
     log(warning)
     return {
-      state: { instances: legacyInstancesOf(config), hiddenNamespaces: [], hideNsfw: true },
+      state: { instances: legacyInstancesOf(config), hiddenNamespaces: [], hideNsfw: DEFAULT_HIDE_NSFW },
       warning,
       legacy: true,
     }
@@ -171,18 +171,9 @@ export function createRsshubSettings(deps: RsshubSettingsDeps): RsshubSettingsCo
     }
 
     if (patch.hiddenNamespaces !== undefined) {
-      const hidden: string[] = []
-      for (const [index, entry] of patch.hiddenNamespaces.entries()) {
-        if (typeof entry !== 'string' || entry.trim() === '') {
-          dropped += 1
-          log(`RSSHub 隐藏列表：第 ${index + 1} 项不是非空字符串，已丢弃`)
-          continue
-        }
-        hidden.push(entry.trim())
-      }
-      // 去重后落盘：同一个 namespace 点两次「隐藏此站点」仍是同一件事。留下重复项会让
-      // 设置页显示「已隐藏（3）」而实际只有两个站点 —— 界面数字与事实分家。
-      next.hiddenNamespaces = [...new Set(hidden)]
+      // 归一化只有 src/rsshub-prefs.ts 一处（trim → 丢空串 → 去重 → 稳定排序）：写侧与读侧、
+      // 检索侧必须同一条判据，否则设置页数量与探索页结果会各说各话（ADR-0001）。
+      next.hiddenNamespaces = normalizeHiddenNamespaces(patch.hiddenNamespaces)
     }
 
     if (patch.hideNsfw !== undefined) next.hideNsfw = patch.hideNsfw

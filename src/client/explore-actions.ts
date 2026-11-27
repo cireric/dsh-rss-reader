@@ -10,6 +10,8 @@
  */
 import type { ExploreCatalogPage, ExploreRouteView } from '../shared.js'
 import { parsePathTemplate, prefillValues } from '../explore-template.js'
+// R15 06：hideNsfw 的默认值只有 rsshub-prefs.ts 一处（缺省 = 隐藏 NSFW）。
+import { effectiveHideNsfw } from '../rsshub-prefs.js'
 import type { ExploreState, ReaderState, ReaderStoreDeps } from './store.js'
 
 export interface ExploreActionHost {
@@ -105,7 +107,7 @@ export function createExploreActions(host: ExploreActionHost) {
       const page = await rpc<ExploreCatalogPage>('exploreCatalog', catalogPayloadOf(
         explore,
         undefined,
-        get().rsshubSettings?.hideNsfw ?? true,
+        effectiveHideNsfw(get().rsshubSettings?.hideNsfw),
         get().onlyRunnable,
       ))
       if (version !== pageVersion) return
@@ -226,7 +228,7 @@ export function createExploreActions(host: ExploreActionHost) {
       const page = await rpc<ExploreCatalogPage>('exploreCatalog', catalogPayloadOf(
         explore,
         cursor,
-        get().rsshubSettings?.hideNsfw ?? true,
+        effectiveHideNsfw(get().rsshubSettings?.hideNsfw),
         get().onlyRunnable,
       ))
       if (version !== pageVersion) return

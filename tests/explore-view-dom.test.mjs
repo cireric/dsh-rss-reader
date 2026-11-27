@@ -346,6 +346,27 @@ test('R8b 04 入口可见性：非法 rsshubBase（ftp://x）与未配置同判�
   }
 })
 
+test('R15 04 行内分类：每行按 route.categories 显示徽标，顶部筛选保留', skip, async () => {
+  // spec §4.2.3：「分类筛选保留；categories 在行内也显示（现在只在顶部筛选区）」。
+  // 顶部按钮与行内徽标是两类节点：前者触发筛选，后者只陈述事实。
+  const h = await mount()
+  try {
+    await openExploreFromFeeds(h)
+    const row = (path) => h.$$('[data-rss-explore-row]')
+      .find((item) => item.getAttribute('data-rss-explore-path') === path)
+    const badges = (path) => [...row(path).querySelectorAll('[data-rss-explore-category-badge]')]
+      .map((badge) => badge.textContent)
+
+    assert.deepEqual(badges('/branches/:user/:repo'), ['programming'], '行内必须显示这条路由自己的分类')
+    assert.deepEqual(badges('/people/activities/:id'), ['social'], '不同分类照实显示，不串行')
+    assert.equal(row('/branches/:user/:repo').querySelector('[data-rss-explore-category-badge="programming"]')
+      ?.className, 'dsh-rss-explore-badge', '分类徽标与既有事实徽标同族（同一套样式）')
+    assert.notEqual(h.$('[data-rss-explore-category="programming"]'), null, '顶部按分类筛选的按钮必须保留')
+  } finally {
+    h.cleanup()
+  }
+})
+
 test('R8b 04 列表行：站点名可点、路由名 / 模板 / 参数说明 / example / 事实徽标（false 不出现）', skip, async () => {
   const h = await mount()
   try {

@@ -14,14 +14,12 @@
  */
 import { useId, useState, type ReactNode } from 'react'
 import type { RsshubSettingsSnapshot, RsshubTestResult } from '../shared.js'
+import { RSSHUB_INSTANCE_MAX as MAX_INSTANCES } from '../rsshub-prefs.js'
 import { parseTunableValue } from '../settings-schema.js'
 import type { SaveRsshubSettingsResult } from './settings-actions.js'
 
 /** 实例地址不合法时的就地红字：判据来自 `parseTunableValue`，这里只说怎么改。 */
 const RSSHUB_BASE_ERROR = '请输入 http(s):// 的实例地址（不能带路径、查询或参数）'
-
-/** 上限与宿主同值（spec §4.1.1）：客户端先禁用按钮，宿主仍会拒绝绕过界面的请求。 */
-const MAX_INSTANCES = 5
 
 /** 推荐实例（spec §4.1.6）：只是展示，点「启用这 3 个」才写入。 */
 const RECOMMENDED_INSTANCES = ['https://hub.slarker.me', 'https://rsshub.rss.tips', 'https://rsshub.cups.moe'] as const
@@ -223,7 +221,7 @@ export function RsshubSettingRow(props: RsshubSettingRowProps): ReactNode {
               disabled={disabled || instances.length === 0}
               onClick={() => { void apply([]) }}>清空实例池</button>
             <p className="dsh-rss-settings-help" id={helpId}>
-              实例源站（如 https://rsshub.example），只支持公网实例；最多 5 个，顺序即优先级。
+              实例源站（如 https://rsshub.example），只支持公网实例；最多 {MAX_INSTANCES} 个，顺序即优先级。
             </p>
           </div>
 

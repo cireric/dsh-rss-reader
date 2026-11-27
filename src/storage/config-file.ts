@@ -19,10 +19,8 @@ import { randomUUID } from 'node:crypto'
 import { feedRecordSchema, type FeedRecord } from '../domain.js'
 import { mergeFolderDirectory } from '../folders.js'
 import { parseRsshubBase } from '../settings-schema.js'
+import { DEFAULT_HIDE_NSFW, RSSHUB_INSTANCE_MAX, normalizeHiddenNamespaces } from '../rsshub-prefs.js'
 import { httpUrlOrEmpty, type CuratedSourceEntry } from '../shared.js'
-
-/** 实例池上限（spec §4.1.1）：>5 条拒绝保存。读取侧只告警、不替用户删数据。 */
-export const RSSHUB_INSTANCE_MAX = 5
 
 /**
  * RSSHub 的持久化策略（R15 01，spec §4.1.1 / §5.1）。
@@ -282,25 +280,20 @@ function validateRsshub(
   }
 
   const rawHidden = record.hiddenNamespaces
-  const hiddenNamespaces: string[] = []
-  if (rawHidden !== undefined) {
-    if (!Array.isArray(rawHidden)) {
-      warn?.(`订阅文件 ${path} 的 rsshub.hiddenNamespaces 不是字符串数组（读到 ${describe(rawHidden)}），已按空列表处理`)
-    } else {
-      for (const [index, entry] of rawHidden.entries()) {
-        if (typeof entry !== 'string' || entry.trim() === '') {
-          warn?.(`订阅文件 ${path} 的 rsshub.hiddenNamespaces 第 ${index + 1} 项不是非空字符串，已丢弃`)
-          continue
-        }
-        hiddenNamespaces.push(entry.trim())
-      }
-    }
+  // 归一化只有 src/rsshub-prefs.ts 一处（trim → 丢空串 → 去重 → 稳定排序）：读侧与写侧
+  // 若各写一份，会出现「保存时接受、重启后值变了」这类只有重启才暴露的分家（ADR-0001）。
+  const hiddenNamespaces = normalizeHiddenNamespaces(rawHidden)
+  if (rawHidden !== undefined && !Array.isArray(rawHidden)) {
+    warn?.(`订阅文件 ${path} 的 rsshub.hiddenNamespaces 不是字符串数组（读到 ${describe(rawHidden)}），已按空列表处理`)
+  } else if (Array.isArray(rawHidden) && rawHidden.length !== hiddenNamespaces.length) {
+    // 只说「有若干项被归一」，不回显原始值：它可能是手改文件的任意字符串。
+    warn?.(`订阅文件 ${path} 的 rsshub.hiddenNamespaces 有 ${rawHidden.length - hiddenNamespaces.length} 项无效或重复，已归一`)
   }
 
-  let hideNsfw = true
+  let hideNsfw = DEFAULT_HIDE_NSFW
   if (record.hideNsfw !== undefined) {
     if (typeof record.hideNsfw === 'boolean') hideNsfw = record.hideNsfw
-    else warn?.(`订阅文件 ${path} 的 rsshub.hideNsfw 不是布尔值（读到 ${describe(record.hideNsfw)}），已按默认 true 处理`)
+    else warn?.(`订阅文件 ${path} 的 rsshub.hideNsfw 不是布尔值（读到 ${describe(record.hideNsfw)}），已按默认 ${DEFAULT_HIDE_NSFW} 处理`)
   }
 
   return { instances, hiddenNamespaces, hideNsfw }

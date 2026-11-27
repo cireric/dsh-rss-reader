@@ -3603,15 +3603,16 @@ export const MUTATIONS = [
   // ── R15 07：namespace 隐藏（2026-11-28）──────────────────────────────────
   // 隐藏列表不落盘：`save` 回包显示成功、本次会话里配置快照也变了，但写进 config.json 的
   // 是旧值 —— 重启后隐藏全部消失（A11 的「重启后仍隐藏」直接失败）。
-  // from 照构建产物 lib/rsshub-settings.js 的实际字节写（pitfalls 一、1.4），独立实测 OCCURRENCES=1。
+  // from 照构建产物 lib/rsshub-settings.js 的实际字节写（pitfalls 一、1.4）；R15 评审把隐藏列表
+  // 归一化收进 rsshub-prefs.js 后，这里是它唯一剩下的赋值形态，锚点随之更新。
   { id: 'rsshub-隐藏不落盘', file: 'lib/rsshub-settings.js',
     judges: ['rsshub-settings.test.mjs', 'explore-endpoints.test.mjs'],
     judgeTests: [
       '隐藏列表写盘归一化：重复项只留一次（点两次「隐藏此站点」不会变成两个 github）',
       'R15 07 A11：重启后仍隐藏、全部恢复后回来；隐藏不取消订阅、不删除条目',
     ],
-    from: 'next.hiddenNamespaces = [...new Set(hidden)]',
-    to: 'next.hiddenNamespaces = [...new Set(state.hiddenNamespaces)]' },
+    from: 'next.hiddenNamespaces = normalizeHiddenNamespaces(patch.hiddenNamespaces);',
+    to: 'next.hiddenNamespaces = [...state.hiddenNamespaces];' },
   // 隐藏列表不进游标栅栏：隐藏 / 恢复之后旧游标仍被当成同一次查询，用户会在第 2 页看到
   // 与第一页不同的行集合（重复 / 漏行），而 `matched` 已经按新条件算过 —— 三者互相矛盾。
   // 判据是栅栏用例「隐藏 / 恢复都必须换游标」与端点用例「翻页中途隐藏 ⇒ 旧游标 400」。
