@@ -4,7 +4,7 @@
  * 纯展示 —— 动作全部由入口的 store 通过 props 传进来。
  */
 import { useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
-import { BACKFILL_LIMIT, feedHealthOf, isHttpUrl, type BackfillReport, type DiscoveryResult, type FeedView, type FolderView, type OpmlExportResult, type OpmlImportResult, type TagView } from '../shared.js'
+import { BACKFILL_LIMIT, feedHealthOf, isHttpUrl, type BackfillReport, type DiscoveryResult, type FeedView, type FolderView, type OpmlExportResult, type OpmlImportResult, type ProbeResult, type TagView } from '../shared.js'
 import type { BackfillActionResult } from './feed-actions.js'
 import { relativeTime } from './store.js'
 
@@ -59,6 +59,18 @@ function feedHealthLabel(feed: FeedView): string {
 }
 
 /**
+ * 试读结果的一行文案（spec §4.3.3）：成功是「可用 N 条 · 耗时 X ms」，失败直接给原因。
+ *
+ * 不在这里补「0 条」之类的默认值：`ok` 为真时 itemCount 一定来自解析器（空 feed 就是 0），
+ * 缺字段只可能是契约漂移，写成「可用 · 耗时」比编一个数字诚实。
+ */
+function probeResultLabel(result: ProbeResult): string {
+  if (!result.ok) return result.reason ?? '试读失败'
+  const count = result.itemCount === undefined ? '' : ' ' + result.itemCount + ' 条'
+  return '可用' + count + ' · 耗时 ' + result.elapsedMs + ' ms'
+}
+
+/**
  * 订阅管理视图：导入 OPML（逐源校验、坏源逐条列出）、导出、加源、退订、文件夹管理。
  *
  * 设计取舍：
@@ -69,7 +81,7 @@ function feedHealthLabel(feed: FeedView): string {
  */
 export function FeedsView({
   feeds, folders, busy, report, notice, discovery,
-  onImport, onExport, onAdd, onRemove, onDiscover, onClearDiscovery,
+  onImport, onExport, onAdd, onRemove, onDiscover, onClearDiscovery, onProbe,
   onCreateFolder, onRenameFolder, onDeleteFolder, onMoveFeed, onMoveOrder,
   onBackfill,
   tags, onCreateTag, onRenameTag, onDeleteTag, onBack,
@@ -87,6 +99,8 @@ export function FeedsView({
   onAdd: (url: string) => void
   /** 只发现、不订阅：候选交给用户挑（宿主侧零写入） */
   onDiscover: (url: string) => void
+  /** 试读（R15 10）：只读探测，返回逐条结果；不写库、不改订阅。 */
+  onProbe: (urls: string[]) => Promise<ProbeResult[]>
   onClearDiscovery: () => void
   onRemove: (url: string) => void
   onCreateFolder: (name: string) => void
@@ -111,6 +125,16 @@ export function FeedsView({
   onExplore: () => void
 }): ReactNode {
   const [draft, setDraft] = useState('')
+  /**
+   * 试读状态（R15 10）。候选结果按 URL 存：同一批候选里各看各的，互不覆盖；
+   * 地址输入框的结果单独一份（它还没有「候选 URL」这个身份）。
+   */
+  const [inputProbe, setInputProbe] = useState<ProbeResult | undefined>(undefined)
+  const [inputProbing, setInputProbing] = useState(false)
+  const [candidateProbes, setCandidateProbes] = useState<Readonly<Record<string, ProbeResult>>>({})
+  const [probingCandidates, setProbingCandidates] = useState<ReadonlySet<string>>(() => new Set())
+  /** 连点的同步守卫：setState 要等下一次渲染才置灰，同一事件循环的第二下会赶在它之前。 */
+  const probeInFlight = useRef(new Set<string>())
   const [fileError, setFileError] = useState<string | undefined>(undefined)
   const [folderDraft, setFolderDraft] = useState('')
   const [renaming, setRenaming] = useState<RenameDraft | undefined>(undefined)
@@ -210,6 +234,53 @@ export function FeedsView({
     reader.readAsText(file)
   }
 
+  /**
+   * 试读输入框里的地址（R15 10）。返回的单条结果就地显示；通道错误也变成同一行的可读原因，
+   * 不写全局 error（一次试读失败不该把整页打成错误）。
+   */
+  const probeInput = async (): Promise<void> => {
+    const url = draft.trim()
+    if (url === '' || inputProbing) return
+    const startedAt = Date.now()
+    setInputProbing(true)
+    setInputProbe(undefined)
+    try {
+      const results = await onProbe([url])
+      setInputProbe(results[0])
+    } catch (failure) {
+      const reason = failure instanceof Error ? failure.message : String(failure)
+      setInputProbe({ url, ok: false, elapsedMs: Date.now() - startedAt, reason: '试读请求失败：' + reason })
+    } finally {
+      setInputProbing(false)
+    }
+  }
+
+  /** 试读一条候选；结果按 URL 存，连点由 ref 同步挡住（按钮置灰要等下一帧）。 */
+  const probeCandidate = async (url: string): Promise<void> => {
+    if (probeInFlight.current.has(url)) return
+    probeInFlight.current.add(url)
+    const startedAt = Date.now()
+    setProbingCandidates((current) => new Set(current).add(url))
+    try {
+      const results = await onProbe([url])
+      const result = results[0]
+      if (result !== undefined) setCandidateProbes((current) => ({ ...current, [url]: result }))
+    } catch (failure) {
+      const reason = failure instanceof Error ? failure.message : String(failure)
+      setCandidateProbes((current) => ({
+        ...current,
+        [url]: { url, ok: false, elapsedMs: Date.now() - startedAt, reason: '试读请求失败：' + reason },
+      }))
+    } finally {
+      probeInFlight.current.delete(url)
+      setProbingCandidates((current) => {
+        const next = new Set(current)
+        next.delete(url)
+        return next
+      })
+    }
+  }
+
   const commitRename = (): void => {
     const target = renaming
     if (target === undefined) return
@@ -239,7 +310,7 @@ export function FeedsView({
         <button type="button" className="dsh-rss-btn" disabled={busy || feeds.length === 0} onClick={onExport}>导出 OPML</button>
         <span style={{ flex: 1 }} />
         <input data-rss-add-input="" value={draft} placeholder="粘贴 feed 地址或站点首页（会自动发现 feed）后回车" disabled={busy}
-          onChange={(event) => setDraft(event.target.value)}
+          onChange={(event) => { setDraft(event.target.value); setInputProbe(undefined) }}
           onKeyDown={(event) => {
             // 本插件的全局快捷键挂在 document 上，输入框里的键不该被它截走；
             // 这里的 stopPropagation 是**双保险**（守卫已按 target 判断，但回车提交不该外泄）
@@ -247,13 +318,19 @@ export function FeedsView({
               event.stopPropagation()
               onAdd(draft.trim())
               setDraft('')
+              setInputProbe(undefined)
             }
             if (event.key === 'Escape') {
               event.stopPropagation()
               setDraft('')
+              setInputProbe(undefined)
             }
           }}
           style={{ flex: '0 1 320px', fontSize: 13, padding: '4px 8px' }} />
+        {/* 「试读」只观测、不写入（R15 10）：和「发现候选」并列，给手填的地址一个先看再存的机会。 */}
+        <button type="button" className="dsh-rss-btn" data-rss-add-probe=""
+          disabled={busy || inputProbing || draft.trim() === ''}
+          onClick={() => { void probeInput() }}>{inputProbing ? '试读中…' : '试读'}</button>
         {/* 「发现」与回车「直接添加」并存：回车保持既有语义（粘贴 feed 地址一步到位），
             发现是显式的第二条路 —— 站点首页常常有多个声明，挑哪个只有用户知道。 */}
         <button type="button" className="dsh-rss-btn" data-rss-discover=""
@@ -267,6 +344,15 @@ export function FeedsView({
         )}
       </div>
 
+      {inputProbe !== undefined && (
+        <div data-rss-add-probe-result="" style={{
+          fontSize: 12, marginBottom: 10, wordBreak: 'break-all',
+          color: inputProbe.ok ? undefined : '#c0392b',
+        }}>
+          {probeResultLabel(inputProbe)}
+        </div>
+      )}
+
       {/* 说明文案提前讲清边界（R3-4）：排序只是显示先后，OPML 标准没有顺序字段，别把它当备份。 */}
       <div data-rss-feed-order-hint="" style={{ fontSize: 12, opacity: 0.65, marginBottom: 10 }}>
         ↑ / ↓ 调整顺序，只影响显示先后；OPML 不记录顺序，导出再导入不保证原顺序。
@@ -278,7 +364,7 @@ export function FeedsView({
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
             <strong style={{ fontSize: 13 }}>订阅候选</strong>
             <span style={{ opacity: 0.6, fontSize: 12, wordBreak: 'break-all' }}>
-              {discovery.candidates.length} 个已验证 · {discovery.url}
+              {discovery.candidates.length} 个候选 · {discovery.url}
             </span>
             <span style={{ flex: 1 }} />
             <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" data-rss-discovery-cancel=""
@@ -291,9 +377,12 @@ export function FeedsView({
           )}
           {discovery.candidates.map((candidate) => {
             // 两类候选混排（spec D9）：来源徽标 + 第二行措辞不同。Radar 候选**没有抓取校验**
-            // （ADR-0010），所以只写「站点名 · 未验证」而不编造 format / 条数；真正的校验在
-            // 「添加」时由 addFeed 做。页面候选仍显示原有的「地址 · 格式 · N 条」。
+            // （ADR-0010），初始只写「站点名 · 未验证」而不编造 format / 条数；用户点「试读」后
+            // 才换成「可用 N 条 · 耗时」或失败原因。页面候选保留原有的「地址 · 格式 · N 条」，
+            // 试读结果另起一行。真正的校验仍在「添加」时由 addFeed 做。
             const isRadar = candidate.source === 'rsshub'
+            const probe = candidateProbes[candidate.url]
+            const probing = probingCandidates.has(candidate.url)
             return (
               <div key={candidate.url} data-rss-candidate={candidate.url} title={candidate.url}
                 style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderTop: '1px solid color-mix(in srgb, currentColor 8%, transparent)' }}>
@@ -309,7 +398,11 @@ export function FeedsView({
                   <span style={{ display: 'block', fontSize: 11, opacity: 0.6, wordBreak: 'break-all' }}>
                     {isRadar ? (
                       <>
-                        {candidate.siteName !== undefined && candidate.siteName !== '' ? candidate.siteName + ' · ' : ''}未验证
+                        {candidate.siteName !== undefined && candidate.siteName !== '' ? candidate.siteName + ' · ' : ''}
+                        <span data-rss-candidate-probe-result={probe === undefined ? undefined : candidate.url}
+                          style={probe !== undefined && !probe.ok ? { color: '#c0392b' } : undefined}>
+                          {probe === undefined ? '未验证' : probeResultLabel(probe)}
+                        </span>
                       </>
                     ) : (
                       <>
@@ -319,7 +412,18 @@ export function FeedsView({
                       </>
                     )}
                   </span>
+                  {!isRadar && probe !== undefined && (
+                    <span data-rss-candidate-probe-result={candidate.url} style={{
+                      display: 'block', fontSize: 11, wordBreak: 'break-all',
+                      color: probe.ok ? undefined : '#c0392b',
+                    }}>
+                      {probeResultLabel(probe)}
+                    </span>
+                  )}
                 </span>
+                <button type="button" className="dsh-rss-btn" data-rss-candidate-probe={candidate.url}
+                  disabled={busy || probing}
+                  onClick={() => { void probeCandidate(candidate.url) }}>{probing ? '试读中…' : '试读'}</button>
                 <button type="button" className="dsh-rss-btn" data-rss-candidate-add={candidate.url}
                   disabled={busy} onClick={() => { onAdd(candidate.url) }}>添加</button>
               </div>

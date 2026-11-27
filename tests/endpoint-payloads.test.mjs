@@ -187,6 +187,23 @@ const CONTRACTS = {
     valid: { url: 'https://example.com/feed.xml' },
     invalid: [{}, { url: '   ' }, { url: 5 }],
   },
+  // R15 10：试读 1–5 条绝对 http(s)；空批 / 超 5 条 / 非 http(s) / 相对地址都是坏入参。
+  probeFeeds: {
+    valid: { urls: ['https://example.com/feed.xml'] },
+    alsoValid: [{ urls: [
+      'https://a.example/1', 'https://b.example/2', 'https://c.example/3',
+      'https://d.example/4', 'https://e.example/5',
+    ] }],
+    invalid: [
+      {},
+      { urls: [] },
+      { urls: ['https://a.example/1', 'https://b.example/2', 'https://c.example/3', 'https://d.example/4', 'https://e.example/5', 'https://f.example/6'] },
+      { urls: [5] },
+      { urls: ['ftp://example.com/feed'] },
+      { urls: ['not a url'] },
+      { urls: 'https://example.com/feed' },
+    ],
+  },
   addFeed: {
     // 空串仍走 ok + failed（金标准）：形状声明只管「是不是字符串」。
     valid: { url: '' },
@@ -416,7 +433,8 @@ test('入参声明：每条坏样本都被拒，并给出字段路径', () => {
   // id 不是 b+下标 / 文本全空白 / id 重复 / title 非字符串）。
   // 170 = 168 + R7 02 的 translateInfo 2 条（数组 / 原始值不是对象）。
   // 174 = 170 + R15 01 的 saveRsshubSettings 4 条（缺 instances / 非数组 / 非字符串项 / hideNsfw 非布尔）。
-  assert.equal(checked, 174, '坏样本条数变了（当前 ' + checked + '）—— 检查契约表是否漏了必填字段')
+  // 181 = 174 + R15 10 的 probeFeeds 7 条（缺 urls / 空批 / 超 5 条 / 非字符串项 / ftp / 非 URL / urls 非数组）。
+  assert.equal(checked, 181, '坏样本条数变了（当前 ' + checked + '）—— 检查契约表是否漏了必填字段')
 })
 
 test('坏入参：每个接 payload 的端点，第一条坏样本都经 dispatch 回 bad-request', async () => {
@@ -440,7 +458,8 @@ test('坏入参：每个接 payload 的端点，第一条坏样本都经 dispatc
   // R7 01 加了 translateBatch（有负例且经 dispatch 验过）：30 → 31。
   // R7 02 加了 translateInfo（零参端点，坏样本经 dispatch 验过）：31 → 32。
   // R15 01 加了 saveRsshubSettings（有负例且经 dispatch 验过）：32 → 33。
-  assert.equal(covered.length, 33, '接 payload 的端点应当是 33 个，实际 ' + covered.length)
+  // R15 10 加了 probeFeeds（有负例且经 dispatch 验过）：33 → 34。
+  assert.equal(covered.length, 34, '接 payload 的端点应当是 34 个，实际 ' + covered.length)
 })
 
 test('坏入参：统一 bad-request 信封、details.issues 指出字段，且不触达 store', async () => {

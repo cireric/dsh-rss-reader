@@ -36,6 +36,8 @@ export const ROUTE_PATH = '/rss-reader-api'
 export const ENDPOINT_NAMES = [
   'overview', 'refresh', 'markRead', 'unmarkRead', 'toggleStar', 'toggleKeepUnread', 'article', 'cleanup',
   'opmlExport', 'opmlImport', 'addFeed', 'removeFeed', 'discoverFeeds',
+  // R15 10：候选 / 地址的试读（只读探测，不写库、不改订阅）。
+  'probeFeeds',
   'viewPreferences', 'saveViewPreferences', 'saveReadingProgress', 'duplicateHints', 'searchItems',
   'listFolders', 'createFolder', 'renameFolder', 'deleteFolder', 'moveFeedToFolder', 'reorderFeeds',
   'listTags', 'createTag', 'renameTag', 'deleteTag', 'setItemTags',
@@ -181,6 +183,27 @@ export interface DiscoveryResult {
   url: string
   candidates: FeedCandidate[]
   warnings: DiscoveryWarning[]
+}
+
+/**
+ * 一条试读结果（R15 10，spec §4.3.3）。
+ *
+ * `ok` 只由解析结果决定（`parseFeed` 认出的 format 不是 unknown），**不看 HTTP 200** ——
+ * 站点对任意路径回 200 HTML 是常态。失败时 `reason` 可直接展示；私网 / 回环 / 非法协议
+ * 一律是「目标被安全策略拒绝」，绝不回显 host / IP。
+ */
+export interface ProbeResult {
+  /** 原样回显本次请求的地址：候选行要按它把结果对回自己那一行（缓存键另走归一化 URL）。 */
+  url: string
+  ok: boolean
+  /** 仅 ok 时存在：解析出的条目数（空 feed 是 0，仍是可用）。 */
+  itemCount?: number
+  /** 仅 ok 时存在：'rss2' | 'rss1' | 'atom'。 */
+  format?: string
+  /** 本次抓取 + 解析耗时（毫秒）。缓存命中时是首次探测的耗时。 */
+  elapsedMs: number
+  /** 仅失败时存在：可直接展示的原因。 */
+  reason?: string
 }
 
 export interface FeedView {

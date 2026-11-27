@@ -1118,6 +1118,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
             onExport={() => { void store.exportOpml() }}
             onAdd={(url) => { void store.addFeed(url) }}
             onDiscover={(url) => { void store.discover(url) }}
+            onProbe={(urls) => store.probe(urls)}
             onClearDiscovery={() => { store.clearDiscovery() }}
             onRemove={(url) => { void store.removeFeed(url) }}
             onCreateFolder={(name) => { void store.createFolder(name) }}
