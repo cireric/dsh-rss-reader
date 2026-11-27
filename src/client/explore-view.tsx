@@ -24,15 +24,20 @@ const FEATURE_LABELS: ReadonlyArray<
 
 /**
  * 一行的事实徽标：`requireConfig` 是三态，必须把「必填 / 可选」分开显示（A9）；
- * `none` 与布尔 false 一样不渲染。`nsfw` 不在本票渲染（隐藏 / 开关归 06）。
+ * `none` 与布尔 false 一样不渲染。`nsfw` 只在「显示 NSFW」开关打开时渲染（R15 06）。
  */
-function featureBadgesOf(features: ExploreRouteView['features']): Array<{ key: string; label: string }> {
+function featureBadgesOf(
+  features: ExploreRouteView['features'],
+  showNsfw: boolean,
+): Array<{ key: string; label: string }> {
   const badges: Array<{ key: string; label: string }> = []
   if (features.requireConfig === 'required') badges.push({ key: 'requireConfig', label: '需配置（必填）' })
   if (features.requireConfig === 'optional') badges.push({ key: 'requireConfig', label: '需配置（可选）' })
   for (const [key, label] of FEATURE_LABELS) {
     if (features[key]) badges.push({ key, label })
   }
+  // R15 06：NSFW 徽标只在「显示 NSFW」开关打开时渲染（默认隐藏时它本来也不会出现在列表里）。
+  if (showNsfw && features.nsfw) badges.push({ key: 'nsfw', label: 'NSFW' })
   return badges
 }
 
@@ -47,7 +52,14 @@ const WEEKLY_TEST_LABELS: Readonly<Record<'passed' | 'failed', string>> = {
 
 export interface ExploreViewProps {
   readonly state: ExploreState
-  readonly onQuery: (patch: Partial<Pick<ExploreState, 'q' | 'category' | 'namespace'>>) => void
+  readonly onQuery: (
+    patch: Partial<Pick<ExploreState, 'q' | 'category' | 'namespace'>> & { onlyRunnable?: boolean },
+  ) => void
+  /** config.rsshub.hideNsfw 的生效值（true = 默认隐藏 NSFW）。 */
+  readonly hideNsfw: boolean
+  /** viewPreferences.onlyRunnable 的生效值。 */
+  readonly onlyRunnable: boolean
+  readonly onToggleHideNsfw: (hideNsfw: boolean) => void
   readonly onLoadMore: () => void
   readonly onSelectRoute: (route: ExploreRouteView) => void
   readonly onDraftValue: (name: string, value: string) => void
@@ -138,17 +150,23 @@ function RouteForm(props: {
 }
 
 export function ExploreView(props: ExploreViewProps): ReactNode {
-  const { state, onQuery, onLoadMore, onSelectRoute, onDraftValue, onBuild, onAdd, onBack } = props
+  const {
+    state, onQuery, hideNsfw, onlyRunnable, onToggleHideNsfw,
+    onLoadMore, onSelectRoute, onDraftValue, onBuild, onAdd, onBack,
+  } = props
   /**
    * 搜索框的文字是**组件局部草稿**：进 store 的 q 只在提交时更新。
    * 若每个字符都写 q，store 的「q 变化 ⇒ 清空行 + 重取第一页」会让输入过程变成一串请求。
    */
   const [queryText, setQueryText] = useState(state.q)
-  const hasFilters = state.q !== '' || state.category !== undefined || state.namespace !== undefined
+  // 「显示 NSFW」是显示开关（默认隐藏），不算用户主动追加的筛选；「只看可跑」是硬过滤，算。
+  const showNsfw = !hideNsfw
+  const hasFilters = state.q !== '' || state.category !== undefined || state.namespace !== undefined || onlyRunnable
 
   const clearFilters = (): void => {
     setQueryText('')
-    onQuery({ q: '', category: undefined, namespace: undefined })
+    // 一次提交全部条件：分两次调用会各发一次请求，第二发还会带着旧游标撞栅栏。
+    onQuery({ q: '', category: undefined, namespace: undefined, onlyRunnable: false })
   }
 
   const selected = state.selected
@@ -167,6 +185,22 @@ export function ExploreView(props: ExploreViewProps): ReactNode {
             {state.matched !== undefined ? ' · 命中 ' + state.matched + ' 条' : ''}
           </span>
         )}
+      </div>
+
+      {/* R15 06：两个用户可见开关。切换都会换筛选条件 ⇒ store 清空累计行与游标、重取第一页。 */}
+      <div className="dsh-rss-explore-toggles" role="group" aria-label="探索过滤">
+        <label className="dsh-rss-explore-toggle">
+          <input type="checkbox" data-rss-explore-show-nsfw=""
+            checked={showNsfw}
+            onChange={(event) => { onToggleHideNsfw(!event.target.checked) }} />
+          显示 NSFW
+        </label>
+        <label className="dsh-rss-explore-toggle">
+          <input type="checkbox" data-rss-explore-only-runnable=""
+            checked={onlyRunnable}
+            onChange={(event) => { onQuery({ onlyRunnable: event.target.checked }) }} />
+          只看可跑
+        </label>
       </div>
 
       <form className="dsh-rss-explore-search" data-rss-explore-search-form=""
@@ -247,7 +281,7 @@ export function ExploreView(props: ExploreViewProps): ReactNode {
                   <div className="dsh-rss-explore-detail" data-rss-explore-example="">示例：{route.example}</div>
                 )}
                 <div className="dsh-rss-explore-features">
-                  {featureBadgesOf(route.features).map(({ key, label }) => (
+                  {featureBadgesOf(route.features, showNsfw).map(({ key, label }) => (
                     <span key={key} className="dsh-rss-explore-badge" data-rss-explore-feature={key}>{label}</span>
                   ))}
                   {/* 周测与 features 是两类事实：单独的 data 属性，避免「周测」被当成实例声明的能力。 */}

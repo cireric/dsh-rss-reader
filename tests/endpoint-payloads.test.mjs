@@ -295,11 +295,15 @@ const CONTRACTS = {
     alsoValid: [
       null,
       { q: 'github', category: 'programming', namespace: 'github', limit: 30, cursor: 'x' },
+      // R15 06：两个用户可见开关是布尔（缺省由 handler 按 hideNsfw=true / onlyRunnable=false 补）。
+      { hideNsfw: false, onlyRunnable: true },
     ],
     invalid: [
       { q: 5 },
       { category: 5 },
       { namespace: 5 },
+      { hideNsfw: 'false' },
+      { onlyRunnable: 1 },
       { limit: 0 },
       { limit: 1.5 },
       { limit: '30' },
@@ -450,7 +454,8 @@ test('入参声明：每条坏样本都被拒，并给出字段路径', () => {
   // 174 = 170 + R15 01 的 saveRsshubSettings 4 条（缺 instances / 非数组 / 非字符串项 / hideNsfw 非布尔）。
   // 177 = 174 + R15 08 的 saveSourcePack 3 条（缺 entries / entries 非数组 / restoreSeed 非布尔）。
   // 184 = 177 + R15 10 的 probeFeeds 7 条（缺 urls / 空批 / 超 5 条 / 非字符串项 / ftp / 非 URL / urls 非数组）。
-  assert.equal(checked, 184, '坏样本条数变了（当前 ' + checked + '）—— 检查契约表是否漏了必填字段')
+  // 186 = 184 + R15 06 的 exploreCatalog 2 条（hideNsfw / onlyRunnable 非布尔）。
+  assert.equal(checked, 186, '坏样本条数变了（当前 ' + checked + '）—— 检查契约表是否漏了必填字段')
 })
 
 test('坏入参：每个接 payload 的端点，第一条坏样本都经 dispatch 回 bad-request', async () => {

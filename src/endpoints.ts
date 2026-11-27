@@ -640,12 +640,22 @@ async function loadExploreCatalog(
 
 /** 入参 → 01 的检索条件；null 与缺省都当「不生效」（与 01 的 normalizeFilter 同一语义）。 */
 function catalogFilterOf(
-  input: { readonly q?: string | null; readonly category?: string | null; readonly namespace?: string | null },
+  input: {
+    readonly q?: string | null
+    readonly category?: string | null
+    readonly namespace?: string | null
+    readonly hideNsfw?: boolean | null
+    readonly onlyRunnable?: boolean | null
+  },
+  defaultHideNsfw: boolean,
 ): CatalogFilter {
   return {
     ...(input.q === null || input.q === undefined ? {} : { q: input.q }),
     ...(input.category === null || input.category === undefined ? {} : { category: input.category }),
     ...(input.namespace === null || input.namespace === undefined ? {} : { namespace: input.namespace }),
+    // 缺省值来自 config.rsshub.hideNsfw（客户端正常会显式带；直接调 API 的人拿到的也是用户配置）。
+    hideNsfw: input.hideNsfw ?? defaultHideNsfw,
+    onlyRunnable: input.onlyRunnable ?? false,
   }
 }
 
@@ -1429,17 +1439,18 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       // 任何失败都是 undefined（= 本次没有周测标注、排序退回目录原序），不抛、不报错。
       const tests = await weeklyTests
 
-      const filter = catalogFilterOf(input)
-      // 游标先过栅栏：筛选变了（B7）或游标认不出（B8）都回 bad-request。
+      // 配置里的 hideNsfw 是用户默认值；请求显式带了就以请求为准（探索页开关写回的就是它）。
+      const filter = catalogFilterOf(input, ctx.rsshubSettings?.snapshot().hideNsfw ?? true)
+      // 游标先过栅栏：筛选变了（B7）、周测换代（R15 06）或游标认不出（B8）都回 bad-request。
       // **绝不**把 undefined 当成「没有游标 ⇒ 从第一页开始」—— 那会让界面无限追加重复行。
       let position: CatalogPosition | undefined
       if (input.cursor !== null && input.cursor !== undefined) {
-        position = decodeCatalogCursor(input.cursor, filter)
+        position = decodeCatalogCursor(input.cursor, filter, tests)
         if (position === undefined) return fail('bad-request', '分页游标与当前筛选不匹配，请重新加载')
       }
       // 越界夹取不拒绝：limit 是展示偏好，不是正确性（spec §4.3）。默认 30 / 上限 100。
       const limit = Math.min(input.limit ?? CATALOG_PAGE_DEFAULT, CATALOG_PAGE_MAX)
-      const { matched, items } = loaded.catalog.query(filter)
+      const { matched, items } = loaded.catalog.query(filter, tests)
       // 默认可跑优先（spec §4.2.3）：稳定分区，可跑组前移、两组组内保持目录原序。
       // 分区必须在分页之前：否则第 2 页之后的「可跑」永远排不到不可跑的行前面。
       const ranked = partitionRunnableRoutes(items, tests)
@@ -1449,7 +1460,7 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       const page = attachWeeklyTests(paged.page, tests)
       const last = page[page.length - 1]
       const nextCursor = paged.hasMore && last !== undefined
-        ? encodeCatalogCursor(filter, { namespace: last.namespace, path: last.path })
+        ? encodeCatalogCursor(filter, { namespace: last.namespace, path: last.path }, tests)
         : undefined
       return ok<ExploreCatalogPage>({
         siteTotal: loaded.catalog.sites,

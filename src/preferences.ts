@@ -40,6 +40,15 @@ export interface ViewPreferences {
    */
   showUnread: boolean
   /**
+   * 探索视图的「只看可跑」开关（R15 06 / A12）。
+   *
+   * 为什么归这里而不是 `config.rsshub`：spec §5.1 的 RSSHub 配置形状只有三个字段
+   *（instances / hiddenNamespaces / hideNsfw），这是「视图记忆」而非订阅配置 —— 与
+   * showUnread / reading 同族，读写都走既有的 saveViewPreferences，不另开存储槽。
+   * 必填 + 默认 false：旧配置没有它 ⇒ 归一化补 false（「只看可跑」默认不启用）。
+   */
+  onlyRunnable: boolean
+  /**
    * 翻译目标语言（R7 02 / spec §5.3）：`Aa` 面板与设置页「显示」分区共用这一个值。
    *
    * 必填字段 + 默认值（与 showUnread / reading 同形）：旧配置没有它 ⇒ 归一化补 `zh-CN`。
@@ -115,6 +124,7 @@ export const DEFAULT_VIEW_PREFERENCES: ViewPreferences = {
   filter: 'all',
   navVisible: true,
   showUnread: true,
+  onlyRunnable: false,
   translateTarget: DEFAULT_TARGET_LANGUAGE,
   reading: DEFAULT_READING_PREFERENCES,
 }
@@ -199,6 +209,13 @@ export function sanitizeViewPreferences(
 
   // 翻译目标语言（R7 02）：只认语言表里的 id，认不出回落默认 —— 与显示开关同一条
   // 「一次坏值只抹掉它自己」的规则；语言表本身不在这里复制第二份。
+  // 「只看可跑」（R15 06）：与 showUnread 同一条规则 —— 只认布尔。
+  // `"true"` / 1 / null 一律回落 false，不做真值转换：字符串 "false" 被当真会静默打开
+  // 一个把大半目录筛掉的硬过滤，用户完全无从解释。
+  const onlyRunnable = typeof source['onlyRunnable'] === 'boolean'
+    ? source['onlyRunnable']
+    : DEFAULT_VIEW_PREFERENCES.onlyRunnable
+
   const translateTarget = isTargetLanguage(source['translateTarget'])
     ? source['translateTarget']
     : DEFAULT_TARGET_LANGUAGE
@@ -246,6 +263,7 @@ export function sanitizeViewPreferences(
     filter,
     navVisible,
     showUnread,
+    onlyRunnable,
     translateTarget,
     reading,
     ...(lastItemId === undefined ? {} : { lastItemId }),

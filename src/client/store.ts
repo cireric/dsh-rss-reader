@@ -209,6 +209,11 @@ export interface ReaderState {
    */
   showUnread: boolean
   /**
+   * 探索视图的「只看可跑」开关（R15 06）：与 `viewPreferences.onlyRunnable` 同一份状态。
+   * 必填 + 默认 false；恢复与落盘都走既有的视图记忆通道，不另开存储槽。
+   */
+  onlyRunnable: boolean
+  /**
    * 设置页的生效值快照（R11 01）：`undefined` = 还没取到（正在取 / 读失败）。
    *
    * 与 `view === 'settings'` 分开：关掉页面再打开时沿用上一份，避免先闪一屏空值。
@@ -442,7 +447,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   let state: ReaderState = {
     items: [], feeds: [], folders: [], tags: [], unread: 0, unreadSplit: undefined, filter: 'all',
     selectedId: undefined, loading: true, error: undefined, undo: undefined,
-    view: 'list', layout: 'list', markAllRange: 'all', displayWindow: 'all', accountWindow: 'all', showUnread: DEFAULT_VIEW_PREFERENCES.showUnread, settings: undefined, settingsError: undefined, rsshubSettings: undefined, rsshubSettingsError: undefined, settingsWarningDismissed: false, explore: undefined, sourcePack: undefined, article: undefined, translations: new Map(), translationMode: 'original', translationInfo: undefined, translateConfirm: undefined, translateTarget: DEFAULT_TARGET_LANGUAGE, translatePending: undefined, notice: undefined,
+    view: 'list', layout: 'list', markAllRange: 'all', displayWindow: 'all', accountWindow: 'all', showUnread: DEFAULT_VIEW_PREFERENCES.showUnread, onlyRunnable: DEFAULT_VIEW_PREFERENCES.onlyRunnable, settings: undefined, settingsError: undefined, rsshubSettings: undefined, rsshubSettingsError: undefined, settingsWarningDismissed: false, explore: undefined, sourcePack: undefined, article: undefined, translations: new Map(), translationMode: 'original', translationInfo: undefined, translateConfirm: undefined, translateTarget: DEFAULT_TARGET_LANGUAGE, translatePending: undefined, notice: undefined,
     importReport: undefined, discovery: undefined, feedsBusy: false,
     navSelection: { kind: 'virtual' }, perFeedUnread: {}, navVisible: true,
     reading: DEFAULT_READING_PREFERENCES, duplicates: {},
@@ -564,6 +569,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
       filter: state.filter,
       navVisible: state.navVisible,
       showUnread: state.showUnread,
+      onlyRunnable: state.onlyRunnable,
       translateTarget: state.translateTarget,
       reading: state.reading,
     }
@@ -608,6 +614,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
       filter: prefs.filter,
       navVisible: prefs.navVisible,
       showUnread: prefs.showUnread,
+      onlyRunnable: prefs.onlyRunnable,
       translateTarget: prefs.translateTarget,
       reading: prefs.reading,
       navCursor: prefs.navSelection.kind === 'feed'
@@ -863,6 +870,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
 
   const exploreActions = createExploreActions({
     get, set, rpc: deps.rpc, addFeed: feedActions.addFeed,
+    persistView, saveRsshubHideNsfw: settingsActions.saveRsshubHideNsfw,
   })
 
   return {

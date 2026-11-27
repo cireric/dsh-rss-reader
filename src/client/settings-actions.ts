@@ -27,6 +27,12 @@ export type SaveRsshubSettingsResult =
   | { readonly ok: true; readonly rsshub: RsshubSettingsSnapshot }
   | { readonly ok: false; readonly message: string }
 
+/** 宿主 saveRsshubSettings 的 wire 形状：instances 必填，其余筛选偏好可选（R15 06）。 */
+interface RsshubSettingsWirePatch {
+  instances: string[]
+  hideNsfw?: boolean
+}
+
 /**
  * 翻译路由的一次性 patch（R7 02）：provider / model / effort 必须**一起**提交。
  *
@@ -156,13 +162,11 @@ export function createSettingsActions(host: SettingsActionHost) {
   let rsshubChain: Promise<unknown> = Promise.resolve()
   let latestRsshubSave = 0
 
-  const saveRsshubInstances = (instances: readonly string[]): Promise<SaveRsshubSettingsResult> => {
+  const runRsshubSave = (payload: RsshubSettingsWirePatch): Promise<SaveRsshubSettingsResult> => {
     const ticket = ++latestRsshubSave
     const run = rsshubChain.then(async (): Promise<SaveRsshubSettingsResult> => {
       try {
-        const result = await rpc<{ rsshub?: RsshubSettingsSnapshot }>('saveRsshubSettings', {
-          instances: [...instances],
-        })
+        const result = await rpc<{ rsshub?: RsshubSettingsSnapshot }>('saveRsshubSettings', payload)
         const snapshot = result?.rsshub
         if (snapshot === undefined) throw new Error('saveRsshubSettings 回包缺少 rsshub 字段')
         if (ticket === latestRsshubSave) set({ rsshubSettings: snapshot, rsshubSettingsError: undefined })
@@ -178,6 +182,24 @@ export function createSettingsActions(host: SettingsActionHost) {
     // 链本身永不 reject：一次失败不该让后续保存永远排在一条断掉的 Promise 后面。
     rsshubChain = run.then(() => undefined, () => undefined)
     return run
+  }
+
+  const saveRsshubInstances = (instances: readonly string[]): Promise<SaveRsshubSettingsResult> =>
+    runRsshubSave({ instances: [...instances] })
+
+  /**
+   * 保存探索页的「显示 NSFW」开关（R15 06）：hideNsfw 住在 config.rsshub，写路径与实例池共用一条串行链。
+   *
+   * 为什么必须带上当前实例池：宿主的 saveRsshubSettings 是整份 rsshub 快照语义，只发 hideNsfw
+   * 会因缺 instances 被判坏入参；带上旧池子才能只改这一位。快照还没到手时明确失败，绝不发空数组
+   * —— 那会把「用户配好的池子」静默清空（功能被关闭）。
+   */
+  const saveRsshubHideNsfw = (hideNsfw: boolean): Promise<SaveRsshubSettingsResult> => {
+    const instances = get().rsshubSettings?.instances
+    if (instances === undefined) {
+      return Promise.resolve({ ok: false, message: '实例池快照尚未加载，无法保存 NSFW 偏好' })
+    }
+    return runRsshubSave({ instances: [...instances], hideNsfw })
   }
 
   const saveSetting = (key: TunableKey, value: string | number | boolean): Promise<SaveSettingResult> =>
@@ -269,6 +291,6 @@ export function createSettingsActions(host: SettingsActionHost) {
 
   return {
     loadSettings, loadRsshubSettings, openSettings, closeSettings, toggleSettings, dismissSettingsWarning,
-    saveSetting, saveRsshubInstances, saveTranslateRoute, resetSettings, testRsshub,
+    saveSetting, saveRsshubInstances, saveRsshubHideNsfw, saveTranslateRoute, resetSettings, testRsshub,
   }
 }
