@@ -16,9 +16,9 @@
 | R3 | 订阅源排序 | 已完成 | 4/4 `done` | 真机三步；`config.json` 的 `feedOrder` 可选字段 |
 | R4 | 正文抓取失败回退 | 已完成 | 2/2 `done` | 真机三步；回退内容不写正文缓存 |
 | R5 | 正文内联语义与表格 | 已完成 | 6/6 `done` | 隔离 smoke；窄栏表格观感未真人验收 |
-| R6 | 图片折叠与灯箱 | 已完成 | 8/8 `resolved` | 门槛/真机三步已过；图片观感、灯箱尺寸已 GUI 走查（2026-11-27）；仅 Referer 实发未验 |
+| R6 | 图片折叠与灯箱 | 已完成 | 8/8 `resolved` | 门槛/真机三步已过；图片观感、灯箱尺寸已 GUI 走查（2026-11-27）；Referer 已用 system Chrome 实测（2026-11-27） |
 | R12 | 作者元数据与作者搜索 | 已完成 | 8/8 `resolved` | v4→v5 真机升级；GUI 观感已走查（2026-11-27） |
-| R11 v1 | RSS 设置页 v1（入口 B） | 已完成 | 7/7 `resolved` | `settings.json` 稀疏覆盖 + `settings` / `saveSettings` 端点 + 五分区设置页；1054/1054、变异 360/360、真机三步；用户人工验收可用（2026-11-22）。遗留：`<460px` 观感、真实 0600 权限位、真实重启保持未单独复核 |
+| R11 v1 | RSS 设置页 v1（入口 B） | 已完成 | 7/7 `resolved` | `settings.json` 稀疏覆盖 + `settings` / `saveSettings` 端点 + 五分区设置页；1054/1054、变异 360/360、真机三步；用户人工验收可用（2026-11-22）；`settings.json` 600 / 目录 700 已实测（2026-11-27），真实重启已由用户多轮确认。遗留：`<460px` 观感 |
 | R8a | RSSHub Radar 发现（公共实例） | 已完成 | 5/5 `resolved` | 1142/1142、全量变异 368/368 · 0 幸存、真机三步；真实实例验收（GitHub 端到端 / B 站 / 36kr 缺参 / 私网拒绝 / 缓存）。遗留：GUI 走查（playwright target crashed）、添加未落真实订阅列表、settings 真实重启未验 |
 | R9 | 归档页回溯更早文章 | 已完成 | 4/4 `resolved` | 1191/1191、全量变异 378/378 · 0 幸存、真机三步；真实站点（真实库快照）阮一峰 8 篇 / 云风 2 篇 / 重复 0；GUI 走查（2026-11-27）。遗留：未写实时库、两级日期规则无真实样本 |
 | R8b | RSSHub 路由表探索 | 已完成 | 5/5 `resolved` | 1271/1271、全量变异 392/392 · 0 幸存、真机三步；真实实例（`rsshub.rssforever.com`，经代理）1589 站 / 3136 路由 / 24 分类，首拉 7.9 s；GitHub 端到端拼出 `/github/branches/DIYgod/RSSHub` 并抓回 11 条。遗留：GUI 观感（playwright target crashed）、152 条多路径路由按 §4.2 跳过 |
@@ -71,7 +71,7 @@
 - **状态**：已完成（8/8 `resolved`）。
 - **交付**：`article-pane.tsx` 的图片折叠 / 三态 / 灯箱、`preferences.ts` 的 `expandImages`、`keys.ts` 的 `i` 键、`referrerPolicy`。
 - **证据**：R6 票 01–08 的测试与变异（新增 15 条，全量复核 0 幸存）；`gate.sh` 全绿；真机三步。
-- **遗留**：图片观感与灯箱尺寸已由用户 GUI 走查（2026-11-27）；`Referer` 实发仍需抓包 / 服务器日志。`CHANGELOG` / `feature-status` 已于 2026-11-27 回填。
+- **遗留**：图片观感与灯箱尺寸已由用户 GUI 走查（2026-11-27）；`Referer` 已用 system Chrome 对两个本地 origin 实测：`strict-origin-when-cross-origin` 跨源只发 origin，`no-referrer` 为空；真实图床抓包仍建议在需要时复核。`CHANGELOG` / `feature-status` 已于 2026-11-27 回填。
 
 ### R12 作者元数据与作者搜索
 
@@ -85,7 +85,7 @@
 - **状态**：已完成（`.scratch/r11-settings-page/issues/` 7/7 `resolved`；已合入 `main` `68f0b12`）。
 - **交付**：`src/settings-schema.ts`（四个可调键的范围唯一判据）、`src/storage/settings-file.ts`（`settings.json` 原子写 0600 / 读侧 absent·ok·corrupt·unreadable）、`src/settings-control.ts`（先落盘再改内存 / 恢复默认的删覆盖与写默认规则 / 关于区只读数据）、端点 `settings` / `saveSettings`（29 → 31）、`src/client/settings-view.tsx` + `settings-actions.ts`（五分区 / 串行保存 / 逐项校验）、`src/client/confirm-dialog.tsx`（三处确认框共用）、`src/agent-help.ts`（Agent 文案单源）；`cleanup` 增加 `dryRun` 预演；`ViewPreferences.showUnread`。
 - **证据**：`settings-file.test.mjs`、`settings-endpoints.test.mjs`（含 A8 `config.json` 逐字节不变、A1 在途刷新不受新值影响）、`settings-page-dom.test.mjs`、`settings-agent-help.test.mjs`；`npm test` 1054/1054、全量变异 360/360 应用 · 0 幸存；真机三步（reload 前后 `[active]` / 当日日志 0 条「装载失败」/ `POST /rss-reader-api` 401）；用户人工验收可用（2026-11-22）。
-- **遗留**：`<460px` 容器查询的实际堆叠观感、真实 `$DSH_HOME` 上 `settings.json` 的 0600 权限位、真实重启插件后的保持未单独复核；界面不显示来源层、v1 无单项清除（spec 已知边界）。
+- **遗留**：`<460px` 容器查询的实际堆叠观感仍未验；`settings.json` 真实权限已实测为 600（目录 700，2026-11-27），真实重启已由用户多轮确认；界面不显示来源层、v1 无单项清除（spec 已知边界）。
 
 ### R7 一键翻译
 
@@ -185,6 +185,6 @@
 - **v0.2.0**：git tag `v0.2.0` 在 `516a79b`（2026-11-22），该 tag 的 `package.json` 仍是 `0.1.0`；`0.3.0` 发布账目已建立（CHANGELOG 0.3.0 小节、package 0.3.0），历史 tag 内容不可改写。
 - **R7 发布账目**：R7 已合入 main `784a2fc`（代码基线 `26ab6ad`）；`package.json` 已抬到 `0.3.0`，`CHANGELOG.md` 已建立 `0.3.0 — 2026-11-27` 小节；本地 tag `v0.3.0` 已创建，未 push。
 - **R6 文档面**：`CHANGELOG.md` / `docs/feature-status.md` 已补 R6；`spec.md` 头已回填 `resolved（8/8）`。
-- **R6 真机**：图片观感与灯箱尺寸已 GUI 走查（2026-11-27）；`Referer` 实发仍需抓包验证。
+- **R6 真机**：图片观感与灯箱尺寸已 GUI 走查（2026-11-27）；`Referer` 已用 system Chrome 对两个本地 origin 实测（2026-11-27）。
 - **R9 / R14 账目**：R9（评审修复 `e317e73`）与 R14（`6153927`）已合入 **main `a59baf4`**，随 `0.3.0` tag 发布、未 push；`CHANGELOG.md` 已补两节，`docs/feature-status.md` 已加两行。真机与真实站点证据在 `.scratch/r9-archive/issues/04-real-device.md` 与 `.scratch/r14-feed-scope/issues/01-feed-scope.md`。
 - **R11 版本账目**：R11 已合入 `main`（`68f0b12`），随 `0.3.0` 一起发布；`CHANGELOG.md` 的 R11 小节已归入 0.3.0。功能状态见 `docs/feature-status.md` 的 R11 行（真机验收可用 + 三项细项未复核）。
