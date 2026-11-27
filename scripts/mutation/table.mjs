@@ -742,9 +742,10 @@ export const MUTATIONS = [
       '正文视图下切「未读 / 星标」过滤：回到列表',
     ],
     // 2026-11-22 R11 01：入口改名 leaveTransientViews 并多收一类 settings，锚点按产物重锚；
-    // 本条只抹掉「正文退出」，settings 分支留着 —— 否则两条判定会被同一条变异一起带走。
-    from: '\t\t\tconst leaveTransientViews = () => {\n\t\t\t\tconst view = get().view;\n\t\t\t\tif (view === "article") set({\n\t\t\t\t\tview: "list",\n\t\t\t\t\tarticle: void 0\n\t\t\t\t});\n\t\t\t\telse if (view === "settings") set({ view: "list" });\n\t\t\t\telse if (view === "explore") set({\n\t\t\t\t\tview: "list",\n\t\t\t\t\texplore: void 0\n\t\t\t\t});\n\t\t\t};',
-    to: '\t\t\tconst leaveTransientViews = () => {\n\t\t\t\tconst view = get().view;\n\t\t\t\tif (view === "article") {\n\t\t\t\t} else if (view === "settings") set({ view: "list" });\n\t\t\t\telse if (view === "explore") set({\n\t\t\t\t\tview: "list",\n\t\t\t\t\texplore: void 0\n\t\t\t\t});\n\t\t\t};' },
+    // 本条只抹掉「正文退出」，settings / explore / sourcePack 分支留着 —— 否则多条判定会被同一条变异一起带走。
+    // 2026-11-27 R15 08：新增 sourcePack 分支后按产物重锚（仍只抹 article 那一支）。
+    from: '\t\t\tconst leaveTransientViews = () => {\n\t\t\t\tconst view = get().view;\n\t\t\t\tif (view === "article") set({\n\t\t\t\t\tview: "list",\n\t\t\t\t\tarticle: void 0\n\t\t\t\t});\n\t\t\t\telse if (view === "settings") set({ view: "list" });\n\t\t\t\telse if (view === "explore") set({\n\t\t\t\t\tview: "list",\n\t\t\t\t\texplore: void 0\n\t\t\t\t});\n\t\t\t\telse if (view === "sourcePack") set({ view: "list" });\n\t\t\t};',
+    to: '\t\t\tconst leaveTransientViews = () => {\n\t\t\t\tconst view = get().view;\n\t\t\t\tif (view === "article") {\n\t\t\t\t} else if (view === "settings") set({ view: "list" });\n\t\t\t\telse if (view === "explore") set({\n\t\t\t\t\tview: "list",\n\t\t\t\t\texplore: void 0\n\t\t\t\t});\n\t\t\t\telse if (view === "sourcePack") set({ view: "list" });\n\t\t\t};' },
   // 每源未读数的**键域**（2026-10-10）。左栏角标按 feeds 表逐行渲染，键域必须严格 = feeds 表：
   // 删掉「以 feeds 表铺 0」后，0 未读的源会丢键，那一行变成「角标空白」而不是「角标 0」——
   // 界面上无从分辨，是最贵的那类沉默失败。非等价变异：丢键后取值变 undefined，两条测试会红。
@@ -3118,6 +3119,23 @@ export const MUTATIONS = [
     from: '            if (patch.instances.length > RSSHUB_INSTANCE_MAX) {',
     to: '            if (patch.instances.length > RSSHUB_INSTANCE_MAX + 1) {' },
 
+  // ── R15 10：试读（2026-11-28）────────────────────────────────────────────
+  // 不做地址策略：私网 / 回环候选直接进 fetch。测试桩会把内网地址当普通 URL 返回一个合法
+  // feed ⇒ 该条被判「可用」，A15 的「目标被安全策略拒绝 + 零出网」当场翻红。
+  // from 照构建产物 lib/probe.js 的实际字节写（pitfalls 一、1.4），独立实测 OCCURRENCES=1。
+  { id: 'rsshub-试读私网放行', file: 'lib/probe.js',
+    judges: ['probe-feeds.test.mjs'],
+    judgeTests: ['试读端点：私网 / 回环 / 非法协议一律拒绝，且不回显地址、不发出网请求'],
+    from: 'if (blockedReason(parsed.toString()) !== undefined) {',
+    to: 'if (false) {' },
+  // 解析不出格式（HTML 页 / 任意 XML）也判 ok：A15 的 HTML 页用例会从「失败」变成「可用」。
+  // 判定在 feed/candidate-check.ts（发现与试读共用），所以锚点落在它的产物上。
+  { id: 'rsshub-试读失败当可用', file: 'lib/feed/candidate-check.js',
+    judges: ['probe-feeds.test.mjs'],
+    judgeTests: ['试读端点：HTML 页 / 304 / 超时都按失败处理并给出可读原因'],
+    from: "if (parsed.format === 'unknown')",
+    to: 'if (false)' },
+
   // ── R8a 03：Radar 接进发现流程（2026-11-23）──────────────────────────────
   // 合并顺序反过来：Radar 候选（未验证）排到页面声明前面。A1 的顺序断言会翻红；
   // 去重用例也会跟着红 —— 同一个地址变成 Radar 那条胜出（页面优先被逆转）。
@@ -3497,6 +3515,17 @@ export const MUTATIONS = [
     from: "        requireConfig: requireConfigStateOf(record['requireConfig']),",
     to: "        requireConfig: record['requireConfig'] === true," },
 
+  // ── R15 08：精选源包（2026-11-27）────────────────────────────────────────
+  // 保存时只写回旧 config、不带上新的 curatedSources：界面显示「删掉了 / 加上了」，
+  // 重启后清单原封不动 —— 用户的增删变成一次只在本次会话有效的假动作（A13 的直接失败）。
+  // 判据是「删除 / 新增都落盘：重建控制器后删掉的仍不在、新加的仍在」。
+  // from 照构建产物 lib/source-pack.js 的实际字节写（pitfalls 一、1.4），独立实测 OCCURRENCES=1。
+  { id: 'rsshub-源包删除不落盘', file: 'lib/source-pack.js',
+    judges: ['source-pack.test.mjs'],
+    judgeTests: ['删除 / 新增都落盘：重建控制器后删掉的仍不在、新加的仍在（A13）'],
+    from: 'writeConfigFile(configPath, { ...current, curatedSources: next });',
+    to: 'writeConfigFile(configPath, current);' },
+
   // ── R15 05：周测数据与可跑判定（2026-11-27）─────────────────────────────
   // 把周测的 failed 也写成 passed：1,271 条失败路由（实测）全部冒充「周测通过」，
   // 「可跑优先」排序与票 06 的「只看可跑」会把明明跑不通的路由排到最前面 —— 用户按排序
@@ -3551,4 +3580,23 @@ export const MUTATIONS = [
     judgeTests: ['A4：非 RSSHub 源 + 已配置实例池 ⇒ 请求次数、超时与错误文案逐字不变'],
     from: 'const failover = rsshub !== undefined && instances.length > 0',
     to: 'const failover = instances.length > 0' },
+
+  // ── R15 06：探索过滤（NSFW 默认隐藏 + 只看可跑）（2026-11-28）─────────────
+  // 默认隐藏被短路：nsfw 路由照常出现在列表与 matched 里（A8 的默认态直接失效）。
+  // 判据是端点用例里「默认 matched=4、且结果里没有 features.nsfw 的行」。
+  // from 照构建产物 lib/explore-catalog.js 的实际字节写（pitfalls 一、1.4），独立实测 OCCURRENCES=1。
+  { id: 'rsshub-nsfw 不隐藏', file: 'lib/explore-catalog.js',
+    judges: ['explore-endpoints.test.mjs'],
+    judgeTests: ['默认隐藏 NSFW：matched 不含它、列表不出现；开关打开后计数与行同步变化（A8）'],
+    from: 'if (hideNsfw && row.features.nsfw)',
+    to: 'if (false && row.features.nsfw)' },
+  // 两个用户筛选项不进游标栅栏：换「显示 NSFW / 只看可跑」后旧游标仍被当成同一次查询，
+  // 用户会在第 2 页看到与第一页不同的筛选口径（重复 / 漏行）。判据是栅栏用例里
+  // 「只改开关、游标不变 ⇒ 必须 bad-request」。
+  // from 照构建产物 lib/explore-catalog.js 的实际字节写（pitfalls 一、1.4），独立实测 OCCURRENCES=1。
+  { id: 'rsshub-过滤不进栅栏', file: 'lib/explore-catalog.js',
+    judges: ['explore-endpoints.test.mjs'],
+    judgeTests: ['栅栏：hideNsfw / onlyRunnable 变化、周测换代都回 bad-request；同条件翻页正常'],
+    from: '.update(JSON.stringify([q, category, namespace, hideNsfw, onlyRunnable, weeklyGeneration]))',
+    to: '.update(JSON.stringify([q, category, namespace, weeklyGeneration]))' },
 ]

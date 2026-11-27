@@ -1,5 +1,5 @@
 /**
- * 浏览器半的读写通道：39 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
+ * 浏览器半的读写通道：40 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
  *
  * 原先这里是一个 switch：每臂各自手写 payload 解析、各自记得把未读账并进回包 ——
  * interface 的复杂度 ≈ implementation 的复杂度。现在「一个端点」是一个 module：
@@ -27,6 +27,7 @@ import {
   noPayload,
   opmlImportPayload,
   overviewPayload,
+  probeFeedsPayload,
   removeFeedPayload,
   renameFolderPayload,
   renameTagPayload,
@@ -34,6 +35,7 @@ import {
   saveReadingProgressPayload,
   saveRsshubSettingsPayload,
   saveSettingsPayload,
+  saveSourcePackPayload,
   saveViewPreferencesPayload,
   scopePayload,
   searchQueryPayload,
@@ -47,6 +49,7 @@ import type { createSearch } from './search.js'
 import type { Config } from './config.js'
 import type { SettingsControl } from './settings-control.js'
 import type { RsshubSettingsControl } from './rsshub-settings.js'
+import type { SourcePackControl } from './source-pack.js'
 import { EXTRACTOR_REVISION, contentVersionOf, fetchArticle, blocksToText } from './article.js'
 import { BackfillError, backfillHistory } from './backfill.js'
 import { rebuildItem } from './domain.js'
@@ -57,6 +60,7 @@ import { FolderError } from './folders.js'
 import { duplicateHintsOf, linkKeyOf, type DuplicateRow } from './duplicates.js'
 import { TagError } from './tags.js'
 import { discoverCandidates, validateSubscriptions } from './subscribe.js'
+import { probeFeeds } from './probe.js'
 import { decodeRadarResponse, radarRulesUrl } from './radar.js'
 import { fetchFeed } from './feed/fetch.js'
 import { parseRsshubBase, parseTunableValue } from './settings-schema.js'
@@ -115,6 +119,11 @@ export interface EndpointDeps {
    */
   readonly rsshubSettings?: RsshubSettingsControl
   /**
+   * 精选源包的内存态（R15 08）。与 rsshubSettings 同理显式注入：清单住在 config.json，
+   * 不属于 ReaderStore 的条目 / 订阅契约。缺省只发生在测试桩没装配它时（端点回 not-ready）。
+   */
+  readonly sourcePack?: SourcePackControl
+  /**
    * RSSHub 探活用的抓取实现（R8a 01）：默认 `fetchFeed`，测试注入桩件。
    * 与 subscribe 的 `options.fetchImpl` 同一手法 —— 否则「超时 / 非 2xx / 非 JSON」只能真出网才能测。
    */
@@ -160,6 +169,7 @@ export interface EndpointCtx {
   readonly searchItems?: ReturnType<typeof createSearch>['run']
   readonly settings?: SettingsControl
   readonly rsshubSettings?: RsshubSettingsControl
+  readonly sourcePack?: SourcePackControl
   readonly fetchImpl?: typeof fetchFeed
   readonly fetchArticleImpl?: typeof fetchArticle
   readonly articleAttempts: Map<string, number>
@@ -630,12 +640,22 @@ async function loadExploreCatalog(
 
 /** 入参 → 01 的检索条件；null 与缺省都当「不生效」（与 01 的 normalizeFilter 同一语义）。 */
 function catalogFilterOf(
-  input: { readonly q?: string | null; readonly category?: string | null; readonly namespace?: string | null },
+  input: {
+    readonly q?: string | null
+    readonly category?: string | null
+    readonly namespace?: string | null
+    readonly hideNsfw?: boolean | null
+    readonly onlyRunnable?: boolean | null
+  },
+  defaultHideNsfw: boolean,
 ): CatalogFilter {
   return {
     ...(input.q === null || input.q === undefined ? {} : { q: input.q }),
     ...(input.category === null || input.category === undefined ? {} : { category: input.category }),
     ...(input.namespace === null || input.namespace === undefined ? {} : { namespace: input.namespace }),
+    // 缺省值来自 config.rsshub.hideNsfw（客户端正常会显式带；直接调 API 的人拿到的也是用户配置）。
+    hideNsfw: input.hideNsfw ?? defaultHideNsfw,
+    onlyRunnable: input.onlyRunnable ?? false,
   }
 }
 
@@ -662,7 +682,7 @@ function catalogPageOf(
 }
 
 /**
- * 端点表：39 个端点一处声明（每项的 `payload` 是入参形状的唯一声明）。
+ * 端点表：40 个端点一处声明（每项的 `payload` 是入参形状的唯一声明）。
  *
  * 穷尽性由 `Record<Endpoint, EndpointSpec>` 保证 —— 名字表（shared.ts 的 ENDPOINT_NAMES）
  * 加了新端点而这里没跟上，编译就不过。这是本文件里唯一需要「加端点时改的地方」。
@@ -1072,6 +1092,25 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
     },
   }),
 
+  /**
+   * **试读**（R15 10，spec §4.3.3 / A15）：只读探测，不写库、不改订阅。
+   *
+   * 出网与判定全在 probe.ts（那里复用 discover 的 checkCandidate）：端点只把已解析的 1–5 条
+   * 地址交出去。试读**不传 trustedTarget**：候选地址不是用户自己的订阅，内网目标必须由出网层拒绝；
+   * 失败原因统一成「目标被安全策略拒绝」，不回显 host / IP。
+   */
+  probeFeeds: defineEndpoint({
+    payload: probeFeedsPayload,
+    invalidMessage: 'probeFeeds 需要 1–5 条 http(s) 地址',
+    to: async (input, ctx) => {
+      const results = await probeFeeds(input.urls, {
+        fetchImpl: ctx.fetchImpl,
+        maxBytes: ctx.config.maxBytes,
+      })
+      return ok(results)
+    },
+  }),
+
   addFeed: defineEndpoint({
     payload: addFeedPayload,
     invalidMessage: 'addFeed 需要 url',
@@ -1345,6 +1384,39 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
   }),
 
   /**
+   * 精选源包的**只读**快照（R15 08）：条目 + 内置快照元信息（采集日 / 条数）+ 读侧告警。
+   *
+   * 首次打开（第一次调它）可能触发种子初始化并落盘 —— 语义在 source-pack.ts，端点只转发。
+   */
+  sourcePack: defineEndpoint({
+    payload: noPayload,
+    to: async (_input, ctx) => {
+      if (ctx.sourcePack === undefined) return fail('not-ready', '精选源包服务尚未就绪')
+      return ok({ sourcePack: ctx.sourcePack.snapshot() })
+    },
+  }),
+
+  /**
+   * 精选源包的**写**端点（R15 08）：整份替换（与 saveViewPreferences 同型）。
+   *
+   * 坏项逐条丢弃并回 `warning`；只有写盘失败才整次失败 —— 用户要采取的动作不同
+   *（改输入 vs 查磁盘 / 权限）。`restoreSeed` 只补缺失 URL，不清用户自己的条目。
+   */
+  saveSourcePack: defineEndpoint({
+    payload: saveSourcePackPayload,
+    invalidMessage: 'saveSourcePack 需要 entries（数组）',
+    to: async (input, ctx) => {
+      if (ctx.sourcePack === undefined) return fail('not-ready', '精选源包服务尚未就绪')
+      const outcome = ctx.sourcePack.save(
+        input.entries,
+        input.restoreSeed === true ? { restoreSeed: true } : undefined,
+      )
+      if (!outcome.ok) return fail('write-failed', outcome.message)
+      return ok({ sourcePack: outcome.snapshot, dropped: outcome.dropped, restored: outcome.restored })
+    },
+  }),
+
+  /**
    * 探索：分页取一页路由行（R8b 03，spec §4.3 / §6）。
    *
    * 浏览器永远拿不到整张表：宿主按需拉一次（02 的 12h 实例键缓存）→ 01 的索引里筛 → 只回这一页。
@@ -1367,17 +1439,18 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       // 任何失败都是 undefined（= 本次没有周测标注、排序退回目录原序），不抛、不报错。
       const tests = await weeklyTests
 
-      const filter = catalogFilterOf(input)
-      // 游标先过栅栏：筛选变了（B7）或游标认不出（B8）都回 bad-request。
+      // 配置里的 hideNsfw 是用户默认值；请求显式带了就以请求为准（探索页开关写回的就是它）。
+      const filter = catalogFilterOf(input, ctx.rsshubSettings?.snapshot().hideNsfw ?? true)
+      // 游标先过栅栏：筛选变了（B7）、周测换代（R15 06）或游标认不出（B8）都回 bad-request。
       // **绝不**把 undefined 当成「没有游标 ⇒ 从第一页开始」—— 那会让界面无限追加重复行。
       let position: CatalogPosition | undefined
       if (input.cursor !== null && input.cursor !== undefined) {
-        position = decodeCatalogCursor(input.cursor, filter)
+        position = decodeCatalogCursor(input.cursor, filter, tests)
         if (position === undefined) return fail('bad-request', '分页游标与当前筛选不匹配，请重新加载')
       }
       // 越界夹取不拒绝：limit 是展示偏好，不是正确性（spec §4.3）。默认 30 / 上限 100。
       const limit = Math.min(input.limit ?? CATALOG_PAGE_DEFAULT, CATALOG_PAGE_MAX)
-      const { matched, items } = loaded.catalog.query(filter)
+      const { matched, items } = loaded.catalog.query(filter, tests)
       // 默认可跑优先（spec §4.2.3）：稳定分区，可跑组前移、两组组内保持目录原序。
       // 分区必须在分页之前：否则第 2 页之后的「可跑」永远排不到不可跑的行前面。
       const ranked = partitionRunnableRoutes(items, tests)
@@ -1387,7 +1460,7 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       const page = attachWeeklyTests(paged.page, tests)
       const last = page[page.length - 1]
       const nextCursor = paged.hasMore && last !== undefined
-        ? encodeCatalogCursor(filter, { namespace: last.namespace, path: last.path })
+        ? encodeCatalogCursor(filter, { namespace: last.namespace, path: last.path }, tests)
         : undefined
       return ok<ExploreCatalogPage>({
         siteTotal: loaded.catalog.sites,
@@ -1653,7 +1726,7 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
  * 异常一律兜成 internal 信封 —— 不把 throw 泄进通道（调用方要的是带 code 的失败信封）。
  */
 export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: unknown, signal?: AbortSignal) => Promise<RpcResult<unknown>> {
-  const { config, log, ready, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, rsshubSettings, fetchImpl, fetchArticleImpl, translateServices, translateDeadlineMs, translateNow } = deps
+  const { config, log, ready, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, rsshubSettings, sourcePack, fetchImpl, fetchArticleImpl, translateServices, translateDeadlineMs, translateNow } = deps
 
   const dispatch = async (endpoint: string, payload: unknown, signal?: AbortSignal): Promise<RpcResult<unknown>> => {
     try {
@@ -1668,7 +1741,7 @@ export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: 
       if (spec === undefined) return fail('unknown-endpoint', '未知端点：' + endpoint)
 
       const ctx: EndpointCtx = {
-        store: target, ready, config, log, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, rsshubSettings, fetchImpl, fetchArticleImpl, signal,
+        store: target, ready, config, log, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, rsshubSettings, sourcePack, fetchImpl, fetchArticleImpl, signal,
         ...(translateServices === undefined ? {} : { translateServices }),
         ...(translateDeadlineMs === undefined ? {} : { translateDeadlineMs }),
         ...(translateNow === undefined ? {} : { translateNow }),

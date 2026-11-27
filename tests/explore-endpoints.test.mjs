@@ -717,7 +717,9 @@ test('默认「可跑优先」：可跑路由整体前移、组内保序，三�
   const seen = []
   let cursor
   for (;;) {
-    const page = await dispatch('exploreCatalog', cursor === undefined ? { limit: 2 } : { limit: 2, cursor })
+    const page = await dispatch('exploreCatalog', cursor === undefined
+      ? { limit: 2, hideNsfw: false }
+      : { limit: 2, hideNsfw: false, cursor })
     assert.equal(page.ok, true, '续页不许失败')
     assert.equal(page.value.matched, 5, '排序不影响命中数')
     seen.push(...page.value.items.map((row) => row.path))
@@ -764,4 +766,109 @@ test('周测拉取失败：探索页照常可用，只是没有徽标且保持�
   assert.deepEqual(result.value.items.map((row) => row.path), ['/first', '/second'], '没有周测 ⇒ 全部按目录原序')
   assert.ok(result.value.items.every((row) => !('weeklyTest' in row)), '失败时不下发任何周测标注')
   assert.equal(weeklyCalls(stub).length, 1, '失败也要真尝试过一次（而不是默认空表）')
+})
+
+// ── R15 06：NSFW 默认隐藏与「只看可跑」（A8 / A12）──────────────────────────
+
+test('默认隐藏 NSFW：matched 不含它、列表不出现；开关打开后计数与行同步变化（A8）', async () => {
+  const weekly = weeklyResultsOf(
+    ['/aa/first', 'passed'], ['/bb/second', 'passed'], ['/cc/third', 'passed'],
+    ['/dd/fourth', 'passed'], ['/ee/fifth', 'passed'],
+  )
+  const stub = stubFetch({ [HUB_CATALOG]: weeklyCatalogOf(), [WEEKLY_URL]: weekly })
+  const dispatch = harness({ fetchImpl: stub.impl, config: { rsshubBase: HUB } })
+
+  const hidden = await dispatch('exploreCatalog', { limit: 100 })
+  assert.equal(hidden.ok, true)
+  assert.equal(hidden.value.matched, 4, '默认 hideNsfw：matched 必须是过滤之后的数')
+  assert.equal(hidden.value.routeTotal, 5, '目录口径不变')
+  assert.equal(hidden.value.items.some((row) => row.features.nsfw), false, 'nsfw 行不许出现')
+
+  const shown = await dispatch('exploreCatalog', { limit: 100, hideNsfw: false })
+  assert.equal(shown.ok, true)
+  assert.equal(shown.value.matched, 5, '打开开关后 matched 同步 +1')
+  assert.equal(shown.value.routeTotal, 5, '目录口径仍不变')
+  assert.equal(shown.value.items.some((row) => row.path === '/fifth'), true, 'nsfw 行必须出现')
+})
+
+test('只看可跑：结果 = 周测通过 + 无反爬 + 无必填配置 + 非 nsfw 的交集（A12）', async () => {
+  const weekly = weeklyResultsOf(
+    ['/aa/first', 'passed'],    // 反爬 ⇒ 不可跑
+    ['/bb/second', 'passed'],   // 可跑
+    ['/cc/third', 'failed'],    // 周测失败 ⇒ 不可跑
+    ['/dd/fourth', 'passed'],   // 可跑
+    ['/ee/fifth', 'passed'],    // nsfw ⇒ 不可跑
+  )
+  const stub = stubFetch({ [HUB_CATALOG]: weeklyCatalogOf(), [WEEKLY_URL]: weekly })
+  const dispatch = harness({ fetchImpl: stub.impl, config: { rsshubBase: HUB } })
+
+  const runnable = await dispatch('exploreCatalog', { limit: 100, onlyRunnable: true })
+  assert.equal(runnable.ok, true)
+  assert.equal(runnable.value.matched, 2, '只有 second / fourth 四项全满足')
+  assert.deepEqual(runnable.value.items.map((row) => row.path), ['/second', '/fourth'], '可跑行按目录原序')
+
+  // 打开 NSFW 开关也不许让 nsfw 行混进「只看可跑」：四项条件是 AND，不是「或」。
+  const withNsfw = await dispatch('exploreCatalog', { limit: 100, onlyRunnable: true, hideNsfw: false })
+  assert.equal(withNsfw.value.matched, 2, 'nsfw 仍是不可跑')
+  assert.equal(withNsfw.value.items.some((row) => row.path === '/fifth'), false)
+
+  // 周测不可用 ⇒ 无法证明「周测通过」，结果必须为空（A10 的探索页照常可用是另一条）。
+  clearWeeklyTestsCache()
+  const noWeekly = harness({ fetchImpl: stubFetch({ [HUB_CATALOG]: weeklyCatalogOf() }).impl, config: { rsshubBase: HUB } })
+  const unknown = await noWeekly('exploreCatalog', { limit: 100, onlyRunnable: true })
+  assert.equal(unknown.ok, true, '周测失败不许把探索页打成错误')
+  assert.equal(unknown.value.matched, 0, '没有周测数据时不许把「未知」当「通过」')
+})
+
+test('栅栏：hideNsfw / onlyRunnable 变化、周测换代都回 bad-request；同条件翻页正常', async () => {
+  const weekly = weeklyResultsOf(
+    ['/aa/first', 'passed'], ['/bb/second', 'passed'], ['/cc/third', 'passed'],
+    ['/dd/fourth', 'passed'], ['/ee/fifth', 'passed'],
+  )
+  const map = { [HUB_CATALOG]: weeklyCatalogOf(), [WEEKLY_URL]: weekly }
+  const stub = stubFetch(map)
+  const dispatch = harness({ fetchImpl: stub.impl, config: { rsshubBase: HUB } })
+
+  const first = await dispatch('exploreCatalog', { limit: 2, hideNsfw: false })
+  assert.equal(first.ok, true)
+  const cursor = first.value.nextCursor
+  assert.equal(typeof cursor, 'string', '5 条、每页 2 条 ⇒ 必须有游标')
+
+  const same = await dispatch('exploreCatalog', { limit: 2, hideNsfw: false, cursor })
+  assert.equal(same.ok, true, '同条件续页必须正常')
+  assert.deepEqual(same.value.items.map((row) => row.path), ['/fourth', '/first'], '第二页 = 排序后的第 3–4 行')
+
+  for (const payload of [
+    { limit: 2, hideNsfw: true, cursor },
+    { limit: 2, hideNsfw: false, onlyRunnable: true, cursor },
+  ]) {
+    const changed = await dispatch('exploreCatalog', payload)
+    assert.equal(changed.ok, false, '开关变了必须响亮失败：' + JSON.stringify(payload))
+    assert.equal(changed.error.code, 'bad-request')
+    assert.match(changed.error.message, /游标/)
+  }
+
+  // 只看可跑自身也要能翻页：matched=2、每页 1 条 ⇒ 第二页不是空壳，也不许重复第一页的行。
+  const runnableFirst = await dispatch('exploreCatalog', { limit: 1, onlyRunnable: true })
+  assert.equal(runnableFirst.ok, true)
+  const runnableCursor = runnableFirst.value.nextCursor
+  assert.equal(typeof runnableCursor, 'string')
+  const runnableSecond = await dispatch('exploreCatalog', { limit: 1, onlyRunnable: true, cursor: runnableCursor })
+  assert.equal(runnableSecond.ok, true)
+  assert.deepEqual(
+    [runnableFirst.value.items[0].path, runnableSecond.value.items[0].path],
+    ['/second', '/third'],
+    '两页累计正好是可跑集合，无重复无遗漏',
+  )
+
+  // 翻页中途周测刷新：排序/过滤所依赖的事实变了，旧游标必须诚实地失效。
+  clearWeeklyTestsCache()
+  map[WEEKLY_URL] = weeklyResultsOf(
+    ['/aa/first', 'failed'], ['/bb/second', 'failed'], ['/cc/third', 'failed'],
+    ['/dd/fourth', 'failed'], ['/ee/fifth', 'failed'],
+  )
+  const afterRefresh = await dispatch('exploreCatalog', { limit: 2, hideNsfw: false, cursor })
+  assert.equal(afterRefresh.ok, false, '周测代次变化后旧游标必须失败')
+  assert.equal(afterRefresh.error.code, 'bad-request')
+  assert.match(afterRefresh.error.message, /游标/)
 })

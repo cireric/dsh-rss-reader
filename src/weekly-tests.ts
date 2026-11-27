@@ -17,6 +17,31 @@ export type WeeklyTest = NonNullable<ExploreRouteView['weeklyTest']>
 export type WeeklyTestMap = ReadonlyMap<string, WeeklyTest>
 
 /**
+ * 周测数据代次（R15 06）：每份映射对象一个自增序号，供游标栅栏判断「翻页中途周测换代」。
+ *
+ * 为什么按对象身份而不是内容哈希：代次回答的是「这一页和下一页看的是不是同一份周测」。
+ * 重新拉取后即便内容恰好相同，也已经是新的一份事实；按对象身份判会保守地让旧游标失效，
+ * 这正是我们想要的诚实失败（静默重复 / 漏行更糟）。WeakMap 不阻止映射被回收。
+ */
+const weeklyTestGenerations = new WeakMap<WeeklyTestMap, number>()
+let weeklyTestGenerationSeq = 0
+
+/**
+ * 一份周测映射的稳定代次；`undefined`（本次没有周测标注）固定为 `none`。
+ *
+ * 同一个映射对象在整个缓存生命期内返回同一个值；`loadWeeklyTests` 刷新后是新对象 ⇒ 新代次。
+ * 直接构造的非缓存映射（测试 / 未来其它来源）也按对象身份惰性取号，不需要调用方配合。
+ */
+export function weeklyTestGenerationOf(weeklyTests: WeeklyTestMap | undefined): string {
+  if (weeklyTests === undefined) return 'none'
+  const known = weeklyTestGenerations.get(weeklyTests)
+  if (known !== undefined) return String(known)
+  weeklyTestGenerationSeq += 1
+  weeklyTestGenerations.set(weeklyTests, weeklyTestGenerationSeq)
+  return String(weeklyTestGenerationSeq)
+}
+
+/**
  * 测试标题是**完整**路径模板（`/github/branches/:user/:repo`），目录里的 `path` 是相对模板
  *（`/branches/:user/:repo`）—— 拼法只有这一处，端点与未来的筛选都从这里取键。
  */

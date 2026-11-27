@@ -583,3 +583,94 @@ test('buildExploreUrl：模板之外的 values 键忽略；全可选模板缺值
     { kind: 'ok', url: 'https://rsshub.example/ns/x' },
   )
 })
+
+// ── R15 06：NSFW 默认隐藏与「只看可跑」（A8 / A12）──────────────────────────
+
+/**
+ * 过滤夹具：五条路由恰好覆盖「可跑」四项条件的每一种反例。
+ * 目录顺序（按 path）= /anti → /nsfw → /optional → /plain → /required。
+ */
+function filterCatalog() {
+  const route = (path, features = {}) => ({
+    path,
+    name: path,
+    features: { requireConfig: false, requirePuppeteer: false, antiCrawler: false, supportPodcast: false, nsfw: false, ...features },
+  })
+  return {
+    f: {
+      name: '过滤样本',
+      routes: {
+        anti: route('/anti', { antiCrawler: true }),
+        nsfw: route('/nsfw', { nsfw: true }),
+        optional: route('/optional', { requireConfig: [{ name: 'TOKEN', optional: true }] }),
+        plain: route('/plain'),
+        required: route('/required', { requireConfig: [{ name: 'TOKEN' }] }),
+      },
+    },
+  }
+}
+
+/** 五条路由的周测全部通过：这样 remaining 差异只来自 features，而不是周测。 */
+function filterWeeklyTests() {
+  return new Map(['/f/anti', '/f/nsfw', '/f/optional', '/f/plain', '/f/required'].map((key) => [key, 'passed']))
+}
+
+test('query：hideNsfw 缺省 true —— nsfw 行不出现且不计入 matched；显式 false 才出现（A8）', () => {
+  const result = projectCatalog(filterCatalog())
+  assert.equal(result.ok, true)
+  const { catalog } = result
+
+  const hidden = catalog.query({})
+  assert.equal(hidden.matched, 4, '默认隐藏：5 条里 nsfw 那条不计入命中')
+  assert.equal(hidden.items.some((row) => row.features.nsfw), false, '默认隐藏：nsfw 行不许出现')
+
+  const shown = catalog.query({ hideNsfw: false })
+  assert.equal(shown.matched, 5, '开关打开后 matched 同步 +1（宿主侧过滤，不是客户端裁页）')
+  assert.equal(shown.items.some((row) => row.path === '/nsfw'), true, '开关打开后 nsfw 行必须出现')
+  assert.equal(catalog.total, 5, '目录口径不受筛选影响')
+})
+
+test('query：onlyRunnable = 周测通过 + 无反爬 + 无必填 + 非 nsfw 的交集（A12）', () => {
+  const result = projectCatalog(filterCatalog())
+  assert.equal(result.ok, true)
+  const { catalog } = result
+  const weekly = filterWeeklyTests()
+
+  const runnable = catalog.query({ onlyRunnable: true }, weekly)
+  assert.equal(runnable.matched, 2, '只有 plain / optional 四项全满足')
+  assert.deepEqual(runnable.items.map((row) => row.path), ['/optional', '/plain'], 'optional 配置仍算可跑')
+
+  // 逐项反例必须被排除——任何一项条件缺失都不能混进结果。
+  const paths = new Set(runnable.items.map((row) => row.path))
+  assert.equal(paths.has('/anti'), false, '反爬不算可跑')
+  assert.equal(paths.has('/required'), false, '必填配置不算可跑')
+  assert.equal(paths.has('/nsfw'), false, 'nsfw 不算可跑')
+  assert.equal(paths.has('/optional'), true, '可选配置仍算可跑')
+
+  // 打开 NSFW 不会让 nsfw 行混进「只看可跑」：非 nsfw 是硬条件之一。
+  assert.equal(catalog.query({ onlyRunnable: true, hideNsfw: false }, weekly).matched, 2)
+
+  // 没有周测数据 ⇒ 没有任何一条能证明「周测通过」，结果为空（诚实失败，不是降级成三条）。
+  assert.equal(catalog.query({ onlyRunnable: true }).matched, 0, '无周测数据时不许把「未知」当「通过」')
+})
+
+test('游标：hideNsfw / onlyRunnable 进栅栏，条件变化即失配（A8 / A12 的分页侧）', () => {
+  const position = { namespace: 'f', path: '/f/plain' }
+  const raw = encodeCatalogCursor({ q: 'x' }, position)
+  assert.deepEqual(decodeCatalogCursor(raw, { q: 'x' }), position, '同条件翻页正常')
+  assert.equal(decodeCatalogCursor(raw, { q: 'x', hideNsfw: false }), undefined, '显示 NSFW 开关变化必须换游标')
+  assert.equal(decodeCatalogCursor(raw, { q: 'x', onlyRunnable: true }), undefined, '只看可跑开关变化必须换游标')
+})
+
+test('游标：周测代次进入栅栏 —— 翻页中途周测刷新 ⇒ 旧游标失配，同一份周测翻页正常', () => {
+  const position = { namespace: 'f', path: '/f/plain' }
+  const filter = { hideNsfw: false, onlyRunnable: true }
+  const weeklyA = new Map([['/f/plain', 'passed']])
+  const weeklyB = new Map([['/f/plain', 'failed']])
+
+  const raw = encodeCatalogCursor(filter, position, weeklyA)
+  assert.deepEqual(decodeCatalogCursor(raw, filter, weeklyA), position, '同一份周测数据内翻页必须正常')
+  assert.equal(decodeCatalogCursor(raw, filter, weeklyB), undefined, '周测换代后旧游标必须失配')
+  assert.equal(decodeCatalogCursor(raw, filter), undefined, '周测从有到无也是换代')
+  assert.deepEqual(decodeCatalogCursor(raw, filter, weeklyA), position, '代次标识必须稳定，不许每次调用都变')
+})
