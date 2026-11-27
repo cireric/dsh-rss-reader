@@ -1,5 +1,5 @@
 /**
- * 浏览器半的读写通道：40 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
+ * 浏览器半的读写通道：42 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
  *
  * 原先这里是一个 switch：每臂各自手写 payload 解析、各自记得把未读账并进回包 ——
  * interface 的复杂度 ≈ implementation 的复杂度。现在「一个端点」是一个 module：
@@ -56,6 +56,8 @@ import { rebuildItem } from './domain.js'
 import { selectCleanup } from './retention.js'
 import { buildOpml, parseOpml } from './opml.js'
 import { rsshubNamespaceOf, rsshubSourceOf } from './rsshub-source.js'
+// R15 06：hideNsfw 的默认值只有 rsshub-prefs.ts 一处（效果 = 缺省隐藏 NSFW）。
+import { effectiveHideNsfw } from './rsshub-prefs.js'
 import { FolderError } from './folders.js'
 import { duplicateHintsOf, linkKeyOf, type DuplicateRow } from './duplicates.js'
 import { TagError } from './tags.js'
@@ -685,7 +687,7 @@ function catalogPageOf(
 }
 
 /**
- * 端点表：40 个端点一处声明（每项的 `payload` 是入参形状的唯一声明）。
+ * 端点表：42 个端点一处声明（每项的 `payload` 是入参形状的唯一声明）。
  *
  * 穷尽性由 `Record<Endpoint, EndpointSpec>` 保证 —— 名字表（shared.ts 的 ENDPOINT_NAMES）
  * 加了新端点而这里没跟上，编译就不过。这是本文件里唯一需要「加端点时改的地方」。
@@ -1453,7 +1455,7 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       // 配置里的 hideNsfw 是用户默认值；请求显式带了就以请求为准（探索页开关写回的就是它）。
       // 隐藏列表（R15 07）反过来：**只能**来自配置，探索页没有任何入口能覆盖它。
       const rsshub = ctx.rsshubSettings?.snapshot()
-      const filter = catalogFilterOf(input, rsshub?.hideNsfw ?? true, rsshub?.hiddenNamespaces ?? [])
+      const filter = catalogFilterOf(input, effectiveHideNsfw(rsshub?.hideNsfw), rsshub?.hiddenNamespaces ?? [])
       // 游标先过栅栏：筛选变了（B7）、周测换代（R15 06）或游标认不出（B8）都回 bad-request。
       // **绝不**把 undefined 当成「没有游标 ⇒ 从第一页开始」—— 那会让界面无限追加重复行。
       let position: CatalogPosition | undefined

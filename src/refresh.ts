@@ -307,8 +307,15 @@ interface SettleInput {
   readonly result: FetchResult
   /** RSSHub 切换路径已经解析过一次，直接复用；非 RSSHub 路径为 undefined（保持原路径的解析位置）。 */
   readonly parsed: ParsedFeed | undefined
-  /** 只有 RSSHub 源带；非 RSSHub 源保持 undefined，回包上就没有这个键。 */
+  /** 返回给界面的尝试实例（RSSHub 切换路径才有）。 */
   readonly instancesAttempted: string[] | undefined
+  /**
+   * 本轮是否处于「内容版本落后」升级轮（`refreshOne` 只算一次）。
+   *
+   * 304 分支要用它决定是否提示「源未响应无条件请求，正文升级跳过」；如果在这里再算一遍，
+   * 两处表达式迟早漂（ADR-0001：一条判据只有一个裁决者）。
+   */
+  readonly contentUpgrade: boolean
 }
 
 /**
@@ -356,6 +363,7 @@ async function refreshOne(
     // 契约），这里原样保留，不因为用户关掉池子就把它改写成别的值。
     return settleFetch({
       feedId, store, options, previous, now, rsshub, result, parsed: undefined, instancesAttempted: undefined,
+      contentUpgrade: needsContentUpgrade,
     })
   }
 
@@ -378,9 +386,11 @@ async function refreshOne(
     instancesAttempted.push(instance)
     const result = await doFetch(
       rsshubInstanceUrl(feedId, instance),
-      // 条件请求只对「上次成功的那台」有意义，而候选顺序的第一个就是它；换到别的实例必须全量拿。
-      // 老记录没记过实例时首个候选只是池子首选，带错的 ETag 最多多一次 200，不会丢内容。
-      instancesAttempted.length === 1 ? validators : {},
+      // 条件请求只对**上次成功的那台**有意义：记录里的实例已移出池子、或正在冷却被排到后面时，
+      // 候选顺序的第一个不是它，带上它的 ETag / Last-Modified 只会让别的实例回 304 ——
+      // 那会被当成成功，并把 rsshub.instance 记成一台根本没取过内容的实例（真 bug）。
+      // 老记录没有 instance 时一律不带：多一次 200 是可接受的，记错来源不是。
+      instance === rsshub?.instance ? validators : {},
       { ...options.limits, timeoutMs: Math.min(RSSHUB_ATTEMPT_TIMEOUT_MS, remaining) },
       signal,
     )
@@ -413,6 +423,7 @@ async function refreshOne(
       },
       parsed: undefined,
       instancesAttempted,
+      contentUpgrade: needsContentUpgrade,
     })
   }
   rsshubCooldown.recordSuccess(feedId, success.instance)
@@ -422,6 +433,7 @@ async function refreshOne(
     result: success.result,
     parsed: success.parsed,
     instancesAttempted,
+    contentUpgrade: needsContentUpgrade,
   })
 }
 
@@ -432,7 +444,7 @@ async function refreshOne(
  * 抄一份「RSSHub 版入库」是最容易让来源字段或失败计数在某一支上漂掉的做法。
  */
 async function settleFetch(input: SettleInput): Promise<FeedOutcome> {
-  const { feedId, store, options, previous, now, rsshub, result, instancesAttempted } = input
+  const { feedId, store, options, previous, now, rsshub, result, instancesAttempted, contentUpgrade } = input
   const stamp = now().toISOString()
   const attempts = instancesAttempted === undefined ? {} : { instancesAttempted }
 
@@ -456,14 +468,14 @@ async function settleFetch(input: SettleInput): Promise<FeedOutcome> {
     }
 
     if (result.kind === 'not-modified') {
-      // 升级轮里还被判 304（源忽略了无条件请求）：写回版本号避免每轮都重试，并留下痕迹
-      const upgradeSkipped = (previous?.contentRevision ?? 1) < CONTENT_REVISION
+      // 升级轮里还被判 304（源忽略了无条件请求）：写回版本号避免每轮都重试，并留下痕迹。
+      // 「是不是升级轮」由 refreshOne 只算一次后传进来（contentUpgrade），这里不重复推导。
       // 304 也是**成功**（源说「内容没变」）：lastFailure 必须清 —— 横幅只能反映最近一次真实结果
       //（用户实测：月光博客连续十几次 not-modified，横幅仍写 HTTP 502）。合并语义在 feed-intent.ts。
       await store.updateFeed(feedId, {
         kind: 'refresh-not-modified', url: feedId, stamp, contentRevision: CONTENT_REVISION, rsshub,
       })
-      return upgradeSkipped
+      return contentUpgrade
         ? { feedId, url: feedId, status: 'not-modified', added: 0, reason: '源未响应无条件请求，正文升级跳过', ...attempts }
         : { feedId, url: feedId, status: 'not-modified', added: 0, ...attempts }
     }

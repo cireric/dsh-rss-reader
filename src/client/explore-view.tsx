@@ -288,6 +288,14 @@ export function ExploreView(props: ExploreViewProps): ReactNode {
                   <div className="dsh-rss-explore-detail" data-rss-explore-example="">示例：{route.example}</div>
                 )}
                 <div className="dsh-rss-explore-features">
+                  {/* spec §4.2.3：分类筛选项保留之外，`categories` 也要在行内显示 ——
+                      否则用户只能回到顶部按分类筛，看不出这一行为什么属于某个分类。
+                      与事实徽标同一族（dsh-rss-explore-badge），用独立 data 属性区分「分类」
+                      与「实例声明的能力」。 */}
+                  {route.categories.map((category) => (
+                    <span key={'category:' + category} className="dsh-rss-explore-badge"
+                      data-rss-explore-category-badge={category}>{category}</span>
+                  ))}
                   {featureBadgesOf(route.features, showNsfw).map(({ key, label }) => (
                     <span key={key} className="dsh-rss-explore-badge" data-rss-explore-feature={key}>{label}</span>
                   ))}

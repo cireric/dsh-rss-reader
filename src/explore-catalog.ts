@@ -14,6 +14,8 @@ import type { ExploreRouteView } from './shared.js'
 import { parsePathTemplate } from './explore-template.js'
 // 「可跑」判据只有一份（票 05 导出）：排序与筛选必须引用它，不许各写一套。
 import { isRunnableRoute, weeklyTestGenerationOf, weeklyTestKey, type WeeklyTestMap } from './weekly-tests.js'
+// RSSHub 用户偏好的判据也只有一份（R15 06 / 07）：默认隐藏值与隐藏列表归一化都不在别处复制。
+import { effectiveHideNsfw, normalizeHiddenNamespaces } from './rsshub-prefs.js'
 export { parsePathTemplate, prefillValues } from './explore-template.js'
 export type { PathTemplate, PathTemplateSegment } from './explore-template.js'
 
@@ -69,25 +71,8 @@ interface NormalizedFilter {
   namespace: string
   hideNsfw: boolean
   onlyRunnable: boolean
-  /** 去空白 / 去重 / 空串丢弃后**排序**：它是集合，顺序不该改变栅栏。 */
+  /** 去空白 / 去重 / 空串丢弃后**排序**：它是集合，顺序不该改变栅栏（判据在 rsshub-prefs.ts）。 */
   hiddenNamespaces: string[]
-}
-
-/**
- * 隐藏列表归一化：隐藏的语义是「这些站点不出现」，所以重复、两端空白、空串都不改变结论。
- *
- * 排序是栅栏的要求：`['a','b']` 与 `['b','a']` 筛出同一份列表，游标必须互相认。
- * 非数组（手改 config / 旧回包漂移）按空列表处理 —— 宁可回到「不隐藏」，也不把垃圾值当站点名。
- */
-function normalizeHiddenNamespaces(raw: unknown): string[] {
-  if (!Array.isArray(raw)) return []
-  const set = new Set<string>()
-  for (const entry of raw) {
-    if (typeof entry !== 'string') continue
-    const trimmed = entry.trim()
-    if (trimmed !== '') set.add(trimmed)
-  }
-  return [...set].sort(compareText)
 }
 
 function normalizeFilter(filter: CatalogFilter): NormalizedFilter {
@@ -95,8 +80,8 @@ function normalizeFilter(filter: CatalogFilter): NormalizedFilter {
     q: typeof filter.q === 'string' ? filter.q.trim().toLowerCase() : '',
     category: typeof filter.category === 'string' ? filter.category : '',
     namespace: typeof filter.namespace === 'string' ? filter.namespace : '',
-    // 只认显式 false 才关闭隐藏：缺省 / 认不出的值都回到「默认隐藏 nsfw」。
-    hideNsfw: filter.hideNsfw !== false,
+    // 只认显式 false 才关闭隐藏：缺省 / 认不出的值都回到「默认隐藏 nsfw」（判据在 rsshub-prefs.ts）。
+    hideNsfw: effectiveHideNsfw(filter.hideNsfw),
     // 只认显式 true：缺省 / 认不出的值都不启用硬过滤。
     onlyRunnable: filter.onlyRunnable === true,
     hiddenNamespaces: normalizeHiddenNamespaces(filter.hiddenNamespaces),
