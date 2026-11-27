@@ -742,9 +742,10 @@ export const MUTATIONS = [
       '正文视图下切「未读 / 星标」过滤：回到列表',
     ],
     // 2026-11-22 R11 01：入口改名 leaveTransientViews 并多收一类 settings，锚点按产物重锚；
-    // 本条只抹掉「正文退出」，settings 分支留着 —— 否则两条判定会被同一条变异一起带走。
-    from: '\t\t\tconst leaveTransientViews = () => {\n\t\t\t\tconst view = get().view;\n\t\t\t\tif (view === "article") set({\n\t\t\t\t\tview: "list",\n\t\t\t\t\tarticle: void 0\n\t\t\t\t});\n\t\t\t\telse if (view === "settings") set({ view: "list" });\n\t\t\t\telse if (view === "explore") set({\n\t\t\t\t\tview: "list",\n\t\t\t\t\texplore: void 0\n\t\t\t\t});\n\t\t\t};',
-    to: '\t\t\tconst leaveTransientViews = () => {\n\t\t\t\tconst view = get().view;\n\t\t\t\tif (view === "article") {\n\t\t\t\t} else if (view === "settings") set({ view: "list" });\n\t\t\t\telse if (view === "explore") set({\n\t\t\t\t\tview: "list",\n\t\t\t\t\texplore: void 0\n\t\t\t\t});\n\t\t\t};' },
+    // 本条只抹掉「正文退出」，settings / explore / sourcePack 分支留着 —— 否则多条判定会被同一条变异一起带走。
+    // 2026-11-27 R15 08：新增 sourcePack 分支后按产物重锚（仍只抹 article 那一支）。
+    from: '\t\t\tconst leaveTransientViews = () => {\n\t\t\t\tconst view = get().view;\n\t\t\t\tif (view === "article") set({\n\t\t\t\t\tview: "list",\n\t\t\t\t\tarticle: void 0\n\t\t\t\t});\n\t\t\t\telse if (view === "settings") set({ view: "list" });\n\t\t\t\telse if (view === "explore") set({\n\t\t\t\t\tview: "list",\n\t\t\t\t\texplore: void 0\n\t\t\t\t});\n\t\t\t\telse if (view === "sourcePack") set({ view: "list" });\n\t\t\t};',
+    to: '\t\t\tconst leaveTransientViews = () => {\n\t\t\t\tconst view = get().view;\n\t\t\t\tif (view === "article") {\n\t\t\t\t} else if (view === "settings") set({ view: "list" });\n\t\t\t\telse if (view === "explore") set({\n\t\t\t\t\tview: "list",\n\t\t\t\t\texplore: void 0\n\t\t\t\t});\n\t\t\t\telse if (view === "sourcePack") set({ view: "list" });\n\t\t\t};' },
   // 每源未读数的**键域**（2026-10-10）。左栏角标按 feeds 表逐行渲染，键域必须严格 = feeds 表：
   // 删掉「以 feeds 表铺 0」后，0 未读的源会丢键，那一行变成「角标空白」而不是「角标 0」——
   // 界面上无从分辨，是最贵的那类沉默失败。非等价变异：丢键后取值变 undefined，两条测试会红。
@@ -3513,6 +3514,17 @@ export const MUTATIONS = [
     judgeTests: ['projectCatalog：requireConfig 三态推导（false / 空数组 / 缺字段 ⇒ none，全可选 ⇒ optional，含必填 ⇒ required）'],
     from: "        requireConfig: requireConfigStateOf(record['requireConfig']),",
     to: "        requireConfig: record['requireConfig'] === true," },
+
+  // ── R15 08：精选源包（2026-11-27）────────────────────────────────────────
+  // 保存时只写回旧 config、不带上新的 curatedSources：界面显示「删掉了 / 加上了」，
+  // 重启后清单原封不动 —— 用户的增删变成一次只在本次会话有效的假动作（A13 的直接失败）。
+  // 判据是「删除 / 新增都落盘：重建控制器后删掉的仍不在、新加的仍在」。
+  // from 照构建产物 lib/source-pack.js 的实际字节写（pitfalls 一、1.4），独立实测 OCCURRENCES=1。
+  { id: 'rsshub-源包删除不落盘', file: 'lib/source-pack.js',
+    judges: ['source-pack.test.mjs'],
+    judgeTests: ['删除 / 新增都落盘：重建控制器后删掉的仍不在、新加的仍在（A13）'],
+    from: 'writeConfigFile(configPath, { ...current, curatedSources: next });',
+    to: 'writeConfigFile(configPath, current);' },
 
   // ── R15 05：周测数据与可跑判定（2026-11-27）─────────────────────────────
   // 把周测的 failed 也写成 passed：1,271 条失败路由（实测）全部冒充「周测通过」，

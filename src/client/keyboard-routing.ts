@@ -164,7 +164,7 @@ function measureLineStep(box: HTMLElement, win: Window | undefined): number | un
  * 「不接管」必须发生在 switch 之前。加视图只改这一处，不会漏掉某个 case（R11 01 的 settings
  * 与 R8b 04 的 explore 是同一条规则）。
  */
-const NON_READING_VIEWS: ReadonlySet<ReaderState['view']> = new Set(['settings', 'explore'])
+const NON_READING_VIEWS: ReadonlySet<ReaderState['view']> = new Set(['settings', 'explore', 'sourcePack'])
 
 /**
  * 一次按键 → 零次或一次动作。
@@ -386,6 +386,8 @@ export function routeKey(event: KeyboardEvent, ctx: KeyRoutingCtx): void {
       // 设置页与订阅管理同级：返回固定回列表，不记来源视图（D20 —— 记 prevView 会把
       // ArticleView 的重挂与正文滚动恢复牵进来，收益低于风险）。
       if (view === 'settings') { event.preventDefault(); store.closeSettings(); break }
+      // 精选源（R15 08）：Esc 固定回列表，与设置 / 探索同一条收口。
+      if (view === 'sourcePack') { event.preventDefault(); store.closeSourcePack(); break }
       return
     // 视图密度只在条目流上有意义（在正文页/订阅管理页按 1/2 不该改背后的列表）
     case 'expandedView': if (view === 'list') store.setLayout('expanded'); break

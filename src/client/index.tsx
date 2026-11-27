@@ -49,6 +49,7 @@ import { TagEditor } from './tag-editor.js'
 import { ArticleView } from './article-pane.js'
 import { SettingsView } from './settings-view.js'
 import { ExploreView } from './explore-view.js'
+import { SourcePackView } from './source-pack-view.js'
 import { ConfirmDialog } from './confirm-dialog.js'
 // 空组覆盖住 `image-fold.ts`（R6 04 从本文件搬去）：`i` 键在 keyboard-routing.ts 里也要写它，
 // 两处各造一个 `new Set()` 会得到值相等但引用不同的两份「空组覆盖」，而 React 的相等判断与
@@ -243,6 +244,35 @@ const STYLE = `
 .dsh-rss-explore-field-label { font-size:12px; color:var(--rss-muted); }
 .dsh-rss-explore-form-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
 .dsh-rss-explore-url { flex:1 1 240px; font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+/* R15 08 精选源：结构与探索页同族（纵向、可换行），但列表行是「清单条目」而不是路由行。 */
+.dsh-rss-pack-page { flex:1; min-height:0; overflow-y:auto; padding:12px clamp(12px, 2vw, 28px) 24px; }
+.dsh-rss-pack-head { display:flex; align-items:center; flex-wrap:wrap; gap:8px 12px; }
+.dsh-rss-pack-title { font-size:16px; line-height:1.35; font-weight:600; }
+.dsh-rss-pack-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:12px; }
+.dsh-rss-pack-input { font:inherit; font-size:13px; padding:3px 8px; border-radius:4px;
+  border:1px solid var(--rss-line); background:var(--rss-bg); color:inherit; min-width:0; flex:1 1 220px; }
+.dsh-rss-pack-select { font:inherit; font-size:13px; padding:3px 6px; border-radius:4px;
+  border:1px solid var(--rss-line); background:var(--rss-bg); color:inherit; }
+.dsh-rss-pack-form { display:flex; flex-direction:column; gap:8px; margin-top:12px; padding:12px;
+  border:1px solid var(--rss-line); border-radius:8px; }
+.dsh-rss-pack-form-title { font-size:14px; font-weight:600; }
+.dsh-rss-pack-field { display:flex; flex-direction:column; gap:3px; }
+.dsh-rss-pack-field-label { font-size:12px; color:var(--rss-muted); }
+.dsh-rss-pack-form-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+.dsh-rss-pack-probe { font-size:12px; color:var(--rss-muted); }
+.dsh-rss-pack-list { list-style:none; margin:12px 0 0; padding:0; }
+.dsh-rss-pack-row { padding:10px 0; border-top:1px solid var(--rss-line); }
+.dsh-rss-pack-row-head { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 10px; }
+.dsh-rss-pack-name { font-size:14px; font-weight:600; overflow-wrap:anywhere; }
+.dsh-rss-pack-badge { padding:0 5px; border-radius:3px; border:1px solid var(--rss-line);
+  font-size:11px; color:var(--rss-muted); }
+.dsh-rss-pack-url { display:block; margin-top:4px; font-size:12px; color:var(--rss-muted);
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap:anywhere; }
+.dsh-rss-pack-note, .dsh-rss-pack-note-line { margin-top:4px; font-size:12px; color:var(--rss-muted);
+  overflow-wrap:anywhere; }
+.dsh-rss-pack-row-head button { margin-left:auto; }
+.dsh-rss-pack-footnote { margin-top:16px; }
+.dsh-rss-pack-notice { margin-top:8px; font-size:12px; color:var(--rss-accent);
   font-size:12px; overflow-wrap:anywhere; }
 .dsh-rss-row { border-bottom:1px solid var(--rss-line); }
 .dsh-rss-row:hover, [data-rss-nav-row]:hover { background:var(--rss-hover); }
@@ -927,11 +957,13 @@ export function createReader(store: ReaderStore): () => ReactNode {
             navCursor={state.navCursor}
             foldedFolders={state.foldedFolders}
             showUnread={state.showUnread}
+            sourcePackActive={state.view === 'sourcePack'}
             onSelectFilter={(next) => store.setFilter(next)}
             onSelectFeed={(feedId) => store.selectNav({ kind: 'feed', feedId })}
             onSelectFolder={(folder) => store.selectNav({ kind: 'folder', folder })}
             onSelectTag={(tagId) => store.selectNav({ kind: 'tag', tagId })}
             onToggleFolder={store.toggleFolder}
+            onOpenSourcePack={store.openSourcePack}
           />
         )}
         <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
@@ -939,7 +971,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
           <div className="dsh-rss-toolbar-title">
             <strong>{state.view === 'list'
               ? selectedFeed?.title ?? selectedFolder?.name ?? selectedTag?.name ?? filters.find((filter) => filter.key === state.filter)?.label
-              : 'RSS 阅读器'}</strong>
+              : state.view === 'sourcePack' ? '精选源' : 'RSS 阅读器'}</strong>
             {state.view === 'list' && (
               <div className="dsh-rss-meta dsh-rss-counts">
                 {/* 时间范围档位（R1-03，spec 决策 22）：只在列表视图、与「已加载 X 条」同一行。
@@ -1195,6 +1227,22 @@ export function createReader(store: ReaderStore): () => ReactNode {
             onBuild={() => { void store.buildExploreAddress() }}
             onAdd={() => { void store.addExploreSubscription() }}
             onBack={() => store.closeExplore()}
+          />
+        )}
+
+        {state.view === 'sourcePack' && state.sourcePack !== undefined && (
+          <SourcePackView
+            state={state.sourcePack}
+            onQuery={store.setSourcePackQuery}
+            onCategory={store.setSourcePackCategory}
+            onOpenForm={store.openSourcePackForm}
+            onCloseForm={store.closeSourcePackForm}
+            onDraft={store.setSourcePackDraft}
+            onProbe={() => { void store.probeSourcePackUrl() }}
+            onSave={(force) => { void store.saveSourcePackDraft(force === true) }}
+            onRemove={(url) => { void store.removeSourcePackEntry(url) }}
+            onRestoreSeed={() => { void store.restoreSourcePackSeed() }}
+            onBack={store.closeSourcePack}
           />
         )}
 

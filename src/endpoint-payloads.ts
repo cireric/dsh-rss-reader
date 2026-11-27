@@ -274,6 +274,20 @@ export const backfillHistoryPayload = z.object({
   limit: z.number().int().min(BACKFILL_LIMIT.min).max(BACKFILL_LIMIT.max).default(BACKFILL_LIMIT.default),
 })
 
+/**
+ * `saveSourcePack`（R15 08）：整份替换精选源包。
+ *
+ * `entries` 只声明成数组，逐项形状（URL / addedAt / 去重）交给 storage 层的
+ * `normalizeCuratedSources` —— 与读取侧同一份判据，坏项逐条丢弃并在回包里告警，
+ * 不把一条手滑的地址变成整份 bad-request。
+ *
+ * `restoreSeed`：恢复内置快照，只补缺失 URL（见 source-pack.ts 的 save）。
+ */
+export const saveSourcePackPayload = z.object({
+  entries: z.array(z.unknown()),
+  restoreSeed: z.boolean().optional(),
+})
+
 /** `saveViewPreferences`：preferences 是必需键 —— 缺键会把默认视图静默写盘。值本身仍由 store 归一。 */
 export const saveViewPreferencesPayload = z.object({ preferences: z.unknown() })
 
