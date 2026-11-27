@@ -9,6 +9,9 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   buildExploreUrl,
   decodeCatalogCursor,
@@ -17,6 +20,17 @@ import {
   prefillValues,
   projectCatalog,
 } from '../lib/explore-catalog.js'
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+
+/**
+ * R15 04 的真实实例快照（裁剪口径见 tests/fixtures/rsshub-catalog/README.md）。
+ * 用真实回包而不是手写形状，是因为 `requireConfig` 的类型漂移正是「手写夹具没跟上实测」造成的：
+ * 旧夹具把它写成布尔 `true`，投影的 `=== true` 判据才会看起来成立。
+ */
+function realSnapshot() {
+  return JSON.parse(readFileSync(join(ROOT, 'tests', 'fixtures', 'rsshub-catalog', 'rssforever-2026-11-27.json'), 'utf8'))
+}
 
 /** 一份带坏条目的原始回包：字段名照实例 `/api/namespace` 的实测形状（spec §1.1）。 */
 function rawCatalog() {
@@ -73,7 +87,9 @@ function rawCatalog() {
           description: 'Issue 列表',
           categories: ['programming'],
           features: {
-            requireConfig: true,
+            // 真实类型是 false | ConfigItem[]（spec §1.3）：这项曾经被写成布尔 true，
+            // 投影照布尔读才「看起来能用」，实际实例上这个分支永远走不到。
+            requireConfig: [{ name: 'GITHUB_TOKEN', optional: false }],
             requirePuppeteer: 'yes', // 非布尔 ⇒ 必须落成 false，不能原样透传
             antiCrawler: 0,
             supportRadar: false,
@@ -174,7 +190,7 @@ test('projectCatalog：字段裁剪 —— description / location / maintainers 
     categories: ['programming', 'github'],
     example: '/github/branches/DIYgod/RSSHub',
     parameters: { user: '用户名', repo: '仓库名' },
-    features: { requireConfig: false, requirePuppeteer: false, antiCrawler: false, supportPodcast: false },
+    features: { requireConfig: 'none', requirePuppeteer: false, antiCrawler: false, supportPodcast: false, nsfw: false },
   })
   const keys = Object.keys(branches).sort()
   assert.deepEqual(keys, [
@@ -182,16 +198,99 @@ test('projectCatalog：字段裁剪 —— description / location / maintainers 
   ], '行里只允许 wire 声明的八个字段')
 })
 
-test('projectCatalog：features 只留四个布尔，非布尔按 false（不原样透传）', () => {
+test('projectCatalog：features 保留 requireConfig 三态与四个布尔，非布尔按 false（不原样透传）', () => {
   const result = projectCatalog(rawCatalog())
   assert.equal(result.ok, true)
   const issues = result.catalog.rows.find((row) => row.path === '/github/issues/:user/:repo/:state?')
   assert.deepEqual(issues.features, {
-    requireConfig: true,
+    requireConfig: 'required',
     requirePuppeteer: false,
     antiCrawler: false,
     supportPodcast: true,
+    nsfw: false,
   })
+})
+
+test('projectCatalog：requireConfig 三态推导（false / 空数组 / 缺字段 ⇒ none，全可选 ⇒ optional，含必填 ⇒ required）', () => {
+  const route = (path, requireConfig) => ({
+    path,
+    name: path,
+    ...(requireConfig === undefined ? {} : { features: { requireConfig } }),
+  })
+  const raw = {
+    shapes: {
+      name: '形态样本',
+      routes: {
+        // 旧代码只认 `=== true`；真实实例从不发布尔 true，所以这个判据必须对下列形状全部翻红。
+        legacyTrue: route('/legacy-true/:id', true),
+        falseValue: route('/false/:id', false),
+        emptyArray: route('/empty/:id', []),
+        missing: route('/missing/:id', undefined),
+        allOptional: route('/all-optional/:id', [{ name: 'A', optional: true }]),
+        explicitRequired: route('/explicit-required/:id', [{ name: 'B', optional: false }]),
+        implicitRequired: route('/implicit-required/:id', [{ name: 'C' }]),
+        mixed: route('/mixed/:id', [{ name: 'D', optional: true }, { name: 'E' }]),
+      },
+    },
+  }
+  const result = projectCatalog(raw)
+  assert.equal(result.ok, true)
+  const states = Object.fromEntries(result.catalog.rows.map((row) => [row.path, row.features.requireConfig]))
+  assert.deepEqual(states, {
+    '/legacy-true/:id': 'none',
+    '/false/:id': 'none',
+    '/empty/:id': 'none',
+    '/missing/:id': 'none',
+    '/all-optional/:id': 'optional',
+    '/explicit-required/:id': 'required',
+    '/implicit-required/:id': 'required',
+    '/mixed/:id': 'required',
+  })
+})
+
+test('projectCatalog：nsfw 只认 === true，拼写漂移 nfsw 不映射', () => {
+  const raw = {
+    site: {
+      name: '站点',
+      routes: {
+        yes: { path: '/yes/:id', name: '是', features: { nsfw: true } },
+        no: { path: '/no/:id', name: '否', features: { nsfw: false } },
+        missing: { path: '/missing/:id', name: '缺字段', features: {} },
+        stringYes: { path: '/string-yes/:id', name: '字符串', features: { nsfw: 'true' } },
+        drift: { path: '/drift/:id', name: '拼写漂移', features: { nfsw: true } },
+      },
+    },
+  }
+  const result = projectCatalog(raw)
+  assert.equal(result.ok, true)
+  const flags = Object.fromEntries(result.catalog.rows.map((row) => [row.path, row.features.nsfw]))
+  assert.deepEqual(flags, {
+    '/yes/:id': true,
+    '/no/:id': false,
+    '/missing/:id': false,
+    '/string-yes/:id': false,
+    // 实例里真有一条把 nsfw 拼成 nfsw（spec §4.2.1）：认不出就不认，不能替实例猜。
+    '/drift/:id': false,
+  })
+})
+
+test('projectCatalog：真实实例快照夹具 —— requireConfig 三态与 nsfw / nfsw 事实', () => {
+  const result = projectCatalog(realSnapshot())
+  assert.equal(result.ok, true)
+  assert.equal(result.invalid, 0, '快照里每条路由都必须是合法形状')
+  const row = (path) => {
+    const found = result.catalog.rows.find((item) => item.path === path)
+    assert.ok(found !== undefined, path + ' 必须在快照里')
+    return found
+  }
+
+  assert.equal(row('/branches/:user/:repo').features.requireConfig, 'none', 'false 是 none')
+  assert.equal(row('/music/playlist/:id').features.requireConfig, 'optional', '全 optional:true 是 optional')
+  assert.equal(row('/user/:id').features.requireConfig, 'required', '带 optional:false 是 required')
+  assert.equal(row('/:category/:key').features.requireConfig, 'required', '可选项与必填项混排仍是 required')
+  assert.equal(row('/:id?').features.nsfw, true, 'nsfw === true 必须保留')
+  // 0xxx 的 features 只有 `nfsw: true`，没有 `nsfw`：拼写漂移不映射。
+  assert.equal(row('/:filter?').features.nsfw, false, 'nfsw 不许被当成 nsfw')
 })
 
 test('projectCatalog：按 (namespace, path) 升序且冻结，顺序在缓存生命期内稳定', () => {

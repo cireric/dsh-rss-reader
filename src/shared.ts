@@ -613,12 +613,20 @@ export interface ExploreRouteView {
   example?: string
   /** 参数名 → 中文说明（可能为空对象）。 */
   parameters: Record<string, string>
-  /** 只带四个会被展示的布尔；其余 features 丢弃，非布尔按 false。 */
+  /**
+   * 只带会被展示的事实键；其余 features 丢弃，非布尔按 false。
+   *
+   * `requireConfig` 是**三态**而不是布尔：实例回包里它的真实类型是 `false | ConfigItem[]`
+   *（spec §1.3 实测 180 条非空）。按布尔读会让「需配置」徽标永远不出现，所以投影时就把
+   * 「有没有必填项」压成 `required` / `optional` / `none`，界面不再重复推导。
+   */
   features: {
-    requireConfig: boolean
+    requireConfig: 'none' | 'optional' | 'required'
     requirePuppeteer: boolean
     antiCrawler: boolean
     supportPodcast: boolean
+    /** 只认实例的 `nsfw === true`；拼写漂移 `nfsw` 不猜、不映射（spec §4.2.1）。 */
+    nsfw: boolean
   }
 }
 

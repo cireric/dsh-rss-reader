@@ -13,13 +13,28 @@ import type { ExploreRouteView } from '../shared.js'
 import { parsePathTemplate } from '../explore-template.js'
 import type { ExploreState } from './store.js'
 
-/** 四个事实徽标的文案与渲染顺序；false 一律不渲染（「一堆否」是噪音，spec §4.4）。 */
-const FEATURE_LABELS: ReadonlyArray<readonly [keyof ExploreRouteView['features'], string]> = [
-  ['requireConfig', '需配置'],
+/** 布尔事实徽标的文案与渲染顺序；false 一律不渲染（「一堆否」是噪音，spec §4.4）。 */
+const FEATURE_LABELS: ReadonlyArray<
+  readonly [Exclude<keyof ExploreRouteView['features'], 'requireConfig' | 'nsfw'>, string]
+> = [
   ['antiCrawler', '反爬'],
   ['requirePuppeteer', '需浏览器'],
   ['supportPodcast', '播客'],
 ]
+
+/**
+ * 一行的事实徽标：`requireConfig` 是三态，必须把「必填 / 可选」分开显示（A9）；
+ * `none` 与布尔 false 一样不渲染。`nsfw` 不在本票渲染（隐藏 / 开关归 06）。
+ */
+function featureBadgesOf(features: ExploreRouteView['features']): Array<{ key: string; label: string }> {
+  const badges: Array<{ key: string; label: string }> = []
+  if (features.requireConfig === 'required') badges.push({ key: 'requireConfig', label: '需配置（必填）' })
+  if (features.requireConfig === 'optional') badges.push({ key: 'requireConfig', label: '需配置（可选）' })
+  for (const [key, label] of FEATURE_LABELS) {
+    if (features[key]) badges.push({ key, label })
+  }
+  return badges
+}
 
 export interface ExploreViewProps {
   readonly state: ExploreState
@@ -223,7 +238,7 @@ export function ExploreView(props: ExploreViewProps): ReactNode {
                   <div className="dsh-rss-explore-detail" data-rss-explore-example="">示例：{route.example}</div>
                 )}
                 <div className="dsh-rss-explore-features">
-                  {FEATURE_LABELS.filter(([key]) => route.features[key]).map(([key, label]) => (
+                  {featureBadgesOf(route.features).map(({ key, label }) => (
                     <span key={key} className="dsh-rss-explore-badge" data-rss-explore-feature={key}>{label}</span>
                   ))}
                 </div>
