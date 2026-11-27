@@ -1,0 +1,112 @@
+{
+  "numTotalTestSuites": 5,
+  "numPassedTestSuites": 3,
+  "numFailedTestSuites": 2,
+  "numTotalTests": 3947,
+  "numPassedTests": 2676,
+  "numFailedTests": 1271,
+  "success": false,
+  "testResults": [
+    {
+      "name": "/home/runner/work/RSSHub/RSSHub/lib/app.test.ts",
+      "status": "failed",
+      "assertionResults": [
+        {
+          "ancestorTitles": [
+            "routes"
+          ],
+          "fullName": "routes /github/branches/:user/:repo",
+          "status": "passed",
+          "title": "/github/branches/:user/:repo",
+          "duration": 2156.5077309999615,
+          "failureMessages": [],
+          "meta": {},
+          "tags": [],
+          "benchmarks": []
+        },
+        {
+          "ancestorTitles": [
+            "routes"
+          ],
+          "fullName": "routes /163/music/user/events/:id",
+          "status": "passed",
+          "title": "/163/music/user/events/:id",
+          "duration": 1184.807996,
+          "failureMessages": [],
+          "meta": {},
+          "tags": [],
+          "benchmarks": []
+        },
+        {
+          "ancestorTitles": [
+            "routes"
+          ],
+          "fullName": "routes /81/jfjb/:page?",
+          "status": "passed",
+          "title": "/81/jfjb/:page?",
+          "duration": 3135.5031589999994,
+          "failureMessages": [],
+          "meta": {},
+          "tags": [],
+          "benchmarks": []
+        },
+        {
+          "ancestorTitles": [
+            "routes"
+          ],
+          "fullName": "routes /zhihu/people/activities/:id",
+          "status": "failed",
+          "title": "/zhihu/people/activities/:id",
+          "duration": 25.833964999765158,
+          "failureMessages": [
+            "AssertionError: expected 503 to be 200 // Object.is equality\n    at /home/runner/work/RSSHub/RSSHub/lib/app.test.ts:138:41\n    at async file:///home/runner/work/RSSHub/RSSHub/node_modules/.pnpm/vitest@5.1.0_@opentelemetry+api@1.10.0_@types+node@26.6.6_@vitest+coverage-v8@5.1.0_jsd_f6175c2bc99982aa5aefc7463c3d6e1d/node_modules/vitest/dist/chunks/run.CjdgFZiW.js:2801:20"
+          ],
+          "meta": {},
+          "tags": [],
+          "benchmarks": []
+        },
+        {
+          "ancestorTitles": [
+            "routes"
+          ],
+          "fullName": "routes /freebuf/articles/:type",
+          "status": "failed",
+          "title": "/freebuf/articles/:type",
+          "duration": 4647.961410999997,
+          "failureMessages": [
+            "AssertionError: expected 503 to be 200 // Object.is equality\n    at /home/runner/work/RSSHub/RSSHub/lib/app.test.ts:138:41\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async file:///home/runner/work/RSSHub/RSSHub/node_modules/.pnpm/vitest@5.1.0_@opentelemetry+api@1.10.0_@types+node@26.6.6_@vitest+coverage-v8@5.1.0_jsd_f6175c2bc99982aa5aefc7463c3d6e1d/node_modules/vitest/dist/chunks/run.CjdgFZiW.js:2801:20"
+          ],
+          "meta": {},
+          "tags": [],
+          "benchmarks": []
+        },
+        {
+          "ancestorTitles": [
+            "index"
+          ],
+          "fullName": "index exports app entrypoint",
+          "status": "passed",
+          "title": "exports app entrypoint",
+          "duration": 2.32149599999957,
+          "failureMessages": [],
+          "meta": {},
+          "tags": [],
+          "benchmarks": []
+        },
+        {
+          "ancestorTitles": [
+            "index"
+          ],
+          "fullName": "index serve index",
+          "status": "passed",
+          "title": "serve index",
+          "duration": 41.63922500000035,
+          "failureMessages": [],
+          "meta": {},
+          "tags": [],
+          "benchmarks": []
+        }
+      ]
+    }
+  ]
+}

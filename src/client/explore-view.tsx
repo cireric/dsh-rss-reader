@@ -36,6 +36,15 @@ function featureBadgesOf(features: ExploreRouteView['features']): Array<{ key: s
   return badges
 }
 
+/**
+ * 周测徽标文案（R15 05）：只有「通过 / 失败」两种事实；未参加（`undefined`）什么都不显示。
+ * 它是上游周测结论，不是质量评分 —— 文案不许写成「优质 / 推荐」（spec §4.2.2）。
+ */
+const WEEKLY_TEST_LABELS: Readonly<Record<'passed' | 'failed', string>> = {
+  passed: '周测通过',
+  failed: '周测失败',
+}
+
 export interface ExploreViewProps {
   readonly state: ExploreState
   readonly onQuery: (patch: Partial<Pick<ExploreState, 'q' | 'category' | 'namespace'>>) => void
@@ -241,6 +250,12 @@ export function ExploreView(props: ExploreViewProps): ReactNode {
                   {featureBadgesOf(route.features).map(({ key, label }) => (
                     <span key={key} className="dsh-rss-explore-badge" data-rss-explore-feature={key}>{label}</span>
                   ))}
+                  {/* 周测与 features 是两类事实：单独的 data 属性，避免「周测」被当成实例声明的能力。 */}
+                  {route.weeklyTest !== undefined && (
+                    <span className="dsh-rss-explore-badge" data-rss-explore-weekly={route.weeklyTest}>
+                      {WEEKLY_TEST_LABELS[route.weeklyTest]}
+                    </span>
+                  )}
                 </div>
                 {selected !== undefined && selected.namespace === route.namespace && selected.path === route.path && (
                   <RouteForm route={route} params={paramSegmentsOf(route)} state={state}

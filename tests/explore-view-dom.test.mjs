@@ -408,6 +408,39 @@ test('R15 04 需配置徽标：required / optional 显示对应文案，none 不
   }
 })
 
+test('R15 05 周测徽标：通过 / 失败显示对应文案，未参加什么都不显示', skip, async () => {
+  // 只允许「周测通过 / 周测失败」两种事实文案；未参加周测不显示第三枚徽标，
+  // 也绝不允许写成「优质 / 推荐 / 评分」（spec §4.2.2）。
+  const features = { requireConfig: 'none', requirePuppeteer: false, antiCrawler: false, supportPodcast: false, nsfw: false }
+  const route = (path, weeklyTest) => ({
+    namespace: 'weekly', siteName: '周测样本', path, name: path,
+    categories: [], parameters: {}, features,
+    ...(weeklyTest === undefined ? {} : { weeklyTest }),
+  })
+  const h = await mount({
+    catalog: () => ({
+      value: catalogPage(
+        [route('/passed/:id', 'passed'), route('/failed/:id', 'failed'), route('/ungraded/:id', undefined)],
+        { siteTotal: 1, routeTotal: 3 },
+      ),
+    }),
+  })
+  try {
+    await openExploreFromFeeds(h)
+    const row = (path) => h.$$('[data-rss-explore-row]')
+      .find((item) => item.getAttribute('data-rss-explore-path') === path)
+    const badge = (path) => row(path).querySelector('[data-rss-explore-weekly]')
+
+    assert.equal(badge('/passed/:id')?.textContent, '周测通过')
+    assert.equal(badge('/failed/:id')?.textContent, '周测失败')
+    assert.equal(badge('/ungraded/:id'), null, '未参加周测不显示任何徽标')
+    const listText = h.$('[data-rss-explore-view]')?.textContent ?? ''
+    assert.equal(/优质|推荐|评分/.test(listText), false, '文案不许出现优质 / 推荐 / 评分')
+  } finally {
+    h.cleanup()
+  }
+})
+
 test('R8b 04 行尾「订阅…」把表单开在该行内部（真机反馈：原先表单挂在整张列表之后）', skip, async () => {
   const h = await mount()
   try {

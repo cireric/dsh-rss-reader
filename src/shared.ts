@@ -646,6 +646,14 @@ export interface ExploreRouteView {
     /** 只认实例的 `nsfw === true`；拼写漂移 `nfsw` 不猜、不映射（spec §4.2.1）。 */
     nsfw: boolean
   }
+  /**
+   * 官方周测结论（R15 05）：`passed` / `failed`；**缺省 = 未参加周测**。
+   *
+   * 刻意不设 `ungraded` 第三值：未参加与「拉了数据但没有这条」在界面上是同一种表现（不显示徽标），
+   * 多一个值只会让每个消费者多写一遍分支。它也不在目录索引里 —— 周测 7 天刷新、索引缓存 12h，
+   * 烤进冻结行会让周测被索引缓存绑架（见 `weekly-tests.ts` 的出页附加）。
+   */
+  weeklyTest?: 'passed' | 'failed'
 }
 
 /**
