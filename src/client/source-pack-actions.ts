@@ -145,7 +145,7 @@ export function createSourcePackActions(host: SourcePackActionHost) {
     }
   }
 
-  /** 打开 / 关闭「精选源」视图（左栏那一行是 toggle，与控制台按钮同型）。 */
+  /** 打开 / 关闭「精选源」视图（入口是订阅管理页工具栏的按钮；在同一面板内再点一次即回列表）。 */
   const openSourcePack = (): void => {
     if (get().view === 'sourcePack') { set({ view: 'list' }); return }
     // 保留上一次的清单，打开时后台刷新：79+ 条不算大，但「每次打开都先闪一屏空清单」是可感知的。

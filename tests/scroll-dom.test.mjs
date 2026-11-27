@@ -1247,7 +1247,7 @@ test('跨源重复提示：行内可展开看别的来源，且展开不会把�
   assert.equal(h.win.document.querySelector('[data-rss-duplicates="b"]'), null, '没有候选的行不该凭空多出一行提示')
 })
 
-test('左栏渲染：虚拟视图三行 + 精选源面板一行 + 每个订阅源一行', skip, async () => {
+test('左栏渲染：虚拟视图三行 + 每个订阅源一行（精选源入口在订阅管理页，不在左栏）', skip, async () => {
   // 三个源：一个未读 2 条、一个未读 1 条、一个 0 未读 —— 后者专门用来钉「键域 = feeds 表」：
   // 0 未读的源也必须有一行，且它的角标是 0 而不是空白（缺键在界面上就是「空白 vs 0」无从分辨）。
   const h = await mountReader({
@@ -1267,10 +1267,10 @@ test('左栏渲染：虚拟视图三行 + 精选源面板一行 + 每个订阅�
 
   const rows = [...h.win.document.querySelectorAll('[data-rss-nav-row]')]
   const labels = rows.map((row) => row.getAttribute('data-rss-nav-row'))
-  // R15 08 起多一行「精选源」面板入口（它不是 Filter，所以排在虚拟视图之后、订阅源之前）。
-  assert.deepEqual(labels, ['filter:all', 'filter:unread', 'filter:starred', 'view:sourcePack', 'feed:f1', 'feed:f2', 'feed:f3'],
-    '左栏应当是虚拟视图三行 + 精选源面板一行 + 每个订阅源一行；实际 ' + JSON.stringify(labels))
-  assert.deepEqual(rows.map((row) => row.getAttribute('data-rss-nav-badge')), [null, null, null, null, '2', '1', '0'],
+  // 面板（探索 / 设置 / 精选源）不进左栏：左栏表达的是「源 / 文件夹 / 标签 / 过滤」四种作用域。
+  assert.deepEqual(labels, ['filter:all', 'filter:unread', 'filter:starred', 'feed:f1', 'feed:f2', 'feed:f3'],
+    '左栏应当是虚拟视图三行 + 每个订阅源一行；实际 ' + JSON.stringify(labels))
+  assert.deepEqual(rows.map((row) => row.getAttribute('data-rss-nav-badge')), [null, null, null, '2', '1', '0'],
     '每个源都要有角标，0 未读的源是 0 而不是空白（perFeedUnread 键域 = feeds 表）')
   // 两个标记各司其职（2026-10-10 任务 6 返工）：
   //   data-rss-nav-cursor   = 键盘光标落在哪一行（shift+n/p 移动的就是它）
@@ -2347,8 +2347,8 @@ test('文件夹展开与折叠同步键盘行序，汇总未读且保留订阅�
   const rows = () => Array.from(doc.querySelectorAll('[data-rss-nav-row]'), (row) => row.getAttribute('data-rss-nav-row'))
   const cursor = () => doc.querySelector('[data-rss-nav-cursor]')?.getAttribute('data-rss-nav-row')
   const visible = () => h.store.visible().map(({ id }) => id)
-  // 精选源面板入口在虚拟视图之后、文件夹之前（R15 08）。
-  const top = ['filter:all', 'filter:unread', 'filter:starred', 'view:sourcePack', key]
+  // 面板入口（探索 / 设置 / 精选源）不进左栏，所以键盘行序里只有虚拟视图三行 + 源/文件夹（R15 08 修正）。
+  const top = ['filter:all', 'filter:unread', 'filter:starred', key]
   assert.deepEqual(rows(), [...top, 'feed:a', 'feed:b', 'feed:c'])
   assert.equal(folder().getAttribute('data-rss-nav-badge'), '2')
   assert.equal(folder().getAttribute('aria-expanded'), 'true')

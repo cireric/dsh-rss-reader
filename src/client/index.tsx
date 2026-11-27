@@ -972,13 +972,11 @@ export function createReader(store: ReaderStore): () => ReactNode {
             navCursor={state.navCursor}
             foldedFolders={state.foldedFolders}
             showUnread={state.showUnread}
-            sourcePackActive={state.view === 'sourcePack'}
             onSelectFilter={(next) => store.setFilter(next)}
             onSelectFeed={(feedId) => store.selectNav({ kind: 'feed', feedId })}
             onSelectFolder={(folder) => store.selectNav({ kind: 'folder', folder })}
             onSelectTag={(tagId) => store.selectNav({ kind: 'tag', tagId })}
             onToggleFolder={store.toggleFolder}
-            onOpenSourcePack={store.openSourcePack}
           />
         )}
         <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
@@ -1182,6 +1180,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
             onBack={() => store.toggleFeeds()}
             exploreAvailable={exploreAvailable}
             onExplore={openExplore}
+            onOpenSourcePack={store.openSourcePack}
           />
         )}
 

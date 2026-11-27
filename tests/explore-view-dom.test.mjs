@@ -310,6 +310,23 @@ test('R8b 04 入口可见性：rsshubBase 已配置时设置页与订阅管理�
   }
 })
 
+test('R15 08 精选源入口在订阅管理页：按钮存在、点击切到 sourcePack 视图（不在左栏）', skip, async () => {
+  // 病象（2026-11-28 用户反馈）：精选源被做成了左栏一行，而同类面板「探索」的入口在订阅管理页
+  // 与设置页 —— 同一个东西两种入口，用户第一反应就是「这不该在订阅里吗」。
+  const h = await mount()
+  try {
+    await openFeeds(h)
+    const entry = h.$('[data-rss-source-pack-open]')
+    assert.ok(entry !== null, '订阅管理页必须有「精选源」入口（面板入口按所属面板走，与探索同族）')
+    assert.match(entry.textContent ?? '', /精选源/, '入口文案是验收项')
+    assert.equal(h.$('[data-rss-nav-row="view:sourcePack"]'), null, '左栏不许再有精选源那一行')
+    entry.click()
+    await h.waitFor(() => h.store.get().view === 'sourcePack', { label: '精选源上屏' })
+  } finally {
+    h.cleanup()
+  }
+})
+
 test('R8b 04 D11 入口隐藏：未配置 rsshubBase 时两处入口都不渲染', skip, async () => {
   const h = await mount({ rsshubBase: '' })
   try {
