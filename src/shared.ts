@@ -183,6 +183,20 @@ export interface DiscoveryResult {
   warnings: DiscoveryWarning[]
 }
 
+/**
+ * RSSHub 订阅来源（R15 02，spec §4.1.3）。
+ *
+ * `namespace` 是路径首段，`path` 是**拼好的具体路径**（不是路由模板），`instance` 是实际来源实例的源站。
+ *
+ * 这是 host 与 client 共用的 wire 形状：**裁决只在宿主一处**（有字段 / origin 命中池），
+ * 客户端只负责显示 —— 两边各拿池子重判一次，迟早会漂。
+ */
+export interface RsshubProvenance {
+  namespace: string
+  path: string
+  instance?: string
+}
+
 export interface FeedView {
   id: string
   title: string
@@ -195,6 +209,8 @@ export interface FeedView {
   lastFailure?: string
   /** 连续失败次数。undefined = **历史未知**（升级前的老记录），0 = 真实零连败，见 domain.ts 的三态注释 */
   failureCount?: number
+  /** RSSHub 来源（R15 02）；缺省 = 非 RSSHub 源，客户端不显示任何来源徽标 */
+  rsshub?: RsshubProvenance
 }
 
 /**

@@ -559,6 +559,14 @@ export function FeedsView({
                   <span style={{ display: 'block', fontSize: 11, opacity: 0.6, wordBreak: 'break-all' }}>
                     {feed.id}{feed.folder !== undefined ? ' · 文件夹：' + feed.folder : ' · 未分类'}
                   </span>
+                  {/* R15 02：来源由宿主裁决并下发（FeedView.rsshub），客户端**不拿实例池重判** ——
+                      两个裁决者迟早漂。非 RSSHub 源没有这个字段，这里什么都不渲染。 */}
+                  {feed.rsshub !== undefined && (
+                    <span data-rss-feed-rsshub={feed.id}
+                      style={{ display: 'block', fontSize: 11, opacity: 0.75, wordBreak: 'break-all' }}>
+                      {'RSSHub · ' + (feed.rsshub.instance ?? '实例未知')}
+                    </span>
+                  )}
                   {/* 健康信息（M4 02）：状态 / 连败次数 / 最近尝试 / 上次成功 / 最近错误。
                       连败次数缺失时写「次数未知」而不是 0 —— 老记录从来没记过计数（见 domain.ts 的三态）。 */}
                   <span data-rss-feed-health={feed.id} style={{ display: 'block', fontSize: 11, opacity: 0.75, wordBreak: 'break-all' }}>
