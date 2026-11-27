@@ -266,6 +266,28 @@ test('A4：非 RSSHub 源 + 已配置实例池 ⇒ 请求次数、超时与错�
   assert.equal(okStore.feed(feedUrl).rsshub, undefined, '非 RSSHub 源不许被标成 RSSHub')
 })
 
+test('池子为空：RSSHub 源按原地址单请求刷新（不切换、不改写来源里的历史实例）', async () => {
+  // 明确一条边界（不是漏测）：空池关闭的是 Radar / 探索 / 新订阅这些 RSSHub 能力，不替用户
+  // 静默停掉已经订好的源。没有候选实例时不切换，按订阅地址本身发一个请求（与加本票之前一致）。
+  const store = strictMemoryStore()
+  const feedUrl = 'https://hub-a.test/empty/baoyu'
+  await store.saveFeed(feedUrl, {
+    url: feedUrl,
+    title: '博客',
+    rsshub: { namespace: 'empty', path: '/empty/baoyu', instance: 'https://old.test' },
+  })
+  const { impl, calls } = fetchStub({ [feedUrl]: { kind: 'ok', body: rss('空池'), finalUrl: feedUrl } })
+
+  const outcomes = await refreshFeeds([feedUrl], store, { ...BASE_OPTIONS, instances: [], fetchFeedImpl: impl })
+
+  assert.equal(calls.length, 1, '空池没有候选可切：仍然只发一个请求')
+  assert.equal(calls[0].url, feedUrl)
+  assert.equal(outcomes[0].status, 'added')
+  assert.equal(outcomes[0].instancesAttempted, undefined, '没有发生切换 ⇒ 不出现尝试实例列表')
+  assert.equal(store.feed(feedUrl).rsshub.instance, 'https://old.test',
+    '没有实际切换到的实例可记：来源字段是历史事实，原样保留')
+})
+
 test('预算：单实例 12s；第一个用满 12s 后第二个只剩 8s（注入时钟，不真 sleep）', async () => {
   const store = strictMemoryStore()
   const feedUrl = 'https://hub-a.test/budget/baoyu'
