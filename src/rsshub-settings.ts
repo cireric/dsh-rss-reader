@@ -161,6 +161,13 @@ export function createRsshubSettings(deps: RsshubSettingsDeps): RsshubSettingsCo
         instances.push(parsed)
       }
       next.instances = instances
+    } else if (next.instances.length > RSSHUB_INSTANCE_MAX) {
+      // 只改筛选偏好时也可能撞上「手改文件留下的 6 条」：写盘前仍按 0–5 的契约再判一次。
+      return {
+        ok: false,
+        reason: 'invalid',
+        message: `最多 ${RSSHUB_INSTANCE_MAX} 个实例（当前 ${next.instances.length} 个），请先删减到上限以内`,
+      }
     }
 
     if (patch.hiddenNamespaces !== undefined) {
