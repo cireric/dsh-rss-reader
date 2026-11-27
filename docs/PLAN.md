@@ -148,11 +148,23 @@
 - **证据**：`npm test` **1197/1197**；`gate.sh` 四条全过；全量变异 **381/381 应用 · 0 幸存**（新增 2 条 + 重锚 2 条全部 caught）；真实库快照源页 `count=27 / nextCursor=null`、跨源页 300 + 续页、未知源 not-found。
 - **遗留**：无（GUI 点击已由用户走查，2026-11-27）。
 
+## 第四批（R15 已完成）
+
+### 第四批 1 — R15：RSSHub 质量与稳定性（v2）
+
+- **状态**：**已完成**（`.scratch/r15-rsshub-quality/issues/` 10/10 `resolved`；集成分支 `r15-rsshub-quality`，**未合入 main**）。spec 由 v1 改为 v2（2026-11-27 用户拍板）：退避整节与「验证 7 状态」删除，RSSHub 从「发现主入口」降级为「兜底补缺」。
+- **交付**：`src/rsshub-settings.ts`（实例池控制器）、`src/rsshub-source.ts`（来源唯一裁决）、`src/rsshub-failover.ts`（候选顺序 / 冷却 / 摘要）、`src/rsshub-prefs.ts`（hiddenNamespaces 归一化 + hideNsfw 默认 + 实例上限的单份判据）、`src/weekly-tests.ts`（官方周测 7 天缓存）、`src/source-pack.ts` + `src/curated-seed.ts`（79 条种子）、`src/probe.ts`（试读）、`src/feed/candidate-check.ts`（订阅校验与试读共用一份判定）；端点 37 → **42**（`rsshubSettings` / `saveRsshubSettings` / `sourcePack` / `saveSourcePack` / `probeFeeds`）；`config.json` 新增 `rsshub` 与 `curatedSources`（`version` 不变、SQLite schema 不动）。
+- **票据**：01 实例池 → 02 来源 → 03 切换（R15a，串行）｜04 投影 → 05 周测 → 06 过滤 → 07 隐藏（R15b）｜08 源包 → 09 导入｜10 试读（R15c）。并行 3–4 个 implementer，每票独立 worktree + 分支，完成即并回集成分支。
+- **证据**：`bash scripts/gate.sh` 四条全过（build 3s / build:client 0s / typecheck 2s / test **1513/1513** 11s）；全量变异 **422/422 应用 · 0 幸存**（新增 15 条 `rsshub-*` 全部 caught，其中 2 条在评审修复轮重锚）；真机三步（`dev_reload_package` 前后均 `[active]`、当天 `reader-2026-11-27.log` 无「装载失败」、`curl /rss-reader-api` → **401**）。
+- **评审**：Standards + Spec 两轴并行评审，修 8 项 —— CSS 花括号丢失（`.dsh-rss-explore-url` 吞掉精选源整段样式，真实 UI 破损）、§4.2.3「categories 行内显示」漏做、§4.3.1「改分类与备注」漏做、`hiddenNamespaces` 归一化三份收成一份、`hideNsfw` 默认值与实例上限各收成一处、端点计数注释 40 → 42、条件请求发错实例（记录实例已不在池中时仍带旧 ETag，304 会被当成成功）、`contentRevision` 判据算两遍。
+- **实测（本机一次性迁移，spec §4.1.6 授权）**：`~/.dsh/storages/rss-reader/config.json` 写入 `rsshub.instances = [hub.slarker.me, rsshub.rss.tips, rsshub.cups.moe, rsshub.rssforever.com]`（rssforever 退居第 4 位保留）；写前备份在 `/tmp/r15-config-backup-*.json`，写后用插件自己的 `readConfigFile` 复核 8 条订阅与字段形状。
+- **遗留**：①冷却表在进程内，重启清零（排序优化，不是事实）；②`instances: []` 时已有 RSSHub 订阅仍按原地址单请求刷新（不静默停掉用户订阅）—— spec §4.1.6 的「零请求」按「Radar / 探索 / 新订阅入口」解释，此边界有用例钉住；③周测不可用时「只看可跑」返回空列表（不把「未知」当「通过」）；④快速连点两个不同站点的「隐藏」后写覆盖前写（源码核对，未实测）；⑤GUI 观感未走查；⑥集成分支未合 main、未 tag、未 push。
+
 ## 后续方向（待拍板）
 
 | 项 | 状态 | 触发 / 说明 |
 |---|---|---|
-| RSSHub 订阅质量与稳定性（R15 v2） | 已拆票 / 待实施 | spec：`.scratch/r15-rsshub-quality/spec.md`；10 张票：`.scratch/r15-rsshub-quality/issues/`。R15a 实例池（01–03）→ R15b 质量闸门（04–07）→ R15c 源包 + 试读（08–10）。退避与 7 状态验证已删；内容边界只认 RSSHub 自报 `nsfw` + 用户隐藏。 |
+| — | — | 暂无待拍板项（R15 v2 已于 2026-11-28 完成，见上）。 |
 
 ## 暂缓 / 不做
 
