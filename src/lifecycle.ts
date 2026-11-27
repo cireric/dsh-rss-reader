@@ -47,6 +47,13 @@ export interface LifecycleDeps {
    * 「不传 summarize」是合法用法。措辞归宿主（人看的），但**必须给**。
    */
   readonly summarize: (outcomes: readonly FeedOutcome[]) => string
+  /**
+   * 当前生效的 RSSHub 实例池（R15 02，spec §4.1.3）：刷新成功时用它识别来源并补写字段。
+   *
+   * 必须是**闭包**而不是构造时快照：设置页保存池子后，下一轮刷新就要用新值。
+   * 缺省 = 空池（测试夹具与「未配置 RSSHub」同义：不识别任何源）。
+   */
+  readonly instances?: () => readonly string[]
 }
 
 export interface Lifecycle {
@@ -225,6 +232,8 @@ export function createLifecycle(deps: LifecycleDeps): Lifecycle {
         maxContentChars: config.maxContentChars,
         maxArticleCacheChars: config.maxArticleCacheChars,
         refreshConcurrency: config.refreshConcurrency,
+        // R15 02：每次刷新现读实例池（设置页保存后下一轮即生效）。
+        instances: deps.instances?.() ?? [],
       }, refreshSignal(options.signal))
       log(deps.summarize(outcomes))
     })()

@@ -5852,3 +5852,30 @@ test('R12 04 正文 header：有作者显示「源 · 作者 · 日期 · 约 N 
   assert.doesNotMatch(withoutHeader.textContent ?? '', /张三|未知作者|佚名|—/, '无作者时不许出现作者或占位文案')
   assertNoAuthorPlaceholderOrEmptySegment(withoutHeader)
 })
+
+
+/* ──────────────── R15 02：订阅行的 RSSHub 来源（真实 DOM） ──────────────── */
+/**
+ * 出处由宿主下发（FeedView.rsshub），客户端只显示 —— 这里钉的正是「非 RSSHub 源什么都不加」：
+ * 若客户端自己拿实例池重判，两份裁决迟早会漂，而那种漂移在 DOM 上表现为多一行或少一行。
+ */
+test('R15 02：RSSHub 源显示「RSSHub · 当前实例」；非 RSSHub 源不显示来源', skip, async () => {
+  const h = await mountReader({
+    items: [item({ id: 'a1', feedId: 'a' }), item({ id: 'b1', feedId: 'b' })],
+    feeds: [
+      { id: 'a', title: 'RSSHub 源', rsshub: { namespace: 'baoyu', path: '/baoyu/blog', instance: 'https://hub.test' } },
+      { id: 'b', title: '原生源' },
+    ],
+  })
+  await h.store.load('overview')
+  await h.settle()
+  h.press('f')
+  await h.settle()
+  const doc = h.win.document
+
+  const rowA = doc.querySelector('[data-rss-feed-rsshub="a"]')
+  assert.ok(rowA, 'RSSHub 源必须有一行来源标注')
+  assert.match(rowA.textContent, /RSSHub · https:\/\/hub\.test/, '显示来源类型与当前实例（宿主下发的值）')
+
+  assert.equal(doc.querySelector('[data-rss-feed-rsshub="b"]'), null, '非 RSSHub 源不许凭空多一行来源')
+})
