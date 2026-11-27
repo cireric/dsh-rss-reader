@@ -71,7 +71,7 @@
 - **状态**：已完成（8/8 `resolved`）。
 - **交付**：`article-pane.tsx` 的图片折叠 / 三态 / 灯箱、`preferences.ts` 的 `expandImages`、`keys.ts` 的 `i` 键、`referrerPolicy`。
 - **证据**：R6 票 01–08 的测试与变异（新增 15 条，全量复核 0 幸存）；`gate.sh` 全绿；真机三步。
-- **遗留**：真机三项未验——① 图片观感（640 限高）② 灯箱尺寸（长截图溢出）③ `Referer` 是否真的不发（需抓包 / 服务器日志）。另外 `CHANGELOG` / `feature-status` 尚未登记 R6（文档账目）。
+- **遗留**：真机三项未验——① 图片观感（640 限高）② 灯箱尺寸（长截图溢出）③ `Referer` 是否真的不发（需抓包 / 服务器日志）。`CHANGELOG` / `feature-status` 已于 2026-11-27 回填。
 
 ### R12 作者元数据与作者搜索
 
@@ -183,7 +183,7 @@
 ## 账目 / 已知不一致
 
 - **v0.2.0**：git tag `v0.2.0` 在 `516a79b`（2026-11-22），但 `package.json` 仍是 `0.1.0`，`CHANGELOG.md` 的 R1–R4 / R5 / R12 仍标「未发布」，`docs/feature-status.md` 仍写「版本 0.1.0…尚未发版」。代码状态不受影响，但发布账目要补，否则「v0.2.0 到底包含什么」不可追溯。
-- **R6 文档面**：`CHANGELOG.md` 没有 R6 小节，`docs/feature-status.md` 没有 R6 行（文档核对）；R6 的交付证据只在 `.scratch/r6-image-fold/` 与 git 历史里。R6 的 `spec.md` 头仍写 `ready-for-agent`，但 8 张票已全部 `resolved`——以票据为准，spec 头待回填。
+- **R6 文档面**：`CHANGELOG.md` / `docs/feature-status.md` 已补 R6；`spec.md` 头已回填 `resolved（8/8）`。
 - **R6 真机**：三项观感未验（图片 640 限高、灯箱长截图溢出、Referer 实发）；不要因为 tag 已打就写成「真机全验」。
 - **R9 / R14 账目**：R9（评审修复 `e317e73`）与 R14（`6153927`）已合入 **main `a59baf4`**，**未打 tag、未 push**；`CHANGELOG.md` 已补两节，`docs/feature-status.md` 已加两行。真机与真实站点证据在 `.scratch/r9-archive/issues/04-real-device.md` 与 `.scratch/r14-feed-scope/issues/01-feed-scope.md`。
 - **R11 版本账目**：R11 已合入 `main`（`68f0b12`），但 `package.json` 仍 `0.1.0`、未打 tag；`CHANGELOG.md` 的 R11 小节仍标「未发布」。功能状态见 `docs/feature-status.md` 的 R11 行（真机验收可用 + 三项细项未复核）。
