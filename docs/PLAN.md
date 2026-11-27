@@ -186,5 +186,5 @@
 - **R7 发布账目**：R7 已合入 main `784a2fc`（代码基线 `26ab6ad`）；`package.json` 已抬到 `0.3.0`，`CHANGELOG.md` 已建立 `0.3.0 — 2026-11-27` 小节；本地 tag `v0.3.0` 已创建，未 push。
 - **R6 文档面**：`CHANGELOG.md` / `docs/feature-status.md` 已补 R6；`spec.md` 头已回填 `resolved（8/8）`。
 - **R6 真机**：三项观感未验（图片 640 限高、灯箱长截图溢出、Referer 实发）；不要因为 tag 已打就写成「真机全验」。
-- **R9 / R14 账目**：R9（评审修复 `e317e73`）与 R14（`6153927`）已合入 **main `a59baf4`**，**未打 tag、未 push**；`CHANGELOG.md` 已补两节，`docs/feature-status.md` 已加两行。真机与真实站点证据在 `.scratch/r9-archive/issues/04-real-device.md` 与 `.scratch/r14-feed-scope/issues/01-feed-scope.md`。
+- **R9 / R14 账目**：R9（评审修复 `e317e73`）与 R14（`6153927`）已合入 **main `a59baf4`**，随 `0.3.0` tag 发布、未 push；`CHANGELOG.md` 已补两节，`docs/feature-status.md` 已加两行。真机与真实站点证据在 `.scratch/r9-archive/issues/04-real-device.md` 与 `.scratch/r14-feed-scope/issues/01-feed-scope.md`。
 - **R11 版本账目**：R11 已合入 `main`（`68f0b12`），随 `0.3.0` 一起发布；`CHANGELOG.md` 的 R11 小节已归入 0.3.0。功能状态见 `docs/feature-status.md` 的 R11 行（真机验收可用 + 三项细项未复核）。
