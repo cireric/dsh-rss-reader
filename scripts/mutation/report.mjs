@@ -53,8 +53,8 @@ export function collectResults(results) {
       survivors.push(r.id + '（崩了：' + (r.crash || '未知') + '）')
     } else if (r.status === 'worker_error') {
       applied += 1
-      console.log('  !  ' + r.id.padEnd(26) + ' 副本基线红（判定无效——先修副本忠实化，重跑门槛）')
-      survivors.push(r.id + '（副本基线红）')
+      console.log('  !  ' + r.id.padEnd(26) + ' ' + (r.crash || '副本基线红') + '（判定无效——先修副本忠实化，重跑门槛）')
+      survivors.push(r.id + '（' + (r.crash || '副本基线红') + '）')
     } else if (r.status === 'cached') {
       // 缓存命中：**独立计数**，既不进 applied，也不进 survivors ——
       // 它证明的是「这条以前被抓到过」，不是「本轮抓到了」。两者混在一起就是伪绿。

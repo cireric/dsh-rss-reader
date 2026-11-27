@@ -15,6 +15,9 @@ import { SUITE_CONCURRENCY, SUITE_HEAP_MB, SUITE_TIMEOUT_MS } from './host.mjs'
 // 为什么把测试名过滤放在这一层：runSuite 是 gate / fast / 基线三条路径共用的唯一执行点，
 // 过滤只有落在这里，才不会出现「gate 跑一套、fast 跑另一套」的双份语义。
 export function runSuite(root, spec) {
+  // baseline 可以传更宽的 timeout：worker 副本要同时跑完整的 1380 条测试，
+  // 若与其它 worker 的变异套件争 CPU，120s 可能偶发超时；超时会被误判成「副本基线红」。
+  const timeoutMs = typeof spec?.timeoutMs === 'number' ? spec.timeoutMs : SUITE_TIMEOUT_MS
   const files = spec?.files
   // 测试名过滤（P1）：judgeTests 是**子串**，node 的 --test-name-pattern 按正则吃，所以逐个转义。
   const patterns = (spec?.patterns ?? []).map((name) => String(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
@@ -29,7 +32,7 @@ export function runSuite(root, spec) {
   const inherited = (process.env.NODE_OPTIONS ?? '').replace(/--max-old-space-size=\d+/g, '').trim()
   const nodeOptions = (inherited + ' --max-old-space-size=' + SUITE_HEAP_MB).trim()
   try {
-    const out = execFileSync(process.execPath, argv, { cwd: root, encoding: "utf8", maxBuffer: 128 * 1024 * 1024, timeout: SUITE_TIMEOUT_MS, env: { ...process.env, NODE_OPTIONS: nodeOptions } })
+    const out = execFileSync(process.execPath, argv, { cwd: root, encoding: "utf8", maxBuffer: 128 * 1024 * 1024, timeout: timeoutMs, env: { ...process.env, NODE_OPTIONS: nodeOptions } })
     return { ok: true, out: out }
   } catch (error) {
     // 超时（SIGTERM 杀）也是「判定无效」：分类器见 timeout 标志记 crashed——红 ≠ 被抓住。
