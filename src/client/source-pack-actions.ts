@@ -11,8 +11,16 @@
  *  - 失败仍允许保存：原因写进 `note`（`未验证：…`），因为 wire 形状（spec §5.1）没有
  *    verified 字段，编一个不存在的字段会让下一次读盘把它丢掉。
  */
-import { isHttpUrl, type CuratedSourceEntry, type DiscoveryResult, type SourcePackSaveResult, type SourcePackSnapshot } from '../shared.js'
+import { isHttpUrl, type CuratedSourceEntry, type DiscoveryResult, type OpmlImportResult, type SourcePackSaveResult, type SourcePackSnapshot } from '../shared.js'
+import { buildSourcePackOpml } from './source-pack-opml.js'
 import type { ReaderState, ReaderStoreDeps } from './store.js'
+
+/**
+ * 一次导入的条数上限（spec §4.3.2）。宿主会对每条逐源抓取校验，30 条已经是「一次请求跑几十秒」
+ * 的量级；再大就不是提示分批而是让界面看起来卡死。这个数只在客户端拦（规范如此），
+ * 宿主 opmlImport 本身不设限 —— 手动粘贴的 OPML 仍然一次全导。
+ */
+export const SOURCE_PACK_IMPORT_LIMIT = 30
 
 /** 加源表单的草稿。`undefined` 的 sourcePack.formOpen = 表单没开。 */
 export interface SourcePackDraft {
@@ -44,6 +52,12 @@ export interface SourcePackState {
   warning: string | undefined
   notice: string | undefined
   saving: boolean
+  /** 勾选待导入的条目 URL。真源是清单本身，这里只存 URL（条目被删时随之清理）。 */
+  selected: string[]
+  /** 导入请求在飞（按钮禁用、勾选冻结）。 */
+  importing: boolean
+  /** 上一次导入的逐条结果，宿主回包原样保存（界面不二次加工）。 */
+  importReport: OpmlImportResult | undefined
   formOpen: boolean
   draft: SourcePackDraft
   probing: boolean
@@ -55,6 +69,8 @@ export interface SourcePackActionHost {
   set: (patch: Partial<ReaderState>) => void
   rpc: ReaderStoreDeps['rpc']
   now: ReaderStoreDeps['now']
+  /** 导入后重取当前列表（与 opml-actions.importOpml 同一条路径：宿主已写入订阅）。 */
+  reload: () => Promise<void>
 }
 
 /** 打开视图时的空状态：种子元信息先留空（宿主回包立刻填），清单在飞。 */
@@ -69,6 +85,9 @@ function emptySourcePack(): SourcePackState {
     warning: undefined,
     notice: undefined,
     saving: false,
+    selected: [],
+    importing: false,
+    importReport: undefined,
     formOpen: false,
     draft: { url: '', title: '', category: '', note: '' },
     probing: false,
@@ -78,17 +97,21 @@ function emptySourcePack(): SourcePackState {
 
 /** 把宿主快照并进现有状态：entries / seed / warning 是宿主的真相，其余是视图私有。 */
 function withSnapshot(state: SourcePackState, snapshot: SourcePackSnapshot): SourcePackState {
+  // 清单被整份替换后，勾选里指向已删条目的 URL 必须丢掉 —— 否则「导入所选（1/N）」会指向
+  // 一个不存在的条目，点下去只能得到一条空 OPML。
+  const present = new Set(snapshot.entries.map((entry) => entry.url))
   return {
     ...state,
     entries: snapshot.entries,
     seed: snapshot.seed,
     warning: snapshot.warning,
     loading: false,
+    selected: state.selected.filter((url) => present.has(url)),
   }
 }
 
 export function createSourcePackActions(host: SourcePackActionHost) {
-  const { get, set, rpc, now } = host
+  const { get, set, rpc, now, reload } = host
 
   const load = async (): Promise<void> => {
     const current = get().sourcePack
@@ -124,6 +147,8 @@ export function createSourcePackActions(host: SourcePackActionHost) {
         : {
             ...existing, loading: true, error: undefined, notice: undefined,
             formOpen: false, probe: undefined, probing: false, saving: false,
+            // 不清 importing：离开视图不会中止在飞请求，重开时必须如实显示「导入中…」。
+            importReport: undefined,
           },
     })
     void load()
@@ -244,6 +269,64 @@ export function createSourcePackActions(host: SourcePackActionHost) {
     await saveEntries([...state.entries, entry], { closeForm: true, notice: '已添加 ✓' })
   }
 
+  /** 勾选 / 取消勾选一条。删条目后由 withSnapshot 兜底清理（勾选只存 URL，不存副本）。 */
+  const toggleSourcePackSelection = (url: string): void => {
+    const state = get().sourcePack
+    // 导入在飞时冻结勾选：结果落地会清空勾选，期间的改动注定丢掉（30 条可能要跑几十秒）。
+    if (state === undefined || state.importing) return
+    const selected = state.selected.includes(url)
+      ? state.selected.filter((item) => item !== url)
+      : [...state.selected, url]
+    set({ sourcePack: { ...state, selected } })
+  }
+
+  /**
+   * 导入当前勾选（spec §4.3.2 / A14）。
+   *
+   * 一次最多 30 条：超限**只提示、不发请求**（这是本票的硬边界，测试钉「31 条时 opmlImport 零调用」）。
+   * 客户端只负责拼 OPML，逐源抓取校验 / 去重 / 落库仍全部由宿主 opmlImport 做 —— 不新增端点、
+   * 不跳过校验。失败条目由宿主挡在库外，客户端只把失败原因如实摆出来。
+   *
+   * 导入**不动**源包清单：它是清单不是订阅（08 的核心不变量），这里一次 saveSourcePack 都不发。
+   */
+  const importSelectedSourcePack = async (): Promise<void> => {
+    const state = get().sourcePack
+    if (state === undefined || state.importing) return
+    // 以清单顺序为准（勾选只存 URL，不保证顺序；清单里已删的 URL 由 withSnapshot 清掉）。
+    const chosen = state.entries.filter((entry) => state.selected.includes(entry.url))
+    if (chosen.length === 0) return
+    if (chosen.length > SOURCE_PACK_IMPORT_LIMIT) {
+      set({
+        sourcePack: {
+          ...state,
+          error: '一次最多导入 ' + SOURCE_PACK_IMPORT_LIMIT + ' 条（当前勾选 ' + chosen.length + ' 条），请分批导入',
+        },
+      })
+      return
+    }
+
+    set({ sourcePack: { ...state, importing: true, error: undefined, importReport: undefined } })
+    try {
+      const report = await rpc<OpmlImportResult>('opmlImport', { opml: buildSourcePackOpml(chosen) })
+      const current = get().sourcePack
+      if (current === undefined) return
+      // 结果原样留在视图里；勾选清空，避免用户以为「还没导」再点一次。
+      set({ sourcePack: { ...current, importing: false, importReport: report, selected: [] } })
+      // 与 opml-actions.importOpml 同一条路径：宿主写完订阅后本地必须重取，否则左栏看不到新源。
+      await reload()
+    } catch (failure) {
+      const current = get().sourcePack
+      if (current === undefined) return
+      // 失败保留勾选：用户可以直接重试，不用重新一条条点。
+      set({
+        sourcePack: {
+          ...current, importing: false,
+          error: failure instanceof Error ? failure.message : String(failure),
+        },
+      })
+    }
+  }
+
   const removeSourcePackEntry = async (url: string): Promise<void> => {
     const state = get().sourcePack
     if (state === undefined || state.saving) return
@@ -267,7 +350,8 @@ export function createSourcePackActions(host: SourcePackActionHost) {
   ): Promise<void> => {
     const state = get().sourcePack
     if (state === undefined || state.saving) return
-    set({ sourcePack: { ...state, saving: true, error: undefined, notice: undefined } })
+    // 清单要变了：上一份导入结果属于旧清单，继续挂着只会让人以为它还是这次操作的结论。
+    set({ sourcePack: { ...state, saving: true, error: undefined, notice: undefined, importReport: undefined } })
     try {
       const result = await rpc<SourcePackSaveResult>(
         'saveSourcePack',
@@ -303,7 +387,8 @@ export function createSourcePackActions(host: SourcePackActionHost) {
 
   return {
     openSourcePack, closeSourcePack, loadSourcePack: load,
-    setSourcePackQuery, setSourcePackCategory,
+    setSourcePackQuery, setSourcePackCategory, toggleSourcePackSelection,
+    importSelectedSourcePack,
     openSourcePackForm, closeSourcePackForm, setSourcePackDraft,
     probeSourcePackUrl, saveSourcePackDraft, removeSourcePackEntry, restoreSourcePackSeed,
   }

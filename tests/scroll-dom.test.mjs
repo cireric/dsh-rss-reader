@@ -6025,3 +6025,30 @@ test('R15 07：候选行「隐藏此站点」只对 RSSHub 候选出现；页面
     '隐藏后该站点的 RSSHub 候选从当前清单里消失')
   assert.notEqual(doc.querySelector('[data-rss-candidate="' + pageUrl + '"]'), null, '页面候选照留')
 })
+
+/* ──────────────── R15 03：RSSHub 订阅行的切换状态 ──────────────── */
+/**
+ * 「当前实例 · 上次成功 · 连续失败 N 次」是宿主下发的三个字段的纯展示。
+ * 特别钉住「不许出现预计下次重试」：退避机制已经删了，界面上编一个时间就是撒谎（spec §4.1.5）。
+ */
+test('R15 03：RSSHub 订阅行显示「当前实例 · 上次成功 · 连续失败 N 次」，没有「预计下次重试」', skip, async () => {
+  const hourAgo = new Date(Date.now() - 3600 * 1000).toISOString()
+  const h = await mountReader({
+    items: [item({ id: 'a1', feedId: 'a' })],
+    feeds: [{
+      id: 'a', title: 'RSSHub 源',
+      lastFetchedAt: hourAgo, lastAttemptedAt: hourAgo, lastFailure: 'HTTP 503', failureCount: 2,
+      rsshub: { namespace: 'baoyu', path: '/baoyu/blog', instance: 'https://hub.test' },
+    }],
+  })
+  await h.store.load('overview')
+  await h.settle()
+  h.press('f')
+  await h.settle()
+  const line = h.win.document.querySelector('[data-rss-feed-rsshub="a"]')
+  assert.ok(line, 'RSSHub 源必须有状态行')
+  assert.match(line.textContent, /RSSHub · https:\/\/hub\.test/, '当前实例用宿主下发的值')
+  assert.match(line.textContent, /上次成功：1 小时前/, '上次成功来自 lastFetchedAt')
+  assert.match(line.textContent, /连续失败：2 次/, '连败次数来自 failureCount')
+  assert.doesNotMatch(line.textContent, /预计下次重试|下次重试/, '退避已删：不许编造重试时间')
+})

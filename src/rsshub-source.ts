@@ -53,6 +53,17 @@ export function rsshubNamespaceOf(url: string): string | undefined {
 }
 
 /**
+ * 把一个实例地址归一成 `URL.origin`；非法 / 非 http(s) 返回 undefined。
+ *
+ * 实例池在写盘时已归一，但 `config.json` 允许手改（末尾斜杠、大写主机、默认端口都可能留下）。
+ * 「比较两个实例是不是同一台」的判据只有这一份：来源识别（本模块）与刷新切换（rsshub-failover.ts）
+ * 都调它，不各自写一遍 URL 解析。
+ */
+export function rsshubOriginOf(raw: string): string | undefined {
+  return parseHttpUrl(raw)?.origin
+}
+
+/**
  * 按 origin 识别一个 URL 是不是 RSSHub 源。
  *
  * @returns `{ namespace, path, instance }`；认不出（非法 URL / 不在池里 / 源站根路径）返回 undefined。
@@ -61,7 +72,7 @@ export function rsshubProvenanceOf(url: string, instances: readonly string[]): R
   const parsed = parseHttpUrl(url)
   if (parsed === undefined) return undefined
   const origin = parsed.origin
-  const matched = instances.some((instance) => parseHttpUrl(instance)?.origin === origin)
+  const matched = instances.some((instance) => rsshubOriginOf(instance) === origin)
   if (!matched) return undefined
 
   // pathname 至少要有一个非空段才算一条 RSSHub 路由。`/` 是实例源站本身：
