@@ -114,8 +114,9 @@ export interface RsshubCooldown {
  * 造一份冷却表。键是 `feedId|instance`：同一个实例在不同源上的健康度互不相干 ——
  * 实例对源 A 的某条路由持续 503，不代表它对源 B 也坏（RSSHub 是路由级故障）。
  *
- * 条目只在失败时新增、成功时删除；实例池调整后遗留的旧条目会自然过期（最多 10 分钟不再参与排序），
- * 不会无限增长成一份需要清理的缓存。
+ * 条目只在失败时新增、成功时删除；冷却到期**只影响排序**（`isCooling` 恒为 false），条目本身不删 ——
+ * 它还要留着连败次数，否则「连续失败」会在冷却到期后从 1 重新数。条目量级是「源数 × 用过的实例数」，
+ * 每条只有两个数字，不值得为它加一套需要定期跑的清理逻辑。
  */
 export function createRsshubCooldown(): RsshubCooldown {
   const entries = new Map<string, CooldownEntry>()
