@@ -84,6 +84,8 @@ export interface SettingsViewProps {
   onTestRsshub: (base: string) => Promise<RsshubTestResult>
   /** 保存整份 RSSHub 实例池（R15 01）：增 / 删 / 排序都提交新数组。 */
   onSaveRsshub: (instances: string[]) => Promise<SaveRsshubSettingsResult>
+  /** 全部恢复被隐藏的站点（R15 07）。 */
+  onRestoreHiddenNamespaces: () => Promise<SaveRsshubSettingsResult>
   /** 「去订阅管理页」：走既有 toggleFeeds，设置页不复制排序控件（D15）。 */
   onManageFeeds: () => void
   /**
@@ -502,7 +504,7 @@ export function SettingsView(props: SettingsViewProps): ReactNode {
     rsshub, rsshubError,
     reading, onReading, showUnread, onShowUnread,
     translationInfo, onSaveTranslateRoute,
-    onSave, onReset, onTestRsshub, onSaveRsshub, onCleanupPreview, onCleanup, onManageFeeds,
+    onSave, onReset, onTestRsshub, onSaveRsshub, onRestoreHiddenNamespaces, onCleanupPreview, onCleanup, onManageFeeds,
     exploreAvailable, onExplore,
   } = props
   const box = useRef<HTMLDivElement | null>(null)
@@ -698,6 +700,7 @@ export function SettingsView(props: SettingsViewProps): ReactNode {
                 error={rsshubError}
                 onSave={onSaveRsshub}
                 onTest={onTestRsshub}
+                onRestoreHiddenNamespaces={onRestoreHiddenNamespaces}
               />
               {/* R8b 04 / D11：未配置实例时入口整个不渲染（同一个判据也管订阅管理页那一处）。 */}
               {exploreAvailable && (

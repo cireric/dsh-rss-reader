@@ -25,6 +25,8 @@ export interface ExploreActionHost {
   persistView: () => void
   /** 保存「显示 NSFW」开关（config.rsshub.hideNsfw）；写盘成功后才允许重取。 */
   saveRsshubHideNsfw: (hideNsfw: boolean) => Promise<{ ok: true } | { ok: false; message: string }>
+  /** 隐藏一个站点（config.rsshub.hiddenNamespaces，R15 07）；写盘成功后才允许重取。 */
+  hideNamespace: (namespace: string) => Promise<{ ok: true } | { ok: false; message: string }>
 }
 
 /** 一次打开探索时的空状态：q / category / namespace 与表单都从零开始（D14，不持久化）。 */
@@ -81,7 +83,7 @@ function catalogPayloadOf(
 }
 
 export function createExploreActions(host: ExploreActionHost) {
-  const { get, set, rpc, addFeed, persistView, saveRsshubHideNsfw } = host
+  const { get, set, rpc, addFeed, persistView, saveRsshubHideNsfw, hideNamespace } = host
 
   /**
    * 第一页请求的代数。换筛选会立刻发起新请求，旧请求可能更晚回来 —— 不判代数就会把
@@ -197,6 +199,19 @@ export function createExploreActions(host: ExploreActionHost) {
       set({ error: '保存 NSFW 偏好失败：' + result.message })
       return
     }
+    await fetchFirstPage()
+  }
+
+  /**
+   * 隐藏整个站点（R15 07）：先写 config.rsshub.hiddenNamespaces，成功后才用新筛选重取第一页。
+   *
+   * 与 NSFW 开关同一条纪律：隐藏是筛选条件的一部分（还会进游标栅栏），所以列表与游标必须
+   * 整份作废重来 —— 失败时不重取，界面保持原样并给出可读原因。
+   */
+  const hideExploreNamespace = async (namespace: string): Promise<void> => {
+    if (get().explore === undefined) return
+    // 失败时宿主动作已写进全局 error（两个入口共用一条通道），这里不重取、不改列表。
+    if (!(await hideNamespace(namespace)).ok) return
     await fetchFirstPage()
   }
 
@@ -362,7 +377,7 @@ export function createExploreActions(host: ExploreActionHost) {
   }
 
   return {
-    openExplore, closeExplore, setExploreQuery, setExploreHideNsfw, loadMoreExplore,
+    openExplore, closeExplore, setExploreQuery, setExploreHideNsfw, hideExploreNamespace, loadMoreExplore,
     selectExploreRoute, setExploreDraftValue, buildExploreAddress, addExploreSubscription,
   }
 }

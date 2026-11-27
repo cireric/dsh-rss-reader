@@ -5,6 +5,7 @@
  */
 import { useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { BACKFILL_LIMIT, feedHealthOf, isHttpUrl, type BackfillReport, type DiscoveryResult, type FeedView, type FolderView, type OpmlExportResult, type OpmlImportResult, type ProbeResult, type TagView } from '../shared.js'
+import { rsshubNamespaceOf } from '../rsshub-source.js'
 import type { BackfillActionResult } from './feed-actions.js'
 import { relativeTime } from './store.js'
 
@@ -81,7 +82,7 @@ function probeResultLabel(result: ProbeResult): string {
  */
 export function FeedsView({
   feeds, folders, busy, report, notice, discovery,
-  onImport, onExport, onAdd, onRemove, onDiscover, onClearDiscovery, onProbe,
+  onImport, onExport, onAdd, onRemove, onDiscover, onClearDiscovery, onProbe, onHideNamespace,
   onCreateFolder, onRenameFolder, onDeleteFolder, onMoveFeed, onMoveOrder,
   onBackfill,
   tags, onCreateTag, onRenameTag, onDeleteTag, onBack,
@@ -102,6 +103,11 @@ export function FeedsView({
   /** 试读（R15 10）：只读探测，返回逐条结果；不写库、不改订阅。 */
   onProbe: (urls: string[]) => Promise<ProbeResult[]>
   onClearDiscovery: () => void
+  /**
+   * 隐藏整个 RSSHub 站点（R15 07）：只对 `source === 'rsshub'` 的候选给入口，
+   * namespace 取候选 URL 的 pathname 首段。
+   */
+  onHideNamespace: (namespace: string) => void
   onRemove: (url: string) => void
   onCreateFolder: (name: string) => void
   onRenameFolder: (from: string, to: string) => void
@@ -381,6 +387,9 @@ export function FeedsView({
             // 才换成「可用 N 条 · 耗时」或失败原因。页面候选保留原有的「地址 · 格式 · N 条」，
             // 试读结果另起一行。真正的校验仍在「添加」时由 addFeed 做。
             const isRadar = candidate.source === 'rsshub'
+            // 只有 RSSHub 候选才有「站点」可隐藏：namespace 是 pathname 首段。页面候选的路径
+            // 首段只是站点自己的目录（/github/feed.xml），按它隐藏会误杀普通订阅。
+            const candidateNamespace = isRadar ? rsshubNamespaceOf(candidate.url) : undefined
             const probe = candidateProbes[candidate.url]
             const probing = probingCandidates.has(candidate.url)
             return (
@@ -424,6 +433,11 @@ export function FeedsView({
                 <button type="button" className="dsh-rss-btn" data-rss-candidate-probe={candidate.url}
                   disabled={busy || probing}
                   onClick={() => { void probeCandidate(candidate.url) }}>{probing ? '试读中…' : '试读'}</button>
+                {candidateNamespace !== undefined && (
+                  <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" data-rss-candidate-hide={candidate.url}
+                    title={'不再显示「' + (candidate.siteName ?? candidateNamespace) + '」的候选；已订阅的源与条目不受影响'}
+                    disabled={busy} onClick={() => { onHideNamespace(candidateNamespace) }}>隐藏此站点</button>
+                )}
                 <button type="button" className="dsh-rss-btn" data-rss-candidate-add={candidate.url}
                   disabled={busy} onClick={() => { onAdd(candidate.url) }}>添加</button>
               </div>

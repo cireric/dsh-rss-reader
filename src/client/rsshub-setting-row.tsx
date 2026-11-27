@@ -35,13 +35,15 @@ export interface RsshubSettingRowProps {
   readonly onSave: (instances: string[]) => Promise<SaveRsshubSettingsResult>
   /** 探活一个实例地址（复用既有 testRsshub 端点；浏览器不直连实例）。 */
   readonly onTest: (base: string) => Promise<RsshubTestResult>
+  /** 全部恢复被隐藏的站点（R15 07）：写回空列表，实例池原样带上。 */
+  readonly onRestoreHiddenNamespaces: () => Promise<SaveRsshubSettingsResult>
 }
 
 /** 测试结果的落点：第几行的结果，避免多行结果互相覆盖成一句无法定位的话。 */
 type TestResultAt = { readonly index: number; readonly result: RsshubTestResult }
 
 export function RsshubSettingRow(props: RsshubSettingRowProps): ReactNode {
-  const { snapshot, error, onSave, onTest } = props
+  const { snapshot, error, onSave, onTest, onRestoreHiddenNamespaces } = props
   const inputId = useId()
   const helpId = useId()
   const [draft, setDraft] = useState('')
@@ -51,6 +53,9 @@ export function RsshubSettingRow(props: RsshubSettingRowProps): ReactNode {
   const [saved, setSaved] = useState(false)
   const [testingIndex, setTestingIndex] = useState<number | undefined>(undefined)
   const [testResult, setTestResult] = useState<TestResultAt | undefined>(undefined)
+  /** 「全部恢复」的在途 / 失败状态：与实例池保存分开，避免一次恢复失败被当成池子写不进去。 */
+  const [restoring, setRestoring] = useState(false)
+  const [restoreError, setRestoreError] = useState<string | undefined>(undefined)
 
   const instances = snapshot?.instances ?? []
   const unavailable = snapshot === undefined
@@ -112,6 +117,17 @@ export function RsshubSettingRow(props: RsshubSettingRowProps): ReactNode {
     const next = [...instances]
     ;[next[index], next[target]] = [next[target], next[index]]
     await apply(next)
+  }
+
+  const restoreHidden = async (): Promise<void> => {
+    setRestoring(true)
+    setRestoreError(undefined)
+    try {
+      const result = await onRestoreHiddenNamespaces()
+      if (!result.ok) setRestoreError('恢复失败：' + result.message)
+    } finally {
+      setRestoring(false)
+    }
   }
 
   const runTest = async (index: number): Promise<void> => {
@@ -246,6 +262,32 @@ export function RsshubSettingRow(props: RsshubSettingRowProps): ReactNode {
             <a href="https://docs.rsshub.app/guide/instances" target="_blank" rel="noopener noreferrer">官方实例列表</a>
             {' '}挑一个。
           </p>
+
+          {/* R15 07：隐藏的是标签级（namespace）的整个站点，N=0 不占版面 —— 没人需要看一个空列表。
+              文案必须说清「不取消订阅、不删除条目」，否则用户会以为隐藏等于清理。 */}
+          {snapshot.hiddenNamespaces.length > 0 && (
+            <div className="dsh-rss-settings-row" data-rss-rsshub-hidden="">
+              <span className="dsh-rss-settings-label">已隐藏（{snapshot.hiddenNamespaces.length}）</span>
+              <ul className="dsh-rss-rsshub-hidden-list">
+                {snapshot.hiddenNamespaces.map((namespace) => (
+                  <li key={namespace} data-rss-rsshub-hidden-item={namespace}>
+                    <code>{namespace}</code>
+                  </li>
+                ))}
+              </ul>
+              <button type="button" className="dsh-rss-btn" data-rss-rsshub-unhide-all=""
+                disabled={disabled || restoring}
+                onClick={() => { void restoreHidden() }}>
+                {restoring ? '恢复中…' : '全部恢复'}
+              </button>
+              <p className="dsh-rss-settings-help">
+                被隐藏的站点不出现在探索与候选列表里；已订阅的源与条目不受影响。
+              </p>
+              {restoreError !== undefined && (
+                <p className="dsh-rss-settings-error" data-rss-rsshub-unhide-error="" role="alert">{restoreError}</p>
+              )}
+            </div>
+          )}
         </>
       )}
     </div>

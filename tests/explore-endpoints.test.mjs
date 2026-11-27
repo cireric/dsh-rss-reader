@@ -12,13 +12,16 @@
  */
 import { test, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Config } from '../lib/config.js'
 import { createDispatch } from '../lib/endpoints.js'
 import { fetchFeed } from '../lib/feed/fetch.js'
 import { createMemoryStore } from '../lib/memory-store.js'
+import { createRsshubSettings } from '../lib/rsshub-settings.js'
+import { readConfigFile, writeConfigFile } from '../lib/storage/config-file.js'
 import { clearCatalogCache } from '../lib/explore-catalog-fetch.js'
 import { encodeCatalogCursor, parsePathTemplate, prefillValues, projectCatalog } from '../lib/explore-catalog.js'
 import { clearWeeklyTestsCache } from '../lib/weekly-tests.js'
@@ -187,7 +190,7 @@ function weeklyCalls(stub) {
 }
 
 /** 一份与生产同形的 dispatch：store 与 fetchImpl 是仅有的替换点。 */
-function harness({ fetchImpl, config = {}, store } = {}) {
+function harness({ fetchImpl, config = {}, store, rsshubSettings } = {}) {
   const target = store ?? createMemoryStore()
   return createDispatch({
     config: Config(config),
@@ -197,6 +200,7 @@ function harness({ fetchImpl, config = {}, store } = {}) {
     lastRefreshCompletedAt: () => undefined,
     articleAttempts: new Map(),
     ...(fetchImpl === undefined ? {} : { fetchImpl }),
+    ...(rsshubSettings === undefined ? {} : { rsshubSettings }),
   })
 }
 
@@ -871,4 +875,150 @@ test('栅栏：hideNsfw / onlyRunnable 变化、周测换代都回 bad-request�
   assert.equal(afterRefresh.ok, false, '周测代次变化后旧游标必须失败')
   assert.equal(afterRefresh.error.code, 'bad-request')
   assert.match(afterRefresh.error.message, /游标/)
+})
+
+// ── R15 07：namespace 隐藏（A11）────────────────────────────────────────────
+
+/**
+ * 一份真实 `config.json` + 实例池控制器。重启就是「用同一路径再建一个控制器」——
+ * 它只读文件，不共享内存态，能区分「落盘了」与「只在当前进程里记得」。
+ */
+function hiddenHarness({ hiddenNamespaces = [], feeds = {}, store } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'rss-explore-hidden-'))
+  const configPath = join(dir, 'config.json')
+  writeConfigFile(configPath, {
+    version: 1,
+    feeds,
+    rsshub: { instances: [HUB], hiddenNamespaces, hideNsfw: true },
+  })
+  const make = () => {
+    const logs = []
+    const control = createRsshubSettings({ config: Config({}), configPath, log: (line) => logs.push(line) })
+    return { control, logs }
+  }
+  return { dir, configPath, make, store, dispose: () => rmSync(dir, { recursive: true, force: true }) }
+}
+
+test('R15 07 A11：隐藏一个 namespace 后列表 / matched / 分页游标三者一致（宿主侧过滤）', async () => {
+  const stub = stubFetch({ [HUB_CATALOG]: catalogOf() })
+  const env = hiddenHarness({ hiddenNamespaces: ['bilibili'] })
+  try {
+    const dispatch = harness({ fetchImpl: stub.impl, rsshubSettings: env.make().control })
+    const seen = []
+    const pages = []
+    let matched
+    let cursor
+    for (;;) {
+      const result = await dispatch('exploreCatalog', cursor === undefined ? { limit: 2 } : { limit: 2, cursor })
+      assert.equal(result.ok, true, '隐藏是筛选，不是错误')
+      matched = result.value.matched
+      pages.push(result.value.items.length)
+      seen.push(...result.value.items)
+      cursor = result.value.nextCursor
+      if (cursor === undefined) break
+    }
+    assert.equal(matched, 5, '110 条里 bilibili 的 105 条不计入 matched')
+    assert.deepEqual(pages, [2, 2, 1], '页大小按过滤后的行算（不是先切一页再在客户端删）')
+    assert.equal(seen.length, 5, '累计行数 = matched')
+    assert.equal(seen.some((row) => row.namespace === 'bilibili'), false, '被隐藏的站点一行都不出现')
+    assert.equal(new Set(seen.map((row) => row.namespace + '|' + row.path)).size, 5, '翻页无重复')
+  } finally {
+    env.dispose()
+  }
+})
+
+test('R15 07：隐藏列表只有一个落点 —— 请求体带 hiddenNamespaces 也不许覆盖 config', async () => {
+  const stub = stubFetch({ [HUB_CATALOG]: catalogOf() })
+  const env = hiddenHarness({ hiddenNamespaces: ['bilibili'] })
+  try {
+    const dispatch = harness({ fetchImpl: stub.impl, rsshubSettings: env.make().control })
+    const overridden = await dispatch('exploreCatalog', { limit: 100, hiddenNamespaces: ['github'] })
+    assert.equal(overridden.ok, true)
+    assert.equal(overridden.value.matched, 5, '仍然是 bilibili 被隐藏后的 5 条')
+    assert.equal(overridden.value.items.some((row) => row.namespace === 'bilibili'), false,
+      '客户端传的隐藏列表不是有效入参：config.rsshub.hiddenNamespaces 是唯一真相')
+    assert.equal(overridden.value.items.filter((row) => row.namespace === 'github').length, 3,
+      'config 没隐藏 github，它就必须在')
+  } finally {
+    env.dispose()
+  }
+})
+
+test('R15 07 A11：重启后仍隐藏、全部恢复后回来；隐藏不取消订阅、不删除条目', async () => {
+  const feedUrl = HUB + '/bilibili/video/r000/x'
+  const feedRecord = { url: feedUrl, title: 'B 站视频' }
+  const store = createMemoryStore()
+  await store.saveFeed(feedUrl, feedRecord)
+  await store.saveItem('item-1', {
+    feedId: feedUrl, title: '一条', link: 'https://bilibili.test/1',
+    fetchedAt: '2026-11-01T00:00:00.000Z', starred: false,
+  })
+  const stub = stubFetch({ [HUB_CATALOG]: catalogOf() })
+  const env = hiddenHarness({ hiddenNamespaces: [], feeds: { [feedUrl]: feedRecord }, store })
+  try {
+    const first = env.make()
+    const dispatchA = harness({ fetchImpl: stub.impl, rsshubSettings: first.control, store })
+    assert.equal(first.control.save({ hiddenNamespaces: ['bilibili'] }).ok, true)
+
+    const pageA = await dispatchA('exploreCatalog', { limit: 100 })
+    assert.equal(pageA.ok, true)
+    assert.equal(pageA.value.matched, 5, '隐藏后命中 5 条')
+
+    const file = readConfigFile(env.configPath)
+    assert.deepEqual(file.rsshub?.hiddenNamespaces, ['bilibili'], '隐藏列表写进 config.json（不是只改内存）')
+    assert.deepEqual(Object.keys(file.feeds), [feedUrl], '隐藏不是退订：config.feeds 原样还在')
+    assert.notEqual(store.feed(feedUrl), undefined, '源记录仍然在 store 里')
+    assert.equal(store.listItems(feedUrl).length, 1, '隐藏不是删条目：该源的条目还在')
+
+    // 重启：新控制器只读同一份 config.json，没有任何内存态可继承。
+    const second = env.make()
+    const dispatchB = harness({ fetchImpl: stub.impl, rsshubSettings: second.control, store })
+    assert.deepEqual(second.control.snapshot().hiddenNamespaces, ['bilibili'], '重启后读回同一份隐藏列表')
+    const pageB = await dispatchB('exploreCatalog', { limit: 100 })
+    assert.equal(pageB.ok, true)
+    assert.equal(pageB.value.matched, 5, '重启后仍隐藏')
+
+    // 「全部恢复」= 写回空列表；列表与 matched 一起回来。
+    assert.equal(second.control.save({ hiddenNamespaces: [] }).ok, true)
+    const pageC = await dispatchB('exploreCatalog', { limit: 100 })
+    assert.equal(pageC.ok, true)
+    assert.equal(pageC.value.matched, 110, '全部恢复后命中回到 110')
+    assert.equal(pageC.value.items.some((row) => row.namespace === 'bilibili'), true)
+    assert.deepEqual(Object.keys(readConfigFile(env.configPath).feeds), [feedUrl], '恢复也不动订阅')
+  } finally {
+    env.dispose()
+  }
+})
+
+test('R15 07 A11：翻页中途隐藏 ⇒ 旧游标必须失效（隐藏列表进栅栏），新条件自己翻页正常', async () => {
+  const stub = stubFetch({ [HUB_CATALOG]: catalogOf() })
+  const env = hiddenHarness({ hiddenNamespaces: [] })
+  try {
+    const settings = env.make()
+    const dispatch = harness({ fetchImpl: stub.impl, rsshubSettings: settings.control })
+    const first = await dispatch('exploreCatalog', { limit: 30 })
+    assert.equal(first.ok, true)
+    assert.equal(first.value.matched, 110)
+    const cursor = first.value.nextCursor
+    assert.equal(typeof cursor, 'string')
+
+    // 用户在翻第二页之前隐藏了 bilibili（入口可能在设置页 / 另一个视图）：旧游标属于旧条件。
+    assert.equal(settings.control.save({ hiddenNamespaces: ['bilibili'] }).ok, true)
+    const stale = await dispatch('exploreCatalog', { limit: 30, cursor })
+    assert.equal(stale.ok, false, '隐藏列表变了，旧游标不能再被当成同一次查询')
+    assert.equal(stale.error.code, 'bad-request')
+    assert.match(stale.error.message, /游标/)
+
+    // 新条件自己翻页正常：游标不是「永远失效」，只对旧条件失效。
+    const fresh = await dispatch('exploreCatalog', { limit: 2 })
+    assert.equal(fresh.ok, true)
+    assert.equal(fresh.value.matched, 5)
+    const freshCursor = fresh.value.nextCursor
+    assert.equal(typeof freshCursor, 'string')
+    const second = await dispatch('exploreCatalog', { limit: 2, cursor: freshCursor })
+    assert.equal(second.ok, true)
+    assert.equal(second.value.items.length, 2)
+  } finally {
+    env.dispose()
+  }
 })

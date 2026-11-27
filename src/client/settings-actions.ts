@@ -27,9 +27,10 @@ export type SaveRsshubSettingsResult =
   | { readonly ok: true; readonly rsshub: RsshubSettingsSnapshot }
   | { readonly ok: false; readonly message: string }
 
-/** 宿主 saveRsshubSettings 的 wire 形状：instances 必填，其余筛选偏好可选（R15 06）。 */
+/** 宿主 saveRsshubSettings 的 wire 形状：instances 必填，其余筛选偏好可选（R15 06 / 07）。 */
 interface RsshubSettingsWirePatch {
   instances: string[]
+  hiddenNamespaces?: string[]
   hideNsfw?: boolean
 }
 
@@ -202,6 +203,35 @@ export function createSettingsActions(host: SettingsActionHost) {
     return runRsshubSave({ instances: [...instances], hideNsfw })
   }
 
+  /**
+   * 保存隐藏列表（R15 07）：与 NSFW 开关共用同一条串行链和同一条约束 —— 必须带上当前实例池。
+   *
+   * `saveRsshubSettings` 是整份 `rsshub` 快照语义：只发 hiddenNamespaces 会因缺 instances 被判
+   * 坏入参；发空 instances 则会把用户配好的池子静默清空（功能关闭）。快照未到手时明确失败。
+   */
+  const saveRsshubHiddenNamespaces = (hiddenNamespaces: readonly string[]): Promise<SaveRsshubSettingsResult> => {
+    const snapshot = get().rsshubSettings
+    if (snapshot === undefined) {
+      return Promise.resolve({ ok: false, message: '实例池快照尚未加载，无法保存隐藏列表' })
+    }
+    return runRsshubSave({ instances: [...snapshot.instances], hiddenNamespaces: [...hiddenNamespaces] })
+  }
+
+  /** 隐藏一个站点（R15 07）：已隐藏时不重复追加（写盘侧也去重，这里少发一次无意义的写）。 */
+  const hideRsshubNamespace = (namespace: string): Promise<SaveRsshubSettingsResult> => {
+    const snapshot = get().rsshubSettings
+    if (snapshot === undefined) {
+      return Promise.resolve({ ok: false, message: '实例池快照尚未加载，无法隐藏站点' })
+    }
+    const next = snapshot.hiddenNamespaces.includes(namespace)
+      ? [...snapshot.hiddenNamespaces]
+      : [...snapshot.hiddenNamespaces, namespace]
+    return saveRsshubHiddenNamespaces(next)
+  }
+
+  /** 全部恢复（R15 07）：空列表 = 不隐藏任何站点，与加这个字段之前的行为一致。 */
+  const restoreHiddenNamespaces = (): Promise<SaveRsshubSettingsResult> => saveRsshubHiddenNamespaces([])
+
   const saveSetting = (key: TunableKey, value: string | number | boolean): Promise<SaveSettingResult> =>
     // 计算键的类型在运行时就是该键本身；宿主端点会用同一份 parseTunableValue 再验一次。
     runSave({ patch: { [key]: value } }, () => get().settings?.effective[key])
@@ -291,6 +321,8 @@ export function createSettingsActions(host: SettingsActionHost) {
 
   return {
     loadSettings, loadRsshubSettings, openSettings, closeSettings, toggleSettings, dismissSettingsWarning,
-    saveSetting, saveRsshubInstances, saveRsshubHideNsfw, saveTranslateRoute, resetSettings, testRsshub,
+    saveSetting, saveRsshubInstances, saveRsshubHideNsfw,
+    hideRsshubNamespace, restoreHiddenNamespaces,
+    saveTranslateRoute, resetSettings, testRsshub,
   }
 }

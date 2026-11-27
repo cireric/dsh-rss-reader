@@ -226,6 +226,22 @@ test('形状：hiddenNamespaces / hideNsfw 一次定好并可落盘读回（06 /
   }
 })
 
+test('隐藏列表写盘归一化：重复项只留一次（点两次「隐藏此站点」不会变成两个 github）', () => {
+  const h = harness({ file: { version: 1, feeds: {} } })
+  try {
+    const saved = h.control.save({
+      instances: ['https://a.example'],
+      hiddenNamespaces: ['github', ' github ', 'zhihu', 'github'],
+    })
+    assert.equal(saved.ok, true)
+    assert.deepEqual(saved.snapshot.hiddenNamespaces, ['github', 'zhihu'], '重复项是同一个站点，只该占一行')
+    assert.deepEqual(JSON.parse(readFileSync(h.configPath, 'utf8')).rsshub.hiddenNamespaces, ['github', 'zhihu'],
+      '落盘的那份也必须是归一后的：否则设置页会显示「已隐藏（3）」')
+  } finally {
+    h.cleanup()
+  }
+})
+
 test('读侧坏实例：控制器的快照带告警，合法项照常显示', () => {
   const h = harness({
     file: {

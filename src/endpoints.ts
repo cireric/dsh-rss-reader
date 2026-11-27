@@ -55,7 +55,7 @@ import { BackfillError, backfillHistory } from './backfill.js'
 import { rebuildItem } from './domain.js'
 import { selectCleanup } from './retention.js'
 import { buildOpml, parseOpml } from './opml.js'
-import { rsshubSourceOf } from './rsshub-source.js'
+import { rsshubNamespaceOf, rsshubSourceOf } from './rsshub-source.js'
 import { FolderError } from './folders.js'
 import { duplicateHintsOf, linkKeyOf, type DuplicateRow } from './duplicates.js'
 import { TagError } from './tags.js'
@@ -648,6 +648,7 @@ function catalogFilterOf(
     readonly onlyRunnable?: boolean | null
   },
   defaultHideNsfw: boolean,
+  hiddenNamespaces: readonly string[],
 ): CatalogFilter {
   return {
     ...(input.q === null || input.q === undefined ? {} : { q: input.q }),
@@ -656,6 +657,8 @@ function catalogFilterOf(
     // 缺省值来自 config.rsshub.hideNsfw（客户端正常会显式带；直接调 API 的人拿到的也是用户配置）。
     hideNsfw: input.hideNsfw ?? defaultHideNsfw,
     onlyRunnable: input.onlyRunnable ?? false,
+    // R15 07：只由宿主注入，**不读入参** —— 隐藏列表的真相只有 config.rsshub.hiddenNamespaces 一份。
+    hiddenNamespaces: [...hiddenNamespaces],
   }
 }
 
@@ -1082,13 +1085,21 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         // Radar 的「命中/跳过」明细要能出现在宿主日志里；只走日志，不进回包（spec §6）。
         log: ctx.log,
       })
+      // R15 07：用户隐藏过的站点不再出现在候选里（spec §4.2.4「隐藏只影响候选 / 探索列表」）。
+      // 判据只用 `source === 'rsshub'` 的候选：页面候选是站点自己的 feed，路径首段同名
+      //（如 https://github.com/feed.xml 的 `github`）**不是** namespace，按它隐藏会误杀。
+      const hidden = ctx.rsshubSettings?.snapshot().hiddenNamespaces ?? []
+      const candidates = hidden.length === 0
+        ? result.candidates
+        : result.candidates.filter((candidate) => candidate.source !== 'rsshub'
+          || !hidden.includes(rsshubNamespaceOf(candidate.url) ?? ''))
       // 口径按来源分计（R8a 评审 #7）：Radar 候选**没有**抓取校验（ADR-0010），把它们算进
       // 「已验证」会让人以为界面上每条都收过一遍。总数仍报，但拆成页面 / RSSHub 两段。
-      const rsshubCount = result.candidates.filter((candidate) => candidate.source === 'rsshub').length
-      const pageCount = result.candidates.length - rsshubCount
-      ctx.log('发现结果：' + raw + ' → 候选 ' + result.candidates.length + ' 条（页面 ' + pageCount
+      const rsshubCount = candidates.filter((candidate) => candidate.source === 'rsshub').length
+      const pageCount = candidates.length - rsshubCount
+      ctx.log('发现结果：' + raw + ' → 候选 ' + candidates.length + ' 条（页面 ' + pageCount
         + ' / RSSHub ' + rsshubCount + '），' + result.warnings.length + ' 条警告')
-      return ok(result)
+      return ok({ ...result, candidates })
     },
   }),
 
@@ -1440,7 +1451,9 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       const tests = await weeklyTests
 
       // 配置里的 hideNsfw 是用户默认值；请求显式带了就以请求为准（探索页开关写回的就是它）。
-      const filter = catalogFilterOf(input, ctx.rsshubSettings?.snapshot().hideNsfw ?? true)
+      // 隐藏列表（R15 07）反过来：**只能**来自配置，探索页没有任何入口能覆盖它。
+      const rsshub = ctx.rsshubSettings?.snapshot()
+      const filter = catalogFilterOf(input, rsshub?.hideNsfw ?? true, rsshub?.hiddenNamespaces ?? [])
       // 游标先过栅栏：筛选变了（B7）、周测换代（R15 06）或游标认不出（B8）都回 bad-request。
       // **绝不**把 undefined 当成「没有游标 ⇒ 从第一页开始」—— 那会让界面无限追加重复行。
       let position: CatalogPosition | undefined
