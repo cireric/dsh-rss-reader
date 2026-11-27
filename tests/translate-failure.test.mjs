@@ -8,18 +8,22 @@
  *      点重试只重发那一批的 indices；
  *   ④ 连续 3 批失败 ⇒ 整篇停止，不再发第 4 批，顶部显示最后原因；
  *   ⑤ 单块回填失败（list 行数不等 / 空白译文）只回退该块，不计批失败、没有重试按钮；
- *   ⑥ 「译自 {model}」取回包 model（不是客户端设置），多批以最后一条非空回包为准。
+ *   ⑥ 「译自」按块展示实际回包 model（不是客户端设置）；多批模型不一致时列出全部，
+ *      entry.model 仍记最后一条非空回包（兼容/遥测），界面不再把旧块冒名成它。
  *
  * 宿主断言走 `createDispatch` + 假 llm；客户端断言走真实 React + jsdom 的共享夹具，
  * 假 rpc 抛真实的 RpcError，保证 `instanceof RpcError` 分支真的被执行到。
  */
-import { afterEach, test } from 'node:test'
+import { afterEach, beforeEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createDispatch } from '../lib/endpoints.js'
 import { Config } from '../lib/config.js'
+import { invalidateTranslateInfoCache } from '../lib/translate.js'
 import { articleOf, cleanupAll, itemOf, mount, openArticle, skip } from './helpers/translate-harness.mjs'
 
 afterEach(cleanupAll)
+// 30s 探测缓存是模块级状态；宿主用例之间必须隔离，否则前一例的 route 会遮住后一例。
+beforeEach(() => { invalidateTranslateInfoCache() })
 
 // ───────────────────────────── 宿主：四类失败原因 ─────────────────────────────
 
@@ -209,7 +213,7 @@ test('R7 05 批失败：其余批继续，失败处显示原因 + 批首一个�
     assert.equal(h.$('[data-rss-translation-retry]'), null, '重试成功后按钮消失')
     const after = translationOf(h)
     assert.equal(after.blocks.size, 3, '重试不覆盖 / 不清空已成功的 b2')
-    assert.equal(after.done, 3)
+    assert.equal(after.blocks.size, 3)
     assert.equal(after.status, 'done')
   } finally {
     h.cleanup()
@@ -241,6 +245,33 @@ test('R7 05 连续 3 批失败 ⇒ 整篇停止，不再发第 4 批，顶部显
   }
 })
 
+test('R7 05 非四类失败：不伪造成 reason，界面显示原始错误且不再发下一批', skip, async () => {
+  // 2026-11-26 评审：bad-request / 通道错误不是模型侧四类失败；继续跑下一批只会撞同一面墙。
+  // 旧实现把 error 写进 entry 但没有任何地方渲染，用户看到“翻译停下”却不知道原因。
+  const blocks = [{ kind: 'p', text: '段落' }]
+  const h = await mount({
+    items: [itemOf('a')],
+    articles: { a: articleOf('a', blocks) },
+    translateBatch: async () => ({
+      error: { code: 'bad-request', message: '入参不合法', details: {} },
+    }),
+  })
+  try {
+    await openArticle(h, 'a')
+    h.$('[data-rss-translate]').click()
+    await h.waitFor(() => translationOf(h)?.status === 'failed' && h.$('[data-rss-translation-error]') !== null, {
+      label: '原始错误上屏',
+    })
+    await h.settle()
+    assert.equal(h.calls('translateBatch').length, 1, '非四类失败不许继续发下一批')
+    assert.equal(translationOf(h).failures.size, 0, '非四类失败不写入四类失败记录')
+    assert.match(h.$('[data-rss-translation-error]').textContent, /翻译失败：bad-request: 入参不合法/)
+    assert.equal(h.$('[data-rss-translation-stopped]'), null, '没有 stoppedReason 时不许显示“已停止”的伪原因')
+  } finally {
+    h.cleanup()
+  }
+})
+
 test('R7 05 连续失败计数清零：失败 → 成功 → 失败 → 失败 → 成功 仍然跑完全篇', skip, async () => {
   // 五批各一块（3000 字）。只有「连续」三次才停：第 3、4 批的两次失败不能累计到第 1 批头上。
   const blocks = Array.from({ length: 5 }, (_, index) => ({ kind: 'p', text: '章'.repeat(3000) + index }))
@@ -261,7 +292,7 @@ test('R7 05 连续失败计数清零：失败 → 成功 → 失败 → 失败 �
     const entry = translationOf(h)
     assert.equal(entry.status, 'done')
     assert.equal(entry.failures.size, 3, '三次失败都保留位置，但从未连续三次')
-    assert.equal(entry.done, 2)
+    assert.equal(entry.blocks.size, 2)
     assert.equal(h.$('[data-rss-translation-stopped]'), null)
   } finally {
     h.cleanup()
@@ -323,7 +354,7 @@ test('R7 05 「译自」显示回包 model，而不是客户端设置 / 探测�
   }
 })
 
-test('R7 05 多批 model 不一致：以最后一条非空回包为准', skip, async () => {
+test('R7 05 多批 model 不一致：entry.model 记最后一条，界面列出全部', skip, async () => {
   // 1500 + 1500 > 2000 ⇒ 每块独占一批，共三批。第三批 model 为空，应沿用第二批。
   const blocks = Array.from({ length: 3 }, () => ({ kind: 'p', text: '字'.repeat(1500) }))
   const models = ['first/m1', 'second/m2', '']
@@ -338,7 +369,8 @@ test('R7 05 多批 model 不一致：以最后一条非空回包为准', skip, a
     await waitDone(h)
     assert.equal(h.calls('translateBatch').length, 3)
     assert.equal(translationOf(h).model, 'second/m2', '空 model 不覆盖上一个非空值')
-    assert.equal(h.$('[data-rss-translated-from]').textContent, '译自 second/m2')
+    // 2026-11-26 评审：界面按块显示实际模型，多批模型不一致时不能把第一批冒名成最后一条回包。
+    assert.equal(h.$('[data-rss-translated-from]').textContent, '译自 first/m1、second/m2')
   } finally {
     h.cleanup()
   }
@@ -406,7 +438,7 @@ test('R7 优化 按钮状态机：无译文→译；缺块→继续翻译（只�
     // 只译成 1/2：按钮必须是「继续翻译（还剩 1/2）」，不是「重译」。
     assert.equal(button().getAttribute('data-rss-translate-state'), 'continue')
     assert.match(button().textContent, /^继续翻译（还剩 1\/2）$/)
-    assert.equal(translationOf(h).done, 1)
+    assert.equal(translationOf(h).blocks.size, 1)
     assert.equal(translationOf(h).total, 2)
 
     // 点继续：只发缺的那一块，已译的 b0 不许重发；失败记录随重排清空。
@@ -415,7 +447,7 @@ test('R7 优化 按钮状态机：无译文→译；缺块→继续翻译（只�
     await h.waitFor(() => h.calls('translateBatch').length > before, { label: '继续翻译发出请求' })
     const continued = h.calls('translateBatch')[before].payload
     assert.deepEqual(continued.items.map((item) => item.id), ['b1'], '继续翻译只补没译成的块')
-    await h.waitFor(() => translationOf(h)?.failures.size === 0 && translationOf(h)?.done === 2,
+    await h.waitFor(() => translationOf(h)?.failures.size === 0 && translationOf(h)?.blocks.size === 2,
       { label: '补齐' })
     await h.settle()
     assert.equal(button().getAttribute('data-rss-translate-state'), 'retranslate', '全译完后按钮变「重译」')

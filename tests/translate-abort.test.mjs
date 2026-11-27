@@ -67,7 +67,7 @@ test('R7 06 停止：在途批跑完不再发下一批；继续只补剩余块�
     await h.waitFor(() => h.$('[data-rss-translate]').textContent.startsWith('继续翻译'), { label: '停止后按钮变继续' })
     const stopped = translationOf(h)
     assert.equal(stopped.status, 'stopped')
-    assert.equal(stopped.done, 12, '第一批已成功写回的 12 块必须保留')
+    assert.equal(stopped.blocks.size, 12, '第一批已成功写回的 12 块必须保留')
     assert.equal(stopped.total, 30)
     assert.equal(stopped.blocks.size, 12)
     assert.equal(h.$('[data-rss-translate]').textContent, '继续翻译（还剩 18/30）')
@@ -75,7 +75,7 @@ test('R7 06 停止：在途批跑完不再发下一批；继续只补剩余块�
     // 放行在途那一批：spec §4.6 允许它跑完，**结果必须写回**（评审修复 A3）——
     // 否则「继续」会把这一批已经付过钱的段落重发一遍。
     second.release()
-    await h.waitFor(() => translationOf(h)?.done === 24, { label: '在途批结果写回已停止的场次' })
+    await h.waitFor(() => translationOf(h)?.blocks.size === 24, { label: '在途批结果写回已停止的场次' })
     await h.settle()
     assert.equal(h.calls('translateBatch').length, 2, '停止后最多只有那一条在途请求，之后不许再发')
     assert.equal(translationOf(h).status, 'stopped')
@@ -99,7 +99,7 @@ test('R7 06 停止：在途批跑完不再发下一批；继续只补剩余块�
       '继续只补剩余块（前两批已在停止前 / 在途时写回），且按文档顺序')
     const entry = translationOf(h)
     assert.equal(entry.status, 'done')
-    assert.equal(entry.done, 30)
+    assert.equal(entry.blocks.size, 30)
     assert.equal(maxInFlight, 1, '批次必须串行：同一时刻只有一批在飞')
   } finally {
     h.cleanup()
@@ -175,14 +175,14 @@ test('R7 06 切面板再回来：译文与进度还在、不自动续；手动�
 
     const afterSwitch = translationOf(h)
     assert.equal(afterSwitch.status, 'stopped', '切走必须中止，不是继续跑')
-    assert.equal(afterSwitch.done, 12, '切回来进度必须还在')
+    assert.equal(afterSwitch.blocks.size, 12, '切回来进度必须还在')
     assert.equal(afterSwitch.blocks.size, 12, '切回来译文必须还在')
     assert.equal(h.store.get().view, 'article', '面板切回来仍停在正文页')
     assert.equal(h.$('[data-rss-translate]').textContent, '继续翻译（还剩 18/30）')
     assert.equal(h.calls('translateBatch').length, 2, '切回来不许自动续翻')
 
     second.release()
-    await h.waitFor(() => translationOf(h)?.done === 24, { label: '在途批结果写回' })
+    await h.waitFor(() => translationOf(h)?.blocks.size === 24, { label: '在途批结果写回' })
     await h.settle()
     assert.equal(h.calls('translateBatch').length, 2, '在途批的迟到回包也不许触发后续批')
     assert.equal(h.$('[data-rss-translate]').textContent, '继续翻译（还剩 6/30）')
@@ -219,7 +219,7 @@ test('R7 06 切到设置再回来：同样中止；重开文章后显示继续�
     await h.waitFor(() => h.store.get().article?.itemId === 'a', { label: '重开文章' })
     await h.settle()
     assert.equal(translationOf(h).blocks.size, 12, '在途批跑完的译文仍要保留（不是白花钱）')
-    assert.equal(translationOf(h).done, 12)
+    assert.equal(translationOf(h).blocks.size, 12)
     assert.equal(h.$('[data-rss-translate]').textContent, '继续翻译（还剩 18/30）')
     assert.equal(h.calls('translateBatch').length, 1, '重开文章不许自动续翻')
   } finally {
@@ -296,7 +296,7 @@ test('R7 06 重试也是一场翻译：重试在飞时点「继续翻译」不�
     await h.waitFor(() => translationOf(h)?.status === 'done' && translationOf(h)?.failures.size === 1,
       { label: '第一场：b1 失败收尾' })
     assert.equal(h.calls('translateBatch').length, 2)
-    assert.equal(translationOf(h).done, 1)
+    assert.equal(translationOf(h).blocks.size, 1)
 
     h.$('[data-rss-translation-retry]').click()
     await h.waitFor(() => h.calls('translateBatch').length === 3, { label: '重试在飞' })
@@ -310,13 +310,13 @@ test('R7 06 重试也是一场翻译：重试在飞时点「继续翻译」不�
     assert.equal(h.calls('translateBatch').length, 3, '重试在飞时不许再发新的一批')
 
     retryGate.release()
-    await h.waitFor(() => translationOf(h)?.status === 'done' && translationOf(h)?.done === 2,
+    await h.waitFor(() => translationOf(h)?.status === 'done' && translationOf(h)?.blocks.size === 2,
       { label: '继续翻译完成' })
     await h.settle()
     assert.equal(maxInFlight, 1, '同一时刻只许一批在飞（重试也参与全局单任务）')
     // 重试那一批落地时已经把 b1 补齐（status 变 done）⇒ 随后排到的「继续」发现没有缺块就不发请求。
     assert.equal(h.calls('translateBatch').length, 3, '首场 2 批 + 重试 1 批；继续无缺块时不发')
-    assert.equal(translationOf(h).done, 2, 'done 必须等于 total，旧重试回包不许重复累计')
+    assert.equal(translationOf(h).blocks.size, 2, 'blocks.size 必须等于 total，旧重试回包不许重复累计')
     assert.equal(translationOf(h).total, 2)
     assert.equal(translationOf(h).blocks.size, 2)
   } finally {

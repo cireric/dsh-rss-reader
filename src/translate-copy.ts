@@ -1,7 +1,7 @@
 /**
  * 翻译文案的**唯一来源**（R7，contract「文案单源」）。
  *
- * 语言名、四类失败文案、按钮 / 标签、隐私句都从这里读：02 的语言下拉、03 的三态切换器、
+ * 语言名、四类失败文案、按钮 / 标签、隐私句都从这里读：02 的语言下拉、03 的两态切换器、
  * 04 的「段落过长」、05 的重试与 06 的确认框会同时消费这张表。各票手抄一份的下场是
  * 「设置页写简体中文、正文 prompt 写 Chinese」这类静默分家，而没有任何断言会翻红。
  *
@@ -132,7 +132,7 @@ export type TranslateUnavailableReason = NonNullable<TranslateInfo['reason']>
 export const TRANSLATE_UNAVAILABLE_TEXT: Record<TranslateUnavailableReason, string> = {
   'llm-unmounted': 'LLM 服务未挂载（当前宿主没有提供模型服务）',
   'no-provider': '没有可用的模型服务（provider 列表为空）',
-  'no-model': '设置的模型不在可用模型列表里，请重新选择',
+  'no-model': '没有可用模型：请检查模型服务是否已配置凭据，或在设置里重新选择模型',
   'no-default-route': '没有可用的会话默认模型，请先选择具体模型',
 }
 

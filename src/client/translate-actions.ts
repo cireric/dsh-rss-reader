@@ -15,33 +15,23 @@ import type { TranslateBatchResult, TranslateInfo } from '../shared.js'
 import {
   DEFAULT_TARGET_LANGUAGE,
   isTargetLanguage,
-  isTranslateFailureReason,
   type TargetLanguage,
   type TranslateFailureReason,
   TRANSLATE_LIMIT_TEXT,
 } from '../translate-copy.js'
 import {
   articleTranslatePlanOf,
-  blockIndexOfTranslateId,
   pickBatch,
   TRANSLATE_ARTICLE_MAX_CHARS,
-  translateBlockIdOf,
   translateCharsOf,
-  translatableTextOf,
   type TranslateArticlePlan,
   type TranslateBlockRect,
   type TranslateGeometry,
   type TranslateRequestItem,
 } from '../translate-blocks.js'
-import {
-  hasTranslations,
-  nextTranslationMode,
-  RpcError,
-  type ReaderState,
-  type ReaderStoreDeps,
-  type TranslationEntry,
-  type TranslationMode,
-} from './store.js'
+import { appliedEntryOf, batchFailureReasonOf, requestItemsOf } from './translate-entry.js'
+import { hasTranslations, nextTranslationMode, type TranslationEntry, type TranslationMode } from './translate-state.js'
+import type { ReaderState, ReaderStoreDeps } from './store.js'
 
 /** 连续多少批失败就整篇停止（spec §4.7 / D15）：三批。 */
 const TRANSLATE_MAX_CONSECUTIVE_FAILURES = 3
@@ -85,101 +75,6 @@ interface TranslateSession {
   readonly target: TargetLanguage
 }
 
-/**
- * 宿主回包的 items → 块下标译文。
- *
- * 这里**不用** `applyBatch`：那是宿主校验模型输出的判据（少给 / 多给 / 重复一律整批失败）。
- * 宿主已经把空白译文从回包里丢掉（见 translate.ts 的 items 拼装），客户端若要求「请求 id 一个
- * 不少」会把「某块模型返回空白」误判成整批失败 —— 而 spec 明确空白块只退回原文、不计批失败。
- * 客户端只守住自己收到的形状：id 必须属于本批、不许重复；缺的那条按「无译文」处理。
- */
-function translatedBlocksOf(
-  result: TranslateBatchResult,
-  requestedIds: ReadonlySet<string>,
-): Map<number, string> | undefined {
-  if (!Array.isArray(result.items)) return undefined
-  const blocks = new Map<number, string>()
-  const seen = new Set<string>()
-  for (const item of result.items) {
-    if (typeof item.id !== 'string' || typeof item.text !== 'string') return undefined
-    if (!requestedIds.has(item.id) || seen.has(item.id)) return undefined
-    seen.add(item.id)
-    if (item.text.trim() === '') continue
-    const index = blockIndexOfTranslateId(item.id)
-    if (index === undefined) continue
-    blocks.set(index, item.text)
-  }
-  return blocks
-}
-
-/**
- * 从 rpc 失败里取四类原因之一（R7 05）。
- *
- * 只认 `RpcError` + `code === 'translate-failed'` + details.reason 属于四类枚举：
- * 别用 message 文本反推 —— 文案是界面资产，改一个标点就会让重试分类静默失效。
- * 其它 code（bad-request / 通道错误）不是「这一批模型失败」，返回 undefined 交给调用方
- * 按整篇失败处理：那些错误继续跑下一批只会重复撞同一面墙。
- */
-function batchFailureReasonOf(failure: unknown): TranslateFailureReason | undefined {
-  if (!(failure instanceof RpcError) || failure.code !== 'translate-failed') return undefined
-  // 手写 RpcError 可能漏传 details；先确认是对象再读 reason，别让读失败本身变成一次崩溃。
-  if (typeof failure.details !== 'object' || failure.details === null) return undefined
-  const details = failure.details as { readonly reason?: unknown }
-  return isTranslateFailureReason(details.reason) ? details.reason : undefined
-}
-
-/** 回包 model 只在非空字符串时采信；空 / 缺字段等于「这次不知道是谁译的」，保留上一个值。 */
-function modelOfResult(result: TranslateBatchResult): string | undefined {
-  return typeof result.model === 'string' && result.model.trim() !== '' ? result.model : undefined
-}
-
-/** 正文块下标 → 请求项；空白块不发送（端点会整批 bad-request）。 */
-function requestItemsOf(blocks: readonly Record<string, unknown>[], indices: readonly number[]): TranslateRequestItem[] {
-  const items: TranslateRequestItem[] = []
-  for (const index of indices) {
-    const block = blocks[index]
-    if (block === undefined) continue
-    const text = translatableTextOf(block)
-    if (text.trim() === '') continue
-    items.push({ id: translateBlockIdOf(index), text })
-  }
-  return items
-}
-
-/**
- * 一批成功回包 → 新条目（评审修复 B6）。
- *
- * 自动编排与手动重试此前各写了一份「写 blocks / 清失败记录 / model / done」的逐行代码；
- * 两份一旦有一处漏改，同一份回包会在两条路径里产生不同状态。
- * 这里只做落库投影，不决定 status 的终态：调用方成功后该继续（running）还是完成（done）由它自己定。
- *
- * @param head 失败批的批首下标：成功即清掉这条失败记录。
- */
-function appliedEntryOf(
-  entry: TranslationEntry,
-  result: TranslateBatchResult,
-  requestedIds: ReadonlySet<string>,
-  options: { readonly head: number },
-): TranslationEntry | undefined {
-  const translatedBlocks = translatedBlocksOf(result, requestedIds)
-  // 回包结构不可用（id 不属于本批 / 重复 / 字段类型错）：由调用方按「没有返回可用译文」记批失败。
-  if (translatedBlocks === undefined) return undefined
-  const nextBlocks = new Map(entry.blocks)
-  for (const [index, text] of translatedBlocks) nextBlocks.set(index, text)
-  const nextFailures = new Map(entry.failures)
-  nextFailures.delete(options.head)
-  const resultModel = modelOfResult(result)
-  return {
-    ...entry,
-    blocks: nextBlocks,
-    failures: nextFailures,
-    done: nextBlocks.size,
-    status: 'running',
-    // 多批回包的 model 可能不同：取最后一条非空回包（见 TranslationEntry.model 的注释）。
-    ...(resultModel === undefined ? {} : { model: resultModel }),
-  }
-}
-
 export function createTranslateActions(host: TranslateActionHost) {
   const { get, set, rpc, log, persistView, saveNoticeAck } = host
 
@@ -192,7 +87,7 @@ export function createTranslateActions(host: TranslateActionHost) {
    *
    * 只靠全局 `generation` 分不清两件完全不同的事：**被中止**（同一 key 没有更新的场次，
    * 在途批应该把结果写回来，否则「继续」会把已经付过钱的批重发）与**被新场次取代**
-   * （同一 key 已经开了新的一场，旧回包必须丢弃，否则会往新进度里塞旧译文 / 重复加 done）。
+   * （同一 key 已经开了新的一场，旧回包必须丢弃，否则会往新进度里塞旧译文 / 重复累计进度）。
    * 新场次开始时接管自己 key 的所有权；旧场次只在仍持有所有权时才允许写 store。
    */
   const ownerByKey = new Map<string, number>()
@@ -280,7 +175,7 @@ export function createTranslateActions(host: TranslateActionHost) {
   }
 
   /**
-   * 把当前场次标成 stopped（在途批已跑完，done 保留已经写入的进度）。
+   * 把当前场次标成 stopped（在途批已跑完，blocks 保留已经写入的进度）。
    *
    * 所有权判据必须按 key：旧场次被同 key 的新场次取代后不许写 stopped（那会把新场次的
    * running 覆盖掉）；但换了条目 / 切了视图时它仍持有旧 key 的所有权，必须把旧条目如实标停。
@@ -345,7 +240,7 @@ export function createTranslateActions(host: TranslateActionHost) {
   }
 
   /**
-   * 手动选三态（R7 03 / spec §4.5）。
+   * 手动选两态（R7 03 / spec §4.5）。
    *
    * **只改渲染状态**：不碰 translations、不发任何 rpc ——「切到译文再切回原文」是纯视图动作
    * （验收 12 / 本票第 7 条），重新翻译只能走「译 / 重译」。
@@ -356,7 +251,7 @@ export function createTranslateActions(host: TranslateActionHost) {
   }
 
   /**
-   * `t` 键（D14 / 验收 14）：无译文 ⇒ 等同点「译」（首次仍弹确认框）；有译文 ⇒ 三态循环。
+   * `t` 键（D14 / 验收 14）：无译文 ⇒ 等同点「译」（首次仍弹确认框）；有译文 ⇒ 两态循环。
    *
    * 视图守卫在这里再挡一次（不只是 routeKey 的守卫）：正文未加载 / 失败时没有可翻块，
    * 也不该因为一次按键产生外发。判据与工具栏按钮同源：都走 `requestTranslate` / `continueTranslate`，
@@ -393,9 +288,9 @@ export function createTranslateActions(host: TranslateActionHost) {
    * 于是「其余批按文档顺序」不依赖用户此刻滚到了哪里。`settled` 集合保证前进，不会重发。
    *
    * 两种入场方式共用这一条编排（06 / spec §4.1 / D19）：
-   *  - `fresh`：清空该 key 的 blocks / done / failures / 标题，整篇重发（首次「译」与「重译」）；
-   *  - `continue`：以现有 entry.blocks 为已译集，并跳过失败批（那些块有各自的重试按钮），
-   *    只补从没尝试过的剩余批；done/total/failures 原样保留。
+   *  - `fresh`：清空该 key 的 blocks / models / failures，整篇重发（首次「译」与「重译」）；
+   *  - `continue`：以现有 entry.blocks 为已译集，把失败批与空回包的缺口重新纳入选择
+   *    （旧失败记录清空，避免旧原因挂在界面上；成功块不重发）。
    *
    * 失败（R7 05）按**批**处理：这一批的块记进 `failures` 并退出后续选择（否则下一轮会原地
    * 重选同一批），其余批继续；只有连续 3 批失败才整篇 `status: 'failed'`。
@@ -421,16 +316,16 @@ export function createTranslateActions(host: TranslateActionHost) {
       ? {
         key: session.key,
         blocks: new Map(),
+        models: new Map(),
         failures: new Map(),
-        done: 0,
         total: plan.totalBlocks,
         status: 'running',
       }
       : {
         key: session.key,
         blocks: new Map(resumeEntry.blocks),
+        models: new Map(resumeEntry.models),
         failures: new Map(),
-        done: resumeEntry.done,
         total: plan.totalBlocks,
         status: 'running',
         ...(resumeEntry.model === undefined ? {} : { model: resumeEntry.model }),
@@ -548,7 +443,7 @@ export function createTranslateActions(host: TranslateActionHost) {
     if (session.token !== generation) { markStopped(session); return }
     const latest = get().translations.get(session.key)
     if (latest !== undefined && latest.status === 'running') {
-      // done 每批都按 blocks.size 如实写（失败批 / 空回包不计入），这里只改状态。
+      // blocks.size 每批都如实写（失败批 / 空回包不计入），这里只改状态。
       storeEntry({ ...latest, status: 'done' })
     }
     if (active?.token === session.token) active = undefined
@@ -557,11 +452,11 @@ export function createTranslateActions(host: TranslateActionHost) {
   /**
    * 手动重试一个失败批（R7 05 / spec 验收 9）：重发该批**原来的全部 indices**。
    *
-   * 不碰其它块：已成功译文原样保留，`done` 只加这一批实际发出去的条数。
+   * 不碰其它块：已成功译文原样保留，`blocks` 只加这一批实际回填成功的条数。
    *
    * 重试也是「一场翻译」（评审修复 A5）：先按「开始新一场先中止旧的」处理并登记自己为当前
    * 场次，再走同一条全局队列。否则重试在飞时点「重译」会两批并发，且重试回包会往新进度里
-   * 重复加 done。排队等待期间用户的切条目 / 改语言 / 离开正文都要重新校验，不拿旧快照发请求。
+   * 重复累计进度。排队等待期间用户的切条目 / 改语言 / 离开正文都要重新校验，不拿旧快照发请求。
    */
   const retryBatch = async (headIndex: number): Promise<void> => {
     if (retrying) return
@@ -620,8 +515,8 @@ export function createTranslateActions(host: TranslateActionHost) {
         if (reason === undefined) return
         const latest = get().translations.get(key)
         if (latest === undefined) return
-        // 重试仍失败：原因可能变了（例如上次 timeout、这次 truncated），按最新回包更新标签；
-        // carriesTitle 必须保留，否则第二次重试会把标题弄丢。
+        // 重试仍失败：原因可能变了（例如上次 timeout、这次 truncated），按最新回包更新标签。
+        // 失败记录只保留 indices / reason；标题已不在客户端发送范围（2026-11-26）。
         const failures = new Map(latest.failures)
         failures.set(headIndex, { indices: record.indices, reason })
         storeEntry({ ...latest, failures })
@@ -640,7 +535,7 @@ export function createTranslateActions(host: TranslateActionHost) {
         return
       }
       // 所有失败批都补齐且 total 到齐才升 done；否则保持原状态（不把 stopped / failed 谎报成完成）。
-      const finished = nextEntry.failures.size === 0 && nextEntry.done >= nextEntry.total
+      const finished = nextEntry.failures.size === 0 && nextEntry.blocks.size >= nextEntry.total
       storeEntry({ ...nextEntry, ...(finished ? { status: 'done' as const } : { status: latest.status }) })
     } finally {
       retrying = false
@@ -703,7 +598,7 @@ export function createTranslateActions(host: TranslateActionHost) {
     }
 
     // 有译文时默认落「对照」（2026-11-26 用户拍板：翻译＝原文段落下方直接给译文，可对照读）。
-    // 只在**全新一场**时切一次：继续翻译时用户可能正停在原文 / 译文态核对进度，
+    // 只在**全新一场**时切一次：继续翻译时用户可能正停在原文 / 对照态核对进度，
     // 不该被一次「继续」硬拽回对照。
     if (mode === 'fresh') setTranslationMode('parallel')
 
@@ -780,8 +675,10 @@ export function createTranslateActions(host: TranslateActionHost) {
   }
 
   /**
-   * 「继续翻译（还剩 N/M）」：以现有进度续跑，已译块与失败批都不重发（spec §4.1 / D19）。
-   * 只对 `stopped` 生效；`done` / `failed` 的下一步是「重译」或逐批重试，不在本动作里混着做。
+   * 「继续翻译（还剩 N/M）」：以现有进度续跑，已成功块不重发（spec §4.1 / D19）。
+   *
+   * 缺块可能来自停止、批失败或空回包，状态可能是 stopped / done / failed —— 判据只看
+   * 「还剩多少块」，不再绑定某一种 status（2026-11-26 用户拍板：继续要补没译成的块）。
    */
   const continueTranslate = async (geometry?: TranslateGeometry): Promise<void> => {
     const state = get()
@@ -794,7 +691,7 @@ export function createTranslateActions(host: TranslateActionHost) {
     await beginSession('continue', geometry)
   }
 
-  /** 「重译」：清空该 key 的 blocks / done / failures / 标题后整篇重发（spec §4.1 / D19）。 */
+  /** 「重译」：清空该 key 的 blocks / models / failures 后整篇重发（spec §4.1 / D19）。 */
   const retranslate = async (geometry?: TranslateGeometry): Promise<void> => {
     await beginSession('fresh', geometry)
   }

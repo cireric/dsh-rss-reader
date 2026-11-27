@@ -22,16 +22,20 @@ import { foldOf, groupImageBlocks, type ImageFold, type ImageGroup } from '../im
 import { paragraphsOf } from '../html-text.js'
 import { READING_FONT_SIZES, READING_LINE_WIDTHS } from '../preferences.js'
 import type { ReadingPreferences } from '../preferences.js'
-import { hasTranslations, type ArticleState, type TranslateConfirmRequest, type TranslationEntry, type TranslationMode } from './store.js'
-import { TranslationPending, TranslationSegment, TranslationToggle, translatedBlockOf } from './translate-view.js'
+import type { ArticleState } from './store.js'
+import {
+  hasTranslations, translationModelsOf,
+  type TranslateConfirmRequest, type TranslationEntry, type TranslationMode,
+} from './translate-state.js'
+import { TranslationPending, TranslationSegment, translatedBlockOf } from './translate-view.js'
+import { TranslateToolbar } from './translate-toolbar.js'
 import { translateGeometryOf } from './translate-geometry.js'
 import {
-  TARGET_LANGUAGES, TRANSLATE_BUTTON_TEXT, TRANSLATE_FAILURE_UI, TRANSLATE_LABEL_TEXT,
+  TRANSLATE_BUTTON_TEXT, TRANSLATE_FAILURE_UI, TRANSLATE_LABEL_TEXT,
   translateNoticeText,
   type TargetLanguage, type TranslateFailureReason,
 } from '../translate-copy.js'
 import {
-  articleTranslatePlanOf,
   isTranslatableBlock,
   translateCharsOf,
   TRANSLATE_BLOCK_MAX_CHARS,
@@ -309,26 +313,16 @@ function ArticleImage({ src, alt, caption, onOpen }: {
  * 只在存在非 text run 时才写字段），所以「没有 runs」是常态路径，不是兼容分支 —— 旧缓存、
  * 纯文本段落、R4 的回退摘要（`paragraphBlocks` 造的 p 块）全都走这里。
  */
-function ArticleBlockView({ block, onOpenImage, textOverride, itemOverride }: {
+function ArticleBlockView({ block, onOpenImage }: {
   block: Record<string, unknown>
   /** 点开这张图（灯箱）。图片块以外的块不读它。 */
   onOpenImage: (src: string) => void
-  /**
-   * 译文态（R7 03）：给了纯文本就替换本块文字，忽略 runs —— 译文是纯文本，没有内联语义（D8）。
-   * 只由可翻块（p / h / quote）传入；list 用 `itemOverride`，pre / img / table 永不传。
-   */
-  textOverride?: string
-  /** 译文态 list：按行拆好且**行数已校验**的译文条目（判据在 translate-view 的 translatedBlockOf）。 */
-  itemOverride?: readonly string[]
 }): ReactNode {
   const kind = typeof block['kind'] === 'string' ? block['kind'] : 'p'
   const text = typeof block['text'] === 'string' ? block['text'] : ''
   const runs = inlineRunsOf(block['runs'])
   /** 带内联语义就按 run 画，否则原样画 `text`（两条路的内容相同，只是前者有元素语义）。 */
-  const inline = (fallback: string): ReactNode => {
-    if (textOverride !== undefined) return textOverride
-    return runs === undefined ? fallback : <InlineRunsView runs={runs} />
-  }
+  const inline = (fallback: string): ReactNode => runs === undefined ? fallback : <InlineRunsView runs={runs} />
 
   if (kind === 'img') {
     const src = typeof block['src'] === 'string' ? block['src'] : ''
@@ -363,11 +357,9 @@ function ArticleBlockView({ block, onOpenImage, textOverride, itemOverride }: {
 
   if (kind === 'list') {
     const ordered = block['ordered'] === true
-    const originalItems = Array.isArray(block['items']) ? block['items'] : []
-    // 译文态：条目来自已经校验过行数的译文行；原文的 itemRuns 此时完全没有意义（文字已换）。
-    const items = itemOverride !== undefined ? itemOverride : originalItems
+    const items = Array.isArray(block['items']) ? block['items'] : []
     // itemRuns 与 items 等长同序才用（判据见 itemRunGroupsOf）；否则整份退回纯文本。
-    const itemRuns = itemOverride === undefined ? itemRunGroupsOf(block['itemRuns'], originalItems.length) : undefined
+    const itemRuns = itemRunGroupsOf(block['itemRuns'], items.length)
     const ListTag = ordered ? 'ol' : 'ul'
     return (
       <ListTag style={{ margin: '0 0 1.1em', paddingLeft: '1.5em' }}>
@@ -626,7 +618,7 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
    * 传 `undefined` = 没有在飞的批；原文态不显示（用户明确选了只看原文）。
    */
   translationPending: readonly number[] | undefined
-  /** 三态（R7 03）：值归 store 所有，本组件只照着画、把用户的切换交回去。 */
+  /** 两态（R7 03）：值归 store 所有，本组件只照着画、把用户的切换交回去。 */
   translationMode: TranslationMode
   /** 点切换器 ⇒ 只改 store 里的显示态（动作层不发 rpc，验收 12）。 */
   onTranslationMode: (mode: TranslationMode) => void
@@ -799,12 +791,14 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
    */
   const blockKeyOf = (at: number): string => articleItemId + ':' + at
   /**
-   * 实际生效的三态（R7 03 / 评审修复 A4）：**没有可用译文时一律按原文画**，切换器也不出现
+   * 实际生效的两态（R7 03 / 评审修复 A4）：**没有可用译文时一律按原文画**，切换器也不出现
    * （spec §4.5）。判据是 `hasTranslations`（blocks.size > 0），不是「条目存在」——
    * 全批失败 / 首批未回时条目仍然存在（要显示进度与重试按钮），但它没有任何译文可切。
    * 这一层派生放在渲染处，store 只保存用户选过的态 —— 否则「有没有译文」会被复制成第二个判据。
    */
   const effectiveMode: TranslationMode = hasTranslations(translation) ? translationMode : 'original'
+  /** 这篇译文实际涉及哪些模型（按块去重；多模型时如实列出，不把旧块冒名成最后一条回包）。 */
+  const translatedModels = translationModelsOf(translation)
   /**
    * 在飞的批（R7 优化）：Set 只在这里建一次。原文态不显示 —— 用户选了「只看原文」时，
    * 一排转圈只会打断阅读；进度仍在工具栏的「已译 X/Y」里。
@@ -841,52 +835,6 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
   // 只按**已缓存的正文**估：加载中 / 抓取失败时 readingBlocks 为空 ⇒ 0 ⇒ 界面不出现任何数字。
   // 刻意不拿 summary 或源里的 excerpt 去凑 —— 回退内容不是原站正文，不给它编一个时长（R4-B5）。
   const readMinutes = estimateReadingMinutes(readingBlocks)
-  /**
-   * 翻译按钮的状态机（R7 06 / spec §4.1 / D19）：
-   *  无条目 → 译；在译 → 停止；中止且还有剩余 → 继续；完成 / 失败 → 重译（次要样式）。
-   *
-   * 「还剩 N/M」与进度同一口径（total - done）：done 是**成功回填的块数**，失败批不计入，
-   * 所以读者看到的剩余量就是继续之后真正会补的批（失败批另有重试按钮，不混进这句文案）。
-   */
-  const translatePlan = articleTranslatePlanOf(article?.blocks ?? [])
-  const translateEmpty = translatePlan.totalBlocks === 0 && translatePlan.overlongBlocks.length === 0
-  /**
-   * 「还剩多少块」按**实际回填的译文块**算（`blocks.size`），不是按「发出去多少块」。
-   * 模型对某块回空 / 对齐失败时那一块没有译文，读者看到的缺口就是它 —— 继续翻译要补的也是它。
-   */
-  const translateRemaining = translation === undefined ? 0 : Math.max(0, translation.total - translation.blocks.size)
-  /**
-   * 按钮只表达**下一步该做什么**（2026-11-26 用户拍板）：
-   *  - 没有任何译文（含一条都没成功）⇒ 「译」，从头开始；
-   *  - 在跑 ⇒ 「停止」；
-   *  - 有译文但还缺块（停止 / 批失败 / 空回包）⇒ 「继续翻译」，只补缺的块；
-   *  - 全部译完 ⇒ 「重译」——唯一真实场景是**换了模型想用新路由重翻同一篇**（D20 不因换模型作废旧译文）。
-   */
-  const translateButtonState: 'translate' | 'stop' | 'continue' | 'retranslate' =
-    translation === undefined || (translation.blocks.size === 0 && translation.status !== 'running')
-      ? 'translate'
-      : translation.status === 'running'
-        ? 'stop'
-        : translateRemaining > 0
-          ? 'continue'
-          : 'retranslate'
-  const translateButtonText = translateButtonState === 'translate'
-    ? TRANSLATE_BUTTON_TEXT.translate
-    : translateButtonState === 'stop'
-      ? TRANSLATE_BUTTON_TEXT.stop
-      : translateButtonState === 'continue'
-        ? TRANSLATE_BUTTON_TEXT.continue(translateRemaining, translation?.total ?? 0)
-        : TRANSLATE_BUTTON_TEXT.retranslate
-  const translateButtonTitle = translateEmpty
-    ? '这篇没有可翻译的正文'
-    : translateButtonState === 'translate'
-      ? '翻译当前文章（先译屏幕内的段落）'
-      : translateButtonState === 'stop'
-        ? '停止后续批次（在途一批会跑完）'
-        : translateButtonState === 'continue'
-          ? '继续翻译剩余段落（已译块不重发）'
-          : '重新翻译整篇（会重新调用模型）'
-
   /**
    * 本组件自己拿到滚动容器 —— 右下角那两个按钮要作用在它上面。
    *
@@ -1076,56 +1024,24 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
             {link !== undefined && link !== '' && (
               <a className="dsh-rss-btn dsh-rss-btn--ghost" href={link} target="_blank" rel="noreferrer">打开原站 ↗</a>
             )}
-            {/*
-              * 目标语言（2026-11-26 用户拍板：按就近原则从设置页 / Aa 面板挪到「译」旁边）。
-              * 不配文字 label —— 下拉里就是语言名，`aria-label` 留给读屏器；不可用时不渲染。
-              */}
-            {translateAvailable && (
-              <select className="dsh-rss-translate-language" value={translateTarget}
-                aria-label="翻译目标语言" data-rss-translate-language=""
-                onChange={(event) => onTranslateTarget(event.target.value as TargetLanguage)}>
-                {TARGET_LANGUAGES.map((language) => (
-                  <option key={language.id} value={language.id}>{language.label}</option>
-                ))}
-              </select>
-            )}
-            {/*
-              * 一键翻译（R7 01 / 04 / 06）。**不可用时不渲染**（R7 02 / spec §4.1）：
-              * 连按钮都不该出现，而不是点了再说「没有模型」。放在 Aa 左侧是固定位置。
-              *
-              * 状态机（D19，2026-11-26 用户拍板）：无译文 ⇒「译」；在译 ⇒「停止」；缺块 ⇒「继续翻译」
-              * （只补没译成的块）；全译完 ⇒「重译」（换模型后想重翻同一篇的唯一入口）。
-              * 点击这一刻才量几何（R7 04）：滚动位置随时在变，渲染期缓存 rect 会在用户滚动后
-              * 变成另一篇视角；`translateGeometryOf` 只读 DOM，选批仍是纯函数。
-              * 可翻块为 0（全图片 / 无正文）时禁用并说明原因（spec §4.1）。
-              */}
-            {translateAvailable && (
-              <button ref={translateButtonRef} type="button"
-                className={'dsh-rss-btn' + (translateButtonState === 'retranslate' ? ' dsh-rss-btn--ghost' : '')}
-                data-rss-translate="" data-rss-translate-state={translateButtonState}
-                disabled={translateEmpty}
-                aria-label={translateButtonText}
-                title={translateButtonTitle}
-                onClick={() => {
-                  const box = boxRef.current
-                  const geometry = box === null ? undefined : translateGeometryOf(box)
-                  if (translateButtonState === 'stop') { onStopTranslate(); return }
-                  if (translateButtonState === 'continue') { onContinueTranslate(geometry); return }
-                  if (translateButtonState === 'retranslate') { onRetranslate(geometry); return }
-                  onTranslate(geometry)
-                }}>{translateButtonText}</button>
-            )}
-            {translation !== undefined && translation.total > 0 && (
-              <span data-rss-translate-progress className="dsh-rss-meta" role="status">{TRANSLATE_LABEL_TEXT.progress(translation.done, translation.total)}</span>
-            )}
-            {/*
-              * 原文 / 译文 单枚切换（2026-11-26 用户拍板，替代原来的三枚）。
-              * 判据是 `hasTranslations`（至少一块真的回填了译文），不是「有翻译条目」——
-              * 全批失败时条目存在，但一个译文都没有，按钮出现就是在承诺一份不存在的内容。
-              */}
-            {hasTranslations(translation) && (
-              <TranslationToggle mode={effectiveMode === 'original' ? 'original' : 'parallel'} onChange={onTranslationMode} />
-            )}
+            <TranslateToolbar
+              blocks={article?.blocks}
+              translation={translation}
+              translationMode={translationMode}
+              translateAvailable={translateAvailable}
+              translateTarget={translateTarget}
+              buttonRef={translateButtonRef}
+              onTranslateTarget={onTranslateTarget}
+              onTranslationMode={onTranslationMode}
+              onTranslate={onTranslate}
+              onContinueTranslate={onContinueTranslate}
+              onRetranslate={onRetranslate}
+              onStopTranslate={onStopTranslate}
+              geometryOf={() => {
+                const box = boxRef.current
+                return box === null ? undefined : translateGeometryOf(box)
+              }}
+            />
             {/*
               * 阅读偏好（M5 01）收在一个 <details> 里：三个 <select> 摊开摆会把这一行挤成两层，
               * 而它们是「调一次就一直用」的东西，不值得占常驻版面。与顶栏「更多」同一个面板样式。
@@ -1190,10 +1106,6 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
           {title && (
             <header style={{ marginBottom: 24 }}>
               <h1 className="dsh-rss-article-title">{title}</h1>
-              {/*
-                * 标题翻译失败角标（spec §4.5）：只在译文态出现 —— 对照态永远原文标题，
-                * 原文态本来就不该提「未翻译」。标题文本本身已经回落到原文，角标只是说明原因。
-                */}
               {item !== undefined && (
                 <div className="dsh-rss-meta" style={{ marginTop: 8 }}>
                   {item.feedTitle}
@@ -1222,6 +1134,21 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
               background: 'color-mix(in srgb, var(--rss-error) 6%, transparent)',
             }}>
               {TRANSLATE_FAILURE_UI.stopped(translation.stoppedReason)}
+            </div>
+          )}
+          {/*
+            * 非四类模型失败（bad-request / 通道错误 / 未知 code）：不伪造成四类原因之一，
+            * 但也不能让翻译无声停下。`error` 是 client 侧原样保存的错误文本（R7 05 评审修复）。
+            */}
+          {translation !== undefined && translation.status === 'failed'
+            && translation.error !== undefined && translation.stoppedReason === undefined && (
+            <div data-rss-translation-error role="alert" style={{
+              margin: '0 0 18px', padding: '8px 10px', borderRadius: 6,
+              color: 'var(--rss-error)',
+              border: '1px solid color-mix(in srgb, var(--rss-error) 32%, transparent)',
+              background: 'color-mix(in srgb, var(--rss-error) 6%, transparent)',
+            }}>
+              翻译失败：{translation.error}
             </div>
           )}
           {/*
@@ -1274,7 +1201,7 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
               /**
                * 译文内容（R7 03）：`translation.blocks` 以块下标为键，不按数组顺序硬贴。
                * 空 / 纯空白、list 行数不等都在 `translatedBlockOf` 里判成 undefined ⇒ 该块退回原文；
-               * 这是**唯一**的「译文能不能用」判据，译文态与对照态共用。
+               * 这是**唯一**的「译文能不能用」判据，原文 / 对照两态共用。
                */
               const translated = translation?.blocks.get(index)
               const translatedContent = translated === undefined ? undefined : translatedBlockOf(block, translated)
@@ -1354,14 +1281,13 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
           })}
           {/*
             * 「译自 {model}」（R7 05 / spec §4.4）：放在正文末尾、最后一段译文之后。
-            * model 用回包里的值（store 侧的 TranslationEntry.model），不读客户端设置——
-            * 显示设置里的模型会把「实际是谁译的」伪造成用户的选择。原文态没有译文内容，
-            * 不显示这行；有译文但还没收到任何回包 model 时也不编造。
+            * 2026-11-26 评审起用 **models（按块）** 而不是单一 model：译一半 → 停止 → 改模型 →
+            * 继续时，前半篇必须如实列出旧模型，不能把旧译文冒名成最后一条回包的模型。
+            * 原文态没有译文内容，不显示这行；没有任何 model 时也不编造。
             */}
-          {translation !== undefined && translation.model !== undefined
-            && translation.blocks.size > 0 && effectiveMode !== 'original' && (
+          {translatedModels.length > 0 && effectiveMode !== 'original' && (
             <p data-rss-translated-from className="dsh-rss-meta" style={{ margin: '18px 0 0' }}>
-              {TRANSLATE_LABEL_TEXT.translatedFrom(translation.model)}
+              {TRANSLATE_LABEL_TEXT.translatedFrom(translatedModels.join('、'))}
             </p>
           )}
         </article>

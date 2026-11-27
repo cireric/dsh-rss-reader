@@ -12,7 +12,7 @@
  */
 import type { ReactNode } from 'react'
 import { TRANSLATE_TOGGLE_TEXT } from '../translate-copy.js'
-import type { TranslationMode } from './store.js'
+import type { TranslationMode } from './translate-state.js'
 
 /** 译文内容的稳定标记：值 = 正文块下标（测试与排查都按它定位，不认组件树形状）。 */
 const TRANSLATION_ATTR = 'data-rss-translation'

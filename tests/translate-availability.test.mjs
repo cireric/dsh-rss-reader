@@ -151,6 +151,54 @@ test('默认路由的 provider 目录为空（别的 provider 有模型）⇒ no
   } finally { h.cleanup() }
 })
 
+test('回落路由校验 currentSelection（不是 catalog.default 的 provider）：selection 有效就必须可用', async () => {
+  // 2026-11-26 评审修复：旧实现只看 catalog.default.provider 有没有模型，却把
+  // currentSelection 当 route 返回。这里让 p1（目录默认）没有模型、p2（会话选择）有模型，
+  // 正确的结论是 available:true + route p2/m2；旧实现会假阴性回 no-model。
+  const llm = fakeLlm({
+    providers: [{ id: 'p1' }, { id: 'p2' }],
+    models: { p2: [{ id: 'm2' }] },
+  })
+  const h = harness({
+    services: {
+      llm,
+      ...fakeSession({
+        selection: { provider: 'p2', model: 'm2' },
+        catalogDefault: { provider: 'p1', model: 'm1' },
+      }),
+    },
+  })
+  try {
+    const info = await launch(h)
+    assert.equal(info.available, true, '会话真正要用的 p2/m2 有模型，不能因目录默认 p1 为空而判死')
+    assert.deepEqual(info.route, { provider: 'p2', model: 'm2' })
+    assert.deepEqual(info.sessionDefault, { provider: 'p2', model: 'm2' })
+  } finally { h.cleanup() }
+})
+
+test('回落路由校验 currentSelection：selection 的模型不在目录里 ⇒ no-model（不能借别的 provider 放行）', async () => {
+  // 反向假阳性：目录默认 p1/m1 存在且有模型，但会话选择 p2/gone 在 p2 目录里不存在。
+  // 旧实现会回 available:true，文章面出现按钮、点下去 stream 到不存在的模型。
+  const llm = fakeLlm({
+    providers: [{ id: 'p1' }, { id: 'p2' }],
+    models: { p1: [{ id: 'm1' }], p2: [{ id: 'm2' }] },
+  })
+  const h = harness({
+    services: {
+      llm,
+      ...fakeSession({
+        selection: { provider: 'p2', model: 'gone' },
+        catalogDefault: { provider: 'p1', model: 'm1' },
+      }),
+    },
+  })
+  try {
+    const info = await launch(h)
+    assert.equal(info.available, false)
+    assert.equal(info.reason, 'no-model')
+  } finally { h.cleanup() }
+})
+
 test('回落会话默认但 modelCatalog().default 不存在 ⇒ no-default-route', async () => {
   const h = harness({ services: { llm: fakeLlm(), ...fakeSession({ catalogDefault: null }) } })
   try {
@@ -271,6 +319,34 @@ function jsonChunks(text) {
     { type: 'finish', reason: { kind: 'stop' } },
   ]
 }
+
+test('translateInfo 与 translateBatch 共用缓存：窗口内不重复枚举全目录', async () => {
+  // 2026-11-26 评审修复：translateBatch 不再每批自己 resolveTranslateRoute，而是复用
+  // translateInfo 的 30s 缓存（key 含显式路由三键）。既省目录调用，也让确认框与真实请求同路由。
+  const config = Config({ translateProvider: 'p', translateModel: 'm' })
+  const base = fakeLlm()
+  const llm = {
+    ...base,
+    stream() {
+      return (async function* stream() {
+        yield { type: 'text-delta', index: 0, text: JSON.stringify({ items: [{ id: 'b0', text: '你好' }] }) }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      })()
+    },
+  }
+  const h = harness({ services: { llm, ...fakeSession({ selection: { provider: 'other', model: 'other' } }) }, config })
+  try {
+    const info = await launch(h)
+    assert.equal(info.available, true)
+    assert.equal(llm.state.calls.providers, 1)
+    assert.equal(llm.state.calls.models, 1)
+
+    const result = await h.dispatch('translateBatch', { target: 'zh-CN', items: [{ id: 'b0', text: 'Hello' }] })
+    assert.equal(result.ok, true, JSON.stringify(result))
+    assert.equal(llm.state.calls.providers, 1, 'translateBatch 必须复用 translateInfo 的缓存')
+    assert.equal(llm.state.calls.models, 1, '模型目录也只许枚举一次')
+  } finally { h.cleanup() }
+})
 
 test('translateBatch 与 translateInfo 用同一条两层路由：显式 provider/model/effort 落到 stream 请求', async () => {
   const config = Config({ translateProvider: 'p', translateModel: 'm', translateEffort: 'low' })

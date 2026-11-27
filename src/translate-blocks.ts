@@ -81,7 +81,7 @@ export function translatableTextOf(block: Record<string, unknown>): string {
   if (block['kind'] === 'list') {
     const items = block['items']
     if (!Array.isArray(items)) return ''
-    return items.map((item) => typeof item === 'string' ? item : String(item ?? '')).join('\n')
+    return items.map((item) => typeof item === 'string' ? item : '').join('\n')
   }
   const text = block['text']
   return typeof text === 'string' ? text : ''

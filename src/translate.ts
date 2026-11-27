@@ -258,12 +258,15 @@ export async function resolveTranslateRoute(
   if (currentSelection === undefined || catalog?.default === undefined) {
     return { available: false, reason: 'no-default-route', providers: providerViews }
   }
-  // 目录里一个模型都没有 = 没有哪家代理配了凭据（spec §1.1 的判据：`listModels` 返回空）。
-  // 此时即使会话仍记着一个默认路由名，点「译」也必然拿到 unavailable —— 必须在这层就判死，
-  // 否则文章面会出现一个点了就失败的按钮。默认路由的 provider 也必须真能列出模型：
-  // 别的 provider 有模型不代表这条默认路由可用。
-  const defaultGroup = providerViews.find((entry) => entry.provider === catalog.default?.provider)
-  if (providerViews.length === 0 || defaultGroup === undefined) {
+  // **校验的是真正要发出去的 currentSelection，而不是 catalog.default.provider**（2026-11-26
+  // 评审修复）：两者可能指向不同的 provider（例如会话选择 p2/m2、目录默认 p1/m1）。旧实现只
+  // 检查 p1 有没有模型，却把 p2/m2 当 route 返回 —— 文章面显示「可用」，点下去必然 stream 失败。
+  // 反过来也会假阴性：p2/m2 有效、p1 目录暂时为空时被判 no-model。目录里一个模型都没有 =
+  // 没有哪家代理配了凭据（spec §1.1 的判据：`listModels` 返回空），所以这里先判空，再按 selection
+  // 逐层找 provider → model；任何一层找不到都回 no-model。
+  const routeGroup = providerViews.find((entry) => entry.provider === currentSelection.provider)
+  const routeModel = routeGroup?.models.find((entry) => entry.id === currentSelection.model)
+  if (routeGroup === undefined || routeModel === undefined) {
     return {
       available: false,
       reason: 'no-model',
@@ -287,8 +290,19 @@ export const TRANSLATE_INFO_CACHE_MS = 30_000
  *
  * 为什么必须缓存：面板加载探一次，设置页也要读同一份；不缓存时每开一次面板都要把
  * `listModels` 全目录拉一遍。时钟从参数注入，测试用假 now 走完 30 秒，不 sleep。
+ *
+ * 缓存键包含显式路由三键（2026-11-26 评审修复）：`translateInfo` 与 `translateBatch` 必须
+ * 看到同一份结论。没有 key 时，先探过会话默认、再改成显式路由（或反过来）会命中旧结果，
+ * 文章面与真正发出的请求就会各说各话。`saveSettings` 成功仍会整份失效。
  */
-let translateInfoCache: { readonly at: number; readonly info: TranslateInfo } | undefined
+let translateInfoCache: { readonly at: number; readonly key: string; readonly info: TranslateInfo } | undefined
+
+/** 显式路由 → 缓存键（空 = 回落会话默认）；三键必须一起进 key，避免只换 effort 命中旧路由。 */
+function translateRouteKeyOf(explicit: TranslateRouteSelection | undefined): string {
+  return explicit === undefined
+    ? ''
+    : explicit.provider + '\u0000' + explicit.model + '\u0000' + explicit.effort
+}
 
 /** `saveSettings` 成功后调用（spec §4.1）：下一次探测必须看到新的设置值。 */
 export function invalidateTranslateInfoCache(): void {
@@ -313,10 +327,13 @@ export async function probeTranslateInfo(
 ): Promise<TranslateInfo> {
   const now = options.now ?? Date.now
   const at = now()
+  const key = translateRouteKeyOf(options.explicit)
   const cached = translateInfoCache
-  if (cached !== undefined && at >= cached.at && at - cached.at < TRANSLATE_INFO_CACHE_MS) return cached.info
+  if (cached !== undefined && cached.key === key && at >= cached.at && at - cached.at < TRANSLATE_INFO_CACHE_MS) {
+    return cached.info
+  }
   const info = await resolveTranslateRoute(services, options.explicit)
-  translateInfoCache = { at: now(), info }
+  translateInfoCache = { at: now(), key, info }
   return info
 }
 
@@ -399,6 +416,25 @@ function nextWithAbort<T>(
   })
 }
 
+/**
+ * 等一个普通 Promise 落地，但同时听 abort（2026-11-26 评审修复）。
+ *
+ * 路由探测（`probeTranslateInfo`）要列 provider 目录 / 模型目录，属于网络或 credential
+ * 读取面；它和模型流一样可能挂住。deadline 必须从**进入 translateBatch 的第一刻**开始，
+ * 而不是等路由解析完才启动 —— 否则“单批 60s 超时后必定返回”的承诺只在流阶段成立。
+ */
+function promiseWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | typeof ABORTED> {
+  if (signal.aborted) return Promise.resolve(ABORTED)
+  return new Promise((resolve, reject) => {
+    const onAbort = (): void => { resolve(ABORTED) }
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(
+      (value) => { signal.removeEventListener('abort', onAbort); resolve(value) },
+      (error: unknown) => { signal.removeEventListener('abort', onAbort); reject(error) },
+    )
+  })
+}
+
 /** 模型侧失败统一信封：四类原因由 details.reason 区分，HTTP 层仍是 200。 */
 function translateFailure(reason: TranslateFailureReason): RpcResult<TranslateBatchResult> {
   return fail('translate-failed', TRANSLATE_FAILURE_TEXT[reason], { reason })
@@ -426,19 +462,28 @@ export async function translateBatch(
     readonly deadlineMs?: number
   },
 ): Promise<RpcResult<TranslateBatchResult>> {
-  const info = await resolveTranslateRoute(options.services, options.selection)
-  if (!info.available || info.route === undefined) return translateFailure('unavailable')
-  const route = info.route
-  const llm = options.services.llm
-  if (llm === undefined) return translateFailure('unavailable')
-
-  const { system, user, requested } = buildPrompt(input)
-  const chars = requested.reduce((sum, item) => sum + item.text.length, 0)
-    + (input.title === undefined || input.title === null ? 0 : input.title.length)
+  // deadline 必须先于路由解析启动（2026-11-26 评审修复）：`listProviders` / `listModels`
+  // 属于外部目录读取，挂住时旧实现会在 `await resolveTranslateRoute` 上无限等，60s 承诺失效。
   const controller = new AbortController()
   let timedOut = false
+  let iterator: AsyncIterator<TranslateLlmChunk> | undefined
   const timer = setTimeout(() => { timedOut = true; controller.abort() }, options.deadlineMs ?? TRANSLATE_DEADLINE_MS)
   try {
+    // 与 translateInfo 共用同一份 30s 缓存（key 含显式路由三键）：既避免每批重复枚举全目录，
+    // 也让「设置页/文章面看到的 route」与「真正发出去的 route」在缓存窗口内保持一致。
+    const info = await promiseWithAbort(
+      probeTranslateInfo(options.services, { explicit: options.selection }),
+      controller.signal,
+    )
+    if (info === ABORTED || controller.signal.aborted || timedOut) return translateFailure('timeout')
+    if (!info.available || info.route === undefined) return translateFailure('unavailable')
+    const route = info.route
+    const llm = options.services.llm
+    if (llm === undefined) return translateFailure('unavailable')
+
+    const { system, user, requested } = buildPrompt(input)
+    const chars = requested.reduce((sum, item) => sum + item.text.length, 0)
+      + (input.title === undefined || input.title === null ? 0 : input.title.length)
     const stream = llm.stream({
       provider: route.provider,
       model: route.model,
@@ -450,7 +495,7 @@ export async function translateBatch(
     })
     const chunks: TranslateLlmChunk[] = []
     let finishKind: string | undefined
-    const iterator = stream[Symbol.asyncIterator]()
+    iterator = stream[Symbol.asyncIterator]()
     for (;;) {
       const next = await nextWithAbort(iterator, controller.signal)
       if (next === ABORTED) break
@@ -496,5 +541,16 @@ export async function translateBatch(
     return translateFailure('unavailable')
   } finally {
     clearTimeout(timer)
+    // 超时/中止时主动关闭消费侧迭代器：adapter 应当尊重 signal，但未来或测试适配器可能只是
+    // 挂住；不 return 会让底层流继续持有连接。不 await —— 关闭本身也可能挂，响应先返回。
+    if (iterator !== undefined && controller.signal.aborted) {
+      try {
+        void Promise.resolve(iterator.return?.()).catch(() => {
+          // 关闭失败不改变本次调用的失败分类：原因已经由 timeout / unavailable 决定。
+        })
+      } catch {
+        // 同步 return 抛错同样不覆盖既定的失败分类。
+      }
+    }
   }
 }

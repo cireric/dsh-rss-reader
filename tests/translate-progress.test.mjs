@@ -64,7 +64,7 @@ test('R7 04 视口优先：第一批只含屏幕内可见块，其余按文档�
     assert.equal(payloads.length, 2, 'b0 一批 + 剩余两块一批')
     assert.deepEqual(payloads[1].items.map((item) => item.id), ['b1', 'b2'], '剩余批按文档顺序')
     const entry = translationOf(h)
-    assert.equal(entry.done, 3)
+    assert.equal(entry.blocks.size, 3)
     assert.equal(entry.total, 3)
   } finally {
     h.cleanup()
@@ -103,7 +103,7 @@ test('R7 04 串行且守批次上限：同时只有一批在飞，≤12 块 / �
     assert.deepEqual(ids, blocks.map((_, index) => 'b' + index), '批次按文档顺序覆盖全篇、不重不漏')
     const entry = translationOf(h)
     assert.equal(entry.status, 'done')
-    assert.equal(entry.done, 30)
+    assert.equal(entry.blocks.size, 30)
     assert.equal(entry.total, 30)
   } finally {
     h.cleanup()
@@ -119,7 +119,7 @@ test('R7 04 进度：30000 字符恰好放行，15 批从 1/15 走到 15/15', sk
     const unsubscribe = h.store.subscribe(() => {
       const entry = translationOf(h)
       if (entry === undefined) return
-      const progress = entry.done + '/' + entry.total
+      const progress = entry.blocks.size + '/' + entry.total
       if (seen[seen.length - 1] !== progress) seen.push(progress)
     })
     h.$('[data-rss-translate]').click()
@@ -139,7 +139,7 @@ test('R7 04 进度：30000 字符恰好放行，15 批从 1/15 走到 15/15', sk
     assert.equal(h.$('[data-rss-translate-progress]').textContent, '已译 15/15 块')
     const entry = translationOf(h)
     assert.equal(entry.status, 'done')
-    assert.equal(entry.done, 15)
+    assert.equal(entry.blocks.size, 15)
     assert.equal(entry.total, 15)
   } finally {
     h.cleanup()
@@ -185,7 +185,7 @@ test('R7 04 长块三档：5000 字独占一批，6001 字原位标「段落过�
     assert.equal(h.$('[data-rss-translation-too-long="0"]').textContent, '段落过长未翻译')
     const entry = translationOf(h)
     assert.equal(entry.total, 2, 'Y 不含超长块')
-    assert.equal(entry.done, 2)
+    assert.equal(entry.blocks.size, 2)
     assert.equal(entry.status, 'done')
   } finally {
     h.cleanup()

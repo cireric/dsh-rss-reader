@@ -38,6 +38,8 @@ test('可翻块的文本口径：段落/标题/引用取 text，list 按 items.j
   assert.equal(translatableTextOf(BLOCKS[4]), '甲\n乙', 'list 的字符口径是 items.join(\'\\n\')')
   assert.equal(translatableTextOf(BLOCKS[6]), '引用')
   assert.equal(translatableTextOf(BLOCKS[1]), '', '不可翻块没有待译文本')
+  // 2026-11-26 评审：非字符串项不能 String() 成 "[object Object]" 发给模型；认不出就当空。
+  assert.equal(translatableTextOf({ kind: 'list', items: ['甲', null, 3] }), '甲\n\n', 'list 非字符串项不编造文本')
 })
 
 test('applyBatch：正常回包按 b + 块下标还原 Map，标题单独还原', () => {

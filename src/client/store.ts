@@ -12,7 +12,17 @@ import type { ReadingPreferences, ViewPreferences } from '../preferences.js'
 import { clampScrollTop } from '../list-scroll.js'
 import type { DisplayWindowRange } from '../display-window.js'
 import type { UnreadSplit } from '../unread.js'
-import { DEFAULT_TARGET_LANGUAGE, type TargetLanguage, type TranslateFailureReason } from '../translate-copy.js'
+import { DEFAULT_TARGET_LANGUAGE, type TargetLanguage } from '../translate-copy.js'
+import { RpcError } from './rpc-error.js'
+import type { TranslateConfirmRequest, TranslationEntry, TranslationMode } from './translate-state.js'
+
+// 翻译状态与 RpcError 的对外导出面保留在这里：既有组件 / 测试仍从 store 取它们；
+// 实现已经搬到叶子模块（2026-11-26 评审修复，消除 store ↔ translate-actions 的运行时循环）。
+export { RpcError } from './rpc-error.js'
+export {
+  hasTranslations, nextTranslationMode, TRANSLATION_MODES,
+  type TranslationBatchFailure, type TranslateConfirmRequest, type TranslationEntry, type TranslationMode,
+} from './translate-state.js'
 
 export type Filter = 'all' | 'unread' | 'starred'
 
@@ -142,88 +152,6 @@ export interface ExploreState {
   receipt: string | undefined
 }
 
-/**
- * 一个失败批的可见信息（R7 05 / spec §4.7）。
- *
- * `indices` 必须原样保留**整批**：重试按钮点一次要重发这一批的全部块，而不是只发批首块。
- * 失败批的块不在 `blocks` 里，所以渲染层能据此同时做到「每块位置显示原因」与
- * 「批首块位置只放一个重试按钮」。
- */
-export interface TranslationBatchFailure {
-  readonly indices: readonly number[]
-  readonly reason: TranslateFailureReason
-}
-
-/**
- * 一条正文的翻译内存态（R7，contract「客户端共享状态」）。
- *
- * 键 = `${itemId}:${contentVersion}:${target}`：正文版本变了旧译文自动不可见（spec §4.6），
- * 目标语言不同也不互相冒充。`blocks` 只收**非空译文**的块下标 → 渲染层不需要再判空。
- */
-export interface TranslationEntry {
-  readonly key: string
-  readonly blocks: ReadonlyMap<number, string>
-  /**
-   * 失败批：键 = 批首块下标。批失败不影响已完成块，也不让整篇立刻失败；
-   * 只有连续 3 批失败才写 `status: 'failed'`（spec §4.7）。
-   */
-  readonly failures: ReadonlyMap<number, TranslationBatchFailure>
-  done: number
-  total: number
-  /**
-   * `model` 取**回包**里的值（spec §4.4），不取客户端设置。
-   *
-   * 多批 / 重试之间模型可能变化。这里取**最后一条非空回包**：它代表最近一次真正产出译文的
-   * 路由，标签不会因为早期批次的旧模型而误导；「全程一致才显示」看似更保守，但路由切换时
-   * 会把整篇译文标成没有出处，读者反而无法核对是谁译的。
-   */
-  model?: string
-  status: 'running' | 'done' | 'stopped' | 'failed'
-  error?: string
-  /** 连续 3 批失败而整篇停止时的最后一类原因；顶层「翻译已停止：…」的文案来源。 */
-  stoppedReason?: TranslateFailureReason
-}
-
-/**
- * 首次外发确认框的待确认内容（R7 06 / spec §4.2）。
- *
- * 只放「确认框要显示的事实」：字符数与当前路由。真正的正文 / 几何留在组件与动作层 ——
- * 对话框是模态的，读者确认时再量一次视口即可，不必把 DOMRect 存进 store。
- */
-export interface TranslateConfirmRequest {
-  readonly chars: number
-  readonly provider: string
-  readonly model: string
-}
-
-/**
- * 这条译文是否「有译文可用」：至少一个块成功回填。
- *
- * 判据只留这一份：渲染层（切换器是否出现、三态是否回落原文）与动作层（`t` 该循环三态还是
- * 触发翻译）必须给同一个答案。全批失败 / 首批未回时条目仍然存在（有进度、有失败按钮），
- * 但 `blocks.size === 0` —— 只看「条目存在」会让切换器承诺一份并不存在的译文。
- */
-export function hasTranslations(entry: TranslationEntry | undefined): boolean {
-  return entry !== undefined && entry.blocks.size > 0
-}
-
-/** 正文的两态（2026-11-26 用户拍板）：原文 / 对照（原文 + 下层译文）。纯「译文」态已删除。 */
-export type TranslationMode = 'original' | 'parallel'
-
-/**
- * 两态的取值域：原文 → 对照 → 原文（`t` 键的语义，D14）。
- *
- * 只定义在这一处：切换按钮与 `t` 都按它走，别在组件里另抄一份。
- */
-export const TRANSLATION_MODES: readonly TranslationMode[] = ['original', 'parallel']
-
-/** `t` 的下一个态；认不出的值（理论上不可达）回落到原文，不抛错。 */
-export function nextTranslationMode(mode: TranslationMode): TranslationMode {
-  const at = TRANSLATION_MODES.indexOf(mode)
-  if (at < 0) return 'original'
-  return TRANSLATION_MODES[(at + 1) % TRANSLATION_MODES.length]
-}
-
 export interface ReaderState {
   items: ItemView[]
   feeds: FeedView[]
@@ -311,8 +239,8 @@ export interface ReaderState {
    */
   translations: ReadonlyMap<string, TranslationEntry>
   /**
-   * 三态（R7 03）。它是**全局面板内**的显示偏好，不持久化：刷新即回原文。
-   * 有译文条目时正文面默认用它（动作层在翻译开始时置 'translated'）；没有译文时
+   * 两态（R7 03）。它是**全局面板内**的显示偏好，不持久化：刷新即回原文。
+   * 有译文时正文面默认用它（动作层在全新一场开始时置 'parallel'）；没有译文时
    * 正文面按 'original' 渲染且不显示切换器 —— 判据在渲染层，本字段不表达「有没有译文」。
    */
   translationMode: TranslationMode
@@ -328,7 +256,8 @@ export interface ReaderState {
   translateConfirm: TranslateConfirmRequest | undefined
   /**
    * 翻译目标语言（R7 02 / spec §5.3）：与 `viewPreferences.translateTarget` 同一份状态。
-   * `Aa` 面板与设置页「显示」分区共读这一位；切换只影响新译文，旧译文按语言分键保留。
+   * 正文工具栏「译」旁边的裸下拉是唯一入口（2026-11-26 从设置页 / Aa 面板迁来）；
+   * 切换只影响新译文，旧译文按语言分键保留。
    */
   translateTarget: TargetLanguage
   /**
@@ -375,26 +304,6 @@ export interface ReaderState {
   loadingMore: boolean
   search?: SearchQuery
   searchRevision: number
-}
-
-/**
- * 宿主失败信封的 Error 投影（R7 05）。
- *
- * 为什么需要子类：失败原因住在 `details.reason` 里，而 `throw new Error(code + ': ' + message)`
- * 会把 details 丢掉 —— 客户端只能从中文文案反推原因（那是字符串前缀猜测，改一句文案就断）。
- * `message` 仍**逐字**保持 `code: message`：既有调用点只依赖 `instanceof Error` 与这句文本，
- * 日志与错误提示不受影响；新的翻译编排用 `instanceof RpcError` 读 `code` / `details`。
- */
-export class RpcError extends Error {
-  readonly code: string
-  readonly details: object
-
-  constructor(code: string, message: string, details: object) {
-    super(code + ': ' + message)
-    this.name = 'RpcError'
-    this.code = code
-    this.details = details
-  }
 }
 
 /**

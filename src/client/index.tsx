@@ -33,7 +33,8 @@ export { createReaderStore }
 // **仅供单测取用**（R7 05）：失败信封的 details 透传住在 browserRpc 里，而 client 半只出
 // 单文件 bundle，测试拿不到 store.ts 的私有实现。测试用导出的 RpcError 构造假 rpc 的失败，
 // 并直接喂 browserRpc 一个信封断言 code / details / message。不是运行时需要的能力。
-export { browserRpc, RpcError } from './store.js'
+export { browserRpc } from './store.js'
+export { RpcError } from './rpc-error.js'
 // **仅供单测取用的 re-export**：键盘路由住在 ./keyboard-routing.ts，而 client 半只出单文件
 // bundle（tsdown codeSplitting: false），.mjs 测试无法直接 import client 目录下的模块。
 // tests/keyboard-routing.test.mjs 用 vm 加载 lib/client.js 后从这里取它来驱动那 10 处 view 守卫。
@@ -1147,7 +1148,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
             onCloseLightbox={() => setLightboxSrc(undefined)}
             translation={articleTranslation}
             translationPending={articleTranslationPending}
-            // 三态（R7 03）：值在 store，正文面只照着画；切换动作只改渲染态、不发 rpc。
+            // 两态（R7 03）：值在 store，正文面只照着画；切换动作只改渲染态、不发 rpc。
             translationMode={state.translationMode}
             onTranslationMode={store.setTranslationMode}
             // 可用性与目标语言（R7 02）：不可用时工具栏不渲染语言下拉与「译」按钮。

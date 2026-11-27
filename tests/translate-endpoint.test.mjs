@@ -5,11 +5,15 @@
  * 所以桩 store 只需要存在（端点若碰它，说明纯函数式契约被破坏了）。假 llm 的 `stream()`
  * 返回异步块序列，超时用例用「永不 resolve 的流 + 20ms deadline」——不 sleep 60 秒。
  */
-import { test } from 'node:test'
+import { test, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { createDispatch } from '../lib/endpoints.js'
 import { Config } from '../lib/config.js'
-import { maxTokensFor } from '../lib/translate.js'
+import { invalidateTranslateInfoCache, maxTokensFor } from '../lib/translate.js'
+
+// 30s 探测缓存是模块级状态：每个用例必须从干净缓存开始，否则前一个用例的 route 会遮住
+// “路由解析挂起”这类用例（2026-11-26 评审新增）。
+beforeEach(() => { invalidateTranslateInfoCache() })
 
 const STORE = {}
 
@@ -151,6 +155,26 @@ test('60s deadline 可注入：永不结束的流在 20ms 后回 timeout，而�
   assert.equal(result.error.details.reason, 'timeout')
   assert.equal(result.error.message, '超时（60s）')
   assert.ok(Date.now() - started < 1000, '必须真的按注入的 deadline 返回，不能等 60s')
+})
+
+test('路由解析也受 deadline 约束：listModels 挂起时回 timeout，不挂住', async () => {
+  // 2026-11-26 评审修复：旧实现先 resolveTranslateRoute 再启动 timer，`listModels` 挂住时
+  // 60s 承诺失效；这里用 20ms 注入 deadline，确认路由探测也在 deadline 内。
+  let release
+  const hanging = new Promise((resolve) => { release = resolve })
+  const llm = {
+    listProviders: () => [{ id: 'p' }],
+    listModels: async () => await hanging,
+    stream: () => { throw new Error('路由都没解析出来，不该走到 stream') },
+  }
+  const dispatch = dispatchWith({ services: { llm, agentDefaultModel: route() }, deadlineMs: 20 })
+  const started = Date.now()
+  const result = await dispatch('translateBatch', PAYLOAD)
+  assert.equal(result.ok, false)
+  assert.equal(result.error.code, 'translate-failed')
+  assert.equal(result.error.details.reason, 'timeout')
+  assert.ok(Date.now() - started < 1000, '必须真的按注入的 deadline 返回，不能等 60s')
+  release([{ id: 'm' }])
 })
 
 test('输出被截断（finish=max-tokens）⇒ translate-failed / truncated', async () => {

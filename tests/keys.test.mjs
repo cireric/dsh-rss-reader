@@ -217,13 +217,13 @@ test("产物字节：lib/keys.js 里存在字面量 return 'toggleImages'（不�
 })
 
 /**
- * `t` = 三态循环（R7 03，spec §4.1 / §4.5 / 验收 14）。
+ * `t` = 两态循环（R7 03，spec §4.1 / §4.5 / 验收 14）。
  *
  * 两处必须同步：`resolveReaderKey` 认它、`READER_KEY_HELP` 写它。帮助表反向覆盖测试只能
  * 保证「动作出现了」，不能保证它的视图范围写对 —— 所以这里同时钉 `scope: 'article'`：
  * `t` 在列表页什么都改不了（正文都没有），标成 any 就是让帮助浮窗撒谎。
  */
-test('t 是三态循环键，且只在正文页生效（R7 03 / 验收 14）', () => {
+test('t 是两态循环键，且只在正文页生效（R7 03 / 验收 14）', () => {
   assert.equal(resolveReaderKey('t'), 'cycleTranslation')
   // 大写 T 不绑：与 i 同一口径，帮助表写的是小写 t，实现只认小写。
   assert.equal(resolveReaderKey('T'), 'none')
@@ -232,6 +232,7 @@ test('t 是三态循环键，且只在正文页生效（R7 03 / 验收 14）', (
     .find((entry) => entry.bindings.some((binding) => binding.action === 'cycleTranslation'))
   assert.ok(row !== undefined, '帮助表里必须有 cycleTranslation 那一行')
   assert.equal(row.scope, 'article', 't 只在正文页生效')
+  assert.match(row.summary, /原文 \/ 对照/, '帮助必须写实际的两态，不许再出现第三次“译文态”')
   assert.ok(row.label.includes('t'), '帮助行要写出它的绑定键')
   assert.equal(READER_HELP_SCOPE_LABEL['article'], '仅正文')
 })
