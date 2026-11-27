@@ -3470,4 +3470,15 @@ export const MUTATIONS = [
     judgeTests: ['R7 06 首次点「译」：确认框写清路由与字符数；取消零副作用'],
     from: 'if (state.settings?.effective.translateNoticeAck !== true) {',
     to: 'if (false) {' },
+
+  // ── R15 04：目录投影修正（2026-11-27）────────────────────────────────────
+  // 把 `requireConfig` 的三态推导改回布尔读：实例的真实类型是 `false | ConfigItem[]`
+  //（spec §1.3 实测 180 条非空），数组永远不等于 `true` ⇒ 全部落成 none，
+  // 180 条需要配置的路由在界面上一个「需配置」徽标都没有（A9 的必填 / 可选文案永不出现）。
+  // from 照构建产物 lib/explore-catalog.js 的实际字节写（pitfalls 一、1.4），独立实测 OCCURRENCES=1。
+  { id: 'rsshub-requireConfig 当布尔', file: 'lib/explore-catalog.js',
+    judges: ['explore-catalog.test.mjs'],
+    judgeTests: ['projectCatalog：requireConfig 三态推导（false / 空数组 / 缺字段 ⇒ none，全可选 ⇒ optional，含必填 ⇒ required）'],
+    from: "        requireConfig: requireConfigStateOf(record['requireConfig']),",
+    to: "        requireConfig: record['requireConfig'] === true," },
 ]

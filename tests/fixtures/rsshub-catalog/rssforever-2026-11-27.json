@@ -1,0 +1,277 @@
+{
+  "163": {
+    "routes": {
+      "/music/playlist/:id": {
+        "path": "/music/playlist/:id",
+        "categories": [
+          "multimedia"
+        ],
+        "example": "/163/music/playlist/35798529",
+        "parameters": {
+          "id": "歌单 id, 可在歌单页 URL 中找到"
+        },
+        "features": {
+          "requireConfig": [
+            {
+              "name": "NCM_COOKIES",
+              "optional": true,
+              "description": "网易云音乐登陆后的 cookie 值，可在浏览器控制台通过`document.cookie`获取。"
+            }
+          ],
+          "requirePuppeteer": false,
+          "antiCrawler": true,
+          "supportBT": false,
+          "supportPodcast": false,
+          "supportScihub": false
+        },
+        "name": "歌单歌曲",
+        "maintainers": [
+          "DIYgod"
+        ],
+        "location": "music/playlist.ts"
+      }
+    },
+    "apiRoutes": {},
+    "name": "网易公开课",
+    "url": "163.com",
+    "description": "::: tip\n部分歌单及听歌排行信息为登陆后可见，自建时将环境变量`NCM_COOKIES`设为登陆后的 Cookie 值，即可正常获取。\n:::",
+    "lang": "zh-CN"
+  },
+  "2048": {
+    "routes": {
+      "/:id?": {
+        "path": "/:id?",
+        "categories": [
+          "multimedia"
+        ],
+        "example": "/2048/2",
+        "parameters": {
+          "id": "板块 ID, 见下表，默认为最新合集，即 `3`，亦可在 URL 中找到, 例如, `thread.php?fid-3.html`中, 板块 ID 为`3`"
+        },
+        "features": {
+          "requireConfig": false,
+          "requirePuppeteer": false,
+          "antiCrawler": false,
+          "supportBT": true,
+          "supportPodcast": false,
+          "supportScihub": false,
+          "nsfw": true
+        },
+        "name": "论坛",
+        "maintainers": [
+          "nczitzk"
+        ],
+        "description": "| 最新合集 | 亞洲無碼 | 日本騎兵 | 歐美新片 | 國內原創 | 中字原創 | 三級寫真 |\n| -------- | -------- | -------- | -------- | -------- | -------- | -------- |\n| 3        | 4        | 5        | 13       | 15       | 16       | 18       |\n\n| 有碼.HD | 亞洲 SM.HD | 日韓 VR/3D | 歐美 VR/3D | S-cute / Mywife / G-area |\n| ------- | ---------- | ---------- | ---------- | ------------------------ |\n| 116     | 114        | 96         | 97         | 119                      |\n\n| 網友自拍 | 亞洲激情 | 歐美激情 | 露出偷窺 | 高跟絲襪 | 卡通漫畫 | 原創达人 |\n| -------- | -------- | -------- | -------- | -------- | -------- | -------- |\n| 23       | 24       | 25       | 26       | 27       | 28       | 135      |\n\n| 唯美清純 | 网络正妹 | 亞洲正妹 | 素人正妹 | COSPLAY | 女优情报 | Gif 动图 |\n| -------- | -------- | -------- | -------- | ------- | -------- | -------- |\n| 21       | 274      | 276      | 277      | 278     | 29       |          |\n\n| 獨家拍攝 | 稀有首發 | 网络见闻 | 主播實錄 | 珍稀套圖 | 名站同步 | 实用漫画 |\n| -------- | -------- | -------- | -------- | -------- | -------- | -------- |\n| 213      | 94       | 283      | 111      | 88       | 131      | 180      |\n\n| 网盘二区 | 网盘三区 | 分享福利 | 国产精选 | 高清福利 | 高清首发 | 多挂原创 |\n| -------- | -------- | -------- | -------- | -------- | -------- | -------- |\n| 72       | 272      | 195      | 280      | 79       | 216      | 76       |\n\n| 磁链迅雷 | 正片大片 | H-GAME | 有声小说 | 在线视频 | 在线快播影院 |\n| -------- | -------- | ------ | -------- | -------- | ------------ |\n| 43       | 67       | 66     | 55       | 78       | 279          |\n\n| 综合小说 | 人妻意淫 | 乱伦迷情 | 长篇连载 | 文学作者 | TXT 小说打包 |\n| -------- | -------- | -------- | -------- | -------- | ------------ |\n| 48       | 103      | 50       | 54       | 100      | 109          |\n\n| 聚友客栈 | 坛友自售 |\n| -------- | -------- |\n| 57       | 136      |",
+        "location": "index.tsx"
+      }
+    },
+    "apiRoutes": {},
+    "name": "2048 核基地",
+    "url": "hjd2048.com",
+    "lang": "zh-CN"
+  },
+  "github": {
+    "routes": {
+      "/branches/:user/:repo": {
+        "path": "/branches/:user/:repo",
+        "categories": [
+          "programming"
+        ],
+        "example": "/github/branches/DIYgod/RSSHub",
+        "parameters": {
+          "user": "User name",
+          "repo": "Repo name"
+        },
+        "features": {
+          "requireConfig": false,
+          "requirePuppeteer": false,
+          "antiCrawler": false,
+          "supportBT": false,
+          "supportPodcast": false,
+          "supportScihub": false
+        },
+        "radar": [
+          {
+            "source": [
+              "github.com/:user/:repo/branches",
+              "github.com/:user/:repo"
+            ]
+          }
+        ],
+        "name": "Repo Branches",
+        "maintainers": [
+          "max-arnold"
+        ],
+        "location": "branches.ts"
+      }
+    },
+    "apiRoutes": {},
+    "name": "GitHub",
+    "url": "github.com",
+    "description": "::: tip\nGitHub provides some official RSS feeds:\n\n- Repo releases: `https://github.com/:owner/:repo/releases.atom`\n- Repo commits: `https://github.com/:owner/:repo/commits.atom`\n- User activities: `https://github.com/:user.atom`\n- Private feed: `https://github.com/:user.private.atom?token=:secret` (Note: You can ONLY obtain this url via an [API](https://docs.github.com/en/rest/activity/feeds?apiVersion=2022-11-28) call with a [Personal Access Token](https://github.com/settings/tokens/new) with **ENOUGH** scopes now.)\n- Wiki history: `https://github.com/:owner/:repo/wiki.atom`\n\n:::",
+    "lang": "en"
+  },
+  "dianping": {
+    "routes": {
+      "/user/:id": {
+        "path": "/user/:id",
+        "categories": [
+          "shopping"
+        ],
+        "example": "/dianping/user/808259118",
+        "parameters": {
+          "id": "User id，打开网页端从 URL 中获取，在 `/member/:id` 中"
+        },
+        "features": {
+          "requireConfig": [
+            {
+              "name": "DIANPING_COOKIE",
+              "optional": false,
+              "description": "大众点评的 Cookie"
+            }
+          ],
+          "requirePuppeteer": false,
+          "antiCrawler": false,
+          "supportBT": false,
+          "supportPodcast": false,
+          "supportScihub": false
+        },
+        "radar": [
+          {
+            "source": [
+              "dianping.com/member/:id"
+            ],
+            "target": "/dianping/user/:id"
+          },
+          {
+            "source": [
+              "m.dianping.com/userprofile/:id"
+            ],
+            "target": "/dianping/user/:id"
+          }
+        ],
+        "name": "用户动态",
+        "maintainers": [
+          "pseudoyu"
+        ],
+        "description": "获取用户点评、签到、攻略等动态。",
+        "location": "user.ts"
+      }
+    },
+    "apiRoutes": {},
+    "name": "大众点评",
+    "url": "dianping.com",
+    "lang": "zh-CN"
+  },
+  "instagram": {
+    "routes": {
+      "/:category/:key": {
+        "path": "/:category/:key",
+        "categories": [
+          "social-media"
+        ],
+        "view": 1,
+        "example": "/instagram/user/stefaniejoosten",
+        "parameters": {
+          "category": {
+            "description": "Feed category",
+            "default": "user",
+            "options": [
+              {
+                "label": "User",
+                "value": "user"
+              },
+              {
+                "label": "Tags",
+                "value": "tags"
+              }
+            ]
+          },
+          "key": "Username / Hashtag name"
+        },
+        "features": {
+          "requireConfig": [
+            {
+              "name": "IG_PROXY",
+              "optional": true,
+              "description": ""
+            },
+            {
+              "name": "IG_USERNAME",
+              "description": "Instagram username"
+            },
+            {
+              "name": "IG_PASSWORD",
+              "description": "Instagram password, due to [Instagram Private API](https://github.com/dilame/instagram-private-api) restrictions, you have to setup your credentials on the server. 2FA is not supported."
+            }
+          ],
+          "requirePuppeteer": false,
+          "antiCrawler": true,
+          "supportBT": false,
+          "supportPodcast": false,
+          "supportScihub": false
+        },
+        "name": "User Profile / Hashtag - Private API",
+        "maintainers": [
+          "oppilate",
+          "DIYgod"
+        ],
+        "location": "private-api/index.ts"
+      }
+    },
+    "apiRoutes": {},
+    "name": "Instagram",
+    "url": "www.instagram.com",
+    "description": "::: tip\nIt's highly recommended to deploy with Redis cache enabled.\n:::",
+    "lang": "en"
+  },
+  "0xxx": {
+    "routes": {
+      "/:filter?": {
+        "path": "/:filter?",
+        "name": "Source",
+        "url": "0xxx.ws",
+        "maintainers": [
+          "nczitzk"
+        ],
+        "example": "/0xxx/category=Movie-HD-1080p",
+        "parameters": {
+          "filter": {
+            "description": "Filter"
+          }
+        },
+        "description": "::: tip\nTo subscribe to [Movie HD 1080p](https://0xxx.ws?category=Movie-HD-1080p), where the source URL is `https://0xxx.ws?category=Movie-HD-1080p`, extract the certain parts from this URL to be used as parameters, resulting in the route as [`/0xxx/category=Movie-HD-1080p`](https://rsshub.app/0xxx/category=Movie-HD-1080p).\n:::",
+        "categories": [
+          "multimedia"
+        ],
+        "features": {
+          "requireConfig": false,
+          "requirePuppeteer": false,
+          "antiCrawler": false,
+          "supportRadar": true,
+          "supportBT": false,
+          "supportPodcast": false,
+          "supportScihub": false,
+          "nfsw": true
+        },
+        "radar": [
+          {
+            "source": [
+              "0xxx.ws"
+            ]
+          }
+        ],
+        "view": 0,
+        "location": "index.ts"
+      }
+    },
+    "apiRoutes": {},
+    "name": "0xxx.ws",
+    "url": "0xxx.ws",
+    "categories": [
+      "multimedia"
+    ],
+    "description": "Best 0day Porn Source",
+    "lang": "en"
+  }
+}

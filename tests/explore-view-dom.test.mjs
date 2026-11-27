@@ -69,18 +69,18 @@ const BRANCHES = {
   namespace: 'github', siteName: 'GitHub', path: '/branches/:user/:repo', name: '仓库分支',
   categories: ['programming'], example: '/github/branches/DIYgod/RSSHub',
   parameters: { user: '用户名', repo: '仓库名' },
-  features: { requireConfig: false, requirePuppeteer: false, antiCrawler: true, supportPodcast: false },
+  features: { requireConfig: 'none', requirePuppeteer: false, antiCrawler: true, supportPodcast: false, nsfw: false },
 }
 const ISSUES = {
   namespace: 'github', siteName: 'GitHub', path: '/issues/:user/:repo/:state?', name: '仓库 Issues',
   categories: ['programming'], example: '/github/issues/DIYgod/RSSHub/open',
   parameters: { user: '用户名', repo: '仓库名', state: '状态' },
-  features: { requireConfig: true, requirePuppeteer: false, antiCrawler: false, supportPodcast: true },
+  features: { requireConfig: 'required', requirePuppeteer: false, antiCrawler: false, supportPodcast: true, nsfw: false },
 }
 const ZHIHU = {
   namespace: 'zhihu', siteName: '知乎', path: '/people/activities/:id', name: '用户动态',
   categories: ['social'], example: undefined, parameters: {},
-  features: { requireConfig: false, requirePuppeteer: false, antiCrawler: false, supportPodcast: false },
+  features: { requireConfig: 'none', requirePuppeteer: false, antiCrawler: false, supportPodcast: false, nsfw: false },
 }
 
 function catalogPage(items = [BRANCHES, ISSUES, ZHIHU], totals = {}) {
@@ -353,7 +353,7 @@ test('R8b 04 列表行：站点名可点、路由名 / 模板 / 参数说明 / e
     assert.match(branches.querySelector('[data-rss-explore-example]')?.textContent ?? '', /DIYgod\/RSSHub/)
     assert.equal(zhihu.querySelector('[data-rss-explore-example]') ?? null, null, '没有 example 的路由不许显示示例行')
 
-    // 事实徽标：四布尔逐条，false 不显示
+    // 事实徽标：true 才显示
     assert.notEqual(branches.querySelector('[data-rss-explore-feature="antiCrawler"]'), null, '反爬徽标必须出现')
     assert.equal(branches.querySelector('[data-rss-explore-feature="requirePuppeteer"]'), null, 'false 的徽标不许出现')
     assert.notEqual(issues.querySelector('[data-rss-explore-feature="requireConfig"]'), null, '需配置徽标必须出现')
@@ -366,6 +366,37 @@ test('R8b 04 列表行：站点名可点、路由名 / 模板 / 参数说明 / e
     const after = h.calls('exploreCatalog').at(-1).payload
     assert.equal(after?.namespace, 'github', '点站点名必须把 namespace 作为筛选条件重取第一页')
     assert.equal(after?.cursor, undefined, '钻取 = 换筛选 = 第一页，不许带旧游标')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R15 04 需配置徽标：required / optional 显示对应文案，none 不显示', skip, async () => {
+  // 三态必须在界面上分得开：只显示「需配置」会让用户以为可选配置也是必填（A9）。
+  const features = (requireConfig) => ({
+    requireConfig, requirePuppeteer: false, antiCrawler: false, supportPodcast: false, nsfw: false,
+  })
+  const route = (path, requireConfig) => ({
+    namespace: 'shapes', siteName: '形态样本', path, name: path,
+    categories: [], parameters: {}, features: features(requireConfig),
+  })
+  const h = await mount({
+    catalog: () => ({
+      value: catalogPage(
+        [route('/required/:id', 'required'), route('/optional/:id', 'optional'), route('/none/:id', 'none')],
+        { siteTotal: 1, routeTotal: 3 },
+      ),
+    }),
+  })
+  try {
+    await openExploreFromFeeds(h)
+    const row = (path) => h.$$('[data-rss-explore-row]')
+      .find((item) => item.getAttribute('data-rss-explore-path') === path)
+    const badge = (path) => row(path).querySelector('[data-rss-explore-feature="requireConfig"]')
+
+    assert.equal(badge('/required/:id')?.textContent, '需配置（必填）', '必填数组必须显示「需配置（必填）」')
+    assert.equal(badge('/optional/:id')?.textContent, '需配置（可选）', '全可选数组必须显示「需配置（可选）」')
+    assert.equal(badge('/none/:id'), null, 'none 不许显示任何需配置徽标')
   } finally {
     h.cleanup()
   }
@@ -533,14 +564,14 @@ test('R8b 04 预填提示：example 缺省 / 段数对不上 ⇒ 字段留空并
   const NO_EXAMPLE = {
     namespace: 'zhihu', siteName: '知乎', path: '/people/activities/:id', name: '用户动态',
     categories: ['social'], parameters: {},
-    features: { requireConfig: false, requirePuppeteer: false, antiCrawler: false, supportPodcast: false },
+    features: { requireConfig: 'none', requirePuppeteer: false, antiCrawler: false, supportPodcast: false, nsfw: false },
   }
   // 段数对不上：模板要 3 段（branches + user + repo），example 只给了 2 段 ⇒ prefillValues 返回空
   const MISMATCH = {
     namespace: 'github', siteName: 'GitHub', path: '/labels/:user/:repo', name: '段数对不上',
     categories: ['programming'], example: '/github/labels/DIYgod',
     parameters: { user: '用户名', repo: '仓库名' },
-    features: { requireConfig: false, requirePuppeteer: false, antiCrawler: false, supportPodcast: false },
+    features: { requireConfig: 'none', requirePuppeteer: false, antiCrawler: false, supportPodcast: false, nsfw: false },
   }
   const h = await mount({
     catalog: () => ({ value: catalogPage([BRANCHES, NO_EXAMPLE, MISMATCH], { siteTotal: 2, routeTotal: 3 }) }),
@@ -575,12 +606,12 @@ test('R8b 04 拼地址回包竞态：两个站点同 path 时，切站后旧回�
   const ALPHA_ROOT = {
     namespace: 'alpha', siteName: 'Alpha', path: '/', name: '站点首页',
     categories: [], parameters: {},
-    features: { requireConfig: false, requirePuppeteer: false, antiCrawler: false, supportPodcast: false },
+    features: { requireConfig: 'none', requirePuppeteer: false, antiCrawler: false, supportPodcast: false, nsfw: false },
   }
   const BETA_ROOT = {
     namespace: 'beta', siteName: 'Beta', path: '/', name: '站点首页',
     categories: [], parameters: {},
-    features: { requireConfig: false, requirePuppeteer: false, antiCrawler: false, supportPodcast: false },
+    features: { requireConfig: 'none', requirePuppeteer: false, antiCrawler: false, supportPodcast: false, nsfw: false },
   }
   // 回包由用例手动放行：在飞期间切到另一站点的同 path 路由，模拟旧回包迟到。
   let releaseBuild
@@ -646,7 +677,7 @@ test('R8b 04 加载更多：带游标续页并追加（不是重取第一页）'
     namespace: 'github', siteName: 'GitHub', path: '/releases/:user/:repo', name: '仓库 Releases',
     categories: ['programming'], example: '/github/releases/DIYgod/RSSHub',
     parameters: { user: '用户名', repo: '仓库名' },
-    features: { requireConfig: false, requirePuppeteer: false, antiCrawler: false, supportPodcast: false },
+    features: { requireConfig: 'none', requirePuppeteer: false, antiCrawler: false, supportPodcast: false, nsfw: false },
   }]
   const h = await mount({
     catalog: (payload) => payload?.cursor === 'C1'

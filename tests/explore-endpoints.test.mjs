@@ -26,7 +26,7 @@ const OTHER_CATALOG = OTHER + '/api/namespace'
 /** 长文本占位：漏进回包时，20 万字符的响应体断言会当场翻红（D12 / B18）。 */
 const LONG_TEXT = '长'.repeat(600)
 
-/** 实测形状的 features 七个布尔（spec §1.1）；投影只留四个。 */
+/** 实测形状的 features：七个事实键，`requireConfig` 是 `false | ConfigItem[]`（spec §1.1 / §4.2.1）。 */
 function featuresOf(overrides = {}) {
   return {
     requireConfig: false,
@@ -118,7 +118,7 @@ function catalogOf() {
           name: '仓库发布',
           categories: ['programming'],
           parameters: { user: '用户名', repo: '仓库名' },
-          features: { requireConfig: true, antiCrawler: true },
+          features: { requireConfig: [{ name: 'GITHUB_TOKEN', optional: false }], antiCrawler: true },
         }),
         // 坏路由：值不是对象 / path 不是字符串 / name 缺失 ⇒ 逐条跳过（B20）。
         nullRoute: null,
