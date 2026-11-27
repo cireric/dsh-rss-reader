@@ -1,6 +1,6 @@
 # 功能状态
 
-> 版本 **0.1.0**（工作树已含 R1–R7、R9、R11、R12、R14 与 R8a，尚未发版）· 更新 2026-11-26 · **本地 main 已合入 R9 / R14（merge `a59baf4`），未 push**（origin/main 停在 `516a79b`，即 v0.2.0 tag）；**R7 已合入 main `784a2fc`（代码基线 `26ab6ad`）** · 未打 tag、无 npm publish
+> 版本 **0.1.0**（本地 main 已含 R1–R7、R9、R11、R12、R14 与 R8a，尚未发版）· 更新 2026-11-27 · **本地 main 已合入 R7（merge `784a2fc`，代码基线 `26ab6ad`）、R9 / R14（merge `a59baf4`）、R11、R8a**，未 push（origin/main 停在 `516a79b`，即 v0.2.0 tag）· 未打新 tag、无 npm publish
 >
 > 状态词只有五个，按「证据离真机有多远」排：
 > **已落地**（代码在 `src/`、门槛绿）→ **隔离 smoke**（测试或合成夹具通过）→ **真机确认**（活体宿主装载过）→

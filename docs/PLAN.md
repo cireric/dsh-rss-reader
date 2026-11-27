@@ -183,6 +183,7 @@
 ## 账目 / 已知不一致
 
 - **v0.2.0**：git tag `v0.2.0` 在 `516a79b`（2026-11-22），但 `package.json` 仍是 `0.1.0`，`CHANGELOG.md` 的 R1–R4 / R5 / R12 仍标「未发布」，`docs/feature-status.md` 仍写「版本 0.1.0…尚未发版」。代码状态不受影响，但发布账目要补，否则「v0.2.0 到底包含什么」不可追溯。
+- **R7 发布账目**：R7 已合入 main `784a2fc`（代码基线 `26ab6ad`）；`package.json` 仍 `0.1.0`，`CHANGELOG.md` 的 R7 小节仍标「未发布」，版本号与 tag 待拍板。
 - **R6 文档面**：`CHANGELOG.md` / `docs/feature-status.md` 已补 R6；`spec.md` 头已回填 `resolved（8/8）`。
 - **R6 真机**：三项观感未验（图片 640 限高、灯箱长截图溢出、Referer 实发）；不要因为 tag 已打就写成「真机全验」。
 - **R9 / R14 账目**：R9（评审修复 `e317e73`）与 R14（`6153927`）已合入 **main `a59baf4`**，**未打 tag、未 push**；`CHANGELOG.md` 已补两节，`docs/feature-status.md` 已加两行。真机与真实站点证据在 `.scratch/r9-archive/issues/04-real-device.md` 与 `.scratch/r14-feed-scope/issues/01-feed-scope.md`。
