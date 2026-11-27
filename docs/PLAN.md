@@ -16,13 +16,13 @@
 | R3 | 订阅源排序 | 已完成 | 4/4 `done` | 真机三步；`config.json` 的 `feedOrder` 可选字段 |
 | R4 | 正文抓取失败回退 | 已完成 | 2/2 `done` | 真机三步；回退内容不写正文缓存 |
 | R5 | 正文内联语义与表格 | 已完成 | 6/6 `done` | 隔离 smoke；窄栏表格观感未真人验收 |
-| R6 | 图片折叠与灯箱 | 已完成 | 8/8 `resolved` | 门槛/真机三步已过；图片观感、灯箱尺寸、Referer 实发三项未验 |
-| R12 | 作者元数据与作者搜索 | 已完成 | 8/8 `resolved` | v4→v5 真机升级；GUI 观感未走查 |
+| R6 | 图片折叠与灯箱 | 已完成 | 8/8 `resolved` | 门槛/真机三步已过；图片观感、灯箱尺寸已 GUI 走查（2026-11-27）；仅 Referer 实发未验 |
+| R12 | 作者元数据与作者搜索 | 已完成 | 8/8 `resolved` | v4→v5 真机升级；GUI 观感已走查（2026-11-27） |
 | R11 v1 | RSS 设置页 v1（入口 B） | 已完成 | 7/7 `resolved` | `settings.json` 稀疏覆盖 + `settings` / `saveSettings` 端点 + 五分区设置页；1054/1054、变异 360/360、真机三步；用户人工验收可用（2026-11-22）。遗留：`<460px` 观感、真实 0600 权限位、真实重启保持未单独复核 |
 | R8a | RSSHub Radar 发现（公共实例） | 已完成 | 5/5 `resolved` | 1142/1142、全量变异 368/368 · 0 幸存、真机三步；真实实例验收（GitHub 端到端 / B 站 / 36kr 缺参 / 私网拒绝 / 缓存）。遗留：GUI 走查（playwright target crashed）、添加未落真实订阅列表、settings 真实重启未验 |
-| R9 | 归档页回溯更早文章 | 已完成 | 4/4 `resolved` | 1191/1191、全量变异 378/378 · 0 幸存、真机三步；真实站点（真实库快照）阮一峰 8 篇 / 云风 2 篇 / 重复 0。遗留：GUI 走查、未写实时库、两级日期规则无真实样本 |
+| R9 | 归档页回溯更早文章 | 已完成 | 4/4 `resolved` | 1191/1191、全量变异 378/378 · 0 幸存、真机三步；真实站点（真实库快照）阮一峰 8 篇 / 云风 2 篇 / 重复 0；GUI 走查（2026-11-27）。遗留：未写实时库、两级日期规则无真实样本 |
 | R8b | RSSHub 路由表探索 | 已完成 | 5/5 `resolved` | 1271/1271、全量变异 392/392 · 0 幸存、真机三步；真实实例（`rsshub.rssforever.com`，经代理）1589 站 / 3136 路由 / 24 分类，首拉 7.9 s；GitHub 端到端拼出 `/github/branches/DIYgod/RSSHub` 并抓回 11 条。遗留：GUI 观感（playwright target crashed）、152 条多路径路由按 §4.2 跳过 |
-| R7 | 一键翻译 | 已完成 | 7/7 `resolved` | 1380/1380、全量变异 407/407 · 0 幸存（评审修复后实跑，3 workers）、真机三步（reload 前后 `[active]` / 当日日志 0 条「装载失败」/ 路由 401）；真模型三篇：短 265 字 1 批 5.2 s，中 1896 字 2 批 27.2 s（首批 truncated → 会话 effort 外溢修复后同批 9.8 s），长 8235 字 8 批 94.5 s 全过。遗留：真实 GUI 原文 / 对照切换与视口优先未验；译文刷新即丢（设计） |
+| R7 | 一键翻译 | 已完成 | 7/7 `resolved` | 1380/1380、全量变异 407/407 · 0 幸存（评审修复后实跑，3 workers）、真机三步（reload 前后 `[active]` / 当日日志 0 条「装载失败」/ 路由 401）；真模型三篇：短 265 字 1 批 5.2 s，中 1896 字 2 批 27.2 s（首批 truncated → 会话 effort 外溢修复后同批 9.8 s），长 8235 字 8 批 94.5 s 全过；原文 / 对照、视口优先、确认框与进度条已 GUI 走查（2026-11-27）。遗留：译文刷新即丢（设计） |
 | R10 | 右侧边栏单栏 | 暂缓 | — | 第二套 UI；现有 `u` 已收左栏 |
 | R13 | `/rss` 命令 | 暂缓 | — | 与 4 个 Agent 工具重复 |
 | R14 | 订阅源范围宿主分页 | 已完成 | 1/1 `resolved` | 648 条库 / 27 条源：源页 27 无续页；1197/1197、全量变异 381/381 · 0 幸存 |
@@ -71,14 +71,14 @@
 - **状态**：已完成（8/8 `resolved`）。
 - **交付**：`article-pane.tsx` 的图片折叠 / 三态 / 灯箱、`preferences.ts` 的 `expandImages`、`keys.ts` 的 `i` 键、`referrerPolicy`。
 - **证据**：R6 票 01–08 的测试与变异（新增 15 条，全量复核 0 幸存）；`gate.sh` 全绿；真机三步。
-- **遗留**：真机三项未验——① 图片观感（640 限高）② 灯箱尺寸（长截图溢出）③ `Referer` 是否真的不发（需抓包 / 服务器日志）。`CHANGELOG` / `feature-status` 已于 2026-11-27 回填。
+- **遗留**：图片观感与灯箱尺寸已由用户 GUI 走查（2026-11-27）；`Referer` 实发仍需抓包 / 服务器日志。`CHANGELOG` / `feature-status` 已于 2026-11-27 回填。
 
 ### R12 作者元数据与作者搜索
 
 - **状态**：已完成（8/8 `resolved`）。
 - **交付**：`src/author.ts` 的 `normalizeAuthor`、`items.author` + v1–v4→v5 四条升级路径、store 读写、refresh 落库 / 机会式补全、identity 合并、搜索谓词、列表 / 正文 / 工具投影。
 - **证据**：`migration-author.test.mjs` 9 条、`parse.test.mjs`、`domain.test.mjs`、`store-sqlite.test.mjs`、`refresh.test.mjs`、`identity.test.mjs`、`search.test.mjs`、`scroll-dom.test.mjs`、`tools.test.mjs`；全量 `npm test` 983/983、变异 342/342、0 幸存；真机 v4→v5 升级（580 条 / 34 位作者 / 438 已读 / 3 星标不变）。
-- **遗留**：真人 GUI 走查未做；Atom feed 级 `<author>` 不回落（ADR-0009 已知边界，不是 bug）。
+- **遗留**：Atom feed 级 `<author>` 不回落（ADR-0009 已知边界，不是 bug）；GUI 走查已由用户完成（2026-11-27）。
 
 ### R11 v1 阅读器内设置页（入口 B）
 
@@ -92,7 +92,7 @@
 - **状态**：已完成（`.scratch/r7-translate/issues/` 7/7 `resolved`；开发分支 `feat/r7-translate`，代码基线 commit `26ab6ad`，已合入 main `784a2fc`）。
 - **交付**：`src/translate.ts`（prompt 指令内联进 user / `maxTokensFor` / 60 s deadline / 流拼装 / 四类失败 / `resolveTranslateRoute` 两层路由与 `routeOfSessionDefault` 只取 provider+model）、`src/translate-blocks.ts`（可翻块筛选 / `applyBatch` 编号对齐 / 12 块 ×2000 字符分批 / 单块三档 / 30000 上限）、`src/translate-copy.ts`（5 语言与中文文案）、端点 `translateBatch` / `translateInfo`（35 → 37）、`src/client/translate-actions.ts`（串行编排 / 视口首批 / 失败批重试 / 连败 3 批停止 / 中止与继续 / 全局单任务）、`src/client/translate-entry.ts`（回包对齐 / 按块 model）、`src/client/translate-state.ts`（条目 / 两态共享状态）、`src/client/translate-toolbar.tsx`（工具栏控件）、`src/client/article-pane.tsx`（原文 / 对照两态与单枚切换、进度、失败批重试入口、翻译中占位）、首次外发确认框与设置页模型选择器、正文工具栏的裸语言下拉、`src/keys.ts` 的 `t`（原文 / 对照切换 / 缺块继续 / 无译文时触发）。
 - **证据**：`tests/translate-*.test.mjs` 12 个文件 101 条；全量 `npm test` **1380/1380**（本轮评审修复新增 5 条）；全量变异 **407/407 应用 · 0 幸存 · 恢复后基线仍绿**（评审修复后实跑，3 workers；R7 15/15 caught）；真机三步（`dev_reload_package` 前后 `[active]` / 当日 `reader-2026-11-25.log` 0 条「装载失败」/ `POST /rss-reader-api` 401）；真模型三篇（同一套 `articleTranslatePlanOf` / `pickBatch` 直调 `lib/translate.js`）：短 265 字 1 批 5.2 s、中 1896 字 2 批 27.2 s（批 0 在会话 effort:max 下 20.1 s truncated；同批显式无 effort A/B 9.8 s 成功，据此修掉会话 effort 外溢）、长 8235 字 8 批 94.5 s 全部成功（每批 4.6–15.7 s，id 全对齐、无空译文、`model=deepseek-v4.1-flash`）。
-- **遗留**：真实 GUI 观感未验（原文 / 对照切换、视口优先首批、确认框与进度条的浏览器实际观感；本轮只经 staging 直调 `translateBatch`，未在页面上点）；译文纯内存、刷新即丢，纯文本丢链接与内联样式，未做表格 / 图片 alt 翻译（spec 已知限制）；输出预算按字符估且与 reasoning 共用 `maxTokens`，超长批仍可能 truncated（真机样本已在 CHANGELOG 记）。
+- **遗留**：译文纯内存、刷新即丢，纯文本丢链接与内联样式，未做表格 / 图片 alt 翻译（spec 已知限制）；输出预算按字符估且与 reasoning 共用 `maxTokens`，超长批仍可能 truncated（真机样本已在 CHANGELOG 记）。
 
 ## 第三批（R8a / R9 / R8b 已完成）
 
@@ -125,7 +125,7 @@
 - **拍板**：D1–D10 见 `.scratch/r9-archive/spec.md` §11（一次一页、行内入口、日期三级来源、同文键忽略协议、未读、headroom 预检、同步 + 120s deadline、N = 尝试数、归档页可信 / 文章页不可信、无时区按 +08:00）。
 - **交付**：`src/history.ts`（链接抽取 / 形态过滤 / 候选）、`src/article-date.ts`（五级日期来源）、`src/backfill.ts`（编排）、`src/duplicates.ts` 的 `sameArticleKeyOf`、`fetchArticle.publishedAt`、端点 `backfillHistory`（32→33）、`feeds-view` 行内表单；无迁移、无新依赖。
 - **证据**：`npm test` **1191/1191**；`gate.sh` 四条全过；全量变异 **378/378 · 0 幸存**（新增 9 条 `history-*` 全部 caught）；真机三步；真实站点（经代理，真实库快照 665 条）阮一峰月份页 8 篇 / 云风 2 篇 / 重复执行 0 / `limit=3` 时 `remaining=5`。
-- **遗留**：真实 GUI 走查（playwright target crashed）、未写用户实时库、`meta article:published_time` 与 URL 完整日期两级无真实站点样本（`docs/pitfalls.md` §八）。
+- **遗留**：未写用户实时库、`meta article:published_time` 与 URL 完整日期两级无真实站点样本（`docs/pitfalls.md` §八）；GUI 走查已由用户完成（2026-11-27）。
 
 ### 第三批 4 — R8b：RSSHub 路由表探索
 
@@ -146,7 +146,7 @@
 - **根因**：源范围没有宿主分页——`PageScope` 只有 folder/tag，客户端选源不重取，`inScope()` 在全局第一页上按 feedId 过滤。R9 回溯按真实日期补进旧条目后暴露。
 - **交付**：`PageScope` 增加 feed 态（栅栏 `feed:<id>`）、`overview`/`refresh` 接受 `feedId`（与 folder/tagId 互斥、未知源 not-found）、客户端选源/取消/续页都带 `feedId`，**恢复到非虚拟范围时首屏之后按范围重取**。
 - **证据**：`npm test` **1197/1197**；`gate.sh` 四条全过；全量变异 **381/381 应用 · 0 幸存**（新增 2 条 + 重锚 2 条全部 caught）；真实库快照源页 `count=27 / nextCursor=null`、跨源页 300 + 续页、未知源 not-found。
-- **遗留**：真实 GUI 点击（playwright target crashed）。
+- **遗留**：无（GUI 点击已由用户走查，2026-11-27）。
 
 ## 暂缓 / 不做
 
@@ -185,6 +185,6 @@
 - **v0.2.0**：git tag `v0.2.0` 在 `516a79b`（2026-11-22），该 tag 的 `package.json` 仍是 `0.1.0`；`0.3.0` 发布账目已建立（CHANGELOG 0.3.0 小节、package 0.3.0），历史 tag 内容不可改写。
 - **R7 发布账目**：R7 已合入 main `784a2fc`（代码基线 `26ab6ad`）；`package.json` 已抬到 `0.3.0`，`CHANGELOG.md` 已建立 `0.3.0 — 2026-11-27` 小节；本地 tag `v0.3.0` 已创建，未 push。
 - **R6 文档面**：`CHANGELOG.md` / `docs/feature-status.md` 已补 R6；`spec.md` 头已回填 `resolved（8/8）`。
-- **R6 真机**：三项观感未验（图片 640 限高、灯箱长截图溢出、Referer 实发）；不要因为 tag 已打就写成「真机全验」。
+- **R6 真机**：图片观感与灯箱尺寸已 GUI 走查（2026-11-27）；`Referer` 实发仍需抓包验证。
 - **R9 / R14 账目**：R9（评审修复 `e317e73`）与 R14（`6153927`）已合入 **main `a59baf4`**，随 `0.3.0` tag 发布、未 push；`CHANGELOG.md` 已补两节，`docs/feature-status.md` 已加两行。真机与真实站点证据在 `.scratch/r9-archive/issues/04-real-device.md` 与 `.scratch/r14-feed-scope/issues/01-feed-scope.md`。
 - **R11 版本账目**：R11 已合入 `main`（`68f0b12`），随 `0.3.0` 一起发布；`CHANGELOG.md` 的 R11 小节已归入 0.3.0。功能状态见 `docs/feature-status.md` 的 R11 行（真机验收可用 + 三项细项未复核）。
