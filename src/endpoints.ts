@@ -70,6 +70,9 @@ import {
   type CatalogPosition,
 } from './explore-catalog.js'
 import { loadCatalog, type CatalogProjectResult } from './explore-catalog-fetch.js'
+// R15 05：周测（外部 1.7 MB 周更文件）只在探索列表出页时消费；附加与排序都走这一份实现，
+// 不把周测结果写进 12h 冻结的目录索引行。
+import { attachWeeklyTests, loadWeeklyTests, partitionRunnableRoutes } from './weekly-tests.js'
 // 未读判据（isUnread / countUnreadPerFeed）不再由本文件在 JS 侧实现：Task 5 把它交给了存储侧，
 // 自持实现里的 SQL `read_at IS NULL` 与 unread.ts 的 isUnread 是同一件事，两者的等价由
 // tests/store-sqlite.test.mjs 的「同一夹具上逐键对账」钉住。shared.ts 仍是那条规则的定义处。
@@ -1274,8 +1277,13 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
     to: async (input, ctx) => {
       const resolved = exploreBaseOf(ctx)
       if (!resolved.ok) return resolved.result
+      // 周测与目录并行取：周测是一份 1.7 MB 的外部文件，串行会让首次打开多等一整份下载。
+      // 先起请求、目录失败时直接返回（不等周测）—— A10 要求周测永远不拖累探索页。
+      const weeklyTests = loadWeeklyTests({ fetchImpl: ctx.fetchImpl })
       const loaded = await loadExploreCatalog(ctx, resolved.base)
       if (!loaded.ok) return loaded.result
+      // 任何失败都是 undefined（= 本次没有周测标注、排序退回目录原序），不抛、不报错。
+      const tests = await weeklyTests
 
       const filter = catalogFilterOf(input)
       // 游标先过栅栏：筛选变了（B7）或游标认不出（B8）都回 bad-request。
@@ -1288,9 +1296,14 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       // 越界夹取不拒绝：limit 是展示偏好，不是正确性（spec §4.3）。默认 30 / 上限 100。
       const limit = Math.min(input.limit ?? CATALOG_PAGE_DEFAULT, CATALOG_PAGE_MAX)
       const { matched, items } = loaded.catalog.query(filter)
-      const paged = catalogPageOf(items, position, limit)
+      // 默认可跑优先（spec §4.2.3）：稳定分区，可跑组前移、两组组内保持目录原序。
+      // 分区必须在分页之前：否则第 2 页之后的「可跑」永远排不到不可跑的行前面。
+      const ranked = partitionRunnableRoutes(items, tests)
+      const paged = catalogPageOf(ranked, position, limit)
       if (paged === undefined) return fail('bad-request', '分页游标已失效（目录已更新），请重新加载')
-      const last = paged.page[paged.page.length - 1]
+      // 周测只在**出页时**附加：目录索引按实例缓存 12h、行是冻结的，而周测 7 天才刷新一次。
+      const page = attachWeeklyTests(paged.page, tests)
+      const last = page[page.length - 1]
       const nextCursor = paged.hasMore && last !== undefined
         ? encodeCatalogCursor(filter, { namespace: last.namespace, path: last.path })
         : undefined
@@ -1299,7 +1312,7 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         routeTotal: loaded.catalog.total,
         matched,
         categories: [...loaded.catalog.categories],
-        items: paged.page,
+        items: page,
         ...(nextCursor === undefined ? {} : { nextCursor }),
       })
     },

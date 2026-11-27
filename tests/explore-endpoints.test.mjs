@@ -12,16 +12,28 @@
  */
 import { test, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Config } from '../lib/config.js'
 import { createDispatch } from '../lib/endpoints.js'
+import { fetchFeed } from '../lib/feed/fetch.js'
 import { createMemoryStore } from '../lib/memory-store.js'
 import { clearCatalogCache } from '../lib/explore-catalog-fetch.js'
 import { encodeCatalogCursor, parsePathTemplate, prefillValues, projectCatalog } from '../lib/explore-catalog.js'
+import { clearWeeklyTestsCache } from '../lib/weekly-tests.js'
 
 const HUB = 'https://hub.test'
 const OTHER = 'https://other.test'
 const HUB_CATALOG = HUB + '/api/namespace'
 const OTHER_CATALOG = OTHER + '/api/namespace'
+const WEEKLY_URL = 'https://rsshub.js.org/build/test-full-routes.json'
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+
+/** 官方周测裁剪快照（真实形状；口径见 tests/fixtures/weekly-tests/README.md）。 */
+function weeklySnapshot() {
+  return JSON.parse(readFileSync(join(ROOT, 'tests', 'fixtures', 'weekly-tests', 'weekly-tests-2026-11-27.json'), 'utf8'))
+}
 
 /** 长文本占位：漏进回包时，20 万字符的响应体断言会当场翻红（D12 / B18）。 */
 const LONG_TEXT = '长'.repeat(600)
@@ -158,9 +170,20 @@ function stubFetch(map) {
     calls.push({ url, validators, limits })
     const outcome = map[url]
     if (outcome === undefined) return { kind: 'failed', reason: 'HTTP 500' }
+    // 已经是一条 FetchResult（失败 / 304）时原样返回；否则当成目录 / 周测 JSON 对象序列化。
+    if (outcome.kind !== undefined) return outcome
     return { kind: 'ok', body: JSON.stringify(outcome), finalUrl: url }
   }
   return { calls, impl }
+}
+
+/** 只数实例目录请求：周测是另一条固定地址，混在一起会让「12h 只拉一次表」失真。 */
+function catalogCalls(stub) {
+  return stub.calls.filter((call) => call.url === HUB_CATALOG || call.url === OTHER_CATALOG)
+}
+
+function weeklyCalls(stub) {
+  return stub.calls.filter((call) => call.url === WEEKLY_URL)
 }
 
 /** 一份与生产同形的 dispatch：store 与 fetchImpl 是仅有的替换点。 */
@@ -177,7 +200,10 @@ function harness({ fetchImpl, config = {}, store } = {}) {
   })
 }
 
-beforeEach(() => clearCatalogCache())
+beforeEach(() => {
+  clearCatalogCache()
+  clearWeeklyTestsCache()
+})
 
 // ── B9 / D11：未配置实例 ────────────────────────────────────────────────
 
@@ -212,8 +238,8 @@ test('第一页：目录口径计数、默认 30 条与 nextCursor 同时到位�
   assert.deepEqual(page.categories, ['multimedia', 'programming', 'social'], '分类目录按路由级去重升序')
   assert.equal(page.items.length, 30, '默认一页 30 条')
   assert.equal(typeof page.nextCursor, 'string', '还有 80 条 ⇒ 必须给续页游标')
-  assert.equal(stub.calls.length, 1, '只拉一次表')
-  assert.equal(stub.calls[0].url, HUB_CATALOG, '按实例源站拼 /api/namespace')
+  assert.equal(catalogCalls(stub).length, 1, '只拉一次表')
+  assert.equal(catalogCalls(stub)[0].url, HUB_CATALOG, '按实例源站拼 /api/namespace')
 
   // 「没有筛选」的常态请求：浏览器通道把缺省序列化成 null，不许因此回 bad-request。
   const bare = await dispatch('exploreCatalog', null)
@@ -478,7 +504,8 @@ test('12h 内两次打开探索只拉一次表（B11）', async () => {
   const second = await dispatch('exploreCatalog', { limit: 5 })
   assert.equal(first.ok, true)
   assert.equal(second.ok, true)
-  assert.equal(stub.calls.length, 1, '缓存命中：第二次零请求')
+  assert.equal(catalogCalls(stub).length, 1, '缓存命中：第二次零请求')
+  assert.equal(weeklyCalls(stub).length, 1, '周测也是进程内缓存，第二次零请求')
   assert.equal(second.value.matched, first.value.matched, '拿到的仍是同一份投影')
 })
 
@@ -493,12 +520,13 @@ test('换实例：按新实例拉表，绝不复用旧实例的投影（B12）',
   assert.equal(onOther.ok, true)
   assert.equal(onOther.value.siteTotal, 1, '换实例后拿到的是新实例的表')
   assert.equal(onOther.value.items[0].namespace, 'other')
-  assert.deepEqual(stub.calls.map((call) => call.url), [HUB_CATALOG, OTHER_CATALOG], '各按自己的实例拉表')
+  assert.deepEqual(catalogCalls(stub).map((call) => call.url), [HUB_CATALOG, OTHER_CATALOG], '各按自己的实例拉表')
 })
 
 test('实例失败：明确错误、不缓存失败 —— 下次立刻重试（B10）', async () => {
   let attempts = 0
   const impl = async (url) => {
+    if (url === WEEKLY_URL) return { kind: 'ok', body: JSON.stringify(weeklySnapshot()), finalUrl: url }
     attempts += 1
     if (attempts === 1) return { kind: 'failed', reason: 'HTTP 503' }
     return { kind: 'ok', body: JSON.stringify(catalogOf()), finalUrl: url }
@@ -532,8 +560,12 @@ test('实例回包坏形状：非 JSON / 顶层不是对象 ⇒ 可读原因，�
 })
 
 test('私网实例：默认抓取层在出网前就拒绝并说明是内网（B19）', async () => {
-  // 刻意不注入 fetchImpl：走真实 fetchFeed 的地址策略，与服务订阅路径同一条判据。
-  const dispatch = harness({ config: { rsshubBase: 'http://127.0.0.1:1200' } })
+  // 目录请求刻意走真实 fetchFeed 的地址策略（与服务订阅路径同一条判据）；
+  // 周测是同一次探索里并行发出的另一条固定地址，桩掉它免得测试真出网。
+  const impl = (url, validators, limits, signal) => url === WEEKLY_URL
+    ? Promise.resolve({ kind: 'ok', body: JSON.stringify(weeklySnapshot()), finalUrl: url })
+    : fetchFeed(url, validators, limits, signal)
+  const dispatch = harness({ fetchImpl: impl, config: { rsshubBase: 'http://127.0.0.1:1200' } })
   const result = await dispatch('exploreCatalog', {})
   assert.equal(result.ok, false)
   assert.equal(result.error.code, 'catalog-unavailable')
@@ -613,4 +645,123 @@ test('两个端点都不写库、不改配置：store 一次都不许碰（探�
   const built = await dispatch('exploreBuildUrl', { namespace: 'github', path: '/branches/:user/:repo', values: { user: 'a', repo: 'b' } })
   assert.equal(built.ok, true)
   assert.equal(JSON.stringify(config), before, '配置对象一个字节都不许变')
+})
+
+// ── R15 05：周测徽标、可跑优先排序与缓存边界（A10 / A12 / spec §4.2.2）────
+
+/** 5 条路由：可跑 / 不可跑交错；(namespace, path) 升序与目录原序一致。 */
+function weeklyCatalogOf() {
+  return {
+    aa: {
+      name: 'A 站',
+      categories: [],
+      routes: { first: routeOf({ path: '/first', name: '反爬路由', features: { antiCrawler: true } }) },
+    },
+    bb: {
+      name: 'B 站',
+      categories: [],
+      routes: { second: routeOf({ path: '/second', name: '可跑路由' }) },
+    },
+    cc: {
+      name: 'C 站',
+      categories: [],
+      routes: { third: routeOf({ path: '/third', name: '周测失败路由' }) },
+    },
+    dd: {
+      name: 'D 站',
+      categories: [],
+      routes: { fourth: routeOf({ path: '/fourth', name: '可跑路由二' }) },
+    },
+    ee: {
+      name: 'E 站',
+      categories: [],
+      routes: { fifth: routeOf({ path: '/fifth', name: 'nsfw 路由', features: { nsfw: true } }) },
+    },
+  }
+}
+
+/** 一份最小周测回包：`[标题, 状态]` 列表 → Jest 汇总形状。 */
+function weeklyResultsOf(...pairs) {
+  return {
+    testResults: [{ assertionResults: pairs.map(([title, status]) => ({ title, status })) }],
+  }
+}
+
+test('周测徽标出页附加：passed / failed 各自标注，未参加不下发第三值', async () => {
+  const stub = stubFetch({ [HUB_CATALOG]: catalogOf(), [WEEKLY_URL]: weeklySnapshot() })
+  const dispatch = harness({ fetchImpl: stub.impl, config: { rsshubBase: HUB } })
+
+  const github = await dispatch('exploreCatalog', { q: 'GitHub', limit: 100 })
+  assert.equal(github.ok, true)
+  const branches = github.value.items.find((row) => row.path === '/branches/:user/:repo')
+  assert.equal(branches?.weeklyTest, 'passed', 'fixture 里 /github/branches/:user/:repo 是 passed')
+  const releases = github.value.items.find((row) => row.path === '/releases/:user/:repo')
+  assert.equal('weeklyTest' in releases, false, '周测集里没有这条 ⇒ 不下发 weeklyTest（不是 ungraded）')
+
+  const zhihu = await dispatch('exploreCatalog', { namespace: 'zhihu', limit: 100 })
+  const activities = zhihu.value.items.find((row) => row.path === '/people/activities/:id')
+  assert.equal(activities?.weeklyTest, 'failed', 'fixture 里 /zhihu/people/activities/:id 是 failed')
+})
+
+test('默认「可跑优先」：可跑路由整体前移、组内保序，三页累计不重不漏（A12 排序侧）', async () => {
+  const weekly = weeklyResultsOf(
+    ['/aa/first', 'passed'],    // 反爬 ⇒ 不可跑
+    ['/bb/second', 'passed'],   // 可跑
+    ['/cc/third', 'failed'],    // 周测失败 ⇒ 不可跑
+    ['/dd/fourth', 'passed'],   // 可跑
+    ['/ee/fifth', 'passed'],    // nsfw ⇒ 不可跑
+  )
+  const stub = stubFetch({ [HUB_CATALOG]: weeklyCatalogOf(), [WEEKLY_URL]: weekly })
+  const dispatch = harness({ fetchImpl: stub.impl, config: { rsshubBase: HUB } })
+
+  const seen = []
+  let cursor
+  for (;;) {
+    const page = await dispatch('exploreCatalog', cursor === undefined ? { limit: 2 } : { limit: 2, cursor })
+    assert.equal(page.ok, true, '续页不许失败')
+    assert.equal(page.value.matched, 5, '排序不影响命中数')
+    seen.push(...page.value.items.map((row) => row.path))
+    cursor = page.value.nextCursor
+    if (cursor === undefined) break
+  }
+  assert.deepEqual(
+    seen,
+    ['/second', '/fourth', '/first', '/third', '/fifth'],
+    '可跑组（second/fourth）前移且保序；其余组（first/third/fifth）保持目录原序',
+  )
+  assert.equal(new Set(seen).size, 5, '翻页不许重复或漏行')
+})
+
+test('缓存边界：周测 7 天刷新不绑架 12h 目录索引 —— 换周测数据后重新出页即可见，目录不再出网', async () => {
+  const map = {
+    [HUB_CATALOG]: weeklyCatalogOf(),
+    [WEEKLY_URL]: weeklyResultsOf(['/bb/second', 'passed']),
+  }
+  const stub = stubFetch(map)
+  const dispatch = harness({ fetchImpl: stub.impl, config: { rsshubBase: HUB } })
+
+  const first = await dispatch('exploreCatalog', { namespace: 'bb' })
+  assert.equal(first.value.items[0].weeklyTest, 'passed')
+  assert.equal(catalogCalls(stub).length, 1)
+
+  // 模拟 7 天到期（测试专用清缓存），上游结论翻成 failed；目录索引仍在 12h 缓存里。
+  clearWeeklyTestsCache()
+  map[WEEKLY_URL] = weeklyResultsOf(['/bb/second', 'failed'])
+  const second = await dispatch('exploreCatalog', { namespace: 'bb' })
+  assert.equal(second.value.items[0].weeklyTest, 'failed', '新周测结果必须在出页时生效')
+  assert.equal(catalogCalls(stub).length, 1, '12h 目录缓存不许因周测刷新而失效')
+})
+
+test('周测拉取失败：探索页照常可用，只是没有徽标且保持目录原序（A10）', async () => {
+  const stub = stubFetch({
+    [HUB_CATALOG]: weeklyCatalogOf(),
+    [WEEKLY_URL]: { kind: 'failed', reason: 'HTTP 503' },
+  })
+  const dispatch = harness({ fetchImpl: stub.impl, config: { rsshubBase: HUB } })
+
+  const result = await dispatch('exploreCatalog', { limit: 2 })
+  assert.equal(result.ok, true, '周测失败不是探索页的失败')
+  assert.deepEqual(result.value.items.map((row) => row.path), ['/first', '/second'], '没有周测 ⇒ 全部按目录原序')
+  assert.ok(result.value.items.every((row) => !('weeklyTest' in row)), '失败时不下发任何周测标注')
+  assert.equal(weeklyCalls(stub).length, 1, '失败也要真尝试过一次（而不是默认空表）')
 })
