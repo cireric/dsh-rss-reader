@@ -9,7 +9,7 @@
  */
 import type { ReactNode } from 'react'
 import type { CuratedSourceEntry } from '../shared.js'
-import type { SourcePackDraft, SourcePackProbe, SourcePackState } from './source-pack-actions.js'
+import { SOURCE_PACK_IMPORT_LIMIT, type SourcePackDraft, type SourcePackProbe, type SourcePackState } from './source-pack-actions.js'
 
 export interface SourcePackViewProps {
   readonly state: SourcePackState
@@ -21,6 +21,8 @@ export interface SourcePackViewProps {
   readonly onProbe: () => void
   readonly onSave: (force?: boolean) => void
   readonly onRemove: (url: string) => void
+  readonly onToggleSelect: (url: string) => void
+  readonly onImport: () => void
   readonly onRestoreSeed: () => void
   readonly onBack: () => void
 }
@@ -128,8 +130,47 @@ function AddForm(props: {
   )
 }
 
+/**
+ * 导入结果（spec §4.3.2 / A14）：新增 / 已存在是汇总，失败与跳过**逐条**带原因。
+ * 结果块本身不判断「哪条算成功」—— 宿主回包说什么是什么，界面不二次加工。
+ */
+function ImportReportBlock(props: { readonly report: NonNullable<SourcePackState['importReport']> }): ReactNode {
+  const { report } = props
+  return (
+    <div className="dsh-rss-pack-import-report" role="status" data-rss-pack-import-report="">
+      <div data-rss-pack-import-summary="">
+        导入结果：新增 <strong>{report.added}</strong> 条，已存在 {report.existed} 条，
+        校验失败 <strong>{report.failed.length}</strong> 条，文件内跳过 {report.skipped.length} 项
+      </div>
+      {report.accepted.map((row) => (
+        <div key={row.url} className="dsh-rss-pack-import-line" data-rss-pack-import-accepted={row.url}>
+          · 已入库 {row.title ?? row.url}{row.folder === undefined ? '' : '（分组：' + row.folder + '）'}
+        </div>
+      ))}
+      {report.failed.length > 0 && (
+        <div className="dsh-rss-pack-import-failed" data-rss-pack-import-failed="">
+          <div>以下源校验失败（未加入订阅，其余不受影响）：</div>
+          {report.failed.map((row) => (
+            <div key={row.url} className="dsh-rss-pack-import-line" data-rss-pack-import-failed-row={row.url}>
+              · {row.url} —— {row.reason}
+            </div>
+          ))}
+        </div>
+      )}
+      {report.skipped.length > 0 && (
+        <div className="dsh-rss-pack-import-line" data-rss-pack-import-skipped="">
+          <div>文件里被跳过的条目：</div>
+          {report.skipped.map((row, index) => (
+            <div key={index}>· {row.title ?? '(无标题)'} —— {row.reason}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function SourcePackView(props: SourcePackViewProps): ReactNode {
-  const { state, onQuery, onCategory, onOpenForm, onCloseForm, onDraft, onProbe, onSave, onRemove, onRestoreSeed, onBack } = props
+  const { state, onQuery, onCategory, onOpenForm, onCloseForm, onDraft, onProbe, onSave, onRemove, onToggleSelect, onImport, onRestoreSeed, onBack } = props
   const categories = categoriesOf(state.entries)
   const visible = visibleEntriesOf(state)
   const hasFilters = state.q.trim() !== '' || state.category !== undefined
@@ -141,6 +182,10 @@ export function SourcePackView(props: SourcePackViewProps): ReactNode {
         <span className="dsh-rss-meta" data-rss-pack-seed="">
           内置快照 {state.seed.count} 条 · 采集日 {state.seed.collectedAt || '—'}
         </span>
+        <button type="button" className="dsh-rss-btn dsh-rss-btn--primary" data-rss-pack-import=""
+          disabled={state.selected.length === 0 || state.importing} onClick={onImport}>
+          {state.importing ? '导入中…' : '导入所选（' + state.selected.length + '/' + state.entries.length + '）'}
+        </button>
         <button type="button" className="dsh-rss-btn" data-rss-pack-restore=""
           disabled={state.saving} onClick={onRestoreSeed}>恢复内置快照</button>
         <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" data-rss-pack-back=""
@@ -155,6 +200,12 @@ export function SourcePackView(props: SourcePackViewProps): ReactNode {
       )}
       {state.notice !== undefined && (
         <div className="dsh-rss-pack-notice" role="status" data-rss-pack-notice="">{state.notice}</div>
+      )}
+      {/* 超限时提前说清楚：按钮本身仍可点，动作层会拦下并发出一条明确的错误（不发请求）。 */}
+      {state.selected.length > SOURCE_PACK_IMPORT_LIMIT && (
+        <div className="dsh-rss-settings-warning" role="status" data-rss-pack-import-limit="">
+          一次最多导入 {SOURCE_PACK_IMPORT_LIMIT} 条（当前勾选 {state.selected.length} 条），请分批导入。
+        </div>
       )}
 
       <div className="dsh-rss-pack-toolbar">
@@ -182,6 +233,8 @@ export function SourcePackView(props: SourcePackViewProps): ReactNode {
         <AddForm state={state} onDraft={onDraft} onProbe={onProbe} onSave={onSave} onClose={onCloseForm} />
       )}
 
+      {state.importReport !== undefined && <ImportReportBlock report={state.importReport} />}
+
       {state.loading && state.entries.length === 0 && (
         <div className="dsh-rss-pack-note" role="status">正在读取精选源…</div>
       )}
@@ -198,6 +251,12 @@ export function SourcePackView(props: SourcePackViewProps): ReactNode {
         {visible.map((entry) => (
           <li key={entry.url} className="dsh-rss-pack-row" data-rss-pack-entry={entry.url}>
             <div className="dsh-rss-pack-row-head">
+              <label className="dsh-rss-pack-check">
+                <input type="checkbox" data-rss-pack-select={entry.url}
+                  checked={state.selected.includes(entry.url)} disabled={state.importing}
+                  aria-label={'选择 ' + (entry.title ?? entry.url)}
+                  onChange={() => { onToggleSelect(entry.url) }} />
+              </label>
               <span className="dsh-rss-pack-name" title={entry.title ?? entry.url}>{entry.title ?? entry.url}</span>
               <span className="dsh-rss-pack-badge">{entry.category ?? '未分类'}</span>
               <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" data-rss-pack-remove=""
@@ -209,7 +268,7 @@ export function SourcePackView(props: SourcePackViewProps): ReactNode {
         ))}
       </ul>
       <p className="dsh-rss-meta dsh-rss-pack-footnote">
-        这里是清单，不是订阅：删除条目不会退订；导入订阅走「订阅」页。
+        这里是清单，不是订阅：删除条目不会退订；勾选条目后「导入所选」才会进订阅（失败源逐条列原因、不入库）。
       </p>
     </div>
   )

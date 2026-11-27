@@ -42,6 +42,12 @@ export { RpcError } from './rpc-error.js'
 export { routeKey } from './keyboard-routing.js'
 // 左栏宽度：横向 flex 布局与本组件共用同一个常量（feed-nav.tsx），分散写会出现 1px 的缝
 export { LEFT_NAV_WIDTH } from './feed-nav.js'
+// **仅供单测取用**：源包 → OPML 的客户端最小序列化器（src/client/source-pack-opml.ts）。
+// 客户端只出单文件 bundle，测试拿不到目录内模块；round-trip 测试要拿它拼出的文本喂宿主 parseOpml。
+export { buildSourcePackOpml } from './source-pack-opml.js'
+// **仅供 DOM 测试**：精选源视图不在整树挂载路径上（整树要桩 fetch / 存储，只为验一个 checkbox 不值得），
+// 导出后测试可以直接渲染它并派发勾选 —— 与 Badge 同一条理由（见下方 export function Badge 的注释）。
+export { SourcePackView } from './source-pack-view.js'
 import { routeKey } from './keyboard-routing.js'
 import { FeedsView } from './feeds-view.js'
 import { FeedNav } from './feed-nav.js'
@@ -272,6 +278,12 @@ const STYLE = `
   overflow-wrap:anywhere; }
 .dsh-rss-pack-row-head button { margin-left:auto; }
 .dsh-rss-pack-footnote { margin-top:16px; }
+.dsh-rss-pack-check { display:inline-flex; align-items:center; flex:0 0 auto; }
+.dsh-rss-pack-check input { margin:0; }
+.dsh-rss-pack-import-report { margin-top:12px; padding:10px 12px; border:1px solid var(--rss-line);
+  border-radius:8px; font-size:12px; line-height:1.45; }
+.dsh-rss-pack-import-line { margin-top:3px; overflow-wrap:anywhere; }
+.dsh-rss-pack-import-failed { margin-top:6px; color:var(--rss-error); }
 .dsh-rss-pack-notice { margin-top:8px; font-size:12px; color:var(--rss-accent);
   font-size:12px; overflow-wrap:anywhere; }
 .dsh-rss-row { border-bottom:1px solid var(--rss-line); }
@@ -1241,6 +1253,8 @@ export function createReader(store: ReaderStore): () => ReactNode {
             onProbe={() => { void store.probeSourcePackUrl() }}
             onSave={(force) => { void store.saveSourcePackDraft(force === true) }}
             onRemove={(url) => { void store.removeSourcePackEntry(url) }}
+            onToggleSelect={store.toggleSourcePackSelection}
+            onImport={() => { void store.importSelectedSourcePack() }}
             onRestoreSeed={() => { void store.restoreSourcePackSeed() }}
             onBack={store.closeSourcePack}
           />
