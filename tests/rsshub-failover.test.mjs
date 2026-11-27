@@ -325,6 +325,52 @@ test('预算：单实例 12s；第一个用满 12s 后第二个只剩 8s（注�
     '第一个用满 12s ⇒ 第二个只剩 20-12=8s（两次合计不超过 20s）')
 })
 
+test('预算：performance.now() 的小数毫秒不许流进 AbortSignal.timeout（真机 2026-11-28 的 internal 崩溃）', async () => {
+  const store = strictMemoryStore()
+  const feedUrl = 'https://hub-a.test/fraction/baoyu'
+  const pool = ['https://hub-a.test', 'https://hub-b.test']
+  await store.saveFeed(feedUrl, {
+    url: feedUrl,
+    title: '博客',
+    rsshub: { namespace: 'fraction', path: '/fraction/baoyu', instance: 'https://hub-a.test' },
+  })
+  // 小数时钟才是 performance.now() 的真实形态；上面几条预算用例用整数时钟推进，
+  // 恰好把「第二次尝试拿到 7998.823…」这个崩溃绕过去了（缺陷能在全绿套件里存活的原因）。
+  let elapsed = 0
+  const timeouts = []
+  const { impl } = fetchStub({
+    [feedUrl]: () => {
+      elapsed = 12_000.7
+      return { kind: 'failed', reason: '超时（12000ms）' }
+    },
+    ['https://hub-b.test/fraction/baoyu']: () => ({ kind: 'failed', reason: '超时（8000ms）' }),
+  })
+  // 真 fetch.ts 的第一件事就是 AbortSignal.timeout(limits.timeoutMs)。这里调同一个平台 API：
+  // 小数会当场抛 ERR_OUT_OF_RANGE —— 这是复现，不是断言，失败信息就是用户看到的那一条。
+  const guarded = async (url, validators, limits) => {
+    timeouts.push(limits.timeoutMs)
+    AbortSignal.timeout(limits.timeoutMs)
+    return impl(url, validators, limits)
+  }
+
+  const outcomes = await refreshFeeds([feedUrl], store, {
+    ...BASE_OPTIONS,
+    limits: { ...LIMITS, timeoutMs: 30_000 },
+    instances: pool,
+    fetchFeedImpl: guarded,
+    clock: () => elapsed,
+    now: () => new Date('2026-11-28T00:00:00.000Z'),
+  })
+
+  assert.equal(outcomes[0].status, 'failed', '两个实例都失败 ⇒ 该源单源降级，不掀翻整轮')
+  assert.equal(timeouts.length, 2, '两个实例都试过')
+  for (const value of timeouts) {
+    assert.ok(Number.isInteger(value), 'AbortSignal.timeout 只收整数毫秒，收到 ' + value)
+  }
+  assert.ok(timeouts[1] <= 8_000 && timeouts[1] > 0,
+    '预算语义不变：第一个用满 12s 后第二个只剩 ≤8s，收到 ' + timeouts[1])
+})
+
 test('预算：第一个拖到 20s 预算耗尽 ⇒ 不再发起第二个请求', async () => {
   const store = strictMemoryStore()
   const feedUrl = 'https://hub-a.test/expired/baoyu'

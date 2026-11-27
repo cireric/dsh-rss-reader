@@ -3560,6 +3560,15 @@ export const MUTATIONS = [
     from: 'if (instancesAttempted.length >= RSSHUB_MAX_ATTEMPTS)',
     to: 'if (instancesAttempted.length >= 5)' },
 
+  // 预算不取整：clock 默认是 performance.now()（小数），差值直接当 timeoutMs 会喂进
+  // AbortSignal.timeout —— 它只收整数，Node 当场抛 ERR_OUT_OF_RANGE，整轮刷新以 internal 失败
+  // （2026-11-28 真机事故：首选超时后第二次尝试带着 7998.823… 崩掉，单源失败没有就地降级）。
+  { id: 'rsshub-预算小数不取整', file: 'lib/refresh.js',
+    judges: ['rsshub-failover.test.mjs'],
+    judgeTests: ['预算：performance.now() 的小数毫秒不许流进 AbortSignal.timeout（真机 2026-11-28 的 internal 崩溃）'],
+    from: 'const remaining = Math.floor(RSSHUB_REFRESH_BUDGET_MS - (clock() - startedAt));',
+    to: 'const remaining = RSSHUB_REFRESH_BUDGET_MS - (clock() - startedAt);' },
+
   // 冷却永不恢复：把「冷却截止时间」判据改成「只要失败过就永远冷却」。10 分钟是一句承诺，
   // 永远冷却等于把实例拉黑 —— 实例恢复健康后也永远排最后（配 3 个以上时直接轮不到它）。
   // 判据是冷却单测的到期恢复与装配用例的第 5 轮顺序。

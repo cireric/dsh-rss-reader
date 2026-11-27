@@ -380,7 +380,9 @@ async function refreshOne(
 
   for (const instance of order) {
     if (instancesAttempted.length >= RSSHUB_MAX_ATTEMPTS) break
-    const remaining = RSSHUB_REFRESH_BUDGET_MS - (clock() - startedAt)
+    // 预算必须是**整数毫秒**：clock 默认是 performance.now()（小数），而 AbortSignal.timeout
+    // 只收整数（Node 抛 ERR_OUT_OF_RANGE）。向下取整只少等 ≤1 ms，不会突破 20 s 总预算。
+    const remaining = Math.floor(RSSHUB_REFRESH_BUDGET_MS - (clock() - startedAt))
     // 第一个实例最多吃 12 s；它用满之后第二个只剩 8 s，两次合计不超过 20 s。
     if (remaining <= 0) break
     instancesAttempted.push(instance)
