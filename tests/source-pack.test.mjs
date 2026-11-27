@@ -286,3 +286,22 @@ test('saveSourcePack 端点：整份替换，坏项逐条丢弃并回 warning，
     h.cleanup()
   }
 })
+
+test('删除源包条目不影响订阅：config.feeds 原样保留，条目库也不参与', () => {
+  const dir = tempDir()
+  const path = join(dir, 'config.json')
+  try {
+    const feed = { url: 'https://feed.example/atom.xml', title: '订阅源' }
+    writeConfigFile(path, { version: 1, feeds: { [feed.url]: feed } })
+    const control = createSourcePack({ configPath: path, log: () => {} })
+    assert.equal(control.snapshot().entries.length, 79)
+    assert.equal(control.save([]).ok, true)
+
+    const file = readConfigFile(path)
+    assert.deepEqual(file.curatedSources, [])
+    assert.deepEqual(file.feeds, { [feed.url]: feed },
+      '源包是清单、feeds 是订阅：删条目只能动 curatedSources')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
