@@ -36,6 +36,23 @@ function parseHttpUrl(raw: string): URL | undefined {
 }
 
 /**
+ * RSSHub 地址的 **namespace = pathname 首段**（`/github/issues/x` → `github`）。
+ *
+ * 单独导出是因为 R15 07 的候选行也要用它：候选 URL 是从某个实例拼出来的，站点身份只有
+ * 路径首段这一条线索。认不出（非法 URL / 只有 `/`）返回 undefined —— 不编造 namespace。
+ *
+ * ⚠️ 调用方必须先确认 `source === 'rsshub'` 再用它：普通站点的原生 feed 完全可能长成
+ * `/github/feed.xml`，按路径给页面候选判站点会把用户的订阅误隐藏。
+ */
+export function rsshubNamespaceOf(url: string): string | undefined {
+  const parsed = parseHttpUrl(url)
+  if (parsed === undefined) return undefined
+  const namespace = parsed.pathname.split('/')[1] ?? ''
+  if (parsed.pathname === '/' || namespace === '') return undefined
+  return namespace
+}
+
+/**
  * 把一个实例地址归一成 `URL.origin`；非法 / 非 http(s) 返回 undefined。
  *
  * 实例池在写盘时已归一，但 `config.json` 允许手改（末尾斜杠、大写主机、默认端口都可能留下）。
@@ -58,12 +75,11 @@ export function rsshubProvenanceOf(url: string, instances: readonly string[]): R
   const matched = instances.some((instance) => rsshubOriginOf(instance) === origin)
   if (!matched) return undefined
 
-  const path = parsed.pathname
   // pathname 至少要有一个非空段才算一条 RSSHub 路由。`/` 是实例源站本身：
   // domain 的 schema 要求 namespace / path 都 min(1)，这里认不出就返回 undefined，不编造。
-  const namespace = path.split('/')[1] ?? ''
-  if (path === '/' || namespace === '') return undefined
-  return { namespace, path, instance: origin }
+  const namespace = rsshubNamespaceOf(url)
+  if (namespace === undefined) return undefined
+  return { namespace, path: parsed.pathname, instance: origin }
 }
 
 /**

@@ -156,7 +156,14 @@ async function mount({ settings, saveSettings, testRsshub, rsshubPool, saveRsshu
         if (custom?.error !== undefined) return failEnvelope(custom.error)
         if (custom?.rsshub !== undefined) { rsshubState = custom.rsshub; return ok({ rsshub: rsshubState }) }
       }
-      rsshubState = { ...rsshubState, instances: [...(body.payload?.instances ?? [])] }
+      // 桩照宿主契约：隐藏列表与实例池是同一份 rsshub 快照的两部分，一起写回。
+      rsshubState = {
+        ...rsshubState,
+        instances: [...(body.payload?.instances ?? [])],
+        ...(Array.isArray(body.payload?.hiddenNamespaces)
+          ? { hiddenNamespaces: [...body.payload.hiddenNamespaces] }
+          : {}),
+      }
       return ok({ rsshub: rsshubState })
     }
     if (body.endpoint === 'saveSettings') {
@@ -1558,6 +1565,49 @@ test('R11 05 显示未读计数：左栏角标与标题栏立即消失/恢复，
     } finally {
       second.cleanup()
     }
+  } finally {
+    h.cleanup()
+  }
+})
+
+// ── R15 07：已隐藏的 namespace 列表与「全部恢复」（A11）────────────────────
+
+test('R15 07：设置页显示「已隐藏（N）」列表，点「全部恢复」写回空列表并收起', async () => {
+  const h = await mount({
+    rsshubPool: {
+      instances: ['https://ok.example'],
+      hiddenNamespaces: ['github', 'zhihu'],
+      hideNsfw: true,
+    },
+  })
+  try {
+    await openSettings(h)
+    const block = h.$('[data-rss-rsshub-hidden]')
+    assert.ok(block !== null, '有隐藏站点时 RSSHub 分区必须有「已隐藏」块')
+    assert.match(block.textContent ?? '', /已隐藏（2）/, '数字必须来自快照，不是写死的')
+    assert.deepEqual(
+      [...block.querySelectorAll('[data-rss-rsshub-hidden-item]')].map((item) => item.getAttribute('data-rss-rsshub-hidden-item')),
+      ['github', 'zhihu'],
+      '逐个列出被隐藏的 namespace',
+    )
+    assert.match(block.textContent ?? '', /已订阅的源与条目不受影响/, '要说明隐藏不动订阅与条目')
+
+    block.querySelector('[data-rss-rsshub-unhide-all]').click()
+    await h.waitFor(() => h.store.get().rsshubSettings?.hiddenNamespaces.length === 0, { label: '全部恢复回包' })
+    const save = h.requests.filter((entry) => entry.endpoint === 'saveRsshubSettings').at(-1)
+    assert.deepEqual(save.payload.hiddenNamespaces, [], '「全部恢复」= 写回空列表')
+    assert.deepEqual(save.payload.instances, ['https://ok.example'], '只改隐藏列表，实例池原样带上')
+    assert.equal(h.$('[data-rss-rsshub-hidden]'), null, '恢复后列表收起（N=0 不占版面）')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R15 07：没有隐藏站点时不渲染「已隐藏」块（N=0 不占版面）', async () => {
+  const h = await mount({ rsshubPool: rsshubPoolOf(['https://ok.example']) })
+  try {
+    await openSettings(h)
+    assert.equal(h.$('[data-rss-rsshub-hidden]'), null)
   } finally {
     h.cleanup()
   }

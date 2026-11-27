@@ -180,7 +180,9 @@ export function createRsshubSettings(deps: RsshubSettingsDeps): RsshubSettingsCo
         }
         hidden.push(entry.trim())
       }
-      next.hiddenNamespaces = hidden
+      // 去重后落盘：同一个 namespace 点两次「隐藏此站点」仍是同一件事。留下重复项会让
+      // 设置页显示「已隐藏（3）」而实际只有两个站点 —— 界面数字与事实分家。
+      next.hiddenNamespaces = [...new Set(hidden)]
     }
 
     if (patch.hideNsfw !== undefined) next.hideNsfw = patch.hideNsfw

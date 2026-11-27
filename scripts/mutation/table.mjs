@@ -3595,8 +3595,33 @@ export const MUTATIONS = [
   // 「只改开关、游标不变 ⇒ 必须 bad-request」。
   // from 照构建产物 lib/explore-catalog.js 的实际字节写（pitfalls 一、1.4），独立实测 OCCURRENCES=1。
   { id: 'rsshub-过滤不进栅栏', file: 'lib/explore-catalog.js',
-    judges: ['explore-endpoints.test.mjs'],
+    judges: ['explore-endpoints.test.mjs', 'explore-catalog.test.mjs'],
     judgeTests: ['栅栏：hideNsfw / onlyRunnable 变化、周测换代都回 bad-request；同条件翻页正常'],
-    from: '.update(JSON.stringify([q, category, namespace, hideNsfw, onlyRunnable, weeklyGeneration]))',
-    to: '.update(JSON.stringify([q, category, namespace, weeklyGeneration]))' },
+    from: '.update(JSON.stringify([q, category, namespace, hiddenNamespaces, hideNsfw, onlyRunnable, weeklyGeneration]))',
+    to: '.update(JSON.stringify([q, category, namespace, hiddenNamespaces, weeklyGeneration]))' },
+
+  // ── R15 07：namespace 隐藏（2026-11-28）──────────────────────────────────
+  // 隐藏列表不落盘：`save` 回包显示成功、本次会话里配置快照也变了，但写进 config.json 的
+  // 是旧值 —— 重启后隐藏全部消失（A11 的「重启后仍隐藏」直接失败）。
+  // from 照构建产物 lib/rsshub-settings.js 的实际字节写（pitfalls 一、1.4），独立实测 OCCURRENCES=1。
+  { id: 'rsshub-隐藏不落盘', file: 'lib/rsshub-settings.js',
+    judges: ['rsshub-settings.test.mjs', 'explore-endpoints.test.mjs'],
+    judgeTests: [
+      '隐藏列表写盘归一化：重复项只留一次（点两次「隐藏此站点」不会变成两个 github）',
+      'R15 07 A11：重启后仍隐藏、全部恢复后回来；隐藏不取消订阅、不删除条目',
+    ],
+    from: 'next.hiddenNamespaces = [...new Set(hidden)]',
+    to: 'next.hiddenNamespaces = [...new Set(state.hiddenNamespaces)]' },
+  // 隐藏列表不进游标栅栏：隐藏 / 恢复之后旧游标仍被当成同一次查询，用户会在第 2 页看到
+  // 与第一页不同的行集合（重复 / 漏行），而 `matched` 已经按新条件算过 —— 三者互相矛盾。
+  // 判据是栅栏用例「隐藏 / 恢复都必须换游标」与端点用例「翻页中途隐藏 ⇒ 旧游标 400」。
+  // from 与「过滤不进栅栏」同一行（改的是同一个数组字面量），独立实测 OCCURRENCES=1。
+  { id: 'rsshub-隐藏不进栅栏', file: 'lib/explore-catalog.js',
+    judges: ['explore-catalog.test.mjs', 'explore-endpoints.test.mjs'],
+    judgeTests: [
+      '游标：hiddenNamespaces 进栅栏 —— 隐藏 / 恢复都换游标，同一集合的写法差异共用一把栅栏（A11）',
+      'R15 07 A11：翻页中途隐藏 ⇒ 旧游标必须失效（隐藏列表进栅栏），新条件自己翻页正常',
+    ],
+    from: '.update(JSON.stringify([q, category, namespace, hiddenNamespaces, hideNsfw, onlyRunnable, weeklyGeneration]))',
+    to: '.update(JSON.stringify([q, category, namespace, hideNsfw, onlyRunnable, weeklyGeneration]))' },
 ]

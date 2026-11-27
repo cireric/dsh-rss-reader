@@ -425,8 +425,8 @@ const browserDeps: ReaderStoreDeps = {
  * | 搜索 | `search` / `searchRevision` / `searchRequest` / `searchPages` | submitSearch / loadSearch / resetSearchPage | 借列表的 items / selectedId / nextCursor / loading 展示；**不许**改 filter |
  * | 订阅 | `feeds` / `folders` / `discovery` / `feedsBusy` / `importReport` / `navSelection` / `navCursor` / `navVisible` / `foldedFolders` / `viewPreferences`（**deleteFolder 例外**：删掉当前所在文件夹时会把 `filter` 回落成 `all`，这条跨域写入登记在此） | addFeed / removeFeed / moveFeedOrder / importOpml / exportOpml / discover / createFolder / renameFolder / deleteFolder / moveFeedToFolder / selectNav / moveNavCursor / openNavCursor / toggleNav / toggleFolder / flushViewMemory | 改 navSelection 后必须走 persistView；**整份覆盖写必须带上当下的 selectedId**（否则一次普通导航就抹掉阅读位置）；选中 / j/k / 打开条目经 300ms 去抖写手记 lastItemId，面板卸载时 flush；退订只能经 `deleteSubscription`；selectNav 经列表域的 leaveTransientViews 写 `view` / `article`（切作用域退出正文与设置页） |
  * | 标签 | `tags` / 条目的 `tagIds` | createTag / renameTag / deleteTag / toggleItemTag | 乐观改 tagIds，失败回取当前页拉回真相（tagWrite 串行化 + tagEpoch 身份） |
-| 设置 | `settings` / `settingsError` / `settingsWarningDismissed` / `rsshubSettings` / `rsshubSettingsError` | loadSettings / loadRsshubSettings / openSettings / closeSettings / toggleSettings / dismissSettingsWarning | 只调 `settings` / `rsshubSettings` 两个端点取快照；`view: 'settings'` 是跨域呈现状态，与列表 / 订阅域同一条规则（左栏导航 / 切过滤 / 切档经列表域入口退出） |
-| 探索 | `explore`（目录页累计行 / q + category + namespace / loading / error / 表单草稿 / 回执 / 拼好的地址） | openExplore / closeExplore / setExploreQuery / loadMoreExplore / selectExploreRoute / setExploreDraftValue / buildExploreAddress / addExploreSubscription | 订阅只经 `addFeed`（订阅域入口），自己只写 `explore`；`view: 'explore'` 与设置页同一条跨域规则（左栏导航 / 切过滤 / 切档经列表域入口退出）；拼地址只调宿主端点，模板判据读 `explore-template.ts` |
+| 设置 | `settings` / `settingsError` / `settingsWarningDismissed` / `rsshubSettings` / `rsshubSettingsError` | loadSettings / loadRsshubSettings / openSettings / closeSettings / toggleSettings / dismissSettingsWarning | 只调 `settings` / `rsshubSettings` 两个端点取快照；**hideNamespace 例外**：同时剪掉订阅域的 `discovery.candidates`（R15 07，根上组合的动作）；`view: 'settings'` 是跨域呈现状态，与列表 / 订阅域同一条规则（左栏导航 / 切过滤 / 切档经列表域入口退出） |
+| 探索 | `explore`（目录页累计行 / q + category + namespace / loading / error / 表单草稿 / 回执 / 拼好的地址） | openExplore / closeExplore / setExploreQuery / hideExploreNamespace / loadMoreExplore / selectExploreRoute / setExploreDraftValue / buildExploreAddress / addExploreSubscription | 订阅只经 `addFeed`（订阅域入口），自己只写 `explore`；`view: 'explore'` 与设置页同一条跨域规则（左栏导航 / 切过滤 / 切档经列表域入口退出）；拼地址只调宿主端点，模板判据读 `explore-template.ts` |
 | 精选源 | `sourcePack`（清单 / 搜索词 / 分类 / 加源表单与校验结果 / 勾选 / 导入结果 / saving / importing / 告警） | openSourcePack / closeSourcePack / loadSourcePack / setSourcePackQuery / setSourcePackCategory / toggleSourcePackSelection / importSelectedSourcePack / openSourcePackForm / closeSourcePackForm / setSourcePackDraft / probeSourcePackUrl / saveSourcePackDraft / removeSourcePackEntry / restoreSourcePackSeed | 只调 `sourcePack` / `saveSourcePack` / `opmlImport` 三个端点；加源解析借 `discoverFeeds`（不新造校验引擎）；导入所选走现有 `opmlImport`（不新增导入端点、不跳过校验，30 条上限只在客户端拦）。删条目 / 导入**都不**写源包清单 —— 清单不是订阅是这一域的核心不变量。`view: 'sourcePack'` 与设置页同一条跨域规则 |
  *
  * `view` / `article` 是跨域呈现状态：列表的 openArticle / retryArticle / closeArticle 与 setFilter、
@@ -870,9 +870,27 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     reload: () => listActions.load('overview'),
   })
 
+  /**
+   * 隐藏一个 RSSHub 站点（R15 07）：设置域负责写 config.rsshub.hiddenNamespaces，订阅域负责把
+   * 当前候选清单里的同一站点剪掉。两处 state 属于两个域，组合动作放在根上 —— 只让一个域知道
+   * 另一个域的存在，比让两边各自复制一份判据便宜。
+   */
+  const hideNamespace = async (namespace: string): Promise<Awaited<ReturnType<typeof settingsActions.hideRsshubNamespace>>> => {
+    const result = await settingsActions.hideRsshubNamespace(namespace)
+    if (!result.ok) {
+      // 两个入口（探索行 / 候选行）共用这一条失败通道：写盘失败必须可见，不能静默。
+      set({ error: '隐藏站点失败：' + result.message })
+      return result
+    }
+    feedActions.dropDiscoveryNamespace(namespace)
+    return result
+  }
+
   const exploreActions = createExploreActions({
     get, set, rpc: deps.rpc, addFeed: feedActions.addFeed,
-    persistView, saveRsshubHideNsfw: settingsActions.saveRsshubHideNsfw,
+    persistView,
+    saveRsshubHideNsfw: settingsActions.saveRsshubHideNsfw,
+    hideNamespace: settingsActions.hideRsshubNamespace,
   })
 
   return {
@@ -886,6 +904,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     /** 取一次恢复的滚动位置（按传入的最大可滚位置夹取）；取过即清空，用户已滚过则放弃。 */
     takeListScrollTop,
     ...navActions, ...opmlActions, ...feedActions,
+    hideNamespace,
     dismissNotice: (): void => { set({ notice: undefined }) },
     ...listActions,
     ...folderActions,

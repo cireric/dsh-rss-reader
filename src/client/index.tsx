@@ -1164,6 +1164,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
             onDiscover={(url) => { void store.discover(url) }}
             onProbe={(urls) => store.probe(urls)}
             onClearDiscovery={() => { store.clearDiscovery() }}
+            onHideNamespace={(namespace) => { void store.hideNamespace(namespace) }}
             onRemove={(url) => { void store.removeFeed(url) }}
             onCreateFolder={(name) => { void store.createFolder(name) }}
             onRenameFolder={(from, to) => { void store.renameFolder(from, to) }}
@@ -1236,6 +1237,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
             hideNsfw={state.rsshubSettings?.hideNsfw ?? true}
             onlyRunnable={state.onlyRunnable}
             onToggleHideNsfw={(hideNsfw) => { void store.setExploreHideNsfw(hideNsfw) }}
+            onHideNamespace={(namespace) => { void store.hideExploreNamespace(namespace) }}
             onLoadMore={() => { void store.loadMoreExplore() }}
             onSelectRoute={store.selectExploreRoute}
             onDraftValue={store.setExploreDraftValue}
@@ -1282,6 +1284,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
             onReset={() => store.resetSettings()}
             onTestRsshub={(base) => store.testRsshub(base)}
             onSaveRsshub={(instances) => store.saveRsshubInstances(instances)}
+            onRestoreHiddenNamespaces={() => store.restoreHiddenNamespaces()}
             onCleanupPreview={() => store.cleanupPreview()}
             onCleanup={() => store.cleanup()}
             onManageFeeds={() => store.toggleFeeds()}

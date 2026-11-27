@@ -60,6 +60,8 @@ export interface ExploreViewProps {
   /** viewPreferences.onlyRunnable 的生效值。 */
   readonly onlyRunnable: boolean
   readonly onToggleHideNsfw: (hideNsfw: boolean) => void
+  /** 隐藏整个站点（config.rsshub.hiddenNamespaces，R15 07）。 */
+  readonly onHideNamespace: (namespace: string) => void
   readonly onLoadMore: () => void
   readonly onSelectRoute: (route: ExploreRouteView) => void
   readonly onDraftValue: (name: string, value: string) => void
@@ -151,7 +153,7 @@ function RouteForm(props: {
 
 export function ExploreView(props: ExploreViewProps): ReactNode {
   const {
-    state, onQuery, hideNsfw, onlyRunnable, onToggleHideNsfw,
+    state, onQuery, hideNsfw, onlyRunnable, onToggleHideNsfw, onHideNamespace,
     onLoadMore, onSelectRoute, onDraftValue, onBuild, onAdd, onBack,
   } = props
   /**
@@ -272,6 +274,11 @@ export function ExploreView(props: ExploreViewProps): ReactNode {
                   <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost dsh-rss-explore-pick"
                     data-rss-explore-pick={route.path}
                     onClick={() => { onSelectRoute(route) }}>订阅…</button>
+                  {/* R15 07：隐藏的是**整个站点**（namespace），不是这一条路由 —— 文案与 title
+                      都要说清楚，否则用户会以为只是去掉当前这行。已订阅的源与条目不受影响。 */}
+                  <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" data-rss-explore-hide-site={route.namespace}
+                    title={'不再显示「' + route.siteName + '」的路由；已订阅的源与条目不受影响'}
+                    onClick={() => { onHideNamespace(route.namespace) }}>隐藏此站点</button>
                 </div>
                 <code className="dsh-rss-explore-path" data-rss-explore-path-text="">{route.path}</code>
                 {paramsText !== '' && (

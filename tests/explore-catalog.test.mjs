@@ -674,3 +674,52 @@ test('游标：周测代次进入栅栏 —— 翻页中途周测刷新 ⇒ 旧�
   assert.equal(decodeCatalogCursor(raw, filter), undefined, '周测从有到无也是换代')
   assert.deepEqual(decodeCatalogCursor(raw, filter, weeklyA), position, '代次标识必须稳定，不许每次调用都变')
 })
+
+// ── R15 07：namespace 隐藏（A11）────────────────────────────────────────────
+
+test('query：hiddenNamespaces 隐藏整站；归一化去重 / 去空白 / 丢空串；空列表 = 不隐藏（A11）', () => {
+  const result = projectCatalog(rawCatalog())
+  assert.equal(result.ok, true)
+  const { catalog } = result
+
+  const hidden = catalog.query({ hiddenNamespaces: ['github'] })
+  assert.equal(hidden.matched, 1, 'github 的两条路由都不再计入 matched')
+  assert.deepEqual(hidden.items.map((row) => row.namespace), ['zhihu'])
+
+  // 写法差异（空白 / 重复 / 空串）必须与 ['github'] 同义：归一化漏一项，同一个列表在不同
+  // 写法下就会算出不同的 matched，游标栅栏也会跟着漂。
+  const messy = catalog.query({ hiddenNamespaces: ['  github  ', 'github', '', '   '] })
+  assert.equal(messy.matched, hidden.matched)
+  assert.deepEqual(messy.items.map((row) => row.path), hidden.items.map((row) => row.path))
+
+  // 空列表 = 不隐藏，行为与加字段之前逐字一致。
+  assert.equal(catalog.query({ hiddenNamespaces: [] }).matched, 3)
+  assert.deepEqual(
+    catalog.query({ hiddenNamespaces: [] }).items.map((row) => row.path),
+    catalog.query({}).items.map((row) => row.path),
+  )
+
+  // 目录口径不受筛选影响。
+  assert.equal(catalog.total, 3)
+})
+
+test('游标：hiddenNamespaces 进栅栏 —— 隐藏 / 恢复都换游标，同一集合的写法差异共用一把栅栏（A11）', () => {
+  const position = { namespace: 'github', path: '/github/branches/:user/:repo' }
+  const raw = encodeCatalogCursor({ hiddenNamespaces: ['github'] }, position)
+  assert.deepEqual(decodeCatalogCursor(raw, { hiddenNamespaces: ['github'] }), position, '同条件翻页正常')
+  assert.equal(decodeCatalogCursor(raw, { hiddenNamespaces: [] }), undefined, '恢复隐藏后旧游标必须失配（列表内容变了）')
+  assert.equal(decodeCatalogCursor(raw, {}), undefined, '从隐藏到不隐藏也是换条件')
+  assert.deepEqual(
+    decodeCatalogCursor(raw, { hiddenNamespaces: ['  github ', 'github', ''] }), position,
+    '同一集合的写法差异（空白 / 重复 / 空串）共用栅栏',
+  )
+  assert.equal(decodeCatalogCursor(raw, { hiddenNamespaces: ['zhihu'] }), undefined, '换隐藏站点必须失配')
+  // 顺序不改变筛选结论，也不该改变栅栏：否则用户手改 config 调个顺序，旧游标就假 400。
+  assert.deepEqual(
+    decodeCatalogCursor(
+      encodeCatalogCursor({ hiddenNamespaces: ['zhihu', 'github'] }, position),
+      { hiddenNamespaces: ['github', 'zhihu'] },
+    ),
+    position,
+  )
+})

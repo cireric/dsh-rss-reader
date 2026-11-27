@@ -35,6 +35,13 @@ export interface CatalogFilter {
    * 无必填配置 + 非 nsfw 四项交集，判据直接复用 `isRunnableRoute`。
    */
   onlyRunnable?: boolean
+  /**
+   * 用户隐藏的 namespace（R15 07 / A11）。**由宿主从 `config.rsshub.hiddenNamespaces` 注入**，
+   * 不是客户端筛选参数 —— 唯一落点的那份配置是真相，请求体不许覆盖它。
+   *
+   * 空数组 / 缺省 = 不隐藏任何站点；归一化（去空白 / 去重 / 丢空串）在 `normalizeFilter`。
+   */
+  hiddenNamespaces?: string[]
 }
 
 /** 一次检索的结果：`matched` 与 `items` 同源，避免调用方另数一遍（两处迟早漂）。 */
@@ -62,6 +69,25 @@ interface NormalizedFilter {
   namespace: string
   hideNsfw: boolean
   onlyRunnable: boolean
+  /** 去空白 / 去重 / 空串丢弃后**排序**：它是集合，顺序不该改变栅栏。 */
+  hiddenNamespaces: string[]
+}
+
+/**
+ * 隐藏列表归一化：隐藏的语义是「这些站点不出现」，所以重复、两端空白、空串都不改变结论。
+ *
+ * 排序是栅栏的要求：`['a','b']` 与 `['b','a']` 筛出同一份列表，游标必须互相认。
+ * 非数组（手改 config / 旧回包漂移）按空列表处理 —— 宁可回到「不隐藏」，也不把垃圾值当站点名。
+ */
+function normalizeHiddenNamespaces(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  const set = new Set<string>()
+  for (const entry of raw) {
+    if (typeof entry !== 'string') continue
+    const trimmed = entry.trim()
+    if (trimmed !== '') set.add(trimmed)
+  }
+  return [...set].sort(compareText)
 }
 
 function normalizeFilter(filter: CatalogFilter): NormalizedFilter {
@@ -73,6 +99,7 @@ function normalizeFilter(filter: CatalogFilter): NormalizedFilter {
     hideNsfw: filter.hideNsfw !== false,
     // 只认显式 true：缺省 / 认不出的值都不启用硬过滤。
     onlyRunnable: filter.onlyRunnable === true,
+    hiddenNamespaces: normalizeHiddenNamespaces(filter.hiddenNamespaces),
   }
 }
 
@@ -269,7 +296,7 @@ export function projectCatalog(raw: unknown): CatalogProjection {
 
 /**
  * 检索（spec §4.3 / D8 / D9）：q / category / namespace 三筛 AND，再叠加 R15 06 的
- * hideNsfw（默认隐藏）与 onlyRunnable（硬过滤）。
+ * hideNsfw（默认隐藏）与 onlyRunnable（硬过滤），以及 R15 07 的 hiddenNamespaces（整站隐藏）。
  *
  * `q` 的匹配面是**站点名 OR 路由名 OR 路径模板**：站点名命中 ⇒ 该站全部路由命中，这是刻意的
  *（「搜站点 = 看该站能订什么」）；只看路由名 / 路径会把「搜 github 却只出来名字里带 github 的
@@ -283,12 +310,18 @@ function queryCatalog(
   filter: CatalogFilter,
   weeklyTests: WeeklyTestMap | undefined,
 ): CatalogQueryResult {
-  const { q, category: rawCategory, namespace: rawNamespace, hideNsfw, onlyRunnable } = normalizeFilter(filter)
+  const {
+    q, category: rawCategory, namespace: rawNamespace, hideNsfw, onlyRunnable, hiddenNamespaces,
+  } = normalizeFilter(filter)
   const category = rawCategory !== '' ? rawCategory : undefined
   const namespace = rawNamespace !== '' ? rawNamespace : undefined
+  // 集合只在非空时建：空列表的常态请求不该多一次构造。
+  const hidden = hiddenNamespaces.length === 0 ? undefined : new Set(hiddenNamespaces)
   const items = rows.filter((row) => {
     if (namespace !== undefined && row.namespace !== namespace) return false
     if (category !== undefined && !row.categories.includes(category)) return false
+    // 隐藏整站（A11）：在宿主侧过滤，matched / 页大小 / nextCursor 才与用户看到的列表一致。
+    if (hidden !== undefined && hidden.has(row.namespace)) return false
     if (q !== '') {
       const hit = row.siteName.toLowerCase().includes(q)
         || row.name.toLowerCase().includes(q)
@@ -313,14 +346,15 @@ function queryCatalog(
  * 而查询只看归一化后的值（`q` 大小写不敏感）。绑原始字符串会把语义相同的查询判成不同，
  * 制造一次假 400（spec §4.3 要拒的是**变了**的条件，不是**写法变了**的条件）。
  * R15 06 的两个开关与周测代次也一起进哈希：它们同样改变列表内容与边界行。
+ * R15 07 的隐藏列表同理 —— 隐藏 / 恢复 / 换站点都会改变行集合，旧游标必须诚实 400。
  */
 function catalogFenceKey(filter: CatalogFilter, weeklyTests?: WeeklyTestMap): string {
-  const { q, category, namespace, hideNsfw, onlyRunnable } = normalizeFilter(filter)
+  const { q, category, namespace, hideNsfw, onlyRunnable, hiddenNamespaces } = normalizeFilter(filter)
   // 周测代次也进栅栏（R15 06）：排序（可跑优先）与 onlyRunnable 都依赖这份外部事实，
   // 翻页中途刷新会让边界行附近重复或漏行 —— 旧游标必须诚实地 400，而不是静默给一页错数据。
   const weeklyGeneration = weeklyTestGenerationOf(weeklyTests)
   return createHash('sha256')
-    .update(JSON.stringify([q, category, namespace, hideNsfw, onlyRunnable, weeklyGeneration]))
+    .update(JSON.stringify([q, category, namespace, hiddenNamespaces, hideNsfw, onlyRunnable, weeklyGeneration]))
     .digest('base64url') + ':'
 }
 

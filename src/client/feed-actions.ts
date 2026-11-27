@@ -9,6 +9,7 @@
  * R9 03 增加 backfill：同一条纪律，报告只用于展示，条目仍以 reload 后的宿主快照为准。
  */
 import type { BackfillReport, DiscoveryResult, OpmlImportResult, ProbeResult } from '../shared.js'
+import { rsshubNamespaceOf } from '../rsshub-source.js'
 import type { ReaderStoreDeps, ReaderState } from './store.js'
 
 export interface FeedActionHost {
@@ -94,6 +95,21 @@ export function createFeedActions(host: FeedActionHost) {
   const clearDiscovery = (): void => { set({ discovery: undefined }) }
 
   /**
+   * 从当前候选清单里去掉某个 RSSHub 站点的候选（R15 07，「隐藏此站点」点完立即生效）。
+   *
+   * 只动内存态：下一次发现由宿主按 `config.rsshub.hiddenNamespaces` 过滤，客户端不提前
+   * 过滤预览/发现的输入（那是第二套判据）。页面候选按来源排除 —— 它们的路径首段不是 namespace。
+   */
+  const dropDiscoveryNamespace = (namespace: string): void => {
+    const discovery = get().discovery
+    if (discovery === undefined) return
+    const candidates = discovery.candidates.filter((candidate) => candidate.source !== 'rsshub'
+      || rsshubNamespaceOf(candidate.url) !== namespace)
+    if (candidates.length === discovery.candidates.length) return
+    set({ discovery: { ...discovery, candidates } })
+  }
+
+  /**
    * 加单个源：同样先校验再落库，避免把网页当订阅。
    *
    * 返回值是 R8b 04 加的，只为让探索知道「到底成没成」；feeds-view 的 `onAdd` 仍丢弃它，
@@ -172,5 +188,5 @@ export function createFeedActions(host: FeedActionHost) {
     return run
   }
 
-  return { discover, addFeed, removeFeed, clearDiscovery, moveFeedOrder, backfill, probe }
+  return { discover, addFeed, removeFeed, clearDiscovery, dropDiscoveryNamespace, moveFeedOrder, backfill, probe }
 }

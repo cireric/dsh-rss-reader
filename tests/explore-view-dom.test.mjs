@@ -141,7 +141,12 @@ async function mount({ rsshubBase = 'https://rsshub.example', catalog, build, ad
   const rsshubInstances = /^https?:\/\//.test(rsshubBase) ? [rsshubBase] : []
   // R15 06：NSFW 开关的初值与写路径都走 rsshubSettings 快照（config.json 的 rsshub.hideNsfw）。
   let rsshubHideNsfw = true
-  const rsshubSnapshot = () => ({ instances: rsshubInstances, hiddenNamespaces: [], hideNsfw: rsshubHideNsfw })
+  // R15 07：隐藏列表同样是 config.json 的事实；桩必须像宿主一样把 payload 里的 hiddenNamespaces
+  // 写回快照，否则「保存后重取」这条验收会被一个更宽松的替身放过去（pitfalls 二、2.6）。
+  let rsshubHidden = []
+  const rsshubSnapshot = () => ({
+    instances: rsshubInstances, hiddenNamespaces: [...rsshubHidden], hideNsfw: rsshubHideNsfw,
+  })
   const overview = { feeds: [], items: [], folders: [], tags: [], unread: 0, perFeedUnread: {}, refreshed: false }
   const ok = (value) => ({ ok: true, status: 200, json: async () => ({ ok: true, value }) })
   const failEnvelope = (error) => ({ ok: true, status: 200, json: async () => ({ ok: false, error }) })
@@ -154,6 +159,7 @@ async function mount({ rsshubBase = 'https://rsshub.example', catalog, build, ad
     if (body.endpoint === 'rsshubSettings') return ok({ rsshub: rsshubSnapshot() })
     if (body.endpoint === 'saveRsshubSettings') {
       if (typeof body.payload?.hideNsfw === 'boolean') rsshubHideNsfw = body.payload.hideNsfw
+      if (Array.isArray(body.payload?.hiddenNamespaces)) rsshubHidden = [...body.payload.hiddenNamespaces]
       return ok({ rsshub: rsshubSnapshot() })
     }
     if (body.endpoint === 'viewPreferences') return ok({ preferences: undefined })
@@ -247,7 +253,7 @@ async function mount({ rsshubBase = 'https://rsshub.example', catalog, build, ad
   const $ = (selector) => win.document.querySelector(selector)
   const $$ = (selector) => [...win.document.querySelectorAll(selector)]
   const calls = (endpoint) => requests.filter((entry) => entry.endpoint === endpoint)
-  return { win, store, requests, calls, press, settle, waitFor, cleanup, $, $$ }
+  return { win, store, requests, calls, press, settle, waitFor, cleanup, $, $$, rsshub: rsshubSnapshot }
 }
 
 /** 受控 input 写值并派发 React 认的 input 事件（原生 setter 绕过 value tracker）。 */
@@ -833,6 +839,45 @@ test('R15 06 两个开关：默认关；切换即重取第一页（不带 cursor
     assert.equal(third.cursor, undefined, '过滤器变了游标必须重来')
     const savedPrefs = h.calls('saveViewPreferences').at(-1)?.payload.preferences
     assert.equal(savedPrefs?.onlyRunnable, true, '写路径走 saveViewPreferences')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R15 07：探索行「隐藏此站点」写入 config.rsshub.hiddenNamespaces，并按新筛选重取第一页', skip, async () => {
+  // 桩件照宿主契约把隐藏列表写回快照，再据此过滤目录 —— 这样「点完行消失、matched 同步变小」
+  // 才是从保存到重取的完整链路，而不是只看一个请求体。
+  const h = await mount({
+    catalog: () => {
+      const hidden = h.rsshub().hiddenNamespaces
+      const items = [BRANCHES, ISSUES, ZHIHU].filter((row) => !hidden.includes(row.namespace))
+      return { value: catalogPage(items, { siteTotal: 2, routeTotal: 3, matched: items.length }) }
+    },
+  })
+  try {
+    await openExploreFromFeeds(h)
+    assert.equal(h.$$('[data-rss-explore-row]').length, 3, '前置：隐藏前三条路由都在')
+    assert.match(h.$('[data-rss-explore-counts]').textContent ?? '', /命中 3 条/)
+
+    const row = h.$$('[data-rss-explore-row]')
+      .find((item) => item.getAttribute('data-rss-explore-path') === '/branches/:user/:repo')
+    const hide = row.querySelector('[data-rss-explore-hide-site="github"]')
+    assert.ok(hide !== null, '每一行都要有「隐藏此站点」按钮（按该行的 namespace）')
+    assert.match(hide.textContent ?? '', /隐藏此站点/)
+    hide.click()
+    await h.settle()
+
+    const save = h.calls('saveRsshubSettings').at(-1)
+    assert.deepEqual(save.payload.hiddenNamespaces, ['github'], '隐藏 = 把该行的 namespace 写进 config.rsshub.hiddenNamespaces')
+    assert.deepEqual(save.payload.instances, ['https://rsshub.example'], '只改隐藏列表，实例池原样带上')
+    await h.waitFor(() => h.$$('[data-rss-explore-row]').length === 1, { label: '隐藏后重取第一页' })
+    assert.deepEqual(
+      h.$$('[data-rss-explore-row]').map((item) => item.getAttribute('data-rss-explore-path')),
+      ['/people/activities/:id'],
+      '被隐藏站点（github）的行必须一起消失',
+    )
+    assert.match(h.$('[data-rss-explore-counts]').textContent ?? '', /命中 1 条/, 'matched 随之重算')
+    assert.equal(h.calls('exploreCatalog').at(-1).payload.cursor, undefined, '筛选变了必须从第一页重取')
   } finally {
     h.cleanup()
   }

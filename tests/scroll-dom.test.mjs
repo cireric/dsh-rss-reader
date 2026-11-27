@@ -5958,6 +5958,74 @@ test('R15 02：RSSHub 源显示「RSSHub · 当前实例」；非 RSSHub 源不�
   assert.equal(doc.querySelector('[data-rss-feed-rsshub="b"]'), null, '非 RSSHub 源不许凭空多一行来源')
 })
 
+/* ──────────────── R15 07：候选行「隐藏此站点」 ──────────────── */
+test('R15 07：候选行「隐藏此站点」只对 RSSHub 候选出现；页面候选路径首段同名也照留', async () => {
+  // 页面候选的地址是站点自己的 feed（/github/feed.xml），路径首段与 namespace 同名纯属巧合。
+  // 给它一个「隐藏此站点」按钮，就会把用户的普通订阅当成 RSSHub 路由隐藏掉。
+  const pageUrl = 'https://github.com/github/feed.xml'
+  const radarUrl = 'https://hub.test/github/branches/DIYgod/RSSHub'
+  const report = {
+    url: 'https://github.com/DIYgod/RSSHub',
+    candidates: [
+      { url: pageUrl, title: '页面源', format: 'rss2', itemCount: 3, source: 'page' },
+      { url: radarUrl, title: '仓库分支', siteName: 'GitHub', source: 'rsshub' },
+    ],
+    warnings: [],
+  }
+  const rsshubState = { instances: ['https://hub.test'], hiddenNamespaces: [], hideNsfw: true }
+  const saves = []
+  const snapshot = () => ({
+    instances: [...rsshubState.instances],
+    hiddenNamespaces: [...rsshubState.hiddenNamespaces],
+    hideNsfw: rsshubState.hideNsfw,
+  })
+  const h = await mountReader({
+    items: [item({ id: 'a1', feedId: 'a' })],
+    feeds: [{ id: 'a', title: '源 A' }],
+    folderApi: async (body) => {
+      if (body.endpoint === 'rsshubSettings') {
+        return { ok: true, status: 200, json: async () => ({ ok: true, value: { rsshub: snapshot() } }) }
+      }
+      if (body.endpoint === 'saveRsshubSettings') {
+        saves.push(body.payload)
+        if (Array.isArray(body.payload?.hiddenNamespaces)) rsshubState.hiddenNamespaces = [...body.payload.hiddenNamespaces]
+        return { ok: true, status: 200, json: async () => ({ ok: true, value: { rsshub: snapshot() } }) }
+      }
+      if (body.endpoint === 'discoverFeeds') {
+        return { ok: true, status: 200, json: async () => ({ ok: true, value: report }) }
+      }
+      return undefined
+    },
+  })
+  await h.store.load('overview')
+  await h.settle()
+  h.press('f')
+  await h.settle()
+  const doc = h.win.document
+  setControlValue(h.win, doc.querySelector('[data-rss-add-input]'), 'https://github.com/DIYgod/RSSHub')
+  await h.settle()
+  doc.querySelector('[data-rss-discover]').click()
+  await h.settle()
+
+  const pageRow = doc.querySelector('[data-rss-candidate="' + pageUrl + '"]')
+  const radarRow = doc.querySelector('[data-rss-candidate="' + radarUrl + '"]')
+  assert.ok(pageRow !== null && radarRow !== null, '前置：两类候选都在')
+  assert.equal(pageRow.querySelector('[data-rss-candidate-hide]'), null,
+    '页面候选是站点自己的 feed：绝不能因为路径首段同名就被隐藏')
+
+  const hide = radarRow.querySelector('[data-rss-candidate-hide]')
+  assert.ok(hide !== null, 'RSSHub 候选必须有「隐藏此站点」')
+  assert.match(hide.textContent, /隐藏此站点/)
+  hide.click()
+  await h.settle()
+
+  assert.deepEqual(saves.at(-1).hiddenNamespaces, ['github'], 'namespace = 候选 URL 的 pathname 首段')
+  assert.deepEqual(saves.at(-1).instances, ['https://hub.test'], '只改隐藏列表，实例池原样带上')
+  assert.equal(doc.querySelector('[data-rss-candidate="' + radarUrl + '"]'), null,
+    '隐藏后该站点的 RSSHub 候选从当前清单里消失')
+  assert.notEqual(doc.querySelector('[data-rss-candidate="' + pageUrl + '"]'), null, '页面候选照留')
+})
+
 /* ──────────────── R15 03：RSSHub 订阅行的切换状态 ──────────────── */
 /**
  * 「当前实例 · 上次成功 · 连续失败 N 次」是宿主下发的三个字段的纯展示。

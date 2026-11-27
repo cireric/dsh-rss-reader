@@ -12,11 +12,16 @@
  */
 import { test, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { Config } from '../lib/config.js'
 import { createDispatch } from '../lib/endpoints.js'
 import { fetchFeed } from '../lib/feed/fetch.js'
 import { createMemoryStore } from '../lib/memory-store.js'
 import { clearRadarCache } from '../lib/radar.js'
+import { createRsshubSettings } from '../lib/rsshub-settings.js'
+import { writeConfigFile } from '../lib/storage/config-file.js'
 import { discoverCandidates } from '../lib/subscribe.js'
 
 const LIMITS = { timeoutMs: 1000, maxBytes: 1024 * 1024, trustedTarget: true }
@@ -298,7 +303,7 @@ test('Radar 请求不带 trustedTarget：即使页面路径是可信目标，实
 
 /* ─────────────────── 端点接线：rsshubBase 来自 ctx.config，日志走 ctx.log ─────────────────── */
 
-function endpointHarness(fetchImpl, config = {}) {
+function endpointHarness(fetchImpl, config = {}, rsshubSettings) {
   const store = createMemoryStore()
   const lines = []
   const dispatch = createDispatch({
@@ -309,8 +314,22 @@ function endpointHarness(fetchImpl, config = {}) {
     lastRefreshCompletedAt: () => undefined,
     articleAttempts: new Map(),
     fetchImpl,
+    ...(rsshubSettings === undefined ? {} : { rsshubSettings }),
   })
   return { dispatch, lines }
+}
+
+/** 真实控制器 + 临时 config.json：隐藏列表只从配置来，端点拿不到别的来源。 */
+function hiddenSettings(namespaces) {
+  const dir = mkdtempSync(join(tmpdir(), 'rss-radar-hidden-'))
+  const configPath = join(dir, 'config.json')
+  writeConfigFile(configPath, {
+    version: 1,
+    feeds: {},
+    rsshub: { instances: [BASE], hiddenNamespaces: namespaces, hideNsfw: true },
+  })
+  const control = createRsshubSettings({ config: Config({}), configPath, log: () => {} })
+  return { control, dispose: () => rmSync(dir, { recursive: true, force: true }) }
 }
 
 test('端点：discoverFeeds 读 ctx.config.rsshubBase，并记一行「Radar：域名 → 命中 N 条，跳过 M 条」', async () => {
@@ -506,4 +525,47 @@ test('发现日志按来源分计候选，不把未校验的 Radar 候选算成�
     '日志要按来源分计；实际：' + JSON.stringify(h.lines))
   assert.equal(h.lines.some((line) => line.includes('已验证')), false,
     'Radar 候选没有抓取校验，不能写「已验证」')
+})
+
+test('R15 07：隐藏的 namespace 不进候选列表 —— 只对 source=rsshub 生效，页面候选路径首段同名也照留', async () => {
+  // 页面候选的地址是站点自己的 feed，路径首段完全可能和 namespace 同名（这里就是 /github/）。
+  // 若按「pathname 首段」不加来源判断地过滤，这条页面候选会被误杀 —— 那是把站点自己的
+  // feed 当成 RSSHub 路由隐藏，用户在该站点上再也发现不了它。
+  const pageCandidateUrl = 'https://github.com/github/feed.xml'
+  const fetchImpl = stubFetch({
+    'https://github.com/DIYgod/RSSHub': { kind: 'ok', body: htmlPage(feedLink('/github/feed.xml')) },
+    [pageCandidateUrl]: { kind: 'ok', body: RSS },
+    [radarUrl('github.com')]: { kind: 'ok', body: GITHUB_RULES },
+  })
+  const settings = hiddenSettings(['github'])
+  try {
+    const h = endpointHarness(fetchImpl, {}, settings.control)
+    const result = await h.dispatch('discoverFeeds', { url: 'https://github.com/DIYgod/RSSHub' })
+    assert.equal(result.ok, true)
+    const urls = result.value.candidates.map((candidate) => candidate.url)
+    assert.deepEqual(urls, [pageCandidateUrl],
+      'Radar 候选（hub.test/github/...）按 namespace 隐藏；页面候选必须留下')
+  } finally {
+    settings.dispose()
+  }
+})
+
+test('R15 07：隐藏列表为空时候选与加这个字段之前逐字一致', async () => {
+  const fetchImpl = stubFetch({
+    'https://site.test/': { kind: 'ok', body: htmlPage(feedLink('/a.xml')) },
+    'https://site.test/a.xml': { kind: 'ok', body: RSS },
+    [radarUrl('site.test')]: {
+      kind: 'ok',
+      body: JSON.stringify({ _name: '示例站', '.': [{ title: '甲', source: ['/'], target: '/a' }] }),
+    },
+  })
+  const settings = hiddenSettings([])
+  try {
+    const h = endpointHarness(fetchImpl, {}, settings.control)
+    const result = await h.dispatch('discoverFeeds', { url: 'https://site.test/' })
+    assert.deepEqual(result.value.candidates.map((candidate) => candidate.source), ['page', 'rsshub'],
+      '空隐藏列表 = 不隐藏任何站点')
+  } finally {
+    settings.dispose()
+  }
 })
