@@ -15,6 +15,7 @@ import { resolveItemIds, type KnownIdentities } from './feed/item-id.js'
 import { fetchFeed, type FetchLimits } from './feed/fetch.js'
 import { selectPrunable, selectArticleEvictions, type RetentionRow } from './retention.js'
 import { parseFeed } from './feed/parse.js'
+import { rsshubSourceOf } from './rsshub-source.js'
 import { effectiveLimitOf } from './shared.js'
 import type { ReaderStore } from './store.js'
 
@@ -50,6 +51,13 @@ export interface RefreshOptions {
    * 它后面的所有源（20 x 15s = 300s）。与 subscribe.ts 的并发校验同一套模式。
    */
   refreshConcurrency: number
+  /**
+   * RSSHub 实例池（R15 02，spec §4.1.3）：成功刷新时用 `feedId` 的 origin 识别来源并补写
+   * `FeedRecord.rsshub`。缺省 = 空池（行为与加字段前逐字相同；测试桩不必逐处传）。
+   *
+   * 每次刷新**现读**（生命周期的闭包），所以设置页改了池子下一轮就生效，不缓存。
+   */
+  instances?: readonly string[]
   now?: () => Date
   fetchFeedImpl?: typeof fetchFeed
 }
@@ -277,6 +285,9 @@ async function refreshOne(
   }
 
   const previous = store.feed(feedId)
+  // R15 02：来源识别（字段优先，否则 origin 命中实例池）。成功与 304 共用这一份 ——
+  // 两个意图都是逐字段重建，漏传就等于「每刷新一次来源字段消失一次」。
+  const rsshub = rsshubSourceOf({ url: feedId, rsshub: previous?.rsshub }, options.instances ?? [])
   // 内容版本落后 ⇒ 这一轮不带条件请求，强制拿 200 以便回填正文
   const needsContentUpgrade = (previous?.contentRevision ?? 1) < CONTENT_REVISION
   const result = await doFetch(
@@ -311,7 +322,9 @@ async function refreshOne(
       const upgradeSkipped = needsContentUpgrade
       // 304 也是**成功**（源说「内容没变」）：lastFailure 必须清 —— 横幅只能反映最近一次真实结果
       //（用户实测：月光博客连续十几次 not-modified，横幅仍写 HTTP 502）。合并语义在 feed-intent.ts。
-      await store.updateFeed(feedId, { kind: 'refresh-not-modified', url: feedId, stamp, contentRevision: CONTENT_REVISION })
+      await store.updateFeed(feedId, {
+        kind: 'refresh-not-modified', url: feedId, stamp, contentRevision: CONTENT_REVISION, rsshub,
+      })
       return upgradeSkipped
         ? { feedId, url: feedId, status: 'not-modified', added: 0, reason: '源未响应无条件请求，正文升级跳过' }
         : { feedId, url: feedId, status: 'not-modified', added: 0 }
@@ -416,6 +429,7 @@ async function refreshOne(
       etag: result.etag,
       lastModified: result.lastModified,
       contentRevision: CONTENT_REVISION,
+      rsshub,
     })
     await prune(store, feedId, options.maxItemsPerFeed)
 
