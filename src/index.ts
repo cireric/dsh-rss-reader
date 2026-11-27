@@ -119,7 +119,8 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
   const sourcePack = createSourcePack({ configPath: configFile, log })
 
   // 生命周期：打开 → 刷新 → 关停。它与 ctx 无关，测试直接 start/stop（2026-10-15 H2）。
-  const session = createLifecycle({ config, storagesRoot, configFile, log, summarize })
+  // R15 02：刷新补写来源要读生效实例池 —— 传闭包，设置页保存后下一轮就用新值。
+  const session = createLifecycle({ config, storagesRoot, configFile, log, summarize, instances: () => rsshubSettings.instances() })
 
   const search = createSearch(join(storagesRoot, 'rss.db'))
   /**

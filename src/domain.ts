@@ -72,6 +72,21 @@ export const feedRecordSchema = z.object({
    * 判据在 tests/store-sqlite.test.mjs（含 undefined ≠ 0）与 tests/refresh.test.mjs 的真装配。
    */
   failureCount: z.number().int().min(0).optional(),
+  /**
+   * RSSHub 订阅来源（R15 02，spec §4.1.3）。
+   *
+   * `path` 是**拼好的具体路径**（如 `/github/branches/DIYgod/RSSHub`），不是路由模板；
+   * `namespace` 是 pathname 首段。可选 ⇒ 老记录照常通过校验，识别走 origin 命中实例池。
+   *
+   * 嵌套对象同样 `.strict()`：宽松对象会把写错的键（如 `instanceUrl`）静默吞掉，
+   * 界面上的「当前实例」就会永远缺一块而没有任何报错。
+   * 识别判据只在 src/rsshub-source.ts 一处，本 schema 只声明形状。
+   */
+  rsshub: z.object({
+    namespace: z.string().min(1),
+    path: z.string().min(1),
+    instance: z.string().optional(),
+  }).strict().optional(),
 }).strict()
 export type FeedRecord = z.infer<typeof feedRecordSchema>
 

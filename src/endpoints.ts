@@ -54,6 +54,7 @@ import { BackfillError, backfillHistory } from './backfill.js'
 import { rebuildItem } from './domain.js'
 import { selectCleanup } from './retention.js'
 import { buildOpml, parseOpml } from './opml.js'
+import { rsshubSourceOf } from './rsshub-source.js'
 import { FolderError } from './folders.js'
 import { duplicateHintsOf, linkKeyOf, type DuplicateRow } from './duplicates.js'
 import { TagError } from './tags.js'
@@ -466,17 +467,24 @@ const buildOverview = (
     return { feeds: [], folders: [], tags: [], items: [], unread: 0, perFeedUnread: {}, refreshed, ...(run === undefined ? {} : { refresh: run }) }
   }
 
-  const feeds = target.listFeeds().map(([feedId, record]) => ({
-    id: feedId,
-    title: record.title ?? feedId,
-    ...(record.folder ? { folder: record.folder } : {}),
-    lastFetchedAt: record.lastFetchedAt,
-    lastAttemptedAt: record.lastAttemptedAt,
-    lastFailure: record.lastFailure,
-    // failureCount 原样透出：undefined（历史未知）与 0（真实零连败）在 wire 上必须能区分，
-    // 补一个 0 就会把「不知道」谎报成「没失败过」（M4 02）。
-    failureCount: record.failureCount,
-  }))
+  // R15 02：来源**由宿主裁决一次**再下发（字段优先，否则 origin 命中池）——客户端不拿池子重判。
+  const instances = rsshubPoolOf(ctx)
+  const feeds = target.listFeeds().map(([feedId, record]) => {
+    const rsshub = rsshubSourceOf(record, instances)
+    return {
+      id: feedId,
+      title: record.title ?? feedId,
+      ...(record.folder ? { folder: record.folder } : {}),
+      lastFetchedAt: record.lastFetchedAt,
+      lastAttemptedAt: record.lastAttemptedAt,
+      lastFailure: record.lastFailure,
+      // failureCount 原样透出：undefined（历史未知）与 0（真实零连败）在 wire 上必须能区分，
+      // 补一个 0 就会把「不知道」谎报成「没失败过」（M4 02）。
+      failureCount: record.failureCount,
+      // 没有来源时保持键缺席：客户端据此决定「非 RSSHub 源什么都不加」。
+      ...(rsshub === undefined ? {} : { rsshub }),
+    }
+  })
   // 目录必须每次随 overview 下发：左栏要显示空文件夹/空标签，而 feeds 里没有它们的位置。
   const folders = target.listFolders()
   const tags = target.listTags()
@@ -1001,6 +1009,8 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
       const failed: Array<{ url: string; reason: string }> = []
       let added = 0
       let existed = 0
+      // 实例池读一次：识别判据只是 origin 比较（src/rsshub-source.ts），不按路径猜。
+      const instances = rsshubPoolOf(ctx)
 
       for (const result of checked) {
         if (!result.ok) {
@@ -1022,6 +1032,8 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
           url: result.url,
           title: result.title ?? subscription?.title ?? previous?.title,
           folder: subscription?.folder,
+          // R15 02：来源写入同一个合并入口；已存在的字段由 feed-intent 优先保留。
+          rsshub: rsshubSourceOf({ url: result.url, rsshub: previous?.rsshub }, instances),
         })
         // 回包报告**实际落盘**的归属（写后重读），而不是 OPML 声明的那个。
         const stored = ctx.store.feed(result.url)
@@ -1089,6 +1101,8 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         title: result.title ?? previous?.title,
         // 新源保持未分类；已存在的源由 feed-intent 保留本地 folder（含「本地是未分类」）。
         folder: undefined,
+        // R15 02：Radar 候选的地址就拼在实例 origin 上，这里按 origin 认出并写入来源。
+        rsshub: rsshubSourceOf({ url: result.url, rsshub: previous?.rsshub }, rsshubPoolOf(ctx)),
       })
       const stored = ctx.store.feed(result.url)
       return ok({

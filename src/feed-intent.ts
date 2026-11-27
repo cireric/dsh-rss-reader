@@ -30,6 +30,8 @@ export type FeedIntent =
       lastModified: string | undefined
       /** 写回当前内容版本（refresh.ts 的 CONTENT_REVISION）—— 缺了它，正文升级轮会被源 304 卡死 */
       contentRevision: number
+      /** RSSHub 来源（R15 02）：新值优先，否则沿用 previous。漏了这个字段，每刷新一次来源消失一次。 */
+      rsshub?: FeedRecord['rsshub']
     }
   | {
       /** 刷新 304（源说内容没变）：也是**成功** —— 同样盖两个时间戳、清 lastFailure，但保留 etag/lastModified。
@@ -39,6 +41,8 @@ export type FeedIntent =
       stamp: string
       /** 升级轮被判 304 时要写回内容版本号，避免每轮重试（refresh.ts 的 needsContentUpgrade 语义） */
       contentRevision: number
+      /** RSSHub 来源（R15 02）：与 200 同一份逐字段重建，必须显式带上，否则 304 一轮就丢。 */
+      rsshub?: FeedRecord['rsshub']
     }
   | {
       /** 刷新失败：盖 lastAttemptedAt（失败的尝试也是一次尝试，防饿死）+ 记 lastFailure；**不**盖 lastFetchedAt。
@@ -61,6 +65,13 @@ export type FeedIntent =
       url: string
       title: string | undefined
       folder: string | undefined
+      /**
+       * RSSHub 来源（R15 02）：只在**新源**上按识别结果写入。
+       *
+       * 已存在的源一律保留 previous（`previous?.rsshub ?? intent.rsshub`）—— 重复导入 OPML /
+       * 重新添加不是一次新的识别，不能让「池子临时为空」把已记录的来源抹掉（与 folder 同型事故）。
+       */
+      rsshub?: FeedRecord['rsshub']
     }
 
 /**
@@ -96,6 +107,8 @@ export function applyFeedIntent(previous: FeedRecord | undefined, intent: FeedIn
         contentRevision: intent.contentRevision,
         // 成功即清零（不是「省略这个字段」）：省略等于退回「历史未知」，而这里我们**知道**刚成功。
         failureCount: 0,
+        // 来源字段是逐字段重建里最容易被漏掉的那个（R15 02）：漏了它，200 一次就丢。
+        rsshub: intent.rsshub ?? previous?.rsshub,
       }
     case 'refresh-not-modified':
       // 304：保留既有 etag/lastModified（源没给新的），写回 contentRevision 避免每轮重试；
@@ -109,6 +122,8 @@ export function applyFeedIntent(previous: FeedRecord | undefined, intent: FeedIn
         lastFetchedAt: intent.stamp,
         lastAttemptedAt: intent.stamp,
         contentRevision: intent.contentRevision,
+        // 304 与 200 同一份逐字段重建：漏了来源，老记录刚补上的字段下一轮 304 就消失。
+        rsshub: intent.rsshub ?? previous?.rsshub,
         // 304 也是成功（源说内容没变）：连败计数同样归零，与 lastFailure 清零同一条理由。
         failureCount: 0,
       }
@@ -147,6 +162,8 @@ export function applyFeedIntent(previous: FeedRecord | undefined, intent: FeedIn
         // 判据从「抹掉」翻成「保留」，见 tests/store-sqlite.test.mjs 的 H4 族。
         lastFailure: previous?.lastFailure,
         failureCount: previous?.failureCount,
+        // 来源字段同理：已记录的来源是历史事实，重复导入 / 重新添加不许抹掉（与 folder 那次同型事故）。
+        rsshub: previous?.rsshub ?? intent.rsshub,
       }
     }
   }
