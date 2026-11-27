@@ -17,6 +17,8 @@ export interface FeedActionHost {
   set: (patch: Partial<ReaderState>) => void
   rpc: ReaderStoreDeps['rpc']
   reload: () => Promise<void>
+  /** 退订掉当前选中的源之后要把回落后的导航记下来（否则重开面板又回到一个已不存在的源）。 */
+  persistView: () => void
 }
 
 /**
@@ -40,7 +42,7 @@ export type AddFeedActionResult =
   | { readonly ok: false; readonly message: string }
 
 export function createFeedActions(host: FeedActionHost) {
-  const { get, set, rpc, reload } = host
+  const { get, set, rpc, reload, persistView } = host
   /**
    * 排序在途标记：**刻意不进 state**。
    *
@@ -136,6 +138,21 @@ export function createFeedActions(host: FeedActionHost) {
   const removeFeed = async (url: string): Promise<void> => {
     try {
       const result = await rpc<{ removed: number; items: number }>('removeFeed', { url })
+      // 退掉的正好是**当前范围**时必须先回落虚拟视图：否则 reload() 会带着刚被删掉的 feedId
+      // 去取 overview，宿主如实回 not-found，界面把它画成「退订报错」——而订阅其实已经删掉了
+      // （真机 2026-11-28）。deleteFolder / deleteTag 都有这条回落规则（它们删的也是「当前所在
+      // 范围」），退订是唯一漏掉的一处。
+      const nav = get().navSelection
+      const selected = nav.kind === 'feed' && nav.feedId === url
+      const cursor = get().navCursor
+      const cursorOnIt = cursor.kind === 'feed' && cursor.feedId === url
+      if (selected) {
+        set({ navSelection: { kind: 'virtual' }, filter: 'all', navCursor: { kind: 'filter', filter: 'all' } })
+        persistView()
+      } else if (cursorOnIt) {
+        // 选中项不是它、但键盘光标停在它上面：光标同样不许指着一个已不存在的源。
+        set({ navCursor: { kind: 'filter', filter: get().filter } })
+      }
       set({ notice: '已退订（连带删除 ' + result.items + ' 条条目）' })
       await reload()
     } catch (failure) {

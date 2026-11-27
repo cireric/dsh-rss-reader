@@ -840,7 +840,9 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     leaveTransientViews,
   })
 
-  const feedActions = createFeedActions({ get, set, rpc: deps.rpc, reload: () => listActions.load('overview') })
+  const feedActions = createFeedActions({
+    get, set, rpc: deps.rpc, reload: () => listActions.load('overview'), persistView,
+  })
 
   // 设置域（R11 01）：只读快照 + 视图开关。写路径是 02 票的 saveSettings。
   const settingsActions = createSettingsActions({ get, set, rpc: deps.rpc, log: deps.log })

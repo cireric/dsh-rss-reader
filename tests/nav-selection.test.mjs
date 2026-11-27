@@ -620,3 +620,34 @@ test('R14 恢复视图：恢复到某个源时，首屏之后按源重取一次�
   assert.deepEqual({ ...store.get().navSelection }, { kind: 'feed', feedId: 'feedB' },
     '恢复出的源选择必须留在 state 里；重取只是把「哪一页」换成源范围')
 })
+
+test('退订当前选中的源：重取不带已删的 feedId（真机 2026-11-28 的 not-found 报错）', async () => {
+  // 病象：在 GUI 里退订一个正被选中的源，界面红字 `not-found: 订阅源不存在：<url>`，
+  // 但订阅其实已经删掉了（服务端日志写着「退订 …（连带删除 N 条条目）」）。
+  // 根因：removeFeed 删完直接 reload，而 navSelection 还指着这个源 ⇒ overview 带着已删的
+  // feedId 去取页，宿主如实回 not-found。deleteFolder / deleteTag 都有「当前所在范围被删
+  // 就回落虚拟视图」这条规则，退订是唯一漏掉的一处。
+  const exports = loadExports(overviewOf([
+    item('a1'),
+    item('b1', { feedId: 'feedB', feedTitle: '源 B' }),
+  ]), (endpoint) => {
+    if (endpoint === 'removeFeed') return { removed: 1, items: 1 }
+    return undefined
+  })
+  const store = exports.createReaderStore()
+  const calls = exports.__calls()
+  // 只挑 overview：reload 之后还有 duplicateHints 等旁路调用，看「最后一次调用」会看错对象。
+  const overviewPayloads = () => calls.filter(([endpoint]) => endpoint === 'overview').map(([, payload]) => payload)
+  await store.load('overview')
+  store.selectNav({ kind: 'feed', feedId: 'feedA' })
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(overviewPayloads().at(-1).feedId, 'feedA', '前提：选中源之后确实按该源取页')
+
+  await store.removeFeed('feedA')
+
+  assert.equal(overviewPayloads().at(-1).feedId, undefined,
+    '退订后不许再按已删的源范围取页 —— 宿主会回 not-found，用户看到的是「退订报错」')
+  assert.equal(store.get().navSelection.kind, 'virtual', '当前范围被删 ⇒ 回落虚拟视图')
+  assert.equal(store.get().navCursor.kind, 'filter', '光标也不许停在一个已不存在的源上')
+  assert.equal(store.get().error, undefined, '退订成功不该留错误')
+})

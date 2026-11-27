@@ -2026,8 +2026,10 @@ export const MUTATIONS = [
   { id: 'folder-删除当前不回落', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
     judgeTests: ['当前浏览文件夹：改名迁移范围，删除回到跨源列表'],
-    from: 'if (selected) {\n\t\t\t\t\t\tset({\n\t\t\t\t\t\t\tnavSelection: { kind: "virtual" },',
-    to: 'if (false) {\n\t\t\t\t\t\tset({\n\t\t\t\t\t\t\tnavSelection: { kind: "virtual" },' },
+    // 2026-11-28 重锚：退订也补上了同一条回落规则，同一段 `if (selected) { set({ navSelection…
+    // }` 在 bundle 里出现了两次；锚点改钉文件夹独有的判据行（行为等价，命中唯一）。
+    from: 'const selected = nav.kind === "folder" && nav.folder === name;',
+    to: 'const selected = false;' },
   { id: 'folder-搜索不按成员收窄', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
     judgeTests: ['文件夹搜索：范围取成员交集，续页回带查询绑定游标'],
@@ -3568,6 +3570,14 @@ export const MUTATIONS = [
     judgeTests: ['预算：performance.now() 的小数毫秒不许流进 AbortSignal.timeout（真机 2026-11-28 的 internal 崩溃）'],
     from: 'const remaining = Math.floor(RSSHUB_REFRESH_BUDGET_MS - (clock() - startedAt));',
     to: 'const remaining = RSSHUB_REFRESH_BUDGET_MS - (clock() - startedAt);' },
+
+  // 退订不回落当前范围：删完直接 reload，overview 会带着刚被删掉的 feedId 去取页，
+  // 宿主如实回 not-found —— 界面把「已经退订成功」画成「退订报错」（真机 2026-11-28）。
+  { id: 'client-退订不回落当前范围', file: 'lib/client.js',
+    judges: ['nav-selection.test.mjs'],
+    judgeTests: ['退订当前选中的源：重取不带已删的 feedId（真机 2026-11-28 的 not-found 报错）'],
+    from: 'const selected = nav.kind === "feed" && nav.feedId === url;',
+    to: 'const selected = false;' },
 
   // 冷却永不恢复：把「冷却截止时间」判据改成「只要失败过就永远冷却」。10 分钟是一句承诺，
   // 永远冷却等于把实例拉黑 —— 实例恢复健康后也永远排最后（配 3 个以上时直接轮不到它）。
