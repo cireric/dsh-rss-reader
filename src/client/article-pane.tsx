@@ -23,6 +23,25 @@ import { paragraphsOf } from '../html-text.js'
 import { READING_FONT_SIZES, READING_LINE_WIDTHS } from '../preferences.js'
 import type { ReadingPreferences } from '../preferences.js'
 import type { ArticleState } from './store.js'
+import {
+  hasTranslations, translationModelsOf,
+  type TranslateConfirmRequest, type TranslationEntry, type TranslationMode,
+} from './translate-state.js'
+import { TranslationPending, TranslationSegment, translatedBlockOf } from './translate-view.js'
+import { TranslateToolbar } from './translate-toolbar.js'
+import { translateGeometryOf } from './translate-geometry.js'
+import {
+  TRANSLATE_BUTTON_TEXT, TRANSLATE_FAILURE_UI, TRANSLATE_LABEL_TEXT,
+  translateNoticeText,
+  type TargetLanguage, type TranslateFailureReason,
+} from '../translate-copy.js'
+import {
+  isTranslatableBlock,
+  translateCharsOf,
+  TRANSLATE_BLOCK_MAX_CHARS,
+  type TranslateGeometry,
+} from '../translate-blocks.js'
+import { ConfirmDialog } from './confirm-dialog.js'
 // InlineRun 从 article-text.js 取，**不从 article.js**：后者 import 了 node:crypto 与 feed/fetch.js，
 // 而 client bundle 不许出现任何 node: 说明符（tsdown 不会因此报错，失败被推迟到浏览器运行期）。
 // 见 docs/pitfalls.md §1.7b。
@@ -585,10 +604,58 @@ function Lightbox({ src, onClose }: {
   )
 }
 
-export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress, expandedGroups, onExpandImageGroup, imagesExpanded, lightboxSrc, onOpenImage, onCloseLightbox }: {
+export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPrev, canNext, onPrev, onNext, reading, onReading, onSaveProgress, expandedGroups, onExpandImageGroup, imagesExpanded, lightboxSrc, onOpenImage, onCloseLightbox, translation, translationPending, translationMode, onTranslationMode, translateAvailable, translateTarget, onTranslateTarget, onTranslate, onContinueTranslate, onRetranslate, translateConfirm, onConfirmTranslate, onCancelTranslate, onStopTranslate, onRetryBatch }: {
   article: ArticleState | undefined
   item: ItemView | undefined
   onBack: () => void
+  /**
+   * 当前正文的译文（R7 01）：键是 `itemId:contentVersion:target`，由 index.tsx 从 store
+   * 现查后传入。组件不持有译文状态 —— 切条目 / 切面板回来才不会丢（spec §4.6）。
+   */
+  translation: TranslationEntry | undefined
+  /**
+   * 正在飞的那一批的块下标（R7 优化）：在这些块下方显示「正在翻译」占位。
+   * 传 `undefined` = 没有在飞的批；原文态不显示（用户明确选了只看原文）。
+   */
+  translationPending: readonly number[] | undefined
+  /** 两态（R7 03）：值归 store 所有，本组件只照着画、把用户的切换交回去。 */
+  translationMode: TranslationMode
+  /** 点切换器 ⇒ 只改 store 里的显示态（动作层不发 rpc，验收 12）。 */
+  onTranslationMode: (mode: TranslationMode) => void
+  /**
+   * 翻译当前是否可用（R7 02，spec §4.1）：`translateInfo.available === true` 才渲染「译」按钮
+   * 与 Aa 面板里的目标语言下拉。判据只由 store 持有，组件不自己再探一次。
+   */
+  translateAvailable: boolean
+  /** 目标语言（R7 02 / §5.3）：值与设置页「显示」分区共用 store 里的同一份。 */
+  translateTarget: TargetLanguage
+  /** 改目标语言：交给 store 落进 viewPreferences，组件不持有状态。 */
+  onTranslateTarget: (target: TargetLanguage) => void
+  /**
+   * 点「译」：动作在 store 的 translate-actions 里，组件只交回意图与**点击那一刻**量到的几何。
+   * 几何不进 props / state：滚动位置随时在变，只有点击瞬间的视口才是「第一批翻哪些」的依据。
+   */
+  onTranslate: (geometry: TranslateGeometry | undefined) => void
+  /** 「继续翻译（还剩 N/M）」：以现有进度续跑，已译块不重发（R7 06 / D19）。 */
+  onContinueTranslate: (geometry: TranslateGeometry | undefined) => void
+  /** 「重译」：清空该 key 的译文后整篇重发（R7 06 / D19），不绑快捷键。 */
+  onRetranslate: (geometry: TranslateGeometry | undefined) => void
+  /** 首次外发确认框的待确认内容；undefined = 不显示（R7 06 / spec §4.2）。 */
+  translateConfirm: TranslateConfirmRequest | undefined
+  /** 确认外发：组件在确认那一刻再量一次视口，然后交给动作层写标记 + 开始翻译。 */
+  onConfirmTranslate: (geometry: TranslateGeometry | undefined) => void
+  /** 取消外发：只清确认态，不写 settings、不发 rpc。 */
+  onCancelTranslate: () => void
+  /**
+   * 停止后续批（R7 04）：组件卸载 = 离开正文面 / 切面板。在途那一批允许跑完，
+   * store 的编排会在下一批前看到 token 已变而退出（spec §4.6 / D18）。
+   */
+  onStopTranslate: () => void
+  /**
+   * 重试一个失败批（R7 05）：参数是**批首块下标**，动作层按 entry.failures 找回整批 indices。
+   * 组件不缓存批次内容 —— 失败批的唯一真相在 store，组件只把用户点的那个批首交回去。
+   */
+  onRetryBatch: (headIndex: number) => void
   /**
    * 重试抓取当前正文页这一篇（R4-B4）。
    * 请求哪个条目由 store 按 `article.itemId` 决定，本组件只负责把用户意图交回去 ——
@@ -723,6 +790,40 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
    * 里的 key 必须互不冲突。
    */
   const blockKeyOf = (at: number): string => articleItemId + ':' + at
+  /**
+   * 实际生效的两态（R7 03 / 评审修复 A4）：**没有可用译文时一律按原文画**，切换器也不出现
+   * （spec §4.5）。判据是 `hasTranslations`（blocks.size > 0），不是「条目存在」——
+   * 全批失败 / 首批未回时条目仍然存在（要显示进度与重试按钮），但它没有任何译文可切。
+   * 这一层派生放在渲染处，store 只保存用户选过的态 —— 否则「有没有译文」会被复制成第二个判据。
+   */
+  const effectiveMode: TranslationMode = hasTranslations(translation) ? translationMode : 'original'
+  /** 这篇译文实际涉及哪些模型（按块去重；多模型时如实列出，不把旧块冒名成最后一条回包）。 */
+  const translatedModels = translationModelsOf(translation)
+  /**
+   * 在飞的批（R7 优化）：Set 只在这里建一次。原文态不显示 —— 用户选了「只看原文」时，
+   * 一排转圈只会打断阅读；进度仍在工具栏的「已译 X/Y」里。
+   */
+  const pendingBlocks: ReadonlySet<number> = new Set(translationPending ?? [])
+  /**
+   * 允许画占位的条件：这一篇已经有译文，或者这一篇正在翻第一批。
+   * 只看 `hasTranslations` 会让「第一批还没回来」时一个图标都不显示 —— 那正是最需要指示的时刻。
+   */
+  const showsPendingSlots = translation !== undefined && translationMode !== 'original'
+    && (hasTranslations(translation) || translation.status === 'running')
+  /**
+   * 块下标 → 它所属的失败批（R7 05）。`failures` 以批首为键，渲染要按**块**找原因，
+   * 所以先摊平成「块 → { 批首, 原因 }」：同批每块位置显示原因，只有批首位置放重试按钮。
+   */
+  const failedBatchOf = new Map<number, { readonly head: number; readonly reason: TranslateFailureReason }>()
+  if (translation !== undefined) {
+    for (const [head, failure] of translation.failures) {
+      for (const index of failure.indices) failedBatchOf.set(index, { head, reason: failure.reason })
+    }
+  }
+  /**
+   * 标题：永远原文标题（2026-11-26 删掉纯译文态后，双语对照里标题不参与翻译；
+   * 标题翻译能力仍保留在宿主端点，客户端不再发送标题）。
+   */
   const title = article?.title || item?.title
   const publishedAt = item?.publishedAt
   // R12：作者只由 src/author.ts 在读路径归一化；这里直接用投影值，不再加桩件守卫。
@@ -734,7 +835,6 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
   // 只按**已缓存的正文**估：加载中 / 抓取失败时 readingBlocks 为空 ⇒ 0 ⇒ 界面不出现任何数字。
   // 刻意不拿 summary 或源里的 excerpt 去凑 —— 回退内容不是原站正文，不给它编一个时长（R4-B5）。
   const readMinutes = estimateReadingMinutes(readingBlocks)
-
   /**
    * 本组件自己拿到滚动容器 —— 右下角那两个按钮要作用在它上面。
    *
@@ -746,6 +846,8 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
    * （keyboard-routing.ts 的 focusScrollBox，理由见那里：现取还能覆盖容器换节点的情况）。
    */
   const boxRef = useRef<HTMLDivElement | null>(null)
+  /** 「译」按钮的 ref：确认框关闭后把焦点还给触发它的控件（与设置页三处确认框同一条约定）。 */
+  const translateButtonRef = useRef<HTMLButtonElement | null>(null)
   /**
    * 「钉住底部」意图。
    *
@@ -765,6 +867,16 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
   const lastBoxRef = useRef<HTMLDivElement | null>(null)
   /** 待恢复的比例（M5 02）：内容长高时按它重算位置，直到用户自己滚走。 */
   const restoreRatioRef = useRef<number | undefined>(undefined)
+
+  /**
+   * 卸载中止（R7 04 / D18）：组件卸载 = 切面板 / 离开正文面，后续批必须停。
+   *
+   * 用 ref 转发而不是把 `onStopTranslate` 直接放进依赖数组：父组件回调身份一旦变化，
+   * effect 的 cleanup 会跟着跑一次 —— 那会在一次普通重渲染里把正在跑的翻译停掉。
+   */
+  const onStopTranslateRef = useRef(onStopTranslate)
+  useEffect(() => { onStopTranslateRef.current = onStopTranslate }, [onStopTranslate])
+  useEffect(() => () => { onStopTranslateRef.current() }, [])
 
   /** 贴到底部，并记下这次是我们写的（供 handleScroll 区分用户滚动）。 */
   const pinToBottom = useCallback((box: HTMLDivElement): void => {
@@ -912,6 +1024,24 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
             {link !== undefined && link !== '' && (
               <a className="dsh-rss-btn dsh-rss-btn--ghost" href={link} target="_blank" rel="noreferrer">打开原站 ↗</a>
             )}
+            <TranslateToolbar
+              blocks={article?.blocks}
+              translation={translation}
+              translationMode={translationMode}
+              translateAvailable={translateAvailable}
+              translateTarget={translateTarget}
+              buttonRef={translateButtonRef}
+              onTranslateTarget={onTranslateTarget}
+              onTranslationMode={onTranslationMode}
+              onTranslate={onTranslate}
+              onContinueTranslate={onContinueTranslate}
+              onRetranslate={onRetranslate}
+              onStopTranslate={onStopTranslate}
+              geometryOf={() => {
+                const box = boxRef.current
+                return box === null ? undefined : translateGeometryOf(box)
+              }}
+            />
             {/*
               * 阅读偏好（M5 01）收在一个 <details> 里：三个 <select> 摊开摆会把这一行挤成两层，
               * 而它们是「调一次就一直用」的东西，不值得占常驻版面。与顶栏「更多」同一个面板样式。
@@ -992,6 +1122,36 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
             </header>
           )}
           {/*
+            * 整篇停止提示（R7 05 / spec §4.7）：连续 3 批失败后不再发后续批，这句话放在正文
+            * 顶部（标题之后、正文之前），读者先知道「后面没有译文不是漏翻」。
+            * `stoppedReason` 是枚举，文案由 translate-copy 统一拼——不在组件里拼中文。
+            */}
+          {translation !== undefined && translation.status === 'failed' && translation.stoppedReason !== undefined && (
+            <div data-rss-translation-stopped role="alert" style={{
+              margin: '0 0 18px', padding: '8px 10px', borderRadius: 6,
+              color: 'var(--rss-error)',
+              border: '1px solid color-mix(in srgb, var(--rss-error) 32%, transparent)',
+              background: 'color-mix(in srgb, var(--rss-error) 6%, transparent)',
+            }}>
+              {TRANSLATE_FAILURE_UI.stopped(translation.stoppedReason)}
+            </div>
+          )}
+          {/*
+            * 非四类模型失败（bad-request / 通道错误 / 未知 code）：不伪造成四类原因之一，
+            * 但也不能让翻译无声停下。`error` 是 client 侧原样保存的错误文本（R7 05 评审修复）。
+            */}
+          {translation !== undefined && translation.status === 'failed'
+            && translation.error !== undefined && translation.stoppedReason === undefined && (
+            <div data-rss-translation-error role="alert" style={{
+              margin: '0 0 18px', padding: '8px 10px', borderRadius: 6,
+              color: 'var(--rss-error)',
+              border: '1px solid color-mix(in srgb, var(--rss-error) 32%, transparent)',
+              background: 'color-mix(in srgb, var(--rss-error) 6%, transparent)',
+            }}>
+              翻译失败：{translation.error}
+            </div>
+          )}
+          {/*
             * 回退标签（R4-B3）：正文列标题 header 之后、正文块之前。
             * 用 role="note" 而不是 role="alert"：这不是错误态 —— 用户有内容可读，只是来源不是原站正文。
             * 原因行沿用 dsh-rss-meta 小字，文案按有无 failure 分两种；failure 原文照实显示（不吞、不改写）。
@@ -1035,12 +1195,101 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
             // 症状是「有的块带 onOpenImage、有的不带」——灯箱入口时灵时不灵，极难看出来。
             // 语义没变：组覆盖 / 篇覆盖 / 偏好的裁决仍然只在 `fold.shouldRender` 那一处（决策 5）。
             if (group === undefined || fold.shouldRender(group.index)) {
-              return <ArticleBlockView key={blockKeyOf(index)} block={block} onOpenImage={onOpenImage} />
+              const kind = typeof block['kind'] === 'string' ? block['kind'] : 'p'
+              /** 可翻块（D10）：只有它们的译文会替换 / 追加文本；pre / img / table 永远原样。 */
+              const translatable = isTranslatableBlock(block)
+              /**
+               * 译文内容（R7 03）：`translation.blocks` 以块下标为键，不按数组顺序硬贴。
+               * 空 / 纯空白、list 行数不等都在 `translatedBlockOf` 里判成 undefined ⇒ 该块退回原文；
+               * 这是**唯一**的「译文能不能用」判据，原文 / 对照两态共用。
+               */
+              const translated = translation?.blocks.get(index)
+              const translatedContent = translated === undefined ? undefined : translatedBlockOf(block, translated)
+              /**
+               * 超长块（R7 04 / spec §4.3 第三档）：> 6000 字符不进任何批，原位说明原因。
+               * 只在有本篇译文条目时出现 —— 没点「译」之前不该先给读者一排「未翻译」。
+               */
+              const tooLong = translation !== undefined && translateCharsOf(block) > TRANSLATE_BLOCK_MAX_CHARS
+              const tooLongNotice = tooLong && (
+                <p data-rss-translation-too-long={index} className="dsh-rss-meta" style={{ margin: '0 0 1.1em' }}>
+                  {TRANSLATE_LABEL_TEXT.blockTooLong}
+                </p>
+              )
+              /**
+               * 批级失败提示（R7 05 / spec §4.7）：失败批内**每个**可翻块位置都显示原因，
+               * 重试按钮只放在批首块位置（一个批一个按钮）。按钮点下去由动作层按批首找回整批
+               * indices，所以这里只交回 head，不在这里复制 indices —— 批次真相在 store。
+               */
+              const batchFailure = failedBatchOf.get(index)
+              const batchFailureNotice = batchFailure !== undefined && (
+                <p data-rss-translation-failure={index} className="dsh-rss-meta"
+                  style={{ margin: '0 0 1.1em', color: 'var(--rss-error)' }}>
+                  {TRANSLATE_FAILURE_UI.batch(batchFailure.reason)}
+                  {batchFailure.head === index && (
+                    <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost"
+                      data-rss-translation-retry={batchFailure.head}
+                      aria-label="重试本批翻译"
+                      style={{ marginLeft: 8 }}
+                      // 整篇还在跑（后面批在飞）时禁用：批次必须串行，动作层也会再挡一次。
+                      disabled={translation?.status === 'running'}
+                      onClick={() => { onRetryBatch(batchFailure.head) }}>
+                      {TRANSLATE_BUTTON_TEXT.retry}
+                    </button>
+                  )}
+                </p>
+              )
+              /**
+               * `data-rss-block` 是测量锚点（R7 04）：DOM 顺序与 displayBlocks 下标一一对应，
+               * `translateGeometryOf` 按它把矩形喂给纯函数 pickBatch。译文段也住在这个包裹里，
+               * 这样「块 + 自己的译文」始终是一个整体，不会与相邻块串段。
+               */
+              const blockBox = (content: ReactNode): ReactNode => (
+                <div key={blockKeyOf(index)} data-rss-block={index}>
+                  {content}
+                  {tooLongNotice}
+                  {batchFailureNotice}
+                  {/* 译文段的位置就是这一批正在跑的位置：原文下方一个转圈，翻好自动换成译文。 */}
+                  {showsPendingSlots && pendingBlocks.has(index) && <TranslationPending index={index} />}
+                </div>
+              )
+              /**
+               * 原文 / 对照态：原文块照旧渲染；对照态在它后面追加**自己的**译文段
+               * （pre / img / table 不产生译文段，只渲染一次 —— 本票第 3 条）。
+               */
+              return blockBox(
+                <>
+                  {/* table 不翻，但必须让读者知道这不是漏翻（spec §4.5 / D10）；只在对照态明示。 */}
+                  {effectiveMode === 'parallel' && kind === 'table' && (
+                    <p data-rss-table-not-translated className="dsh-rss-meta" style={{ margin: '0 0 6px' }}>
+                      {TRANSLATE_LABEL_TEXT.tableNotTranslated}
+                    </p>
+                  )}
+                  <ArticleBlockView block={block} onOpenImage={onOpenImage} />
+                  {effectiveMode === 'parallel' && translatable && translatedContent !== undefined && (
+                    <TranslationSegment index={index} content={translatedContent} ordered={block['ordered'] === true} />
+                  )}
+                </>,
+              )
             }
             // 折叠：只在组首块画提示，其余成员整块不渲染（组是原子的）
             if (group.blockIndexes[0] !== index) return null
-            return <ImageFoldHint key={blockKeyOf(index)} group={group} onExpand={onExpandImageGroup} />
+            return (
+              <div key={blockKeyOf(index)} data-rss-block={index}>
+                <ImageFoldHint group={group} onExpand={onExpandImageGroup} />
+              </div>
+            )
           })}
+          {/*
+            * 「译自 {model}」（R7 05 / spec §4.4）：放在正文末尾、最后一段译文之后。
+            * 2026-11-26 评审起用 **models（按块）** 而不是单一 model：译一半 → 停止 → 改模型 →
+            * 继续时，前半篇必须如实列出旧模型，不能把旧译文冒名成最后一条回包的模型。
+            * 原文态没有译文内容，不显示这行；没有任何 model 时也不编造。
+            */}
+          {translatedModels.length > 0 && effectiveMode !== 'original' && (
+            <p data-rss-translated-from className="dsh-rss-meta" style={{ margin: '18px 0 0' }}>
+              {TRANSLATE_LABEL_TEXT.translatedFrom(translatedModels.join('、'))}
+            </p>
+          )}
         </article>
       </div>
 
@@ -1073,6 +1322,34 @@ export function ArticleView({ article, item, onBack, onRetry, scrollAttr, canPre
         * 只在正文真的画出来时可能打开（入口是正文里的图），但这里不另加 `bodyState` 判断：
         * 折叠 / 换篇 / 按 `i` 三条路径都会把它清掉，多一个守卫就多一处可能与那三条分家的判定。
         */}
+      {/*
+        * 首次外发确认（R7 06 / spec §4.2）。共享 ConfirmDialog 的三条出口：
+        *   取消 / Esc ⇒ 只清 store 里的待确认态，不写 settings、不发 rpc；
+        *   确认 ⇒ 动作层先写 `translateNoticeAck = true`（走 saveSettings patch）再开始翻译。
+        * 文案里的 provider/model/字符数在**点「译」那一刻**算好（store 的 translateConfirm），
+        * 不在这里按渲染时设置重算 —— 用户在框开着时切了模型，不能出现「说的是 A、发的是 B」。
+        */}
+      {translateConfirm !== undefined && (
+        <ConfirmDialog
+          titleId="rss-translate-confirm-title"
+          title="翻译外发确认"
+          rootAttrs={{ 'data-rss-translate-confirm': '' }}
+          cardAttrs={{ 'data-rss-translate-confirm-card': '' }}
+          confirmAttrs={{ 'data-rss-translate-confirm-ok': '', 'aria-label': '确认外发并开始翻译' }}
+          cancelAttrs={{ 'data-rss-translate-confirm-cancel': '', 'aria-label': '取消翻译外发' }}
+          confirmLabel="开始翻译"
+          returnFocus={() => { translateButtonRef.current?.focus() }}
+          onCancel={onCancelTranslate}
+          onConfirm={() => {
+            const box = boxRef.current
+            onConfirmTranslate(box === null ? undefined : translateGeometryOf(box))
+          }}
+        >
+          <p data-rss-translate-notice className="dsh-rss-confirm-note">
+            {translateNoticeText(translateConfirm.provider, translateConfirm.model, translateConfirm.chars)}
+          </p>
+        </ConfirmDialog>
+      )}
       {lightboxSrc !== undefined && <Lightbox src={lightboxSrc} onClose={onCloseLightbox} />}
     </div>
   )

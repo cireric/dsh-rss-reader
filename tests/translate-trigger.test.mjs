@@ -1,0 +1,171 @@
+/**
+ * 键盘触发与「无自动调用」（R7 06，spec §4.1 / D14 / 验收 14 / 15）。
+ *
+ *   ① `t` 无译文 ⇒ 等同点「译」：首次仍弹确认框，取消零副作用，确认后开始；
+ *   ② `t` 有译文 ⇒ 原文 → 译文 → 对照 循环；
+ *   ③ 输入框聚焦时 `t` 不触发；
+ *   ④ 打开文章 / 刷新 / 切筛选 / 恢复视图（面板重挂）⇒ translateBatch 计数必须为 0；
+ *   ⑤ 可翻块为 0 的按钮禁用并给出准确原因。
+ */
+import { test, afterEach } from 'node:test'
+import assert from 'node:assert/strict'
+import { articleOf, cleanupAll, itemOf, mount, openArticle, skip } from './helpers/translate-harness.mjs'
+
+afterEach(cleanupAll)
+
+const BLOCKS = [{ kind: 'p', text: '第一段' }, { kind: 'h', level: 2, text: '小标题' }]
+
+function translationOf(h) {
+  return [...h.store.get().translations.values()][0]
+}
+
+test('R7 06 t 无译文：首次弹确认框；取消零请求，确认后开始并进入译文态', skip, async () => {
+  const h = await mount({
+    items: [itemOf('a')],
+    articles: { a: articleOf('a', BLOCKS) },
+    noticeAck: false,
+  })
+  try {
+    await openArticle(h, 'a')
+    h.press('t')
+    await h.waitFor(() => h.$('[data-rss-translate-confirm]') !== null, { label: 't 也走同一个确认框' })
+    assert.equal(h.calls('translateBatch').length, 0)
+
+    h.$('[data-rss-translate-confirm-cancel]').click()
+    await h.settle()
+    assert.equal(h.$('[data-rss-translate-confirm]'), null)
+    assert.equal(h.calls('translateBatch').length, 0, '取消后 t 不许发翻译请求')
+    assert.equal(h.calls('saveSettings').length, 0)
+    assert.equal(h.store.get().translations.size, 0)
+
+    h.press('t')
+    await h.waitFor(() => h.$('[data-rss-translate-confirm]') !== null, { label: '再次按 t 仍要确认' })
+    h.$('[data-rss-translate-confirm-ok]').click()
+    await h.waitFor(() => h.calls('translateBatch').length === 1, { label: '确认后开始翻译' })
+    await h.waitFor(() => translationOf(h)?.status === 'done', { label: '翻译完成' })
+    assert.equal(h.store.get().translationMode, 'parallel', '开始翻译后默认落对照态')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R7 06 t 有译文：原文 ↔ 对照 循环且不发 rpc', skip, async () => {
+  const h = await mount({ items: [itemOf('a')], articles: { a: articleOf('a', BLOCKS) } })
+  try {
+    await openArticle(h, 'a')
+    h.press('t')
+    await h.waitFor(() => h.calls('translateBatch').length === 1, { label: 't 触发首翻' })
+    await h.waitFor(() => translationOf(h)?.status === 'done', { label: '翻译完成' })
+    await h.settle()
+    const requestsBefore = h.requests.length
+
+    assert.equal(h.store.get().translationMode, 'parallel', '默认对照')
+    h.press('t')
+    await h.settle()
+    assert.equal(h.store.get().translationMode, 'original', '对照 → 原文')
+    h.press('t')
+    await h.settle()
+    assert.equal(h.store.get().translationMode, 'parallel', '原文 → 对照')
+    assert.equal(h.requests.length, requestsBefore, '两态循环只改渲染，一条 rpc 都不许发')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R7 06 t 输入控件聚焦时不触发', skip, async () => {
+  const h = await mount({ items: [itemOf('a')], articles: { a: articleOf('a', BLOCKS) } })
+  try {
+    await openArticle(h, 'a')
+    // 工具栏里随便一个可聚焦的表单控件都行（下拉键盘可聚焦，但不属于文本输入）。
+    const language = h.$('[data-rss-translate-language]')
+    assert.ok(language !== null, '工具栏里应有目标语言下拉')
+    language.focus()
+    h.press('t')
+    await h.settle()
+    assert.equal(h.calls('translateBatch').length, 0, '输入控件聚焦时 t 必须被 isTypingTarget 挡住')
+    assert.equal(h.store.get().translations.size, 0)
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R7 06 全程无自动调用：打开文章 / 刷新 / 切筛选 / 恢复视图 → translateBatch = 0', skip, async () => {
+  const h = await mount({ items: [itemOf('a')], articles: { a: articleOf('a', BLOCKS) } })
+  try {
+    await openArticle(h, 'a')
+    assert.equal(h.calls('translateBatch').length, 0, '打开文章不许自动翻译')
+
+    await h.store.load('refresh')
+    await h.settle()
+    assert.equal(h.calls('translateBatch').length, 0, '刷新不许自动翻译')
+
+    h.store.setFilter('unread')
+    await h.settle()
+    assert.equal(h.calls('translateBatch').length, 0, '切筛选不许自动翻译')
+
+    await h.remount()
+    assert.equal(h.calls('translateBatch').length, 0, '恢复视图（面板重挂）不许自动翻译')
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('R7 06 可翻块为 0：按钮禁用、title 说明原因、点击零请求', skip, async () => {
+  const h = await mount({
+    items: [itemOf('a')],
+    articles: { a: articleOf('a', [{ kind: 'img', src: 'https://img.example/x.png', alt: '图' }]) },
+  })
+  try {
+    await openArticle(h, 'a')
+    const button = h.$('[data-rss-translate]')
+    assert.ok(button !== null, '可用性为 true 时按钮仍要渲染（只是禁用）')
+    assert.equal(button.disabled, true, '全图片文章没有可翻块 ⇒ 必须禁用')
+    assert.equal(button.title, '这篇没有可翻译的正文')
+    button.click()
+    await h.settle()
+    assert.equal(h.calls('translateBatch').length, 0)
+    assert.equal(h.store.get().translations.size, 0)
+  } finally {
+    h.cleanup()
+  }
+})
+
+/**
+ * 只让 0 号块落在视口里：容器 0..80，块高 50、间距 100（与 translate-progress 同一条夹具）。
+ * 其余元素返回零矩形 —— jsdom 没有布局，本用例只关心选批。
+ */
+function stubArticleViewport(h) {
+  h.win.Element.prototype.getBoundingClientRect = function () {
+    const block = this.getAttribute?.('data-rss-block')
+    if (block !== null && block !== undefined) {
+      const index = Number(block)
+      const top = 10 + index * 100
+      return { top, bottom: top + 50, left: 0, right: 600 }
+    }
+    if (this.getAttribute?.('data-rss-scroll') === 'article') {
+      return { top: 0, bottom: 80, left: 0, right: 600 }
+    }
+    return { top: 0, bottom: 0, left: 0, right: 0 }
+  }
+}
+
+test('R7 06 t 与点「译」共用视口几何：首批只含屏幕内可见块', skip, async () => {
+  const blocks = [
+    { kind: 'p', text: '第一段' },
+    { kind: 'p', text: '第二段' },
+    { kind: 'p', text: '第三段' },
+  ]
+  const h = await mount({ items: [itemOf('a')], articles: { a: articleOf('a', blocks) } })
+  try {
+    await openArticle(h, 'a')
+    stubArticleViewport(h)
+    h.press('t')
+    await h.waitFor(() => h.calls('translateBatch').length >= 1, { label: 't 触发首批' })
+    const first = h.calls('translateBatch')[0].payload
+    assert.deepEqual(first.items.map((item) => item.id), ['b0'],
+      '屏幕内只有 b0：键盘路径也必须量几何（不能退化成文档顺序 b0/b1/b2）')
+    await h.waitFor(() => [...h.store.get().translations.values()][0]?.status === 'done', { label: '翻译完成' })
+  } finally {
+    h.cleanup()
+  }
+})

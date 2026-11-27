@@ -1,0 +1,144 @@
+/**
+ * 翻译文案的**唯一来源**（R7，contract「文案单源」）。
+ *
+ * 语言名、四类失败文案、按钮 / 标签、隐私句都从这里读：02 的语言下拉、03 的两态切换器、
+ * 04 的「段落过长」、05 的重试与 06 的确认框会同时消费这张表。各票手抄一份的下场是
+ * 「设置页写简体中文、正文 prompt 写 Chinese」这类静默分家，而没有任何断言会翻红。
+ *
+ * 零 node 依赖：客户端与宿主都要 import（client bundle 不许出现 node: 说明符）。
+ */
+import type { TranslateInfo } from './shared.js'
+
+/** 支持的目标语言（spec §5.4 / D4）。`instruction` 是 prompt 里用的英文语言名。 */
+export const TARGET_LANGUAGES = [
+  { id: 'zh-CN', label: '简体中文', instruction: 'Simplified Chinese' },
+  { id: 'zh-TW', label: '繁體中文', instruction: 'Traditional Chinese' },
+  { id: 'en', label: 'English', instruction: 'English' },
+  { id: 'ja', label: '日本語', instruction: 'Japanese' },
+  { id: 'ko', label: '한국어', instruction: 'Korean' },
+] as const
+
+export type TargetLanguage = (typeof TARGET_LANGUAGES)[number]['id']
+
+export const DEFAULT_TARGET_LANGUAGE: TargetLanguage = 'zh-CN'
+
+/** 认不出的值一律 false —— 调用方据此回落默认或拒绝入参，不猜语言。 */
+export function isTargetLanguage(value: unknown): value is TargetLanguage {
+  return typeof value === 'string' && TARGET_LANGUAGES.some((entry) => entry.id === value)
+}
+
+/** 目标语言 → prompt 里的英文语言名（唯一查表处）。 */
+export function targetLanguageInstructionOf(target: TargetLanguage): string {
+  const entry = TARGET_LANGUAGES.find((candidate) => candidate.id === target)
+  if (entry === undefined) throw new Error('未登记的目标语言：' + target)
+  return entry.instruction
+}
+
+/**
+ * 模型侧失败的四类原因（spec §4.7 / D17）。
+ *
+ * 运行时常量 + 类型派生：宿主按 reason 回包、客户端按 reason 选文案 / 判重试，
+ * 两边都要能在运行时认出「这是不是四类之一」。只留一个 type 时，客户端只好手写
+ * `reason === 'timeout' || ...`，第五类出现时两处会悄悄分家。
+ */
+export const TRANSLATE_FAILURE_REASONS = ['timeout', 'truncated', 'empty', 'unavailable'] as const
+
+export type TranslateFailureReason = (typeof TRANSLATE_FAILURE_REASONS)[number]
+
+/** 认不出的值一律 false：不把未知 reason 当成某一类已知失败。 */
+export function isTranslateFailureReason(value: unknown): value is TranslateFailureReason {
+  return typeof value === 'string' && (TRANSLATE_FAILURE_REASONS as readonly string[]).includes(value)
+}
+
+/**
+ * 四类失败文案**分开、不合并**：超时和截断对用户是两条不同的行动线索
+ *（等一会儿重试 vs 调小范围），合并成「翻译失败」等于把可诊断信息丢掉。
+ */
+export const TRANSLATE_FAILURE_TEXT: Record<TranslateFailureReason, string> = {
+  timeout: '超时（60s）',
+  truncated: '输出被截断（达到输出上限）',
+  empty: '模型没有返回可用译文',
+  unavailable: '模型未挂载或无可用路由',
+}
+
+/** 按钮文案（01 只用「译」，其余留给 02/05；表一次建全避免各票各抄）。 */
+export const TRANSLATE_BUTTON_TEXT = {
+  translate: '译',
+  stop: '停止',
+  retranslate: '重译',
+  continue: (remaining: number, total: number): string => '继续翻译（还剩 ' + remaining + '/' + total + '）',
+  /** 批级失败处的重试（R7 05）：只有一个按钮，点它重发整批。 */
+  retry: '重试',
+} as const
+
+/**
+ * 批级失败提示（R7 05 / spec §4.7）：文案模板与四类原因在这里拼一次。
+ *
+ * 单独成表的原因：失败原因（`timeout` 等）是 wire 枚举，用户看到的是中文句式。
+ * 若组件里写 `'本批翻译失败：' + reason`，就会把英文枚举直接漏到界面上；
+ * 而「停止」那句必须与批内那句共用同一个原因表，避免同一类失败在两处叫不同名字。
+ */
+export const TRANSLATE_FAILURE_UI = {
+  batch: (reason: TranslateFailureReason): string => '本批翻译失败：' + TRANSLATE_FAILURE_TEXT[reason],
+  stopped: (reason: TranslateFailureReason): string => '翻译已停止：' + TRANSLATE_FAILURE_TEXT[reason],
+} as const
+
+/** 标签文案（03/05 直接复用）。 */
+export const TRANSLATE_LABEL_TEXT = {
+  tableNotTranslated: '表格未翻译',
+  blockTooLong: '段落过长未翻译',
+  translatedFrom: (model: string): string => '译自 ' + model,
+  /** 进度（spec §4.8）：X = 已完成批里的块数，Y = 全篇可翻块数（不含超长块）。 */
+  progress: (done: number, total: number): string => '已译 ' + done + '/' + total + ' 块',
+} as const
+
+/**
+ * 单枚切换按钮的文案（2026-11-26 用户拍板：原文 / 译文 / 对照 三枚合成一枚）。
+ *
+ * 键是「点下去会切到哪个态」，所以按钮上写的永远是**目标**而不是当前态：
+ * 正在看对照时显示「原文」，正在看原文时显示「译文」。
+ */
+export const TRANSLATE_TOGGLE_TEXT = {
+  original: '原文',
+  parallel: '译文',
+} as const
+
+/**
+ * 整篇上限提示（spec §4.3 / D3）。
+ *
+ * 把字符数与上限都写进文案：只说「文章太长」用户没法判断差多少，也无从决定要不要手动删减。
+ */
+export const TRANSLATE_LIMIT_TEXT = {
+  articleTooLong: (chars: number, limit: number): string =>
+    '正文共 ' + chars + ' 字符，超过单篇 ' + limit + ' 字符上限，本次不翻译',
+} as const
+
+/**
+ * 首次外发的隐私句（spec §4.2）：provider/model 与字符数都由调用方按**当前**路由与正文现算。
+ * 不把「约 N 字符」写死在这里 —— 那句话必须能随文章变化。
+ */
+export function translateNoticeText(provider: string, model: string, chars: number): string {
+  return '翻译会把当前文章正文发送给 ' + provider + '/' + model + '，本次约 ' + chars + ' 字符，可能产生调用费用。'
+}
+
+/**
+ * 四类不可用原因的中文文案（R7 02，spec §4.1）。
+ *
+ * 文案归这里而不是设置页：原因枚举是 wire 契约的一部分，将来加第五类时只改这一处，
+ * 设置页与文章面不会各说各话。`Record<NonNullable<...>>` 让漏配一个新原因直接编译失败。
+ */
+export type TranslateUnavailableReason = NonNullable<TranslateInfo['reason']>
+
+export const TRANSLATE_UNAVAILABLE_TEXT: Record<TranslateUnavailableReason, string> = {
+  'llm-unmounted': 'LLM 服务未挂载（当前宿主没有提供模型服务）',
+  'no-provider': '没有可用的模型服务（provider 列表为空）',
+  'no-model': '没有可用模型：请检查模型服务是否已配置凭据，或在设置里重新选择模型',
+  'no-default-route': '没有可用的会话默认模型，请先选择具体模型',
+}
+
+/**
+ * 设置页「翻译」分区的常驻隐私提示（spec §4.2：不可关闭）。
+ *
+ * 不带字符数：设置页不知道当前文章；「本次约 N 字符」只在点「译」的确认框里由正文现算。
+ */
+export const TRANSLATE_SETTINGS_NOTICE = '翻译会把当前文章正文发送给所选模型，可能产生调用费用。'

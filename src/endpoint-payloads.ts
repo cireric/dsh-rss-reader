@@ -17,6 +17,12 @@ import { z } from 'zod'
 import { BACKFILL_LIMIT, isHttpUrl } from './shared.js'
 import { assignTunableValue, isTunableKey, parseTunableValue } from './settings-schema.js'
 import type { TunableOverrides } from './settings-schema.js'
+import { isTargetLanguage } from './translate-copy.js'
+import {
+  blockIndexOfTranslateId,
+  TRANSLATE_BATCH_MAX_BLOCKS,
+  TRANSLATE_BLOCK_MAX_CHARS,
+} from './translate-blocks.js'
 
 /** 零入参端点：接受并忽略 payload（与阶段 5 之前的语义一致）。 */
 export const noPayload = z.unknown()
@@ -361,3 +367,53 @@ export const saveSettingsPayload = z.union([
   z.strictObject({ patch: tunablePatch }),
   z.strictObject({ resetToDefaults: z.literal(true) }),
 ])
+
+/**
+ * `translateBatch` 入参（R7 01 / 05，spec §5.1）。
+ *
+ * 六类明显坏入参一律 `bad-request`、且不触达模型：空 items、超过 `TRANSLATE_BATCH_MAX_BLOCKS` 项、
+ * 总字符超过 `TRANSLATE_BLOCK_MAX_CHARS`、重复 id、文本全空白、目标语言不在枚举内。
+ *
+ * 「总字符」按 §4.3 的字符口径 = 可翻块文本长度之和（title 有独立的 2000 上限，不计入）：
+ * 单批预算 2000、单块 2000–6000 独占一批，所以 6000 是唯一合法的单批上限（一个长块）。
+ * 两个数都从 translate-blocks.ts 取：端点与分批编排必须承认同一组上限，否则「客户端认为合法、
+ * 端点回 bad-request」的漂移不会有测试翻红。
+ * id 必须是 `'b' + 块下标`（编解码唯一实现在 translate-blocks 的 translateBlockIdOf /
+ * blockIndexOfTranslateId）—— 端点与客户端共用这一个编号协议，回包才能按号入座。
+ */
+export const translateBatchPayload = z.object({
+  target: z.string().min(1).refine(isTargetLanguage, { message: '不支持的目标语言' }),
+  title: z.string().max(2000).nullish(),
+  items: z.array(z.object({
+    id: z.string().refine((value) => blockIndexOfTranslateId(value) !== undefined, {
+      message: 'id 必须是 b + 块下标',
+    }),
+    text: z.string().refine((value) => value.trim() !== '', { message: '待译文本不能为空' }),
+  })).min(1).max(TRANSLATE_BATCH_MAX_BLOCKS),
+}).superRefine((value, ctx) => {
+  const seen = new Set<string>()
+  let totalChars = 0
+  for (const [index, item] of value.items.entries()) {
+    if (seen.has(item.id)) {
+      ctx.addIssue({ code: 'custom', path: ['items', index, 'id'], message: 'id 重复' })
+    }
+    seen.add(item.id)
+    totalChars += item.text.length
+  }
+  if (totalChars > TRANSLATE_BLOCK_MAX_CHARS) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['items'],
+      message: '待译文本总字符超过单批 ' + TRANSLATE_BLOCK_MAX_CHARS + ' 上限',
+    })
+  }
+})
+
+/**
+ * `translateInfo` 入参（R7 02，spec §5.1）：零参端点，`emptyAsObject` 是既有 wire 约定。
+ *
+ * 浏览器通道把「没有 payload」序列化成 `null`；设置页 / 面板加载探活都会走这条路，
+ * 所以必须接受 null / undefined，而不是回 bad-request。传别的垃圾（数组 / 数字）仍拒绝：
+ * 「没有参数」与「参数写坏了」是两件事。
+ */
+export const translateInfoPayload = z.preprocess(emptyAsObject, z.object({}))

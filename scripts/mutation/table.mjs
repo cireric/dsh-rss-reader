@@ -2605,8 +2605,12 @@ export const MUTATIONS = [
     // 注意 to 里**必须保留** `group === void 0 ||` 这一项：整个条件换成 `if (true)` 会让
     // 所有块都走 ArticleBlockView、折叠提示一条都不出现，症状虽然也是红，但变异落点从
     // 「折叠判定失效」漂成「分组逻辑被删」—— 判据证明的就不是这条变异要证明的事了。
-    from: "if (group === void 0 || fold.shouldRender(group.index)) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ArticleBlockView, {\n\t\t\t\t\t\t\t\t\t\tblock,\n\t\t\t\t\t\t\t\t\t\tonOpenImage\n\t\t\t\t\t\t\t\t\t}, blockKeyOf(index));\n\t\t\t\t\t\t\t\t\tif (group.blockIndexes[0] !== index) return null;",
-    to: "if (group === void 0 || true) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ArticleBlockView, {\n\t\t\t\t\t\t\t\t\t\tblock,\n\t\t\t\t\t\t\t\t\t\tonOpenImage\n\t\t\t\t\t\t\t\t\t}, blockKeyOf(index));\n\t\t\t\t\t\t\t\t\tif (group.blockIndexes[0] !== index) return null;" },
+    // ⚠️ 2026-11-25（R7 01）再锚：译文段把 `ArticleBlockView` 分支包进 Fragment，产物首行仍是
+    // `if (group === void 0 || fold.shouldRender(...)) {`，但后面的 return 形态变了 ⇒ 旧的
+    // 多行 from 命中 0 次。这里改用**判定本身**那一行做锚，语义不变：把 `fold.shouldRender(...)`
+    // 换成 true 之后，折叠分支永远进不去 ⇒ 折叠偏好下照样渲染 <img>。
+    from: "if (group === void 0 || fold.shouldRender(group.index)) {",
+    to: "if (group === void 0 || true) {" },
   { id: 'client-折叠提示可聚焦', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
     judgeTests: ['折叠提示不在 Tab 序里：tabIndex < 0，且不是 BUTTON / SUMMARY / INPUT / SELECT / TEXTAREA、不是带 href 的链接'],
@@ -3334,4 +3338,136 @@ export const MUTATIONS = [
     // 条件恒假是**行为变异**：missing 保持空数组，流程继续走宿主拼地址（不是崩溃）。
     from: 'if ((explore.draft[segment.name] ?? "").trim() === "" && !missing.includes(segment.name)) missing.push(segment.name);',
     to: 'if (false && (explore.draft[segment.name] ?? "").trim() === "" && !missing.includes(segment.name)) missing.push(segment.name);' },
+
+  // ── R7 01：一键翻译的块筛选与回包对齐（2026-11-25）────────────────────────
+  // 可翻块种类放宽：把 pre 也算进去 ⇒ 代码块会进请求、抢走编号，正文段落与翻译请求错位。
+  // 判据是 translate-blocks 的品类筛选用例（pre / img / table 不占编号）。
+  // from 照构建产物 lib/translate-blocks.js 的实际字节写，独立实测 OCCURRENCES=1。
+  { id: 'translate-可翻块把 pre 也算进去', file: 'lib/translate-blocks.js',
+    judges: ['translate-blocks.test.mjs'],
+    judgeTests: ['可翻块只取 p / h / quote / list；pre / img / table 不占编号'],
+    from: "const TRANSLATABLE_KINDS = new Set(['p', 'h', 'quote', 'list']);",
+    to: "const TRANSLATABLE_KINDS = new Set(['p', 'h', 'quote', 'list', 'pre']);" },
+  // 对齐放过重复 id：模型把同一条译文回两次时，条数碰巧相等就会通过校验，重复的那条
+  // 覆盖掉某一段、另一段永远没有译文。判据是「编号重复 ⇒ 整批失败」的用例。
+  { id: 'translate-对齐放过重复 id', file: 'lib/translate-blocks.js',
+    judges: ['translate-blocks.test.mjs'],
+    judgeTests: ['applyBatch：编号重复 ⇒ 整批失败（哪怕条数碰巧相等）'],
+    from: "        if (seen.has(item.id))\n            return { ok: false, reason: 'misaligned' };",
+    to: "        if (false)\n            return { ok: false, reason: 'misaligned' };" },
+
+  // ── R7 02：两层路由与探测缓存（2026-11-25）──────────────────────────────
+  // 可用性忽略「目录里确有默认路由」：modelCatalog().default 不存在时仍回 available，
+  // 文章面会出现「译」按钮，点下去 translateBatch 却选不出路由（用户看到按钮却翻不了）。
+  // 判据是「回落会话默认但 modelCatalog().default 不存在 ⇒ no-default-route」。
+  { id: 'translate-可用性忽略默认路由', file: 'lib/translate.js',
+    judges: ['translate-availability.test.mjs'],
+    judgeTests: ['回落会话默认但 modelCatalog().default 不存在 ⇒ no-default-route'],
+    from: "    if (currentSelection === undefined || catalog?.default === undefined) {\n        return { available: false, reason: 'no-default-route', providers: providerViews };\n    }",
+    to: "    if (currentSelection === undefined) {\n        return { available: false, reason: 'no-default-route', providers: providerViews };\n    }" },
+  // 会话默认把 reasoningEffort 带进翻译：2026-11-25 真机实测 effort:max 与正文共用输出预算，
+  // 同一个 12 块 / 1223 字的批带 effort 被 max-tokens 截断、不带 effort 正常。强度只属于显式
+  // 路由（spec §4.4）；判据是「回落会话默认只取 provider+model」——回包路由与流请求都不得带 effort。
+  { id: 'translate-会话默认带出 reasoningEffort', file: 'lib/translate.js',
+    judges: ['translate-availability.test.mjs'],
+    judgeTests: ['回落会话默认只取 provider+model：会话的 reasoningEffort 不外溢到翻译（真机 2026-11-25）'],
+    from: "function routeOfSessionDefault(selection) {\n    return { provider: selection.provider, model: selection.model };\n}",
+    to: "function routeOfSessionDefault(selection) {\n    return { provider: selection.provider, model: selection.model, ...(selection.reasoningEffort === undefined ? {} : { effort: selection.reasoningEffort }) };\n}" },
+  // 保存设置后不清探测缓存：改完模型最多 30 秒内文章面按钮 / 设置页原因仍是旧结论。
+  // 时钟固定在同一个值的用例只有「显式失效」能让它看到新服务 —— 正是这条变异要抓的。
+  { id: 'translate-保存后不清缓存', file: 'lib/endpoints.js',
+    judges: ['translate-availability.test.mjs'],
+    judgeTests: ['saveSettings 成功后探测缓存立即失效（不用等 30s）'],
+    from: "            invalidateTranslateInfoCache();\n            return ok({ settings: outcome.snapshot });",
+    to: "            void 0;\n            return ok({ settings: outcome.snapshot });" },
+  // ── R7 04：视口选批与长块三档（2026-11-25）────────────────────────────────
+  // 视口优先退化成「永远从文档第一块取」：用户点「译」时屏幕里的块不再先翻，D7 的
+  // 可感知承诺（先看到眼前这段）落空。判据是纯函数用例里「块覆盖视口时只取它」。
+  { id: 'translate-视口优先退化成从头取', file: 'lib/translate-blocks.js',
+    judges: ['translate-batch.test.mjs'],
+    judgeTests: ['块比视口长（矩形完全覆盖视口）也算可见，且按文档顺序排第一批'],
+    from: 'const pool = visible.length > 0 ? visible : candidates;',
+    to: 'const pool = candidates;' },
+  // 2000–6000 的块不再独占一批：它会被当普通块塞进批里，但字符上限又装不下，
+  // 结果是整块被静默跳过（进度永远差一块）。判据是「长块只能一个人一批」。
+  { id: 'translate-长块不独占一批', file: 'lib/translate-blocks.js',
+    judges: ['translate-batch.test.mjs'],
+    judgeTests: ['单块 2000 < 字符 ≤ 6000 ⇒ 独占一批（该批放宽到 6000）'],
+    from: 'if ((chars[first] ?? 0) > TRANSLATE_BATCH_MAX_CHARS)',
+    to: 'if ((chars[first] ?? 0) > TRANSLATE_BLOCK_MAX_CHARS)' },
+
+  // ── R7 03：三态与译文渲染（2026-11-25）────────────────────────────────────
+  // 对照态被当成译文态：`effectiveMode !== 'original'` 让 parallel 也走「原文让位给译文」
+  // 的分支，对照态就不再是「原文 + 紧跟自己的译文」，读者核对不了原文。
+  // 判据是「三态切换」用例里对照态必须还能看到原文段落。
+  // from 照构建产物 lib/client.js 的实际字节写，独立实测 OCCURRENCES=1。
+  // 单枚切换按钮的方向写反：看对照时按钮该写「原文」，反过来会写成「译文」并按错误的态切换。
+  // 2026-11-26 三枚合成一枚后，原「对照态被当成译文态」的锚点已随译文态一起删除，这里重锚。
+  { id: 'translate-切换按钮方向写反', file: 'lib/client.js',
+    judges: ['translate-view.test.mjs'],
+    judgeTests: ['R7 03 两态切换：原文 / 对照互换，且不发任何 rpc'],
+    from: 'const next = mode === "parallel" ? "original" : "parallel";',
+    to: 'const next = mode === "parallel" ? "parallel" : "original";' },
+  // list 译文行数不校验：两条原文配一条译文时会把一行硬贴成列表，读者分不清哪条对哪条。
+  // 判据是「list 行数不等 ⇒ 整块退回原文」的用例。
+  { id: 'translate-list行数不校验', file: 'lib/client.js',
+    judges: ['translate-view.test.mjs'],
+    judgeTests: ['R7 03 list 行数不等 / 空白译文：整块退回原文，不渲染空段落'],
+    from: 'if (lines.length !== items.length) return void 0;',
+    to: 'if (false) return void 0;' },
+
+  // ── R7 05：失败分类、重试与连续失败停止（2026-11-25）──────────────────────
+  // 一批失败被当成整篇失败：第一批发 translate-failed 后立刻把 status 置 failed 并 return，
+  // 其余批不再继续 —— 读者只看到第一批的错误，后面本来能译的段落全没了。
+  // 判据是「批失败后其余批继续 + 重试只重发那一批」用例（它要求第一次失败后仍有第二次请求）。
+  // from 照构建产物 lib/client.js 的实际字节写，独立实测 OCCURRENCES=1。
+  { id: 'translate-批失败当整篇失败', file: 'lib/client.js',
+    judges: ['translate-failure.test.mjs'],
+    judgeTests: ['R7 05 批失败：其余批继续，失败处显示原因 + 批首一个重试按钮，点重试只重发那一批'],
+    from: 'if (reason === void 0) {',
+    to: 'if (true) {' },
+  // 连续失败计数不清零：失败 → 成功 → 失败 → 失败 会被累计成 3 次连续失败而提前停整篇，
+  // 用户在一篇本来能译完的文章上点第三次重试时发现「翻译已停止」。
+  // 判据是「失败 → 成功 → 失败 → 失败 → 成功 仍然跑完全篇」用例（要求 5 次请求）。
+  { id: 'translate-连续失败计数不清零', file: 'lib/client.js',
+    judges: ['translate-failure.test.mjs'],
+    judgeTests: ['R7 05 连续失败计数清零：失败 → 成功 → 失败 → 失败 → 成功 仍然跑完全篇'],
+    from: '\t\t\t\t\tconsecutiveFailures = 0;',
+    to: '\t\t\t\t\tvoid 0;' },
+
+  // ── R7 06：首次外发确认、中止与继续（2026-11-25）────────────────────────
+  // 「取消」仍然开始翻译：用户明确点了取消，正文还是被发给了模型 —— 这是隐私承诺的直接破口。
+  // 判据是确认框用例里「取消 ⇒ 零 translateBatch / 零 saveSettings / 无状态」。
+  // from 照构建产物 lib/client.js 的实际字节写，独立实测 OCCURRENCES=1。
+  { id: 'translate-取消确认仍发请求', file: 'lib/client.js',
+    judges: ['translate-confirm.test.mjs'],
+    judgeTests: ['R7 06 首次点「译」：确认框写清路由与字符数；取消零副作用'],
+    from: '\t\t\tconst cancelTranslate = () => {\n\t\t\t\tif (get().translateConfirm === void 0) return;\n\t\t\t\tset({ translateConfirm: void 0 });\n\t\t\t};',
+    to: '\t\t\tconst cancelTranslate = () => {\n\t\t\t\tif (get().translateConfirm === void 0) return;\n\t\t\t\tset({ translateConfirm: void 0 });\n\t\t\t\tvoid beginSession("fresh");\n\t\t\t};' },
+  // 「继续翻译」不把已译块放进 settled：点一次继续会把前几批原样重发，用户为同一段文字付第二遍钱。
+  // 判据是中止用例里「继续只补剩余块，已译块不重发」。
+  { id: 'translate-继续重发已译块', file: 'lib/client.js',
+    judges: ['translate-abort.test.mjs'],
+    judgeTests: ['R7 06 停止：在途批跑完不再发下一批；继续只补剩余块，已译块不重发'],
+    from: '\t\t\t\tconst settled = new Set(resumeEntry?.blocks.keys() ?? []);',
+    to: '\t\t\t\tconst settled = new Set([]);' },
+
+  // ── R7 评审修复（2026-11-25）────────────────────────────────────────────
+  // 整篇上限从 `>` 改成 `>=`：恰好 30000 字符的文章会被拒绝 —— spec §4.3 / D3 明写「> 30000」才拒，
+  // 30000 必须正常分 15 批。判据是纯函数计划用例与「30000 字符跑 15 批」的客户端用例。
+  // from 照构建产物 lib/translate-blocks.js 的实际字节写，独立实测 OCCURRENCES=1。
+  { id: 'translate-整篇上限边界少放行1字符', file: 'lib/translate-blocks.js',
+    judges: ['translate-batch.test.mjs', 'translate-progress.test.mjs'],
+    judgeTests: ['整篇计划：30000 字符正常、30001 拒绝（> 而不是 >=）', 'R7 04 进度：30000 字符恰好放行，15 批从 1/15 走到 15/15'],
+    from: 'tooLong: chars > TRANSLATE_ARTICLE_MAX_CHARS,',
+    to: 'tooLong: chars >= TRANSLATE_ARTICLE_MAX_CHARS,' },
+  // 首次外发确认闸门被短路：translateNoticeAck 永远视为已确认，确认框不再弹 ——
+  // 用户从未同意就把当前文章正文发给第三方模型（spec §4.2 隐私承诺的直接破口）。
+  // 判据是确认框用例里「首次点译先弹框，取消零请求 / 零 saveSettings / 零状态」。
+  // from 照构建产物 lib/client.js 的实际字节写，独立实测 OCCURRENCES=1。
+  { id: 'translate-首次确认闸门短路', file: 'lib/client.js',
+    judges: ['translate-confirm.test.mjs'],
+    judgeTests: ['R7 06 首次点「译」：确认框写清路由与字符数；取消零副作用'],
+    from: 'if (state.settings?.effective.translateNoticeAck !== true) {',
+    to: 'if (false) {' },
 ]

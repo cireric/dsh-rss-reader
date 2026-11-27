@@ -29,18 +29,32 @@ export const NUMBER_TUNABLE_KEYS = [
 ] as const
 
 /**
- * 字符串键（R8a D1 / D2）。`rsshubBase` 空串 = 功能关闭；不做「猜一个公共实例」。
+ * 字符串键（R8a D1 / D2，R7 02 扩容）。`rsshubBase` 空串 = 功能关闭；不做「猜一个公共实例」。
+ * 翻译三键（provider / model / effort）空串 = 未配置 / 回落，**不做语义校验**：
+ * 合法路由由模型目录在运行期裁决，抄一份目录进来就会成为第二份真相（spec §5.2）。
  */
-export const STRING_TUNABLE_KEYS = ['rsshubBase'] as const
+export const STRING_TUNABLE_KEYS = [
+  'rsshubBase',
+  'translateProvider',
+  'translateModel',
+  'translateEffort',
+] as const
 
 /**
- * 可覆盖键的**显式白名单**（R11 D5 / R8a D2）。`feeds` 永远不可覆盖；将来再加键必须同时
- * 决定它属于哪一组（数字 / 字符串），而不是「顺手支持任意 Config 键」。
+ * 布尔键（R7 02，spec §5.2）。`translateNoticeAck` 不是用户可调项：它只由首次外发确认框
+ * 写入，设置页不展示开关；但必须进可写白名单，否则 06 票写不进 settings.json。
  */
-export const TUNABLE_KEYS = [...NUMBER_TUNABLE_KEYS, ...STRING_TUNABLE_KEYS] as const
+export const BOOLEAN_TUNABLE_KEYS = ['translateNoticeAck'] as const
+
+/**
+ * 可覆盖键的**显式白名单**（R11 D5 / R8a D2 / R7 02）。`feeds` 永远不可覆盖；将来再加键必须同时
+ * 决定它属于哪一组（数字 / 字符串 / 布尔），而不是「顺手支持任意 Config 键」。
+ */
+export const TUNABLE_KEYS = [...NUMBER_TUNABLE_KEYS, ...STRING_TUNABLE_KEYS, ...BOOLEAN_TUNABLE_KEYS] as const
 
 export type NumberTunableKey = (typeof NUMBER_TUNABLE_KEYS)[number]
 export type StringTunableKey = (typeof STRING_TUNABLE_KEYS)[number]
+export type BooleanTunableKey = (typeof BOOLEAN_TUNABLE_KEYS)[number]
 export type TunableKey = (typeof TUNABLE_KEYS)[number]
 
 /** 每个键的取值类型（唯一定义处）。 */
@@ -50,6 +64,10 @@ export interface TunableValueByKey {
   minRefreshIntervalMs: number
   cleanupAfterDays: number
   rsshubBase: string
+  translateProvider: string
+  translateModel: string
+  translateEffort: string
+  translateNoticeAck: boolean
 }
 
 /** 全部可调键的完整取值（生效值 / 默认值 / 合并后的 config 都长这样）。 */
@@ -66,12 +84,18 @@ export type TunableOverrides = Partial<TunableSettings>
  * 值的**类型**仍由上面的 `TunableValueByKey` 声明：校验器只回答「这个 unknown 能不能变成
  * 该键的值」，不复制一份类型表。
  */
-export const TUNABLE_PARSERS: { readonly [K in TunableKey]: (value: unknown) => string | number | undefined } = {
+export const TUNABLE_PARSERS: {
+  readonly [K in TunableKey]: (value: unknown) => TunableValueByKey[K] | undefined
+} = {
   refreshFeedsPerRound: (value) => parseNumberValue('refreshFeedsPerRound', value),
   refreshConcurrency: (value) => parseNumberValue('refreshConcurrency', value),
   minRefreshIntervalMs: (value) => parseNumberValue('minRefreshIntervalMs', value),
   cleanupAfterDays: (value) => parseNumberValue('cleanupAfterDays', value),
   rsshubBase: parseRsshubBase,
+  translateProvider: parseTranslateText,
+  translateModel: parseTranslateText,
+  translateEffort: parseTranslateText,
+  translateNoticeAck: parseBooleanValue,
 }
 
 /**
@@ -130,13 +154,14 @@ export function changedNumberTunableKeys(
  * 校验一个可调值；认不出返回 `undefined`（**不编造**一个夹取后的值）。
  *
  * 读侧、写侧、客户端共用这一份：`settings.json` 的坏值靠它逐键丢弃，保存靠它拒绝非法入参，
- * 界面靠它把非法输入挡在请求之前。三个重载让调用方按 key 拿到正确类型（数字 / 字符串），
- * 运行时只分派给两个解析器 —— 类型判断仍只有这一处。
+ * 界面靠它把非法输入挡在请求之前。重载让调用方按 key 拿到正确类型（数字 / 字符串 / 布尔），
+ * 运行时只按 `TUNABLE_PARSERS` 分派 —— 类型判断仍只有这一处。
  */
-export function parseTunableValue(key: 'rsshubBase', value: unknown): string | undefined
+export function parseTunableValue(key: 'rsshubBase' | 'translateProvider' | 'translateModel' | 'translateEffort', value: unknown): string | undefined
+export function parseTunableValue(key: 'translateNoticeAck', value: unknown): boolean | undefined
 export function parseTunableValue(key: NumberTunableKey, value: unknown): number | undefined
-export function parseTunableValue(key: TunableKey, value: unknown): string | number | undefined
-export function parseTunableValue(key: TunableKey, value: unknown): string | number | undefined {
+export function parseTunableValue(key: TunableKey, value: unknown): string | number | boolean | undefined
+export function parseTunableValue(key: TunableKey, value: unknown): string | number | boolean | undefined {
   return TUNABLE_PARSERS[key](value)
 }
 
@@ -144,6 +169,23 @@ function parseNumberValue(key: NumberTunableKey, value: unknown): number | undef
   if (typeof value !== 'number' || !Number.isInteger(value)) return undefined
   const range = TUNABLE_RANGES[key]
   return value >= range.min && value <= range.max ? value : undefined
+}
+
+/**
+ * 翻译三键的唯一形状判据（R7 02，spec §5.2）：trim；长度 ≤ 200；空串合法。
+ *
+ * **刻意不做语义校验**：provider 是否存在、model 能不能用由模型目录在运行期裁决。
+ * 在这里抄一份允许名单，等于把目录变成第二份真相 —— 模型上下线一次，设置就存不进去。
+ */
+export function parseTranslateText(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  return trimmed.length <= 200 ? trimmed : undefined
+}
+
+/** 布尔键的唯一判据：只认真正的 boolean，`"true"` / 1 / null 一律拒绝（不编造真值转换）。 */
+export function parseBooleanValue(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined
 }
 
 /**

@@ -174,3 +174,65 @@ test('原子写：rsshubBase 按判据归一后落盘（去尾斜杠），非法
     assert.deepEqual(readdirSync(dir), ['settings.json'], '失败路径不残留临时文件')
   })
 })
+
+test('R7 02：翻译三键与确认标记能读能写；坏形状只丢该键（版本仍是 1）', async () => {
+  await withDir((dir) => {
+    const path = join(dir, 'settings.json')
+    // 写侧：四个新键都在白名单里，稀疏落盘（只写点名的那几个）。
+    writeSettingsFile(path, {
+      translateProvider: ' deepseek ',
+      translateModel: 'deepseek-chat',
+      translateEffort: '',
+      translateNoticeAck: true,
+    })
+    assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), {
+      version: 1,
+      overrides: {
+        translateProvider: 'deepseek',
+        translateModel: 'deepseek-chat',
+        translateEffort: '',
+        translateNoticeAck: true,
+      },
+    }, '翻译键必须与既有键走同一条原子写协议，字符串存 trim 后的形态')
+
+    // 读侧：合法值原样回来。
+    const ok = readSettingsFile(path)
+    assert.equal(ok.status, 'ok')
+    assert.deepEqual(ok.overrides, {
+      translateProvider: 'deepseek', translateModel: 'deepseek-chat', translateEffort: '', translateNoticeAck: true,
+    }, '写入的四个键必须都能读回')
+
+    // 坏值逐键丢弃：非字符串 / 超长 / 非布尔，其余合法的（refreshConcurrency）照用。
+    writeFileSync(path, JSON.stringify({
+      version: 1,
+      overrides: {
+        refreshConcurrency: 8,
+        translateProvider: 5,
+        translateModel: 'x'.repeat(201),
+        translateEffort: null,
+        translateNoticeAck: 'true',
+      },
+    }))
+    const result = readSettingsFile(path)
+    assert.equal(result.status, 'ok', '坏翻译值不许把整份文件判死')
+    assert.deepEqual(result.overrides, { refreshConcurrency: 8 }, '四个坏值只该丢它们自己')
+    assert.equal(result.dropped, 4)
+  })
+})
+
+test('R7 02：写侧拒绝非法翻译值，且不留下半个文件', async () => {
+  await withDir((dir) => {
+    const path = join(dir, 'settings.json')
+    writeSettingsFile(path, { translateNoticeAck: false })
+    const before = readFileSync(path, 'utf8')
+    for (const bad of [
+      { translateProvider: 5 },
+      { translateModel: 'x'.repeat(201) },
+      { translateNoticeAck: 'yes' },
+    ]) {
+      assert.throws(() => writeSettingsFile(path, bad), /不合法/, '非法值必须当场拒绝：' + JSON.stringify(bad))
+      assert.equal(readFileSync(path, 'utf8'), before, '写失败时原文件不动')
+    }
+    assert.deepEqual(readdirSync(dir), ['settings.json'], '失败路径也要清掉临时文件')
+  })
+})

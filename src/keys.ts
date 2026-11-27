@@ -21,6 +21,8 @@ export type ReaderKeyAction =
   // i = 展开 / 折叠**当前正文**的全部图片（R6 04，GR 里 i 原本空闲）。语义是「翻基线并清空组覆盖」，
   // 细节在 keyboard-routing.ts 的 case：一次按键收掉整篇、再按一次放回来 —— 键盘流的主路径。
   | 'toggleImages'
+  // t = 两态循环（R7 03 / D14）：有译文时 原文 ↔ 对照；无译文时触发翻译（06 已接，首次弹确认框）。
+  | 'cycleTranslation'
   | 'none'
 
 /**
@@ -64,6 +66,10 @@ export function resolveReaderKey(key: string, shift = false): ReaderKeyAction {
     //    halfPageUp 这四个三元里的返回值）。写成三元 ⇒ 反向覆盖照样绿而判据失效，是假绿。
     //    视图守卫因此住在 routeKey 的 `view !== 'article'` 判断里（与 openArticle 同形）。
     case 'i': return 'toggleImages'
+    // t = 正文两态循环 / 无译文时触发翻译（R7 03 / 06，D14）。**必须写成字面量 return**：帮助表反向覆盖用
+    // `return\s+'([A-Za-z]+)'` 从产物里抓动作名，三元里的返回值抓不到（与 i 同一条教训）。
+    // 视图守卫在 routeKey 的 `view !== 'article'` 判断里（与 i 同形）。
+    case 't': return 'cycleTranslation'
     // 1/2 = 视图密度（GR 原键位）：1 = expanded view「含条目描述/正文摘录」、2 = list view「只有标题行」
     case '1': return 'expandedView'
     case '2': return 'listView'
@@ -190,6 +196,9 @@ export const READER_KEY_HELP: ReaderHelpSection[] = [
       // scope 是 article（仅正文）：`i` 在列表页 / 订阅管理页是 no-op（守卫在 routeKey 里）。
       { label: 'i', summary: '展开 / 折叠正文图片', scope: 'article',
         bindings: [{ key: 'i', action: 'toggleImages' }] },
+      // t 同理只在正文页：无译文时触发翻译（首次先确认外发），有译文时在原文 / 对照之间切换（spec §4.1 / 验收 14）。
+      { label: 't', summary: '无译文时开始翻译；有译文时在原文 / 对照之间切换', scope: 'article',
+        bindings: [{ key: 't', action: 'cycleTranslation' }] },
       { label: 'v', summary: '用系统浏览器打开原站（并标已读）', scope: 'any',
         bindings: [{ key: 'v', action: 'openExternal' }] },
       { label: 's', summary: '星标 / 取消星标', scope: 'any',

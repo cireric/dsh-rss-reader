@@ -1,5 +1,5 @@
 /**
- * 浏览器半的读写通道：33 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
+ * 浏览器半的读写通道：37 个端点的**注册表**（2026-10-07 从 index.ts 拆出；2026-10-15 深化）。
  *
  * 原先这里是一个 switch：每臂各自手写 payload 解析、各自记得把未读账并进回包 ——
  * interface 的复杂度 ≈ implementation 的复杂度。现在「一个端点」是一个 module：
@@ -38,6 +38,8 @@ import {
   searchQueryPayload,
   setItemTagsPayload,
   testRsshubPayload,
+  translateBatchPayload,
+  translateInfoPayload,
   unmarkReadPayload,
 } from './endpoint-payloads.js'
 import type { createSearch } from './search.js'
@@ -79,6 +81,13 @@ import { decodeFencedCursor, encodeFencedCursor, queryFenceKey } from './cursor-
 import type { Cursor } from './cursor.js'
 import type { DisplayWindowBounds } from './display-window.js'
 import { buildItemPage, decodePageCursor, type PageScope } from './item-page.js'
+import {
+  invalidateTranslateInfoCache,
+  probeTranslateInfo,
+  translateBatch,
+  translateRouteSelectionOf,
+  type TranslateServices,
+} from './translate.js'
 
 /** 端点需要的运行时依赖（显式传入，不靠闭包）。 */
 export interface EndpointDeps {
@@ -105,6 +114,17 @@ export interface EndpointDeps {
    */
   readonly fetchArticleImpl?: typeof fetchArticle
   readonly articleAttempts: Map<string, number>
+  /**
+   * R7：翻译用的宿主服务（llm / sessionController / agentDefaultModel）。
+   *
+   * **每次调用现取**（index.ts 传闭包）：服务可能后挂，缓存下来的 undefined 会让「装上模型
+   * 之后仍然没有译按钮」。测试经 createDispatch 注入假服务，因此端点不需要 cordis ctx。
+   */
+  readonly translateServices?: () => TranslateServices
+  /** 单批 deadline 的测试接缝（生产缺省 60s，见 translate.ts 的 TRANSLATE_DEADLINE_MS）。 */
+  readonly translateDeadlineMs?: number
+  /** 可用性探测缓存的时钟接缝（默认 Date.now）：测试用假 now 走完 30s，不 sleep。 */
+  readonly translateNow?: () => number
 }
 
 /**
@@ -131,6 +151,9 @@ export interface EndpointCtx {
   readonly fetchImpl?: typeof fetchFeed
   readonly fetchArticleImpl?: typeof fetchArticle
   readonly articleAttempts: Map<string, number>
+  readonly translateServices?: () => TranslateServices
+  readonly translateDeadlineMs?: number
+  readonly translateNow?: () => number
 }
 
 /**
@@ -598,7 +621,7 @@ function catalogPageOf(
 }
 
 /**
- * 端点表：35 个端点一处声明（每项的 `payload` 是入参形状的唯一声明）。
+ * 端点表：37 个端点一处声明（每项的 `payload` 是入参形状的唯一声明）。
  *
  * 穷尽性由 `Record<Endpoint, EndpointSpec>` 保证 —— 名字表（shared.ts 的 ENDPOINT_NAMES）
  * 加了新端点而这里没跟上，编译就不过。这是本文件里唯一需要「加端点时改的地方」。
@@ -1183,6 +1206,9 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
         ? ctx.settings.resetToDefaults()
         : ctx.settings.save(input.patch)
       if (!outcome.ok) return fail('write-failed', outcome.message)
+      // R7 02 / spec §4.1：可用性探测缓存 30s；设置落盘成功后必须立刻失效，否则用户改完模型
+      // 仍会在最长 30 秒里看到旧路由（文章面按钮 / 设置页原因都可能是过期结论）。
+      invalidateTranslateInfoCache()
       return ok({ settings: outcome.snapshot })
     },
   }),
@@ -1316,6 +1342,44 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
     },
   }),
 
+
+  /**
+   * 翻译一批正文块（R7 01，spec §5.1）。
+   *
+   * **纯函数式**：不读 store、不碰库、不认 itemId —— 入参只有目标语言、可选标题与
+   * `{id,text}[]`。这是刻意的：翻译结果属于客户端内存态（`itemId:contentVersion:target`），
+   * 宿主若保存第二份「谁翻了什么」，就会变成第二个真相。模型侧失败一律 translate-failed，
+   * 由 details.reason 区分四类；HTTP 仍是 200 信封（与其它端点同形）。
+   */
+  translateBatch: defineEndpoint({
+    payload: translateBatchPayload,
+    invalidMessage: 'translateBatch 需要目标语言与至少一条待译文本（id 不重复、文本非空）',
+    to: async (input, ctx) => translateBatch(input, {
+      services: ctx.translateServices?.() ?? {},
+      // 显式路由每次现读 config（settings 保存后直接改内存，不需要重启）。
+      selection: translateRouteSelectionOf(ctx.config),
+      ...(ctx.translateDeadlineMs === undefined ? {} : { deadlineMs: ctx.translateDeadlineMs }),
+    }),
+  }),
+
+  /**
+   * 翻译可用性探测（R7 02，spec §4.1 / §4.4）。
+   *
+   * 四类原因由 translate.ts 的 resolveTranslateRoute 一次定下；这里只负责把「当前设置里的
+   * 显式路由」和「探测时钟」交给它。**永远回 ok 信封**：不可用是正常观测结果，不是请求失败；
+   * 文章面据 `available` 决定是否渲染「译」按钮，设置页据 `reason` 显示中文原因。
+   */
+  translateInfo: defineEndpoint({
+    payload: translateInfoPayload,
+    invalidMessage: 'translateInfo 不接受参数（可传 null / 空对象）',
+    to: async (_input, ctx) => ok(await probeTranslateInfo(
+      ctx.translateServices?.() ?? {},
+      {
+        explicit: translateRouteSelectionOf(ctx.config),
+        ...(ctx.translateNow === undefined ? {} : { now: ctx.translateNow }),
+      },
+    )),
+  }),
 
   // ── 文件夹目录与变更接口（M2 02）────────────────────────────────────────
   // 与订阅同住 config.json；每个变更都在**一次**读改写里完成（改名连带成员归属）。
@@ -1494,7 +1558,7 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
  * 异常一律兜成 internal 信封 —— 不把 throw 泄进通道（调用方要的是带 code 的失败信封）。
  */
 export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: unknown, signal?: AbortSignal) => Promise<RpcResult<unknown>> {
-  const { config, log, ready, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, fetchImpl, fetchArticleImpl } = deps
+  const { config, log, ready, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, fetchImpl, fetchArticleImpl, translateServices, translateDeadlineMs, translateNow } = deps
 
   const dispatch = async (endpoint: string, payload: unknown, signal?: AbortSignal): Promise<RpcResult<unknown>> => {
     try {
@@ -1510,6 +1574,9 @@ export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: 
 
       const ctx: EndpointCtx = {
         store: target, ready, config, log, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, fetchImpl, fetchArticleImpl, signal,
+        ...(translateServices === undefined ? {} : { translateServices }),
+        ...(translateDeadlineMs === undefined ? {} : { translateDeadlineMs }),
+        ...(translateNow === undefined ? {} : { translateNow }),
       }
       const outcome = await spec.to(payload, ctx)
       const { result } = outcome

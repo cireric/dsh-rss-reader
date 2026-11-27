@@ -47,6 +47,10 @@ export const ENDPOINT_NAMES = [
   'backfillHistory',
   // R8b 03：探索的两个**只读**端点 —— 目录分页与地址拼装。整张路由表永不下发浏览器（D12）。
   'exploreCatalog', 'exploreBuildUrl',
+  // R7 01：翻译一批正文块（纯函数式；模型路由与失败原因都从宿主注入的服务取）。
+  'translateBatch',
+  // R7 02：翻译可用性探测（四类原因 + 当前路由；设置页据此显示模型选择器）。
+  'translateInfo',
 ] as const
 export type Endpoint = (typeof ENDPOINT_NAMES)[number]
 
@@ -522,6 +526,63 @@ function httpUrlOf(raw: string): URL | undefined {
  */
 export function isHttpUrl(value: string): boolean {
   return httpUrlOf(value) !== undefined
+}
+
+/**
+ * 翻译的 wire 形状（R7，contract「shared.ts 共享 wire 类型」）。
+ *
+ * `TranslateRoute` 的 `effort` 是**已确认可用**的推理强度；01 只回会话默认，02 的可用性
+ * 探测会复用同一份形状。`TranslateInfo` 的 reason 四枚举就是设置页 / 文章面不渲染按钮的
+ * 依据 —— 客户端不自己拼「为什么不可用」。
+ */
+export interface TranslateRoute {
+  readonly provider: string
+  readonly model: string
+  readonly effort?: string
+}
+
+/** 一条待译 / 已译文本：id 是 `'b' + 正文块下标`（标题走独立字段，不做成 item）。 */
+export interface TranslateItem {
+  readonly id: string
+  readonly text: string
+}
+
+/** `translateBatch` 的成功回包：model 取响应回包里的值（不信客户端）。 */
+export interface TranslateBatchResult {
+  readonly model: string
+  readonly title?: string
+  readonly items: TranslateItem[]
+}
+
+/**
+ * `translateInfo` 的 wire 形状（02 用；01 先建立，避免两票各造一份）。
+ *
+ * 必填项与 contract 一致：四类原因之一 + 解析出的路由。`sessionDefault` / `providers`
+ * 是本票为**设置页模型选择器**补的可选扩展：客户端在浏览器沙箱里没有 ctx，无法直接读
+ * `sessionController.modelCatalog()` / `llm.listModels()`；没有这两个字段，设置页就只能
+ * 显示原因、无法列出可选模型（spec §4.2 要求「可用时显示模型选择器」）。
+ * 老客户端忽略未知字段，因此这是向后兼容的加法。
+ */
+export interface TranslateInfo {
+  readonly available: boolean
+  readonly reason?: 'llm-unmounted' | 'no-provider' | 'no-model' | 'no-default-route'
+  readonly route?: TranslateRoute
+  /** 会话默认路由：设置页首项「跟随会话默认（{模型名}）」的文案来源。 */
+  readonly sessionDefault?: TranslateRoute
+  /** 可选模型目录：设置页按 provider 分组列模型；llm 不可用时缺席。 */
+  readonly providers?: ReadonlyArray<TranslateProviderView>
+}
+
+/** 一个可选模型的展示信息；efforts 是适配器声明的思考强度 id（空 = 该模型不支持）。 */
+export interface TranslateModelView {
+  readonly id: string
+  readonly efforts: ReadonlyArray<string>
+}
+
+/** 设置页模型下拉的一组：provider + 它列得出的模型。 */
+export interface TranslateProviderView {
+  readonly provider: string
+  readonly models: ReadonlyArray<TranslateModelView>
 }
 
 /** 成功信封（两侧共用的信封构造器：宿主端点与客户端解包都按这个形状）。 */

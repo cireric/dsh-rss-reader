@@ -231,5 +231,9 @@ function snapshotOf(config: ConfigShape): TunableSettings {
     minRefreshIntervalMs: config.minRefreshIntervalMs,
     cleanupAfterDays: config.cleanupAfterDays,
     rsshubBase: config.rsshubBase,
+    translateProvider: config.translateProvider,
+    translateModel: config.translateModel,
+    translateEffort: config.translateEffort,
+    translateNoticeAck: config.translateNoticeAck,
   }
 }

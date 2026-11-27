@@ -17,7 +17,19 @@ import type { ReaderState, ReaderStoreDeps } from './store.js'
  */
 export type SaveSettingResult =
   | { readonly ok: true; readonly settings: SettingsSnapshot }
-  | { readonly ok: false; readonly message: string; readonly current: string | number | undefined }
+  | { readonly ok: false; readonly message: string; readonly current: string | number | boolean | undefined }
+
+/**
+ * 翻译路由的一次性 patch（R7 02）：provider / model / effort 必须**一起**提交。
+ *
+ * 分三次写会经过「provider 已换、model 还是旧的」这类中间态；模型选择器切换时那一瞬
+ * 可能被翻译端点读走。一次 patch 落盘，生效值是原子的。
+ */
+export type TranslateRouteSettingsPatch = {
+  readonly translateProvider: string
+  readonly translateModel: string
+  readonly translateEffort: string
+}
 
 /** 「恢复默认」的结果：失败只带可展示的原因；N 由动作在提交时按「生效值 vs 默认值」算出。 */
 export type ResetSettingsResult =
@@ -71,11 +83,21 @@ export function createSettingsActions(host: SettingsActionHost) {
   let saveChain: Promise<unknown> = Promise.resolve()
   let latestSave = 0
 
-  const saveSetting = (key: TunableKey, value: string | number): Promise<SaveSettingResult> => {
+  /**
+   * 一条保存请求的公共执行体（R11 02 / R7 02）：
+   * 串行 + 只认最新回包 + 失败时回「此刻真正生效的值」。
+   *
+   * 单键保存与翻译三键 patch 共用它：两条路径各写一遍串行链时，后一次改动可能被前一次
+   * 的旧回包覆盖（风险 3），而这个 bug 只在连续操作时显形。
+   */
+  const runSave = (
+    payload: { readonly patch: Record<string, string | number | boolean> },
+    currentOf: () => string | number | boolean | undefined,
+  ): Promise<SaveSettingResult> => {
     const ticket = ++latestSave
     const run = saveChain.then(async (): Promise<SaveSettingResult> => {
       try {
-        const result = await rpc<{ settings?: SettingsSnapshot }>('saveSettings', { patch: { [key]: value } })
+        const result = await rpc<{ settings?: SettingsSnapshot }>('saveSettings', payload)
         const snapshot = result?.settings
         if (snapshot === undefined) throw new Error('saveSettings 回包缺少 settings 字段')
         if (ticket === latestSave) set({ settings: snapshot, settingsError: undefined })
@@ -85,13 +107,25 @@ export function createSettingsActions(host: SettingsActionHost) {
         // 顶部状态条也留一句（设置页之外看得见），就地红字负责细节（D12）。
         set({ error: '保存设置失败：' + message })
         log('warn', '[rss-reader] 保存设置失败', failure)
-        return { ok: false, message, current: get().settings?.effective[key] }
+        return { ok: false, message, current: currentOf() }
       }
     })
     // 链本身永不 reject：一次失败不该让后续保存永远排在一条断掉的 Promise 后面。
     saveChain = run.then(() => undefined, () => undefined)
     return run
   }
+
+  const saveSetting = (key: TunableKey, value: string | number | boolean): Promise<SaveSettingResult> =>
+    // 计算键的类型在运行时就是该键本身；宿主端点会用同一份 parseTunableValue 再验一次。
+    runSave({ patch: { [key]: value } }, () => get().settings?.effective[key])
+
+  /** 翻译路由三键一次落盘（R7 02）：设置页选中模型 / 强度时调用，成功后由 store 刷新探测。 */
+  const saveTranslateRoute = (patch: TranslateRouteSettingsPatch): Promise<SaveSettingResult> =>
+    runSave({ patch }, () => {
+      const effective = get().settings?.effective
+      // 失败提示里的「当前生效值」：三键一起改，用 provider/model 组合回答「现在到底用的哪条路由」。
+      return effective === undefined ? undefined : effective.translateProvider + '/' + effective.translateModel
+    })
 
   /**
    * 页面级「恢复默认」（07 票，D28）：客户端只发一个动作，删 / 写覆盖的判断全在宿主。
@@ -168,6 +202,6 @@ export function createSettingsActions(host: SettingsActionHost) {
 
   return {
     loadSettings, openSettings, closeSettings, toggleSettings, dismissSettingsWarning,
-    saveSetting, resetSettings, testRsshub,
+    saveSetting, saveTranslateRoute, resetSettings, testRsshub,
   }
 }

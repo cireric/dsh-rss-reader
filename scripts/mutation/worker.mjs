@@ -103,9 +103,19 @@ function judgeSpec(m) {
   if (missing.length > 0) return { files: files.map((f) => 'tests/' + f), patterns: [], drift: true, missing }
   return { files: files.map((f) => 'tests/' + f), patterns, drift: false }
 }
-const base = runSuite(root)
+// 副本基线卫兵：基线红 = 本副本的判定全部无效。先重试一次（与单条变异的超时重试同一条理由：
+// 并行负载下偶发超时，重试即愈），并给 baseline 更宽的 timeout；仍红才报告，
+// 同时把失败用例带回去，避免「136 条幸存」这种不可诊断的结论。
+let base = runSuite(root, { timeoutMs: Math.max(SUITE_TIMEOUT_MS * 2, 240000) })
 if (!base.ok) {
-  for (const m of mutations) parentPort.postMessage({ id: m.id, status: 'worker_error', crash: '副本基线红', fails: [], judges: [] })
+  console.log('  · 副本基线红，重试一次…')
+  base = runSuite(root, { timeoutMs: Math.max(SUITE_TIMEOUT_MS * 2, 240000) })
+}
+if (!base.ok) {
+  const firstFail = base.out.split('\\n').filter((line) => /^\\s*✖/.test(line)).slice(0, 3).join(' | ')
+  const reason = base.timeout ? '副本基线超时' : '副本基线红'
+  console.log('  · ' + reason + (firstFail === '' ? '' : '：' + firstFail))
+  for (const m of mutations) parentPort.postMessage({ id: m.id, status: 'worker_error', crash: reason + (firstFail === '' ? '' : '：' + firstFail), fails: [], judges: [] })
 } else for (const m of mutations) {
   try {
     const applied = applyMutation(root, m)

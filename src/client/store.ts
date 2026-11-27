@@ -6,12 +6,23 @@
  * 列表、正文、订阅管理与键盘接线，任一改动都要动同一个文件。
  */
 import { useEffect, useState } from 'react'
-import { ROUTE_PATH, type DiscoveryResult, type Endpoint, type ExploreRouteView, type FeedView, type FolderView, type ItemView, type OpmlImportResult, type RpcResult, type SearchQuery, type SettingsSnapshot, type TagView, type DuplicateHintView } from '../shared.js'
+import { ROUTE_PATH, type DiscoveryResult, type Endpoint, type ExploreRouteView, type FeedView, type FolderView, type ItemView, type OpmlImportResult, type RpcResult, type SearchQuery, type SettingsSnapshot, type TagView, type DuplicateHintView, type TranslateInfo } from '../shared.js'
 import { DEFAULT_READING_PREFERENCES, DEFAULT_VIEW_PREFERENCES, sanitizeViewPreferences, validListScrollTop } from '../preferences.js'
 import type { ReadingPreferences, ViewPreferences } from '../preferences.js'
 import { clampScrollTop } from '../list-scroll.js'
 import type { DisplayWindowRange } from '../display-window.js'
 import type { UnreadSplit } from '../unread.js'
+import { DEFAULT_TARGET_LANGUAGE, type TargetLanguage } from '../translate-copy.js'
+import { RpcError } from './rpc-error.js'
+import type { TranslateConfirmRequest, TranslationEntry, TranslationMode } from './translate-state.js'
+
+// 翻译状态与 RpcError 的对外导出面保留在这里：既有组件 / 测试仍从 store 取它们；
+// 实现已经搬到叶子模块（2026-11-26 评审修复，消除 store ↔ translate-actions 的运行时循环）。
+export { RpcError } from './rpc-error.js'
+export {
+  hasTranslations, nextTranslationMode, TRANSLATION_MODES,
+  type TranslationBatchFailure, type TranslateConfirmRequest, type TranslationEntry, type TranslationMode,
+} from './translate-state.js'
 
 export type Filter = 'all' | 'unread' | 'starred'
 
@@ -58,9 +69,10 @@ import { createListActions } from './list-actions.js'
 import { createNavActions } from './nav-actions.js'
 import { createOpmlActions } from './opml-actions.js'
 import { createSearchActions } from './search-actions.js'
-import { createSettingsActions } from './settings-actions.js'
+import { createSettingsActions, type TranslateRouteSettingsPatch } from './settings-actions.js'
 import { createExploreActions } from './explore-actions.js'
 import { createTagActions } from './tag-actions.js'
+import { createTranslateActions } from './translate-actions.js'
 import {
   navRowsOf, navCursorKey, nextExpandedOf, memorableSelectionOf, VIRTUAL_VIEWS,
 } from './nav-model.js'
@@ -219,6 +231,42 @@ export interface ReaderState {
   /** 一次性提示（如清理结果）：显示后由用户下一个动作清掉，不设定时器 */
   notice: string | undefined
   article: ArticleState | undefined
+  /**
+   * 内存译文（R7 01）：键 = `${itemId}:${contentVersion}:${target}`。
+   *
+   * 刻意不落盘、不进 viewPreferences：刷新 / 热重载即丢（spec D9 / D11）。切条目、切面板
+   * 不丢 —— 它挂在 store 上而不是组件 state 上。
+   */
+  translations: ReadonlyMap<string, TranslationEntry>
+  /**
+   * 两态（R7 03）。它是**全局面板内**的显示偏好，不持久化：刷新即回原文。
+   * 有译文时正文面默认用它（动作层在全新一场开始时置 'parallel'）；没有译文时
+   * 正文面按 'original' 渲染且不显示切换器 —— 判据在渲染层，本字段不表达「有没有译文」。
+   */
+  translationMode: TranslationMode
+  /** 可用性探测结果（R7 02）：面板加载时探一次；undefined = 还没探到（按钮先不渲染）。 */
+  translationInfo: TranslateInfo | undefined
+  /**
+   * 首次外发确认框的待确认内容（R7 06 / spec §4.2）：undefined = 没有框。
+   *
+   * 放 store 而不是 ArticleView 的 `useState`：`t` 键与工具栏按钮必须走**同一个**请求入口
+   * （键盘路径不经过组件），确认态跟着 store 才能在两条入口之间保持一致。
+   * 取消 / 离开正文时清空，不写 settings、不发 rpc。
+   */
+  translateConfirm: TranslateConfirmRequest | undefined
+  /**
+   * 翻译目标语言（R7 02 / spec §5.3）：与 `viewPreferences.translateTarget` 同一份状态。
+   * 正文工具栏「译」旁边的裸下拉是唯一入口（2026-11-26 从设置页 / Aa 面板迁来）；
+   * 切换只影响新译文，旧译文按语言分键保留。
+   */
+  translateTarget: TargetLanguage
+  /**
+   * 正在飞的那一批的块下标（R7 优化：翻译中的 loading 指示）。
+   *
+   * `key` 是这一篇的译文键：切条目 / 换语言后旧场次的占位不该画到新正文上，渲染层按 key 比对。
+   * `undefined` = 没有在飞的批（空闲 / 已停）。
+   */
+  translatePending: { readonly key: string; readonly indices: readonly number[] } | undefined
   /** 导航选中（虚拟视图 / 某个具体源）。与 filter 叠加生效，见 NavSelection。 */
   navSelection: NavSelection
   /** 导航**光标**（左栏键盘高亮所在行）。与 navSelection 是两件事，见 NavCursor。 */
@@ -259,12 +307,14 @@ export interface ReaderState {
 }
 
 /**
- * 调一个端点并解信封；失败抛出 `code: message`，由面板渲染。
+ * 调一个端点并解信封；失败抛出 `RpcError`，由面板渲染。
  *
  * endpoint 收的是 shared.ts 的 Endpoint（= ENDPOINT_NAMES 派生）：拼错名字从「运行时收一个
  * unknown-endpoint」变成**编译错误**。这是本文件与宿主之间唯一的那条 seam，值得有类型。
+ *
+ * 仅供 05 的测试接缝导出：测试要直接喂一个失败信封，断言 `details.reason` 确实进了 Error。
  */
-async function browserRpc<T>(endpoint: Endpoint, payload?: unknown, signal?: AbortSignal): Promise<T> {
+export async function browserRpc<T>(endpoint: Endpoint, payload?: unknown, signal?: AbortSignal): Promise<T> {
   const response = await fetch(ROUTE_PATH, {
     method: 'POST',
     ...(signal === undefined ? {} : { signal }),
@@ -275,7 +325,13 @@ async function browserRpc<T>(endpoint: Endpoint, payload?: unknown, signal?: Abo
   const result = (await response.json()) as RpcResult<T>
   if (result?.ok) return result.value
   const error = result?.error
-  throw new Error(error ? error.code + ': ' + error.message : '通道返回了非预期形状')
+  if (error === undefined || typeof error.code !== 'string' || typeof error.message !== 'string') {
+    throw new Error('通道返回了非预期形状')
+  }
+  // details 在 wire 上必填；但旧宿主 / 手写桩可能省掉它。缺省成空对象，不让「读 reason」
+  // 在客户端抛 TypeError —— 那会把一次可读的失败变成整块面板的错误。
+  const details = typeof error.details === 'object' && error.details !== null ? error.details : {}
+  throw new RpcError(error.code, error.message, details)
 }
 
 export { relativeTime } from './relative-time.js'
@@ -372,7 +428,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   let state: ReaderState = {
     items: [], feeds: [], folders: [], tags: [], unread: 0, unreadSplit: undefined, filter: 'all',
     selectedId: undefined, loading: true, error: undefined, undo: undefined,
-    view: 'list', layout: 'list', markAllRange: 'all', displayWindow: 'all', accountWindow: 'all', showUnread: DEFAULT_VIEW_PREFERENCES.showUnread, settings: undefined, settingsError: undefined, settingsWarningDismissed: false, explore: undefined, article: undefined, notice: undefined,
+    view: 'list', layout: 'list', markAllRange: 'all', displayWindow: 'all', accountWindow: 'all', showUnread: DEFAULT_VIEW_PREFERENCES.showUnread, settings: undefined, settingsError: undefined, settingsWarningDismissed: false, explore: undefined, article: undefined, translations: new Map(), translationMode: 'original', translationInfo: undefined, translateConfirm: undefined, translateTarget: DEFAULT_TARGET_LANGUAGE, translatePending: undefined, notice: undefined,
     importReport: undefined, discovery: undefined, feedsBusy: false,
     navSelection: { kind: 'virtual' }, perFeedUnread: {}, navVisible: true,
     reading: DEFAULT_READING_PREFERENCES, duplicates: {},
@@ -494,6 +550,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
       filter: state.filter,
       navVisible: state.navVisible,
       showUnread: state.showUnread,
+      translateTarget: state.translateTarget,
       reading: state.reading,
     }
     if (state.selectedId !== undefined) preferences.lastItemId = state.selectedId
@@ -537,6 +594,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
       filter: prefs.filter,
       navVisible: prefs.navVisible,
       showUnread: prefs.showUnread,
+      translateTarget: prefs.translateTarget,
       reading: prefs.reading,
       navCursor: prefs.navSelection.kind === 'feed'
         ? { kind: 'feed', feedId: prefs.navSelection.feedId }
@@ -766,6 +824,24 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   // 设置域（R11 01）：只读快照 + 视图开关。写路径是 02 票的 saveSettings。
   const settingsActions = createSettingsActions({ get, set, rpc: deps.rpc, log: deps.log })
 
+  // 翻译域（R7 01）：只写 translations；正文块本身归 article，动作只读不写。
+  // R7 06：首次外发确认标记复用设置域的保存串行链（走 saveSettings 的 patch，不新开端点）。
+  const translateActions = createTranslateActions({
+    get, set, rpc: deps.rpc, log: deps.log, persistView,
+    saveNoticeAck: async () => (await settingsActions.saveSetting('translateNoticeAck', true)).ok,
+  })
+
+  /**
+   * 翻译路由保存（R7 02）：复用设置域的串行链，成功后**立刻**重探可用性 ——
+   * 宿主的 30s 缓存在 saveSettings 成功时失效，客户端这份也要马上换成新结论，
+   * 否则设置页刚选完模型，文章面的「译」按钮要等下一次面板加载才出现。
+   */
+  const saveTranslateRoute = async (patch: TranslateRouteSettingsPatch): Promise<Awaited<ReturnType<typeof settingsActions.saveTranslateRoute>>> => {
+    const result = await settingsActions.saveTranslateRoute(patch)
+    if (result.ok) await translateActions.loadTranslateInfo()
+    return result
+  }
+
   // 探索域（R8b 04）：订阅只经 feedActions.addFeed（唯一入口），探索自己不碰 feeds 真相。
   const exploreActions = createExploreActions({
     get, set, rpc: deps.rpc, addFeed: feedActions.addFeed,
@@ -787,6 +863,8 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     ...folderActions,
     ...tagActions,
     ...settingsActions,
+    saveTranslateRoute,
+    ...translateActions,
     ...exploreActions,
   }
 }

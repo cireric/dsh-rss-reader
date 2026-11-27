@@ -29,6 +29,7 @@ import { createLifecycle } from './lifecycle.js'
 import { createSearch } from './search.js'
 import { registerAgentTools } from './tools.js'
 import { ROUTE_PATH } from './shared.js'
+import type { TranslateLlmService, TranslateServices } from './translate.js'
 
 export const name = '@dsh-external/dsh-rss-reader'
 
@@ -111,6 +112,43 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
   const session = createLifecycle({ config, storagesRoot, configFile, log, summarize })
 
   const search = createSearch(join(storagesRoot, 'rss.db'))
+  /**
+   * 翻译服务按**每次请求现取**（D16）：三个服务都可能后挂（例如用户后来配好模型），
+   * 把 `ctx.get(...)` 的结果缓存进 dispatch 会让「模型装上了但译按钮永远不出」无法自愈。
+   * 也**刻意不写进 inject**：没有 llm 时插件必须照常加载，只是翻译端点回 unavailable。
+   */
+  const translateServices = (): TranslateServices => {
+    const llm = ctx.get('llm')
+    return {
+      // 真实服务 → 本仓库最小结构的**薄适配**：不 import dsh-llm 的类型，也不把整个服务
+      // 原样塞进来（`stream` 的 GenerateOptions 带品牌类型，字符串 effort 传不过去）。
+      // R7 02 起把 effort 一并转发：值要么来自适配器自己 listModels 返回的 effort id，
+      // 要么来自 settings.json 且已被同一份列表校验过（见 translate.ts 的 resolveTranslateRoute），
+      // 所以这里对品牌类型的收窄是安全的 —— 不做 `as any`，只把边界收窄到 GenerateOptions 的字段类型。
+      ...(llm === undefined ? {} : {
+        llm: {
+          listProviders: () => llm.listProviders(),
+          listModels: (provider: string) => llm.listModels(provider),
+          stream: (options: Parameters<TranslateLlmService['stream']>[0]) => llm.stream({
+            provider: options.provider,
+            model: options.model,
+            ...(options.reasoningEffort === undefined ? {} : {
+              reasoningEffort: options.reasoningEffort as Parameters<typeof llm.stream>[0]['reasoningEffort'],
+            }),
+            messages: options.messages.map((message) => ({
+              role: message.role,
+              content: message.content.map((block) => ({ type: block.type, text: block.text })),
+            })),
+            ...(options.system === undefined ? {} : { system: options.system }),
+            ...(options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens }),
+            ...(options.signal === undefined ? {} : { signal: options.signal }),
+          }),
+        },
+      }),
+      sessionController: ctx.get('sessionController'),
+      agentDefaultModel: ctx.get('agentDefaultModel'),
+    }
+  }
   const dispatch = createDispatch({
     config, log,
     ready: session.ready,
@@ -119,6 +157,7 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
     articleAttempts: session.articleAttempts,
     searchItems: search.run,
     settings,
+    translateServices,
   })
 
   // M3 02/03 的模型工具：**同步**注册（apply 必须同步，见上面的注释）。

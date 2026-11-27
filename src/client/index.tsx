@@ -26,9 +26,15 @@ import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import { createReaderStore, nextExpandedOf, relativeTime, useReaderStore, VIRTUAL_VIEWS, type Filter, type MarkAllRange, type ReaderState, type ReaderStore, type ReaderStoreDeps } from './store.js'
 import { DISPLAY_WINDOW_OPTIONS, displayWindowNameOf, unreadCountTextOf } from './window-control.js'
+import { translationEntryOf } from './translate-actions.js'
 import type { DisplayWindowRange } from '../display-window.js'
 // 导出面是构建产物对外的契约（契约测试直接调它），store 搬家后仍要从入口转出去
 export { createReaderStore }
+// **仅供单测取用**（R7 05）：失败信封的 details 透传住在 browserRpc 里，而 client 半只出
+// 单文件 bundle，测试拿不到 store.ts 的私有实现。测试用导出的 RpcError 构造假 rpc 的失败，
+// 并直接喂 browserRpc 一个信封断言 code / details / message。不是运行时需要的能力。
+export { browserRpc } from './store.js'
+export { RpcError } from './rpc-error.js'
 // **仅供单测取用的 re-export**：键盘路由住在 ./keyboard-routing.ts，而 client 半只出单文件
 // bundle（tsdown codeSplitting: false），.mjs 测试无法直接 import client 目录下的模块。
 // tests/keyboard-routing.test.mjs 用 vm 加载 lib/client.js 后从这里取它来驱动那 10 处 view 守卫。
@@ -124,6 +130,9 @@ const STYLE = `
   border:1px solid var(--rss-line); }
 .dsh-rss-window:disabled { opacity:.55; }
 .dsh-rss-window-hint { font-size:11px; color:var(--rss-muted); }
+/* R7：正文工具栏的目标语言下拉（与「译」相邻，裸下拉不带文字 label；不可用时不渲染）。 */
+.dsh-rss-translate-language { font:inherit; font-size:12px; padding:1px 4px; border-radius:4px;
+  color:inherit; background:var(--rss-bg); border:1px solid var(--rss-line); max-width:100%; }
 .dsh-rss-actions { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
 .dsh-rss-settings { position:relative; }
 .dsh-rss-settings > summary::-webkit-details-marker { display:none; }
@@ -160,6 +169,16 @@ const STYLE = `
 /* R8a：实例地址是整条 URL，数值行的 6.5em 只够显示到 https://rsshub。
    仍允许在窄面板里收缩（max-width），否则整行会横向溢出。 */
 .dsh-rss-settings-input--url { width:20em; max-width:100%; }
+/* R7：模型下拉的选项是模型 id（最长见过 31 字符），数值行的 6.5em 只显示得出「deepsee」。
+   用内容宽度而不是再写一个 em 常量：选项变长时不会又截断；窄面板仍靠 max-width 收缩。 */
+.dsh-rss-settings-input--select { width:auto; min-width:12em; max-width:100%; }
+/* R7：翻译中的占位（同译文段的位置）。动画是装饰，读屏器靠 aria-label「正在翻译」。 */
+.dsh-rss-translate-pending { display:flex; align-items:center; min-height:18px; margin:0 0 1.1em; padding-left:10px; }
+.dsh-rss-spinner { width:12px; height:12px; border-radius:50%;
+  border:2px solid color-mix(in srgb, currentColor 22%, transparent); border-top-color:var(--rss-accent);
+  animation:dsh-rss-spin .8s linear infinite; }
+@keyframes dsh-rss-spin { to { transform:rotate(360deg) } }
+@media (prefers-reduced-motion: reduce) { .dsh-rss-spinner { animation:none; border-top-color:currentColor; opacity:.55 } }
 .dsh-rss-settings-saved { font-size:12px; color:var(--rss-accent); }
 .dsh-rss-settings-error { flex-basis:100%; margin:0; font-size:12px; color:var(--rss-error); line-height:1.45; }
 /* R11 03：非整分钟的「= 90123 ms」只在这个前提下出现（整分钟不显示，D14.2）。 */
@@ -625,6 +644,8 @@ export function createReader(store: ReaderStore): () => ReactNode {
     useEffect(() => {
       void store.load('refresh')
       void store.loadSettings()
+      // R7 02：翻译可用性在面板加载时探一次（宿主侧 30s 缓存；saveSettings 后失效）。
+      void store.loadTranslateInfo()
     }, [])
     // 关面板时把待写的阅读位置落一次（R2-01）：写手是 300ms 去抖的，读者完全可能选完一行立刻离开。
     // 没有待写值时 flushViewMemory 什么都不做 —— 「打开面板看一眼再关」不产生写请求。
@@ -755,7 +776,10 @@ export function createReader(store: ReaderStore): () => ReactNode {
       // 放这条 effect 而不是 `back` 里，是因为它同时覆盖「Esc 回列表后重开同一篇」那条路径
       // （`closeArticle` 只改 view、刻意保留 article ⇒ 那一刻 articleItemId 不变）。
       setLightboxSrc(undefined)
-    }, [articleItemId, state.view])
+      // 首次外发确认框同理（R7 06）：换条目 / 离开正文时，待确认的正文与字符数已经不属于
+      // 眼前这一篇了，必须收掉 —— 否则回来点「译」会拿着旧文章的字符数去确认新文章的外发。
+      store.cancelTranslate()
+    }, [articleItemId, state.view, store])
 
     // 键盘流：挂在 document 上 + 输入框守卫（24 个 action 的判据与路由都在 keyboard-routing.ts）。
     // 原实现挂在面板根节点并要求其持有焦点，导致「必须先点一下页面」才响应（用户实测）。
@@ -844,6 +868,18 @@ export function createReader(store: ReaderStore): () => ReactNode {
       : state.feeds
     const activeArticle = state.view === 'article'
       ? state.items.find((entry) => entry.id === state.article?.itemId)
+      : undefined
+    /**
+     * 当前正文的译文（R7 01）：从 store 按「条目 + 正文版本 + 目标语言」现查。
+     * 不把整张 Map 传进 ArticleView —— 组件只该看见这一篇的那一条。
+     */
+    const articleTranslation = state.article === undefined
+      ? undefined
+      : translationEntryOf(state, state.article.itemId, state.article.contentVersion, state.translateTarget)
+    /** 在飞的批（R7 优化）：key 必须与当前这篇的译文键一致，否则旧场次的占位会画到别的文章上。 */
+    const articleTranslationPending = state.translatePending !== undefined
+      && articleTranslation !== undefined && state.translatePending.key === articleTranslation.key
+      ? state.translatePending.indices
       : undefined
     const tagTarget = state.view === 'article'
       ? activeArticle
@@ -1110,6 +1146,27 @@ export function createReader(store: ReaderStore): () => ReactNode {
             lightboxSrc={lightboxSrc}
             onOpenImage={setLightboxSrc}
             onCloseLightbox={() => setLightboxSrc(undefined)}
+            translation={articleTranslation}
+            translationPending={articleTranslationPending}
+            // 两态（R7 03）：值在 store，正文面只照着画；切换动作只改渲染态、不发 rpc。
+            translationMode={state.translationMode}
+            onTranslationMode={store.setTranslationMode}
+            // 可用性与目标语言（R7 02）：不可用时工具栏不渲染语言下拉与「译」按钮。
+            translateAvailable={state.translationInfo?.available === true}
+            translateTarget={state.translateTarget}
+            onTranslateTarget={store.setTranslateTarget}
+            // 点击时把视口矩形交给动作层（R7 04）：选批是纯函数，组件只负责量。
+            // R7 06：入口改走 requestTranslate —— 首次外发先弹确认框，t 键与按钮共用这一条。
+            onTranslate={(geometry) => { void store.requestTranslate(geometry) }}
+            onContinueTranslate={(geometry) => { void store.continueTranslate(geometry) }}
+            onRetranslate={(geometry) => { void store.retranslate(geometry) }}
+            translateConfirm={state.translateConfirm}
+            onConfirmTranslate={(geometry) => { void store.confirmTranslate(geometry) }}
+            onCancelTranslate={store.cancelTranslate}
+            // 组件卸载（切面板 / 离开正文面）时中止后续批；在途那批允许跑完。
+            onStopTranslate={store.stopTranslate}
+            // 失败批的重试（R7 05）：组件只交回批首下标，整批 indices 由动作层从 store 找回。
+            onRetryBatch={(headIndex) => { void store.retryBatch(headIndex) }}
             canPrev={store.canStepArticle(-1)}
             canNext={store.canStepArticle(1)}
             onPrev={() => { store.stepArticle(-1) }}
@@ -1139,6 +1196,8 @@ export function createReader(store: ReaderStore): () => ReactNode {
             onReading={(patch) => store.setReading(patch)}
             showUnread={state.showUnread}
             onShowUnread={(value) => store.setShowUnread(value)}
+            translationInfo={state.translationInfo}
+            onSaveTranslateRoute={(patch) => store.saveTranslateRoute(patch)}
             onClose={() => store.closeSettings()}
             onDismissWarning={() => store.dismissSettingsWarning()}
             onSave={(key, value) => store.saveSetting(key, value)}

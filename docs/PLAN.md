@@ -22,12 +22,12 @@
 | R8a | RSSHub Radar 发现（公共实例） | 已完成 | 5/5 `resolved` | 1142/1142、全量变异 368/368 · 0 幸存、真机三步；真实实例验收（GitHub 端到端 / B 站 / 36kr 缺参 / 私网拒绝 / 缓存）。遗留：GUI 走查（playwright target crashed）、添加未落真实订阅列表、settings 真实重启未验 |
 | R9 | 归档页回溯更早文章 | 已完成 | 4/4 `resolved` | 1191/1191、全量变异 378/378 · 0 幸存、真机三步；真实站点（真实库快照）阮一峰 8 篇 / 云风 2 篇 / 重复 0。遗留：GUI 走查、未写实时库、两级日期规则无真实样本 |
 | R8b | RSSHub 路由表探索 | 已完成 | 5/5 `resolved` | 1271/1271、全量变异 392/392 · 0 幸存、真机三步；真实实例（`rsshub.rssforever.com`，经代理）1589 站 / 3136 路由 / 24 分类，首拉 7.9 s；GitHub 端到端拼出 `/github/branches/DIYgod/RSSHub` 并抓回 11 条。遗留：GUI 观感（playwright target crashed）、152 条多路径路由按 §4.2 跳过 |
-| R7 | 一键翻译 | 进行中 | 0/7 `ready-for-agent` | 规格 v2 定稿（`.scratch/r7-translate/spec.md`，D1–D20）；译文纯内存、分块视口优先、模型路由两层 |
+| R7 | 一键翻译 | 已完成 | 7/7 `resolved` | 1380/1380、全量变异 407/407 · 0 幸存（评审修复后实跑，3 workers）、真机三步（reload 前后 `[active]` / 当日日志 0 条「装载失败」/ 路由 401）；真模型三篇：短 265 字 1 批 5.2 s，中 1896 字 2 批 27.2 s（首批 truncated → 会话 effort 外溢修复后同批 9.8 s），长 8235 字 8 批 94.5 s 全过。遗留：真实 GUI 原文 / 对照切换与视口优先未验；译文刷新即丢（设计） |
 | R10 | 右侧边栏单栏 | 暂缓 | — | 第二套 UI；现有 `u` 已收左栏 |
 | R13 | `/rss` 命令 | 暂缓 | — | 与 4 个 Agent 工具重复 |
 | R14 | 订阅源范围宿主分页 | 已完成 | 1/1 `resolved` | 648 条库 / 27 条源：源页 27 无续页；1197/1197、全量变异 381/381 · 0 幸存 |
 
-**进度**：已交付 12 个阶段、58 张票（R1–R6、R11、R12、R8a、R9、R14、R8b）；**R7 进行中**（规格 v2 定稿、7 张票 `ready-for-agent`），R10/R13 暂缓。**当前阶段：R7。**
+**进度**：已交付 13 个阶段、65 张票（R1–R7、R11、R12、R8a、R9、R14、R8b）；**R7 已完成（7/7 `resolved`）**，R10/R13 暂缓。**当前阶段：R7 已收尾，待合入 main / 发布账目。**
 
 ## 已完成阶段（留作上下文）
 
@@ -86,6 +86,13 @@
 - **交付**：`src/settings-schema.ts`（四个可调键的范围唯一判据）、`src/storage/settings-file.ts`（`settings.json` 原子写 0600 / 读侧 absent·ok·corrupt·unreadable）、`src/settings-control.ts`（先落盘再改内存 / 恢复默认的删覆盖与写默认规则 / 关于区只读数据）、端点 `settings` / `saveSettings`（29 → 31）、`src/client/settings-view.tsx` + `settings-actions.ts`（五分区 / 串行保存 / 逐项校验）、`src/client/confirm-dialog.tsx`（三处确认框共用）、`src/agent-help.ts`（Agent 文案单源）；`cleanup` 增加 `dryRun` 预演；`ViewPreferences.showUnread`。
 - **证据**：`settings-file.test.mjs`、`settings-endpoints.test.mjs`（含 A8 `config.json` 逐字节不变、A1 在途刷新不受新值影响）、`settings-page-dom.test.mjs`、`settings-agent-help.test.mjs`；`npm test` 1054/1054、全量变异 360/360 应用 · 0 幸存；真机三步（reload 前后 `[active]` / 当日日志 0 条「装载失败」/ `POST /rss-reader-api` 401）；用户人工验收可用（2026-11-22）。
 - **遗留**：`<460px` 容器查询的实际堆叠观感、真实 `$DSH_HOME` 上 `settings.json` 的 0600 权限位、真实重启插件后的保持未单独复核；界面不显示来源层、v1 无单项清除（spec 已知边界）。
+
+### R7 一键翻译
+
+- **状态**：已完成（`.scratch/r7-translate/issues/` 7/7 `resolved`；开发分支 `feat/r7-translate`，代码基线 commit `26ab6ad`（评审修复已提交），待合入 main）。
+- **交付**：`src/translate.ts`（prompt 指令内联进 user / `maxTokensFor` / 60 s deadline / 流拼装 / 四类失败 / `resolveTranslateRoute` 两层路由与 `routeOfSessionDefault` 只取 provider+model）、`src/translate-blocks.ts`（可翻块筛选 / `applyBatch` 编号对齐 / 12 块 ×2000 字符分批 / 单块三档 / 30000 上限）、`src/translate-copy.ts`（5 语言与中文文案）、端点 `translateBatch` / `translateInfo`（35 → 37）、`src/client/translate-actions.ts`（串行编排 / 视口首批 / 失败批重试 / 连败 3 批停止 / 中止与继续 / 全局单任务）、`src/client/translate-entry.ts`（回包对齐 / 按块 model）、`src/client/translate-state.ts`（条目 / 两态共享状态）、`src/client/translate-toolbar.tsx`（工具栏控件）、`src/client/article-pane.tsx`（原文 / 对照两态与单枚切换、进度、失败批重试入口、翻译中占位）、首次外发确认框与设置页模型选择器、正文工具栏的裸语言下拉、`src/keys.ts` 的 `t`（原文 / 对照切换 / 缺块继续 / 无译文时触发）。
+- **证据**：`tests/translate-*.test.mjs` 12 个文件 101 条；全量 `npm test` **1380/1380**（本轮评审修复新增 5 条）；全量变异 **407/407 应用 · 0 幸存 · 恢复后基线仍绿**（评审修复后实跑，3 workers；R7 15/15 caught）；真机三步（`dev_reload_package` 前后 `[active]` / 当日 `reader-2026-11-25.log` 0 条「装载失败」/ `POST /rss-reader-api` 401）；真模型三篇（同一套 `articleTranslatePlanOf` / `pickBatch` 直调 `lib/translate.js`）：短 265 字 1 批 5.2 s、中 1896 字 2 批 27.2 s（批 0 在会话 effort:max 下 20.1 s truncated；同批显式无 effort A/B 9.8 s 成功，据此修掉会话 effort 外溢）、长 8235 字 8 批 94.5 s 全部成功（每批 4.6–15.7 s，id 全对齐、无空译文、`model=deepseek-v4.1-flash`）。
+- **遗留**：真实 GUI 观感未验（原文 / 对照切换、视口优先首批、确认框与进度条的浏览器实际观感；本轮只经 staging 直调 `translateBatch`，未在页面上点）；译文纯内存、刷新即丢，纯文本丢链接与内联样式，未做表格 / 图片 alt 翻译（spec 已知限制）；输出预算按字符估且与 reasoning 共用 `maxTokens`，超长批仍可能 truncated（真机样本已在 CHANGELOG 记）。
 
 ## 第三批（R8a / R9 / R8b 已完成）
 
@@ -163,7 +170,7 @@
 
 | 日期 | 事项 | 结论 |
 |---|---|---|
-| 2026-11-25 | R7 一键翻译 | 译文纯内存不落盘（不建表、不升 schema）；分块 ≤12 块且 ≤2000 字符、视口优先、单块 2000/6000 三档；5 语言 + 三态；模型路由两层（`settings.json` > 会话默认）且服务全走 `ctx.get()` 可选获取；失败 `translate-failed` + 四类 reason 按批重试（spec D1–D20） |
+| 2026-11-25 | R7 一键翻译 | 译文纯内存不落盘（不建表、不升 schema）；分块 ≤12 块且 ≤2000 字符、视口优先、单块 2000/6000 三档；5 语言 + 原文 / 对照两态（2026-11-26 收成一枚切换按钮）；模型路由两层（`settings.json` > 会话默认）且服务全走 `ctx.get()` 可选获取；失败 `translate-failed` + 四类 reason 按批重试（spec D1–D20） |
 | 2026-11-24 | R8b 路由表探索 | 独立 `view:'explore'`；单级扁平+站点钻取；缓存 12h 硬编码（**推翻原「可配置」**）；拉表 60s/16MiB 专用预算；constraint 不校验；分类仅路由级；三筛 AND；未配置实例入口不可见；下发行裁剪（spec D1–D15） |
 | 2026-11-23 | R9 归档页回溯 | 一次一页；日期三级来源、月级不补；同文键忽略协议（ADR-0011）；未读；headroom 预检；同步 + 120s；N=尝试数；归档页可信 / 文章页不可信（spec D1–D10） |
 | 2026-11-22 | RSSHub 实例 | 只用公共实例，不自建；不开口子网 SSRF 例外 |

@@ -29,6 +29,7 @@ import {
 } from '../list-scroll.js'
 import { isElementNode } from './element-node.js'
 import { nextExpandedOf, type ReaderState, type ReaderStore } from './store.js'
+import { articleTranslateGeometryOf } from './translate-geometry.js'
 import { EMPTY_IMAGE_GROUPS, baselineExpandedOf } from '../image-fold.js'
 
 export interface KeyRoutingCtx {
@@ -355,6 +356,15 @@ export function routeKey(event: KeyboardEvent, ctx: KeyRoutingCtx): void {
       })
       break
     }
+    // t = 两态循环（R7 03 / 06，D14 / 验收 14）：只在正文页。无译文时**触发翻译**
+    //（首次仍走确认框）；有译文时在 原文 ↔ 对照 之间切换。视图守卫与「正文已加载」判据
+    // 都在动作层（cycleTranslationMode）再挡一次 —— 键盘与按钮共用同一条外发入口。
+    // 几何必须在这里现量（评审修复 A2）：否则键盘路径的首批退化成文档顺序，与点「译」翻的不是
+    // 同一批段落。容器按 scrollAttr 现取（与 n/p 同一条「不闭包捕获节点」的规矩）。
+    case 'cycleTranslation':
+      if (view !== 'article') return
+      run(() => store.cycleTranslationMode(articleTranslateGeometryOf(ctx.root)))
+      break
     // r：刷新未读计数（只重取本地视图，不抓取 —— 规格不变量 1）
     case 'refreshCount': run(() => { void store.refreshCount() }); break
     case 'manageFeeds': run(() => store.toggleFeeds()); break
