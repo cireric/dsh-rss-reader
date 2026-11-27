@@ -45,6 +45,8 @@ export const ENDPOINT_NAMES = [
   'testRsshub',
   // R15 01：RSSHub 实例池（0–5 条）的读 / 写。写路径先落盘成功再改内存，见 rsshub-settings.ts。
   'rsshubSettings', 'saveRsshubSettings',
+  // R15 08：精选源包（config.json 的 curatedSources）的读 / 写。写路径先落盘再改内存，见 source-pack.ts。
+  'sourcePack', 'saveSourcePack',
   // R9 02：归档页回溯（宿主读归档页、逐篇抓正文与日期、写入条目库）。
   'backfillHistory',
   // R8b 03：探索的两个**只读**端点 —— 目录分页与地址拼装。整张路由表永不下发浏览器（D12）。
@@ -101,6 +103,40 @@ export interface RsshubSettingsSnapshot {
   hiddenNamespaces: string[]
   hideNsfw: boolean
   warning?: string
+}
+
+/**
+ * 精选源包的一条（R15 08，spec §4.3.1 / §5.1）。
+ *
+ * 它是**清单**，不是订阅：`config.json` 的顶层 `curatedSources` 字段，与 `feeds` 互不影响；
+ * 删除一条源包条目不会退订，导入（票 09）才走 `addFeed`。
+ *
+ * `addedAt` 与库里其他时刻串同形（`toISOString()`），用于「最近加的排后面 / 界面上标日期」。
+ * 其余字段都可选：用户可能只粘一个地址就保存（未验证），主机不替用户编标题。
+ */
+export interface CuratedSourceEntry {
+  url: string
+  title?: string
+  category?: string
+  note?: string
+  addedAt: string
+}
+
+/** `sourcePack` 端点回包：条目 + 内置快照元信息（界面要把「内置」与「我的」分清）。 */
+export interface SourcePackSnapshot {
+  entries: CuratedSourceEntry[]
+  seed: { collectedAt: string; count: number }
+  /** 读侧 / 写侧丢弃坏项时的一句话；正常态缺席。 */
+  warning?: string
+}
+
+/** `saveSourcePack` 回包：落盘后的清单 + 本次丢弃 / 恢复的条数（界面给回执用）。 */
+export interface SourcePackSaveResult {
+  sourcePack: SourcePackSnapshot
+  /** 本次被逐条丢弃的坏项数。 */
+  dropped: number
+  /** 「恢复内置快照」本次补进来的条数（普通保存恒为 0）。 */
+  restored: number
 }
 
 /**

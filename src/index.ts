@@ -26,6 +26,7 @@ export { Config }
 import { createDispatch, createHttpHandler } from './endpoints.js'
 import { createSettingsControl } from './settings-control.js'
 import { createRsshubSettings } from './rsshub-settings.js'
+import { createSourcePack } from './source-pack.js'
 import { createLifecycle } from './lifecycle.js'
 import { createSearch } from './search.js'
 import { registerAgentTools } from './tools.js'
@@ -113,6 +114,10 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
   // 迁移时的 `[config.rsshubBase]` 要读的是**生效值**，不是 schema 默认值。
   const rsshubSettings = createRsshubSettings({ config, configPath: configFile, log })
 
+  // R15 08：精选源包也住在 config.json（清单不是订阅）。种子初始化是惰性的 —— 第一次
+  // 打开「精选源」视图才落盘，插件装载本身不写用户文件。
+  const sourcePack = createSourcePack({ configPath: configFile, log })
+
   // 生命周期：打开 → 刷新 → 关停。它与 ctx 无关，测试直接 start/stop（2026-10-15 H2）。
   const session = createLifecycle({ config, storagesRoot, configFile, log, summarize })
 
@@ -163,6 +168,7 @@ export function apply(ctx: Context, rawConfig: ConfigShape): void {
     searchItems: search.run,
     settings,
     rsshubSettings,
+    sourcePack,
     translateServices,
   })
 

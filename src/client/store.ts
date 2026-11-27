@@ -71,6 +71,7 @@ import { createOpmlActions } from './opml-actions.js'
 import { createSearchActions } from './search-actions.js'
 import { createSettingsActions, type TranslateRouteSettingsPatch } from './settings-actions.js'
 import { createExploreActions } from './explore-actions.js'
+import { createSourcePackActions, type SourcePackState } from './source-pack-actions.js'
 import { createTagActions } from './tag-actions.js'
 import { createTranslateActions } from './translate-actions.js'
 import {
@@ -174,8 +175,8 @@ export interface ReaderState {
   /** 刚被「全部标记已读」的条目，供短时撤销 */
   /** 一键已读的撤销条。窗口到期由 armUndoExpiry 的定时器负责，所以这里不需要存时间戳。 */
   undo: { ids: string[] } | undefined
-  /** 当前视图：列表 / 正文 / 订阅管理 / 设置（后两者同样在主栏内切换） */
-  view: 'list' | 'article' | 'feeds' | 'settings' | 'explore'
+  /** 当前视图：列表 / 正文 / 订阅管理 / 设置 / 探索 / 精选源（后四者同样在主栏内切换） */
+  view: 'list' | 'article' | 'feeds' | 'settings' | 'explore' | 'sourcePack'
   /**
    * 条目流的**视图密度**（GR 的两视图）：expanded 含条目描述/正文摘录，list 只有标题行。
    * 注意与上面的 view 是两条正交的轴：view 决定「看哪个面板」，layout 决定「条目流怎么排」。
@@ -224,6 +225,11 @@ export interface ReaderState {
   rsshubSettingsError: string | undefined
   /** 探索视图的整份状态（`view: 'explore'` 时存在；关闭即丢弃，D14）。 */
   explore: ExploreState | undefined
+  /**
+   * 精选源包视图的整份状态（R15 08）。与探索不同，离开视图后**保留**：清单只有 79+ 条、
+   * 改完就扔会表现为「每次打开都先闪一屏空清单」；真正的清单真相在宿主 config.json。
+   */
+  sourcePack: SourcePackState | undefined
   /** 启动时的读侧告警（坏文件隔离 / 坏值忽略）是否已被本次会话关掉（D17）。 */
   settingsWarningDismissed: boolean
   /** 最近一次导入的报告（坏源要逐条列出，不能只报总数） */
@@ -416,6 +422,7 @@ const browserDeps: ReaderStoreDeps = {
  * | 标签 | `tags` / 条目的 `tagIds` | createTag / renameTag / deleteTag / toggleItemTag | 乐观改 tagIds，失败回取当前页拉回真相（tagWrite 串行化 + tagEpoch 身份） |
 | 设置 | `settings` / `settingsError` / `settingsWarningDismissed` / `rsshubSettings` / `rsshubSettingsError` | loadSettings / loadRsshubSettings / openSettings / closeSettings / toggleSettings / dismissSettingsWarning | 只调 `settings` / `rsshubSettings` 两个端点取快照；`view: 'settings'` 是跨域呈现状态，与列表 / 订阅域同一条规则（左栏导航 / 切过滤 / 切档经列表域入口退出） |
 | 探索 | `explore`（目录页累计行 / q + category + namespace / loading / error / 表单草稿 / 回执 / 拼好的地址） | openExplore / closeExplore / setExploreQuery / loadMoreExplore / selectExploreRoute / setExploreDraftValue / buildExploreAddress / addExploreSubscription | 订阅只经 `addFeed`（订阅域入口），自己只写 `explore`；`view: 'explore'` 与设置页同一条跨域规则（左栏导航 / 切过滤 / 切档经列表域入口退出）；拼地址只调宿主端点，模板判据读 `explore-template.ts` |
+| 精选源 | `sourcePack`（清单 / 搜索词 / 分类 / 加源表单与校验结果 / saving / 告警） | openSourcePack / closeSourcePack / loadSourcePack / setSourcePackQuery / setSourcePackCategory / openSourcePackForm / closeSourcePackForm / setSourcePackDraft / probeSourcePackUrl / saveSourcePackDraft / removeSourcePackEntry / restoreSourcePackSeed | 只调 `sourcePack` / `saveSourcePack` 两个端点；加源解析借 `discoverFeeds`（不新造校验引擎）。删条目**不**调 removeFeed —— 清单不是订阅是这张票的核心不变量。`view: 'sourcePack'` 与设置页同一条跨域规则 |
  *
  * `view` / `article` 是跨域呈现状态：列表的 openArticle / retryArticle / closeArticle 与 setFilter、
  * 搜索的 submitSearch、导航的 selectNav（经列表域入口）、toggleFeeds 与设置域的 open/closeSettings
@@ -435,7 +442,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   let state: ReaderState = {
     items: [], feeds: [], folders: [], tags: [], unread: 0, unreadSplit: undefined, filter: 'all',
     selectedId: undefined, loading: true, error: undefined, undo: undefined,
-    view: 'list', layout: 'list', markAllRange: 'all', displayWindow: 'all', accountWindow: 'all', showUnread: DEFAULT_VIEW_PREFERENCES.showUnread, settings: undefined, settingsError: undefined, rsshubSettings: undefined, rsshubSettingsError: undefined, settingsWarningDismissed: false, explore: undefined, article: undefined, translations: new Map(), translationMode: 'original', translationInfo: undefined, translateConfirm: undefined, translateTarget: DEFAULT_TARGET_LANGUAGE, translatePending: undefined, notice: undefined,
+    view: 'list', layout: 'list', markAllRange: 'all', displayWindow: 'all', accountWindow: 'all', showUnread: DEFAULT_VIEW_PREFERENCES.showUnread, settings: undefined, settingsError: undefined, rsshubSettings: undefined, rsshubSettingsError: undefined, settingsWarningDismissed: false, explore: undefined, sourcePack: undefined, article: undefined, translations: new Map(), translationMode: 'original', translationInfo: undefined, translateConfirm: undefined, translateTarget: DEFAULT_TARGET_LANGUAGE, translatePending: undefined, notice: undefined,
     importReport: undefined, discovery: undefined, feedsBusy: false,
     navSelection: { kind: 'virtual' }, perFeedUnread: {}, navVisible: true,
     reading: DEFAULT_READING_PREFERENCES, duplicates: {},
@@ -850,6 +857,10 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   }
 
   // 探索域（R8b 04）：订阅只经 feedActions.addFeed（唯一入口），探索自己不碰 feeds 真相。
+  const sourcePackActions = createSourcePackActions({
+    get, set, rpc: deps.rpc, now: deps.now,
+  })
+
   const exploreActions = createExploreActions({
     get, set, rpc: deps.rpc, addFeed: feedActions.addFeed,
   })
@@ -873,6 +884,7 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     saveTranslateRoute,
     ...translateActions,
     ...exploreActions,
+    ...sourcePackActions,
   }
 }
 

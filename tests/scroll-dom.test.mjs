@@ -1247,7 +1247,7 @@ test('跨源重复提示：行内可展开看别的来源，且展开不会把�
   assert.equal(h.win.document.querySelector('[data-rss-duplicates="b"]'), null, '没有候选的行不该凭空多出一行提示')
 })
 
-test('左栏渲染：虚拟视图三行 + 每个订阅源一行', skip, async () => {
+test('左栏渲染：虚拟视图三行 + 精选源面板一行 + 每个订阅源一行', skip, async () => {
   // 三个源：一个未读 2 条、一个未读 1 条、一个 0 未读 —— 后者专门用来钉「键域 = feeds 表」：
   // 0 未读的源也必须有一行，且它的角标是 0 而不是空白（缺键在界面上就是「空白 vs 0」无从分辨）。
   const h = await mountReader({
@@ -1267,9 +1267,10 @@ test('左栏渲染：虚拟视图三行 + 每个订阅源一行', skip, async ()
 
   const rows = [...h.win.document.querySelectorAll('[data-rss-nav-row]')]
   const labels = rows.map((row) => row.getAttribute('data-rss-nav-row'))
-  assert.deepEqual(labels, ['filter:all', 'filter:unread', 'filter:starred', 'feed:f1', 'feed:f2', 'feed:f3'],
-    '左栏应当是虚拟视图三行 + 每个订阅源一行；实际 ' + JSON.stringify(labels))
-  assert.deepEqual(rows.map((row) => row.getAttribute('data-rss-nav-badge')), [null, null, null, '2', '1', '0'],
+  // R15 08 起多一行「精选源」面板入口（它不是 Filter，所以排在虚拟视图之后、订阅源之前）。
+  assert.deepEqual(labels, ['filter:all', 'filter:unread', 'filter:starred', 'view:sourcePack', 'feed:f1', 'feed:f2', 'feed:f3'],
+    '左栏应当是虚拟视图三行 + 精选源面板一行 + 每个订阅源一行；实际 ' + JSON.stringify(labels))
+  assert.deepEqual(rows.map((row) => row.getAttribute('data-rss-nav-badge')), [null, null, null, null, '2', '1', '0'],
     '每个源都要有角标，0 未读的源是 0 而不是空白（perFeedUnread 键域 = feeds 表）')
   // 两个标记各司其职（2026-10-10 任务 6 返工）：
   //   data-rss-nav-cursor   = 键盘光标落在哪一行（shift+n/p 移动的就是它）
@@ -1277,8 +1278,8 @@ test('左栏渲染：虚拟视图三行 + 每个订阅源一行', skip, async ()
   // 初始状态下两者都在「全部」那一行。
   assert.equal(rows[0].getAttribute('data-rss-nav-cursor'), '', '默认光标应当在「全部」那一行')
   assert.equal(rows[0].getAttribute('data-rss-nav-selected'), '', '默认生效的也是「全部」')
-  assert.equal(rows[3].getAttribute('data-rss-nav-cursor'), null, '光标不在源那一行')
-  assert.equal(rows[3].getAttribute('data-rss-nav-selected'), null, '未选中的源不该高亮')
+  assert.equal(rows[4].getAttribute('data-rss-nav-cursor'), null, '光标不在源那一行')
+  assert.equal(rows[4].getAttribute('data-rss-nav-selected'), null, '未选中的源不该高亮')
 })
 
 test('隐藏未读计数时左栏角标也消失（GR spec 不变量 8）', skip, async () => {
@@ -2346,7 +2347,8 @@ test('文件夹展开与折叠同步键盘行序，汇总未读且保留订阅�
   const rows = () => Array.from(doc.querySelectorAll('[data-rss-nav-row]'), (row) => row.getAttribute('data-rss-nav-row'))
   const cursor = () => doc.querySelector('[data-rss-nav-cursor]')?.getAttribute('data-rss-nav-row')
   const visible = () => h.store.visible().map(({ id }) => id)
-  const top = ['filter:all', 'filter:unread', 'filter:starred', key]
+  // 精选源面板入口在虚拟视图之后、文件夹之前（R15 08）。
+  const top = ['filter:all', 'filter:unread', 'filter:starred', 'view:sourcePack', key]
   assert.deepEqual(rows(), [...top, 'feed:a', 'feed:b', 'feed:c'])
   assert.equal(folder().getAttribute('data-rss-nav-badge'), '2')
   assert.equal(folder().getAttribute('aria-expanded'), 'true')

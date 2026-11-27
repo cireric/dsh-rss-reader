@@ -34,6 +34,7 @@ import {
   saveReadingProgressPayload,
   saveRsshubSettingsPayload,
   saveSettingsPayload,
+  saveSourcePackPayload,
   saveViewPreferencesPayload,
   scopePayload,
   searchQueryPayload,
@@ -47,6 +48,7 @@ import type { createSearch } from './search.js'
 import type { Config } from './config.js'
 import type { SettingsControl } from './settings-control.js'
 import type { RsshubSettingsControl } from './rsshub-settings.js'
+import type { SourcePackControl } from './source-pack.js'
 import { EXTRACTOR_REVISION, contentVersionOf, fetchArticle, blocksToText } from './article.js'
 import { BackfillError, backfillHistory } from './backfill.js'
 import { rebuildItem } from './domain.js'
@@ -114,6 +116,11 @@ export interface EndpointDeps {
    */
   readonly rsshubSettings?: RsshubSettingsControl
   /**
+   * 精选源包的内存态（R15 08）。与 rsshubSettings 同理显式注入：清单住在 config.json，
+   * 不属于 ReaderStore 的条目 / 订阅契约。缺省只发生在测试桩没装配它时（端点回 not-ready）。
+   */
+  readonly sourcePack?: SourcePackControl
+  /**
    * RSSHub 探活用的抓取实现（R8a 01）：默认 `fetchFeed`，测试注入桩件。
    * 与 subscribe 的 `options.fetchImpl` 同一手法 —— 否则「超时 / 非 2xx / 非 JSON」只能真出网才能测。
    */
@@ -159,6 +166,7 @@ export interface EndpointCtx {
   readonly searchItems?: ReturnType<typeof createSearch>['run']
   readonly settings?: SettingsControl
   readonly rsshubSettings?: RsshubSettingsControl
+  readonly sourcePack?: SourcePackControl
   readonly fetchImpl?: typeof fetchFeed
   readonly fetchArticleImpl?: typeof fetchArticle
   readonly articleAttempts: Map<string, number>
@@ -1331,6 +1339,39 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
   }),
 
   /**
+   * 精选源包的**只读**快照（R15 08）：条目 + 内置快照元信息（采集日 / 条数）+ 读侧告警。
+   *
+   * 首次打开（第一次调它）可能触发种子初始化并落盘 —— 语义在 source-pack.ts，端点只转发。
+   */
+  sourcePack: defineEndpoint({
+    payload: noPayload,
+    to: async (_input, ctx) => {
+      if (ctx.sourcePack === undefined) return fail('not-ready', '精选源包服务尚未就绪')
+      return ok({ sourcePack: ctx.sourcePack.snapshot() })
+    },
+  }),
+
+  /**
+   * 精选源包的**写**端点（R15 08）：整份替换（与 saveViewPreferences 同型）。
+   *
+   * 坏项逐条丢弃并回 `warning`；只有写盘失败才整次失败 —— 用户要采取的动作不同
+   *（改输入 vs 查磁盘 / 权限）。`restoreSeed` 只补缺失 URL，不清用户自己的条目。
+   */
+  saveSourcePack: defineEndpoint({
+    payload: saveSourcePackPayload,
+    invalidMessage: 'saveSourcePack 需要 entries（数组）',
+    to: async (input, ctx) => {
+      if (ctx.sourcePack === undefined) return fail('not-ready', '精选源包服务尚未就绪')
+      const outcome = ctx.sourcePack.save(
+        input.entries,
+        input.restoreSeed === true ? { restoreSeed: true } : undefined,
+      )
+      if (!outcome.ok) return fail('write-failed', outcome.message)
+      return ok({ sourcePack: outcome.snapshot, dropped: outcome.dropped, restored: outcome.restored })
+    },
+  }),
+
+  /**
    * 探索：分页取一页路由行（R8b 03，spec §4.3 / §6）。
    *
    * 浏览器永远拿不到整张表：宿主按需拉一次（02 的 12h 实例键缓存）→ 01 的索引里筛 → 只回这一页。
@@ -1639,7 +1680,7 @@ export const ENDPOINTS: Record<Endpoint, EndpointSpec> = {
  * 异常一律兜成 internal 信封 —— 不把 throw 泄进通道（调用方要的是带 code 的失败信封）。
  */
 export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: unknown, signal?: AbortSignal) => Promise<RpcResult<unknown>> {
-  const { config, log, ready, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, rsshubSettings, fetchImpl, fetchArticleImpl, translateServices, translateDeadlineMs, translateNow } = deps
+  const { config, log, ready, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, rsshubSettings, sourcePack, fetchImpl, fetchArticleImpl, translateServices, translateDeadlineMs, translateNow } = deps
 
   const dispatch = async (endpoint: string, payload: unknown, signal?: AbortSignal): Promise<RpcResult<unknown>> => {
     try {
@@ -1654,7 +1695,7 @@ export function createDispatch(deps: EndpointDeps): (endpoint: string, payload: 
       if (spec === undefined) return fail('unknown-endpoint', '未知端点：' + endpoint)
 
       const ctx: EndpointCtx = {
-        store: target, ready, config, log, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, rsshubSettings, fetchImpl, fetchArticleImpl, signal,
+        store: target, ready, config, log, refreshNow, lastRefreshCompletedAt, articleAttempts, searchItems, settings, rsshubSettings, sourcePack, fetchImpl, fetchArticleImpl, signal,
         ...(translateServices === undefined ? {} : { translateServices }),
         ...(translateDeadlineMs === undefined ? {} : { translateDeadlineMs }),
         ...(translateNow === undefined ? {} : { translateNow }),

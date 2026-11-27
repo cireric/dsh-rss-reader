@@ -30,7 +30,7 @@ import type { FeedView, FolderView, TagView } from '../shared.js'
  */
 export const LEFT_NAV_WIDTH = 240
 
-export function FeedNav({ feeds, folders, tags, perFeedUnread, filter, navSelection, navCursor, foldedFolders, showUnread, onSelectFilter, onSelectFeed, onSelectFolder, onSelectTag, onToggleFolder }: {
+export function FeedNav({ feeds, folders, tags, perFeedUnread, filter, navSelection, navCursor, foldedFolders, showUnread, sourcePackActive, onSelectFilter, onSelectFeed, onSelectFolder, onSelectTag, onToggleFolder, onOpenSourcePack }: {
   feeds: FeedView[]
   /** 文件夹目录（含空目录）；只从 feeds 派生会让空文件夹在左栏消失。 */
   folders: FolderView[]
@@ -43,11 +43,14 @@ export function FeedNav({ feeds, folders, tags, perFeedUnread, filter, navSelect
   navCursor: NavCursor
   foldedFolders: ReadonlySet<string>
   showUnread: boolean
+  /** 「精选源」面板是否正开着（R15 08）。 */
+  sourcePackActive: boolean
   onSelectFilter: (filter: Filter) => void
   onSelectFeed: (feedId: string) => void
   onSelectFolder: (folder: string) => void
   onSelectTag: (tagId: string) => void
   onToggleFolder: (folder: string) => void
+  onOpenSourcePack: () => void
 }): ReactNode {
   // 生效态有两条**正交**轴：源（navSelection）与过滤（filter）各自独立生效，两者相乘（见 store.ts 的
   // NavSelection 注释）。所以「选了源」并不意味着「过滤失效」—— 两者要各自显示自己的生效状态。
@@ -103,6 +106,21 @@ export function FeedNav({ feeds, folders, tags, perFeedUnread, filter, navSelect
         </div>
         )
       })}
+
+      {/* 精选源（R15 08）：它不是 Filter —— 三行虚拟视图筛的是条目流，这一行换的是主栏面板。
+          刻意不塞进 navRowsOf：键盘光标那一列表达的是「源 / 文件夹 / 标签 / 过滤」四种作用域，
+          而面板（探索 / 设置）本来就不在光标序列里；混进去会让 shift+n 的语义分叉。
+          鼠标与 Tab 都可达，与其它导航行同一形状。 */}
+      <div role="button" tabIndex={0}
+        {...{ 'data-rss-nav-row': 'view:sourcePack' }}
+        {...(sourcePackActive ? { 'data-rss-nav-selected': '' } : {})}
+        onClick={onOpenSourcePack}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onOpenSourcePack() }
+        }}
+        style={ROW_STYLE}>
+        <span style={LABEL_STYLE}>精选源</span>
+      </div>
 
       <div style={{ flex: '0 0 1px', background: 'var(--rss-line)', margin: '6px 8px' }} />
 
