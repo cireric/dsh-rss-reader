@@ -6,6 +6,7 @@
  */
 import { mapConcurrent } from './concurrency.js'
 import { blockedReason, fetchFeed, type FetchLimits } from './feed/fetch.js'
+import { checkCandidate } from './feed/candidate-check.js'
 import { parseFeed } from './feed/parse.js'
 import { normalizeFeedUrl } from './refresh.js'
 import { discoverFeedUrls, isSameOrigin, MAX_CANDIDATES } from './feed/discover.js'
@@ -138,27 +139,6 @@ async function discoverAndValidate(
 function limitsForCandidate(candidate: string, pageUrl: string, limits: FetchLimits): FetchLimits {
   const inherited = limits.trustedTarget === true && isSameOrigin(candidate, pageUrl)
   return inherited ? limits : { ...limits, trustedTarget: false }
-}
-
-type CandidateCheck =
-  | { ok: true; title: string | undefined; format: string; itemCount: number }
-  | { ok: false; reason: string }
-
-/**
- * 抓一个候选并**按解析结果**判定它是不是 feed（不看状态码：有些站点对任意路径都回 200 HTML）。
- * 失败一律带可直接展示的原因 —— 发现列表要把「这个候选为什么不行」逐条列出来。
- */
-async function checkCandidate(
-  candidate: string,
-  limits: FetchLimits,
-  fetchImpl: typeof fetchFeed,
-): Promise<CandidateCheck> {
-  const attempt = await fetchImpl(candidate, {}, limits)
-  if (attempt.kind === 'failed') return { ok: false, reason: attempt.reason }
-  if (attempt.kind === 'not-modified') return { ok: false, reason: '校验请求收到了 304（不应发生）' }
-  const parsed = parseFeed(attempt.body, candidate)
-  if (parsed.format === 'unknown') return { ok: false, reason: '不是可识别的 feed（RSS 2.0 / RSS 1.0 / Atom 皆不匹配）' }
-  return { ok: true, title: parsed.title, format: parsed.format, itemCount: parsed.items.length }
 }
 
 /** Radar 支路的结果：候选 + 最多一条警告（实例故障或跳过计数）。 */

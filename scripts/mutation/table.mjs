@@ -3119,6 +3119,23 @@ export const MUTATIONS = [
     from: '            if (patch.instances.length > RSSHUB_INSTANCE_MAX) {',
     to: '            if (patch.instances.length > RSSHUB_INSTANCE_MAX + 1) {' },
 
+  // ── R15 10：试读（2026-11-28）────────────────────────────────────────────
+  // 不做地址策略：私网 / 回环候选直接进 fetch。测试桩会把内网地址当普通 URL 返回一个合法
+  // feed ⇒ 该条被判「可用」，A15 的「目标被安全策略拒绝 + 零出网」当场翻红。
+  // from 照构建产物 lib/probe.js 的实际字节写（pitfalls 一、1.4），独立实测 OCCURRENCES=1。
+  { id: 'rsshub-试读私网放行', file: 'lib/probe.js',
+    judges: ['probe-feeds.test.mjs'],
+    judgeTests: ['试读端点：私网 / 回环 / 非法协议一律拒绝，且不回显地址、不发出网请求'],
+    from: 'if (blockedReason(parsed.toString()) !== undefined) {',
+    to: 'if (false) {' },
+  // 解析不出格式（HTML 页 / 任意 XML）也判 ok：A15 的 HTML 页用例会从「失败」变成「可用」。
+  // 判定在 feed/candidate-check.ts（发现与试读共用），所以锚点落在它的产物上。
+  { id: 'rsshub-试读失败当可用', file: 'lib/feed/candidate-check.js',
+    judges: ['probe-feeds.test.mjs'],
+    judgeTests: ['试读端点：HTML 页 / 304 / 超时都按失败处理并给出可读原因'],
+    from: "if (parsed.format === 'unknown')",
+    to: 'if (false)' },
+
   // ── R8a 03：Radar 接进发现流程（2026-11-23）──────────────────────────────
   // 合并顺序反过来：Radar 候选（未验证）排到页面声明前面。A1 的顺序断言会翻红；
   // 去重用例也会跟着红 —— 同一个地址变成 Radar 那条胜出（页面优先被逆转）。

@@ -222,6 +222,18 @@ export const removeFeedPayload = z.object({ url: z.string().min(1) })
 export const discoverFeedsPayload = z.object({ url: z.string().trim().min(1) })
 
 /**
+ * `probeFeeds`（R15 10，spec §4.3.3）：一次试读 1–5 条**绝对 http(s)** 地址。
+ *
+ * 协议判据复用 shared.ts 的 `isHttpUrl`（与客户端行内预检、归档页地址同一份）；私网不在这里判 ——
+ * 那是出网层的安全策略，应该回「目标被安全策略拒绝」这条可展示结果，而不是把整批打成 bad-request。
+ */
+const probeUrlString = z.string().trim().min(1).refine(isHttpUrl, { message: '必须是 http(s) 地址' })
+
+export const probeFeedsPayload = z.object({
+  urls: z.array(probeUrlString).min(1).max(5),
+})
+
+/**
  * `testRsshub`（R8a 01）：只声明「base 是字符串」。
  *
  * 地址形状（http/https、无 path / query / hash）仍由 handler 用 `parseTunableValue` 判 ——
