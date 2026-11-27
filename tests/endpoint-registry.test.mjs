@@ -30,10 +30,12 @@ test('端点名字表非空、无重复、全为非空字符串', () => {
   // R11 02 新增写端点 saveSettings：30 → 31；R8a 01 新增 testRsshub：31 → 32；
   // R9 02 新增 backfillHistory：32 → 33；R8b 03 新增只读的探索端点 exploreCatalog /
   // exploreBuildUrl：33 → 35；R7 01 新增 translateBatch：35 → 36；R7 02 新增可用性探测
-  // translateInfo：36 → 37；R15 01 新增实例池读写 rsshubSettings / saveRsshubSettings：37 → 39。
+  // translateInfo：36 → 37；R15 01 新增实例池读写 rsshubSettings / saveRsshubSettings：37 → 39；
+  // R15 08 新增精选源包读写 sourcePack / saveSourcePack：39 → 41；
+  // R15 10 新增试读 probeFeeds：41 → 42。
   // 这个数字是「端点表变更必须显形」的判据本身。
-  assert.equal(ENDPOINT_NAMES.length, 39)
-  assert.equal(new Set(ENDPOINT_NAMES).size, 39)
+  assert.equal(ENDPOINT_NAMES.length, 42)
+  assert.equal(new Set(ENDPOINT_NAMES).size, 42)
   for (const name of ENDPOINT_NAMES) assert.equal(typeof name, 'string')
 })
 

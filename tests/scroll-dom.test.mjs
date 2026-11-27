@@ -1247,7 +1247,7 @@ test('跨源重复提示：行内可展开看别的来源，且展开不会把�
   assert.equal(h.win.document.querySelector('[data-rss-duplicates="b"]'), null, '没有候选的行不该凭空多出一行提示')
 })
 
-test('左栏渲染：虚拟视图三行 + 每个订阅源一行', skip, async () => {
+test('左栏渲染：虚拟视图三行 + 精选源面板一行 + 每个订阅源一行', skip, async () => {
   // 三个源：一个未读 2 条、一个未读 1 条、一个 0 未读 —— 后者专门用来钉「键域 = feeds 表」：
   // 0 未读的源也必须有一行，且它的角标是 0 而不是空白（缺键在界面上就是「空白 vs 0」无从分辨）。
   const h = await mountReader({
@@ -1267,9 +1267,10 @@ test('左栏渲染：虚拟视图三行 + 每个订阅源一行', skip, async ()
 
   const rows = [...h.win.document.querySelectorAll('[data-rss-nav-row]')]
   const labels = rows.map((row) => row.getAttribute('data-rss-nav-row'))
-  assert.deepEqual(labels, ['filter:all', 'filter:unread', 'filter:starred', 'feed:f1', 'feed:f2', 'feed:f3'],
-    '左栏应当是虚拟视图三行 + 每个订阅源一行；实际 ' + JSON.stringify(labels))
-  assert.deepEqual(rows.map((row) => row.getAttribute('data-rss-nav-badge')), [null, null, null, '2', '1', '0'],
+  // R15 08 起多一行「精选源」面板入口（它不是 Filter，所以排在虚拟视图之后、订阅源之前）。
+  assert.deepEqual(labels, ['filter:all', 'filter:unread', 'filter:starred', 'view:sourcePack', 'feed:f1', 'feed:f2', 'feed:f3'],
+    '左栏应当是虚拟视图三行 + 精选源面板一行 + 每个订阅源一行；实际 ' + JSON.stringify(labels))
+  assert.deepEqual(rows.map((row) => row.getAttribute('data-rss-nav-badge')), [null, null, null, null, '2', '1', '0'],
     '每个源都要有角标，0 未读的源是 0 而不是空白（perFeedUnread 键域 = feeds 表）')
   // 两个标记各司其职（2026-10-10 任务 6 返工）：
   //   data-rss-nav-cursor   = 键盘光标落在哪一行（shift+n/p 移动的就是它）
@@ -1277,8 +1278,8 @@ test('左栏渲染：虚拟视图三行 + 每个订阅源一行', skip, async ()
   // 初始状态下两者都在「全部」那一行。
   assert.equal(rows[0].getAttribute('data-rss-nav-cursor'), '', '默认光标应当在「全部」那一行')
   assert.equal(rows[0].getAttribute('data-rss-nav-selected'), '', '默认生效的也是「全部」')
-  assert.equal(rows[3].getAttribute('data-rss-nav-cursor'), null, '光标不在源那一行')
-  assert.equal(rows[3].getAttribute('data-rss-nav-selected'), null, '未选中的源不该高亮')
+  assert.equal(rows[4].getAttribute('data-rss-nav-cursor'), null, '光标不在源那一行')
+  assert.equal(rows[4].getAttribute('data-rss-nav-selected'), null, '未选中的源不该高亮')
 })
 
 test('隐藏未读计数时左栏角标也消失（GR spec 不变量 8）', skip, async () => {
@@ -2346,7 +2347,8 @@ test('文件夹展开与折叠同步键盘行序，汇总未读且保留订阅�
   const rows = () => Array.from(doc.querySelectorAll('[data-rss-nav-row]'), (row) => row.getAttribute('data-rss-nav-row'))
   const cursor = () => doc.querySelector('[data-rss-nav-cursor]')?.getAttribute('data-rss-nav-row')
   const visible = () => h.store.visible().map(({ id }) => id)
-  const top = ['filter:all', 'filter:unread', 'filter:starred', key]
+  // 精选源面板入口在虚拟视图之后、文件夹之前（R15 08）。
+  const top = ['filter:all', 'filter:unread', 'filter:starred', 'view:sourcePack', key]
   assert.deepEqual(rows(), [...top, 'feed:a', 'feed:b', 'feed:c'])
   assert.equal(folder().getAttribute('data-rss-nav-badge'), '2')
   assert.equal(folder().getAttribute('aria-expanded'), 'true')
@@ -2947,6 +2949,82 @@ test('R8a 03：RSSHub 候选带来源徽标与「未验证」，添加走 addFee
     [radarUrl], '点 Radar 行的「添加」必须把拼出的地址交给 addFeed（那里才真正校验）')
 })
 
+
+/* ──────────────── R15 10：试读（候选 / 地址） ──────────────── */
+/**
+ * A15：候选行与地址输入框都能就地试读，显示「可用 N 条 · 耗时 X ms」或失败原因；
+ * Radar 候选试读后不再停留在「未验证」。试读不落库 —— addFeed 仍是「添加」才走的路。
+ */
+test('R15 10：候选与地址输入框可试读；Radar 行试读后换成可用条数 / 失败原因', async () => {
+  const pageUrl = 'https://site.test/a.xml'
+  const radarUrl = 'https://hub.test/github/branches/DIYgod/RSSHub'
+  const report = {
+    url: 'https://site.test/',
+    candidates: [
+      { url: pageUrl, title: '页面源', format: 'rss2', itemCount: 3, source: 'page' },
+      { url: radarUrl, title: '仓库分支', siteName: 'GitHub', source: 'rsshub' },
+    ],
+    warnings: [],
+  }
+  const h = await mountReader({
+    items: [item({ id: 'a1', feedId: 'a' })],
+    feeds: [{ id: 'a', title: '源 A' }],
+    folderApi: async (body) => {
+      if (body.endpoint === 'discoverFeeds') {
+        return { ok: true, status: 200, json: async () => ({ ok: true, value: report }) }
+      }
+      if (body.endpoint === 'probeFeeds') {
+        const value = body.payload.urls.map((url) => (url === radarUrl
+          ? { url, ok: false, elapsedMs: 12, reason: '目标被安全策略拒绝' }
+          : { url, ok: true, itemCount: 7, format: 'rss2', elapsedMs: 35 }))
+        return { ok: true, status: 200, json: async () => ({ ok: true, value }) }
+      }
+      return undefined
+    },
+  })
+  await h.store.load('overview')
+  await h.settle()
+  h.press('f')
+  await h.settle()
+  const doc = h.win.document
+  setControlValue(h.win, doc.querySelector('[data-rss-add-input]'), 'https://site.test/')
+  await h.settle()
+  doc.querySelector('[data-rss-discover]').click()
+  await h.settle()
+
+  // 标题不再把 Radar 候选算成「已验证」。
+  assert.match(doc.querySelector('[data-rss-discovery]').textContent, /2 个候选/)
+  assert.doesNotMatch(doc.querySelector('[data-rss-discovery]').textContent, /已验证/)
+
+  // 页面候选：试读成功显示条数与耗时。
+  doc.querySelector('[data-rss-candidate-probe="' + pageUrl + '"]').click()
+  await h.settle()
+  assert.match(doc.querySelector('[data-rss-candidate-probe-result="' + pageUrl + '"]').textContent,
+    /可用 7 条 · 耗时 35 ms/)
+
+  // Radar 候选：试读后「未验证」被结果替换；失败原因是可展示的一句话。
+  const radarRow = doc.querySelector('[data-rss-candidate="' + radarUrl + '"]')
+  assert.match(radarRow.textContent, /GitHub · 未验证/, '试读前仍是未验证')
+  radarRow.querySelector('[data-rss-candidate-probe="' + radarUrl + '"]').click()
+  await h.settle()
+  assert.doesNotMatch(radarRow.textContent, /未验证/, '试读后不再写「未验证」')
+  assert.match(radarRow.querySelector('[data-rss-candidate-probe-result="' + radarUrl + '"]').textContent,
+    /目标被安全策略拒绝/)
+
+  // 地址输入框：同一套结果展示，请求带的是输入框里那个地址。
+  setControlValue(h.win, doc.querySelector('[data-rss-add-input]'), 'https://direct-probe.test/feed')
+  await h.settle()
+  doc.querySelector('[data-rss-add-probe]').click()
+  await h.settle()
+  assert.match(doc.querySelector('[data-rss-add-probe-result]').textContent, /可用 7 条 · 耗时 35 ms/)
+  assert.deepEqual(
+    h.requests.filter((request) => request.endpoint === 'probeFeeds').map((request) => request.payload.urls),
+    [[pageUrl], [radarUrl], ['https://direct-probe.test/feed']],
+    '每次试读只发被点的那一条地址',
+  )
+  assert.equal(h.requests.filter((request) => request.endpoint === 'addFeed').length, 0,
+    '试读是只读探测，不许顺手走 addFeed 落库')
+})
 
 /* ──────────────── M4 02：管理页的健康信息（真实 DOM） ──────────────── */
 test('M4 02：管理页显示健康、连败次数、最近尝试与上次成功；历史未知写成「次数未知」而不是 0', skip, async () => {

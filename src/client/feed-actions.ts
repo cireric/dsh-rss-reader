@@ -8,7 +8,7 @@
  * 成功后 reload 取回宿主快照——**不做乐观重排**（否则宿主拒绝时会留下屏幕新、文件旧的形态）。
  * R9 03 增加 backfill：同一条纪律，报告只用于展示，条目仍以 reload 后的宿主快照为准。
  */
-import type { BackfillReport, DiscoveryResult, OpmlImportResult } from '../shared.js'
+import type { BackfillReport, DiscoveryResult, OpmlImportResult, ProbeResult } from '../shared.js'
 import type { ReaderStoreDeps, ReaderState } from './store.js'
 
 export interface FeedActionHost {
@@ -128,6 +128,17 @@ export function createFeedActions(host: FeedActionHost) {
   }
 
   /**
+   * 试读（R15 10）：只读探测，宿主不写库、不改订阅，因此这里也不动全局 state。
+   *
+   * 刻意不借 `feedsBusy`：那面旗子的文案是「正在逐源抓取校验…」，会把整页按钮一起灰掉；
+   * 而试读是行内动作，用户应当能「试读一条、再决定要不要添加」。
+   * 失败原因由组件就地展示（返回值），不写全局 error —— 一行候选的失败不该盖住整页。
+   */
+  const probe = async (urls: string[]): Promise<ProbeResult[]> => {
+    return await rpc<ProbeResult[]>('probeFeeds', { urls })
+  }
+
+  /**
    * 每源在途的回溯 Promise（key = feedId）。
    *
    * 界面会把「开始」置灰，但 state 要等下一次渲染才生效：同一事件循环里的连点仍可能第二次
@@ -161,5 +172,5 @@ export function createFeedActions(host: FeedActionHost) {
     return run
   }
 
-  return { discover, addFeed, removeFeed, clearDiscovery, moveFeedOrder, backfill }
+  return { discover, addFeed, removeFeed, clearDiscovery, moveFeedOrder, backfill, probe }
 }

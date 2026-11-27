@@ -163,6 +163,8 @@ export function createListActions(host: ListActionHost) {
     // 探索没有内容快照要留（整份 explore 随视图丢弃，D14），所以连状态一起清。
     else if (view === 'settings') set({ view: 'list' })
     else if (view === 'explore') set({ view: 'list', explore: undefined })
+    // 精选源同理：左栏切源 / 切过滤时不能停在一个「只属于上一次作用域」的面板上。
+    else if (view === 'sourcePack') set({ view: 'list' })
   }
 
   /**

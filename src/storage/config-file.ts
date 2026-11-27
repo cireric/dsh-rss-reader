@@ -19,6 +19,7 @@ import { randomUUID } from 'node:crypto'
 import { feedRecordSchema, type FeedRecord } from '../domain.js'
 import { mergeFolderDirectory } from '../folders.js'
 import { parseRsshubBase } from '../settings-schema.js'
+import { httpUrlOrEmpty, type CuratedSourceEntry } from '../shared.js'
 
 /** 实例池上限（spec §4.1.1）：>5 条拒绝保存。读取侧只告警、不替用户删数据。 */
 export const RSSHUB_INSTANCE_MAX = 5
@@ -67,6 +68,12 @@ export interface ReaderConfigFile {
    * `instances: []` = 用户主动清空，功能关闭，**绝不回落**旧值。
    */
   rsshub?: ReaderRsshubConfig
+  /**
+   * 精选源包（R15 08，spec §4.3.1）。**缺省 ≠ 空数组**：
+   * 缺省 = 从没打开过「精选源」视图，首次打开时用内置快照初始化并落盘；
+   * `[]` = 用户把清单删光了，**不再自动填充**。两者必须可区分，否则「删光」永远关不掉种子。
+   */
+  curatedSources?: CuratedSourceEntry[]
   /** 视图偏好（两列布局的单例槽）。形状归一化在 src/preferences.ts 的 sanitizeViewPreferences 做。 */
   viewPreferences?: unknown
   /** 文件格式版本。只认 1。 */
@@ -214,6 +221,8 @@ function validateConfig(parsed: unknown, path: string, warn?: (line: string) => 
   // RSSHub 实例池：坏项逐条丢弃 + 告警，**不抛错**。它和 folders / feedOrder 的语义刻意不同 ——
   // 一个手滑的实例地址不该让整份订阅配置打不开；那些是结构（目录 / 顺序），坏掉就无从解释。
   const rsshub = validateRsshub(record.rsshub, path, warn)
+  // 精选源包同理：一条手滑的地址不该让整份订阅配置失效（它只是清单，不是订阅）。
+  const curatedSources = validateCuratedSources(record.curatedSources, path, warn)
   return {
     version: CURRENT_CONFIG_VERSION,
     feeds: valid,
@@ -223,6 +232,8 @@ function validateConfig(parsed: unknown, path: string, warn?: (line: string) => 
     // 用条件展开把「没排过」保持成真正的不存在）。
     ...(feedOrder === undefined ? {} : { feedOrder }),
     ...(rsshub === undefined ? {} : { rsshub }),
+    // 同上：缺省保持成真正的不存在 —— 这是「首次打开用种子初始化」唯一能看见的信号。
+    ...(curatedSources === undefined ? {} : { curatedSources }),
   }
 }
 
@@ -293,6 +304,99 @@ function validateRsshub(
   }
 
   return { instances, hiddenNamespaces, hideNsfw }
+}
+
+/** 一条源包输入被丢弃的原因（索引从 0 起；对外文案里 +1）。 */
+export interface CuratedSourceIssue {
+  readonly index: number
+  readonly reason: string
+}
+
+/**
+ * 源包条目的归一化与去重（R15 08，spec §7「源包归一化与去重」）。
+ *
+ * 为什么放在 storage 层而不是控制器里：**读文件和保存两条路径必须用同一套判据** ——
+ * 读取侧用它在手改文件里逐条丢坏项，保存侧用它在写盘前把客户端送来的原始数组变成
+ * 可落盘的形状。两套判据会出现「保存时接受、重启后消失」这类只有重启才暴露的分家。
+ *
+ * 判据只有三条，都是**形状**，不猜内容：
+ *  1. `url` 必须是绝对 http(s) 地址（与别处共用 shared.ts 的 `httpUrlOrEmpty`），归一成
+ *     `URL.toString()` —— 于是 `https://a.example` 与 `https://a.example/` 是同一个 URL（去重的键）；
+ *  2. `addedAt` 必须是能解析的时刻串（空串、乱码都算坏项）；
+ *  3. 同 URL 只留**第一条**（保留用户先加的那条，后来的重复项丢弃并回报）。
+ *
+ * `title` / `category` / `note` 是自由文本：去首尾空白，空串折成 undefined（不落无意义的键）；
+ * 不校验长度，也不替用户编内容。
+ */
+export function normalizeCuratedSources(raw: readonly unknown[]): {
+  entries: CuratedSourceEntry[]
+  issues: CuratedSourceIssue[]
+} {
+  const entries: CuratedSourceEntry[] = []
+  const issues: CuratedSourceIssue[] = []
+  const seen = new Set<string>()
+  const textOf = (value: unknown): string | undefined =>
+    typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
+
+  for (const [index, item] of raw.entries()) {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+      issues.push({ index, reason: '不是对象' })
+      continue
+    }
+    const record = item as Record<string, unknown>
+    const url = typeof record.url === 'string' ? httpUrlOrEmpty(record.url.trim()) : ''
+    if (url === '') {
+      // 不回显原始地址：URL 可能带 userinfo（凭据），告警不该成为第二份泄漏面。
+      issues.push({ index, reason: 'url 不是绝对 http(s) 地址' })
+      continue
+    }
+    if (seen.has(url)) {
+      issues.push({ index, reason: 'URL 与前面的条目重复' })
+      continue
+    }
+    const addedAt = typeof record.addedAt === 'string' ? record.addedAt.trim() : ''
+    if (addedAt === '' || Number.isNaN(Date.parse(addedAt))) {
+      issues.push({ index, reason: 'addedAt 不是有效时刻' })
+      continue
+    }
+    seen.add(url)
+    const entry: CuratedSourceEntry = { url, addedAt }
+    const title = textOf(record.title)
+    const category = textOf(record.category)
+    const note = textOf(record.note)
+    if (title !== undefined) entry.title = title
+    if (category !== undefined) entry.category = category
+    if (note !== undefined) entry.note = note
+    entries.push(entry)
+  }
+  return { entries, issues }
+}
+
+/**
+ * 校验 config.json 的 `curatedSources` 字段（R15 08）。
+ *
+ * 与 `rsshub` 同一条语义：**坏项逐条丢弃 + 告警，不抛错** —— 它只是清单，一条坏地址不该让
+ * 整份订阅配置打不开。与 `rsshub` 不同的是「字段存在但形状认不出」：
+ * `rsshub` 缺 `instances` 时整份忽略、回落旧设置；这里若也忽略，就会把一份**存在的**字段
+ * 当成「从没配过」，下次打开时用种子覆盖掉用户（哪怕已经读不出来）的清单。所以按空数组处理：
+ * 字段存在 ⇒ 不自动填充，且告警说明原因。
+ */
+function validateCuratedSources(
+  raw: unknown,
+  path: string,
+  warn?: (line: string) => void,
+): CuratedSourceEntry[] | undefined {
+  if (raw === undefined) return undefined
+  if (!Array.isArray(raw)) {
+    warn?.(`订阅文件 ${path} 的 curatedSources 不是数组（读到 ${describe(raw)}），已按空清单处理；`
+      + '内置快照不会覆盖一份已经存在的字段')
+    return []
+  }
+  const { entries, issues } = normalizeCuratedSources(raw)
+  for (const issue of issues) {
+    warn?.(`订阅文件 ${path} 的 curatedSources 第 ${issue.index + 1} 项${issue.reason}，已丢弃`)
+  }
+  return entries
 }
 
 /**
