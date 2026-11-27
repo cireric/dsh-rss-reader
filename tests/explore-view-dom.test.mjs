@@ -139,6 +139,9 @@ async function mount({ rsshubBase = 'https://rsshub.example', catalog, build, ad
   }
   // R15 01：探索入口看的是实例池快照（宿主已把坏项丢掉）。夹具用 rsshubBase 模拟一条池子记录。
   const rsshubInstances = /^https?:\/\//.test(rsshubBase) ? [rsshubBase] : []
+  // R15 06：NSFW 开关的初值与写路径都走 rsshubSettings 快照（config.json 的 rsshub.hideNsfw）。
+  let rsshubHideNsfw = true
+  const rsshubSnapshot = () => ({ instances: rsshubInstances, hiddenNamespaces: [], hideNsfw: rsshubHideNsfw })
   const overview = { feeds: [], items: [], folders: [], tags: [], unread: 0, perFeedUnread: {}, refreshed: false }
   const ok = (value) => ({ ok: true, status: 200, json: async () => ({ ok: true, value }) })
   const failEnvelope = (error) => ({ ok: true, status: 200, json: async () => ({ ok: false, error }) })
@@ -148,8 +151,10 @@ async function mount({ rsshubBase = 'https://rsshub.example', catalog, build, ad
     const body = JSON.parse(init.body)
     requests.push({ endpoint: body.endpoint, payload: body.payload })
     if (body.endpoint === 'settings') return ok({ settings: settingsState })
-    if (body.endpoint === 'rsshubSettings') {
-      return ok({ rsshub: { instances: rsshubInstances, hiddenNamespaces: [], hideNsfw: true } })
+    if (body.endpoint === 'rsshubSettings') return ok({ rsshub: rsshubSnapshot() })
+    if (body.endpoint === 'saveRsshubSettings') {
+      if (typeof body.payload?.hideNsfw === 'boolean') rsshubHideNsfw = body.payload.hideNsfw
+      return ok({ rsshub: rsshubSnapshot() })
     }
     if (body.endpoint === 'viewPreferences') return ok({ preferences: undefined })
     if (body.endpoint === 'saveViewPreferences') return ok({ preferences: body.payload?.preferences })
@@ -772,6 +777,62 @@ test('R8b 04 键盘：探索视图里 j/k 不被接管；Esc 回列表且焦点�
     assert.equal(h.press('F'), true, 'F 在探索视图仍可用（非阅读视图豁免）')
     await h.waitFor(() => h.store.get().view === 'feeds', { label: 'F 进订阅管理' })
     assert.equal(h.store.get().explore, undefined, '离开探索即整份清掉（D14）')
+  } finally {
+    h.cleanup()
+  }
+})
+
+// ── R15 06：NSFW 默认隐藏 + 只看可跑（A8 / A12 的界面侧）───────────────────
+
+test('R15 06 两个开关：默认关；切换即重取第一页（不带 cursor）并写回配置 / 视图记忆', skip, async () => {
+  const NSFW_ROUTE = {
+    namespace: 'secret', siteName: '隐藏站', path: '/secret', name: '隐藏路由',
+    categories: [], parameters: {},
+    features: { requireConfig: 'none', requirePuppeteer: false, antiCrawler: false, supportPodcast: false, nsfw: true },
+  }
+  // 回包按请求里的开关变化 —— 若客户端只在本地过滤，这里会看到请求没变、计数也没变。
+  const h = await mount({
+    catalog: (payload) => payload?.onlyRunnable === true
+      ? { value: catalogPage([BRANCHES], { siteTotal: 2, routeTotal: 2, matched: 1 }) }
+      : payload?.hideNsfw === false
+        ? { value: catalogPage([BRANCHES, NSFW_ROUTE], { siteTotal: 2, routeTotal: 2, matched: 2 }) }
+        : { value: catalogPage([BRANCHES], { siteTotal: 2, routeTotal: 2, matched: 1 }) },
+  })
+  try {
+    await openExploreFromFeeds(h)
+    const showNsfw = h.$('[data-rss-explore-show-nsfw]')
+    const onlyRunnable = h.$('[data-rss-explore-only-runnable]')
+    assert.ok(showNsfw !== null, '顶部必须有「显示 NSFW」开关')
+    assert.ok(onlyRunnable !== null, '顶部必须有「只看可跑」开关')
+    assert.equal(showNsfw.checked, false, '「显示 NSFW」默认关（hideNsfw 默认 true）')
+    assert.equal(onlyRunnable.checked, false, '「只看可跑」默认关')
+
+    const first = h.calls('exploreCatalog')[0].payload
+    assert.equal(first.hideNsfw, true, '默认请求必须把 hideNsfw 发给宿主（宿主侧过滤）')
+    assert.equal(first.onlyRunnable, false)
+    assert.equal(h.$('[data-rss-explore-feature="nsfw"]'), null, '开关未打开时 NSFW 徽标不许渲染')
+
+    // 显示 NSFW：持久化到 config.rsshub.hideNsfw，并以新筛选重取第一页。
+    showNsfw.click()
+    await h.waitFor(() => h.calls('exploreCatalog').length === 2, { label: '显示 NSFW 后重取' })
+    await h.settle()
+    const second = h.calls('exploreCatalog').at(-1).payload
+    assert.equal(second.hideNsfw, false, '开关打开后请求必须带 hideNsfw=false')
+    assert.equal(second.cursor, undefined, '过滤器变了游标必须重来')
+    const savedRsshub = h.calls('saveRsshubSettings').at(-1)?.payload
+    assert.equal(savedRsshub?.hideNsfw, false, '写路径走 saveRsshubSettings')
+    assert.deepEqual(savedRsshub?.instances, ['https://rsshub.example'], '保存筛选偏好不许冲掉实例池')
+    assert.equal(h.$('[data-rss-explore-feature="nsfw"]')?.textContent, 'NSFW', '开关打开后行内显示 NSFW 徽标')
+
+    // 只看可跑：进入视图记忆（不是 config.rsshub 的第四个字段），同样重取第一页。
+    onlyRunnable.click()
+    await h.waitFor(() => h.calls('exploreCatalog').length === 3, { label: '只看可跑后重取' })
+    await h.settle()
+    const third = h.calls('exploreCatalog').at(-1).payload
+    assert.equal(third.onlyRunnable, true, '开关打开后请求必须带 onlyRunnable=true')
+    assert.equal(third.cursor, undefined, '过滤器变了游标必须重来')
+    const savedPrefs = h.calls('saveViewPreferences').at(-1)?.payload.preferences
+    assert.equal(savedPrefs?.onlyRunnable, true, '写路径走 saveViewPreferences')
   } finally {
     h.cleanup()
   }

@@ -1233,6 +1233,9 @@ export function createReader(store: ReaderStore): () => ReactNode {
           <ExploreView
             state={state.explore}
             onQuery={store.setExploreQuery}
+            hideNsfw={state.rsshubSettings?.hideNsfw ?? true}
+            onlyRunnable={state.onlyRunnable}
+            onToggleHideNsfw={(hideNsfw) => { void store.setExploreHideNsfw(hideNsfw) }}
             onLoadMore={() => { void store.loadMoreExplore() }}
             onSelectRoute={store.selectExploreRoute}
             onDraftValue={store.setExploreDraftValue}

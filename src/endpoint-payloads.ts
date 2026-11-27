@@ -347,6 +347,10 @@ export const exploreCatalogPayload = z.preprocess(emptyAsObject, z.object({
   q: z.string().nullish(),
   category: z.string().nullish(),
   namespace: z.string().nullish(),
+  // R15 06：两个用户可见开关。缺省值（hideNsfw=true / onlyRunnable=false）由 handler 补，
+  // 声明层只判类型 —— 与 limit 的默认 / 上限归 handler 同一条分工。
+  hideNsfw: z.boolean().nullish(),
+  onlyRunnable: z.boolean().nullish(),
   limit: z.number().int().positive().nullish(),
   cursor: z.string().nullish(),
 }))
