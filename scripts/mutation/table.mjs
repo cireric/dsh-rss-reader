@@ -235,8 +235,8 @@ export const MUTATIONS = [
   { id: 'health-未知次数写成 0', file: 'lib/client.js',
     judges: ['scroll-dom.test.mjs'],
     judgeTests: ['M4 02：管理页显示健康、连败次数、最近尝试与上次成功；历史未知写成「次数未知」而不是 0'],
-    from: '" · 连续失败：" + (feed.failureCount === void 0 ? "次数未知" : feed.failureCount + " 次"),',
-    to: '" · 连续失败：" + (feed.failureCount === void 0 ? "0 次" : feed.failureCount + " 次"),' },
+    from: 'feed.rsshub === void 0 ? " · 连续失败：" + (feed.failureCount === void 0 ? "次数未知" : feed.failureCount + " 次") : "",',
+    to: 'feed.rsshub === void 0 ? " · 连续失败：" + (feed.failureCount === void 0 ? "0 次" : feed.failureCount + " 次") : "",' },
 
   // ── M5 01：阅读偏好与预计时长（2026-11-16）────────────────────────────────
   // 归一化必须**放行档位内的值**：恒回落默认的实现会让「选了 20px，重开变回 16px」，
@@ -3540,6 +3540,46 @@ export const MUTATIONS = [
     ],
     from: "                tests.set(title, status);",
     to: "                tests.set(title, 'passed');" },
+
+  // ── R15 03：刷新失败切换与冷却（2026-11-28）─────────────────────────────
+  // 池不切换：候选顺序被截成「只试第一个」。首选 503 时直接判整源失败，次选 200 永远拿不到 ——
+  // 用户配了 5 个实例，实际只有一个在服役（spec §4.1.4 的核心承诺失效）。
+  // from 照构建产物 lib/refresh.js 的实际字节写（pitfalls 一、1.4），独立实测 OCCURRENCES=1。
+  { id: 'rsshub-池不切换', file: 'lib/refresh.js',
+    judges: ['rsshub-failover.test.mjs'],
+    judgeTests: ['A1：首选 503、次选 200 ⇒ 刷新成功、请求 2 次、当前实例改写为实际成功的那台'],
+    from: 'if (instancesAttempted.length >= RSSHUB_MAX_ATTEMPTS)',
+    to: 'if (instancesAttempted.length >= 1)' },
+
+  // 切换无预算：把「每源最多 2 个实例」的硬上限放宽到池子上限 5。池里配 3 个时会把 3 个全试一遍：
+  // 最坏延迟从 20s 放大到最多 5×12s，而 spec §8 的「只对 RSSHub 源、每轮最多 2 个」正是防这个。
+  // 判据是 A3 的请求数（池配 3 个，只允许 2 个请求）。
+  { id: 'rsshub-切换无预算', file: 'lib/refresh.js',
+    judges: ['rsshub-failover.test.mjs'],
+    judgeTests: ['A3：两个实例都失败 ⇒ 保留旧条目与 lastFetchedAt、failureCount+1、摘要含两实例'],
+    from: 'if (instancesAttempted.length >= RSSHUB_MAX_ATTEMPTS)',
+    to: 'if (instancesAttempted.length >= 5)' },
+
+  // 冷却永不恢复：把「冷却截止时间」判据改成「只要失败过就永远冷却」。10 分钟是一句承诺，
+  // 永远冷却等于把实例拉黑 —— 实例恢复健康后也永远排最后（配 3 个以上时直接轮不到它）。
+  // 判据是冷却单测的到期恢复与装配用例的第 5 轮顺序。
+  { id: 'rsshub-冷却永不恢复', file: 'lib/rsshub-failover.js',
+    judges: ['rsshub-failover.test.mjs'],
+    judgeTests: [
+      '冷却：同一源对同一实例连续失败 2 次才进入 10 分钟冷却；成功一次即清零；到期恢复',
+      '冷却（装配）：连续失败 2 次的实例被排到最后；10 分钟后回到原顺序',
+    ],
+    from: 'return entry !== undefined && entry.coolingUntil > nowMs',
+    to: 'return entry !== undefined' },
+
+  // 非 RSSHub 也切换：把「只有 RSSHub 源才走实例逻辑」的判定改成「池子非空就走」。普通源会被
+  // 请求到池里的实例上（订阅路径泄露给第三方实例，spec §8 的隐私边界），请求次数、超时与错误
+  // 文案全部改变。判据是 A4：非 RSSHub 源 + 已配置池必须仍然只有一个请求、原超时、原文案。
+  { id: 'rsshub-非 RSSHub 也切换', file: 'lib/refresh.js',
+    judges: ['rsshub-failover.test.mjs'],
+    judgeTests: ['A4：非 RSSHub 源 + 已配置实例池 ⇒ 请求次数、超时与错误文案逐字不变'],
+    from: 'const failover = rsshub !== undefined && instances.length > 0',
+    to: 'const failover = instances.length > 0' },
 
   // ── R15 06：探索过滤（NSFW 默认隐藏 + 只看可跑）（2026-11-28）─────────────
   // 默认隐藏被短路：nsfw 路由照常出现在列表与 matched 里（A8 的默认态直接失效）。

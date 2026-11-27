@@ -663,21 +663,30 @@ export function FeedsView({
                   <span style={{ display: 'block', fontSize: 11, opacity: 0.6, wordBreak: 'break-all' }}>
                     {feed.id}{feed.folder !== undefined ? ' · 文件夹：' + feed.folder : ' · 未分类'}
                   </span>
-                  {/* R15 02：来源由宿主裁决并下发（FeedView.rsshub），客户端**不拿实例池重判** ——
-                      两个裁决者迟早漂。非 RSSHub 源没有这个字段，这里什么都不渲染。 */}
+                  {/* R15 02 / R15 03：来源与切换状态都由宿主裁决并下发（FeedView.rsshub /
+                      lastFetchedAt / failureCount），客户端**不拿实例池重判** —— 两个裁决者迟早漂。
+                      这里只显示「当前实例 · 上次成功 · 连续失败 N 次」。**没有「预计下次重试」**：
+                      退避已删，那个时间不存在，编一个等于撒谎。非 RSSHub 源整行不渲染。 */}
                   {feed.rsshub !== undefined && (
                     <span data-rss-feed-rsshub={feed.id}
                       style={{ display: 'block', fontSize: 11, opacity: 0.75, wordBreak: 'break-all' }}>
                       {'RSSHub · ' + (feed.rsshub.instance ?? '实例未知')}
+                      {' · 上次成功：' + (feed.lastFetchedAt === undefined ? '从未' : relativeTime(feed.lastFetchedAt))}
+                      {' · 连续失败：' + (feed.failureCount === undefined ? '次数未知' : feed.failureCount + ' 次')}
                     </span>
                   )}
                   {/* 健康信息（M4 02）：状态 / 连败次数 / 最近尝试 / 上次成功 / 最近错误。
-                      连败次数缺失时写「次数未知」而不是 0 —— 老记录从来没记过计数（见 domain.ts 的三态）。 */}
+                      连败次数缺失时写「次数未知」而不是 0 —— 老记录从来没记过计数（见 domain.ts 的三态）。
+                      RSSHub 源的连败与上次成功已经在上面那行状态里，这里不再重复一遍。 */}
                   <span data-rss-feed-health={feed.id} style={{ display: 'block', fontSize: 11, opacity: 0.75, wordBreak: 'break-all' }}>
                     {'健康：' + feedHealthLabel(feed)}
-                    {' · 连续失败：' + (feed.failureCount === undefined ? '次数未知' : feed.failureCount + ' 次')}
+                    {feed.rsshub === undefined
+                      ? ' · 连续失败：' + (feed.failureCount === undefined ? '次数未知' : feed.failureCount + ' 次')
+                      : ''}
                     {' · 最近尝试：' + (feed.lastAttemptedAt === undefined ? '从未' : relativeTime(feed.lastAttemptedAt))}
-                    {' · 上次成功：' + (feed.lastFetchedAt === undefined ? '从未' : relativeTime(feed.lastFetchedAt))}
+                    {feed.rsshub === undefined
+                      ? ' · 上次成功：' + (feed.lastFetchedAt === undefined ? '从未' : relativeTime(feed.lastFetchedAt))
+                      : ''}
                     {feed.lastFailure !== undefined ? ' · 最近错误：' + feed.lastFailure : ''}
                   </span>
                 </span>
