@@ -21,6 +21,10 @@ export interface ExploreActionHost {
    * 不复制「校验 → 落库 → reload」那条路径（D6 / spec §4.6）。
    */
   addFeed: (url: string) => Promise<{ ok: true; added: number; existed: number } | { ok: false; message: string }>
+  /** 视图记忆的整份覆盖写（R15 06：「只看可跑」归 viewPreferences，不归 config.rsshub）。 */
+  persistView: () => void
+  /** 保存「显示 NSFW」开关（config.rsshub.hideNsfw）；写盘成功后才允许重取。 */
+  saveRsshubHideNsfw: (hideNsfw: boolean) => Promise<{ ok: true } | { ok: false; message: string }>
 }
 
 /** 一次打开探索时的空状态：q / category / namespace 与表单都从零开始（D14，不持久化）。 */
@@ -49,12 +53,26 @@ function emptyExplore(): ExploreState {
   }
 }
 
-/** 只把生效中的筛子发给宿主（空串 / undefined = 不生效，与宿主 payload schema 同一语义）。 */
+/**
+ * 只把生效中的筛子发给宿主（空串 / undefined = 不生效，与宿主 payload schema 同一语义）。
+ *
+ * R15 06 的两个开关**显式带上**：过滤在宿主侧执行，游标栅栏也按它们算 —— 客户端若只在本地过滤，
+ * `matched` / 页大小 / `nextCursor` 会全部失真（spec §4.2.4）。缺省值仍由宿主兜底。
+ */
 function catalogPayloadOf(
   explore: ExploreState,
   cursor: string | undefined,
-): { q?: string; category?: string; namespace?: string; cursor?: string } {
-  const payload: { q?: string; category?: string; namespace?: string; cursor?: string } = {}
+  hideNsfw: boolean,
+  onlyRunnable: boolean,
+): { q?: string; category?: string; namespace?: string; hideNsfw: boolean; onlyRunnable: boolean; cursor?: string } {
+  const payload: {
+    q?: string
+    category?: string
+    namespace?: string
+    hideNsfw: boolean
+    onlyRunnable: boolean
+    cursor?: string
+  } = { hideNsfw, onlyRunnable }
   if (explore.q !== '') payload.q = explore.q
   if (explore.category !== undefined) payload.category = explore.category
   if (explore.namespace !== undefined) payload.namespace = explore.namespace
@@ -63,7 +81,7 @@ function catalogPayloadOf(
 }
 
 export function createExploreActions(host: ExploreActionHost) {
-  const { get, set, rpc, addFeed } = host
+  const { get, set, rpc, addFeed, persistView, saveRsshubHideNsfw } = host
 
   /**
    * 第一页请求的代数。换筛选会立刻发起新请求，旧请求可能更晚回来 —— 不判代数就会把
@@ -82,7 +100,12 @@ export function createExploreActions(host: ExploreActionHost) {
       },
     })
     try {
-      const page = await rpc<ExploreCatalogPage>('exploreCatalog', catalogPayloadOf(explore, undefined))
+      const page = await rpc<ExploreCatalogPage>('exploreCatalog', catalogPayloadOf(
+        explore,
+        undefined,
+        get().rsshubSettings?.hideNsfw ?? true,
+        get().onlyRunnable,
+      ))
       if (version !== pageVersion) return
       const current = get().explore
       if (current === undefined) return
@@ -129,7 +152,9 @@ export function createExploreActions(host: ExploreActionHost) {
    * 为什么不在原列表上过滤：宿主的分页是在完整目录上做的 keyset；在客户端过滤当前页会出现
    * 「明明有命中却显示 0 条」，也会让旧游标与新筛选错配（B7 的栅栏会拒绝，界面就卡死）。
    */
-  const setExploreQuery = (patch: Partial<Pick<ExploreState, 'q' | 'category' | 'namespace'>>): void => {
+  const setExploreQuery = (
+    patch: Partial<Pick<ExploreState, 'q' | 'category' | 'namespace'>> & { onlyRunnable?: boolean },
+  ): void => {
     const explore = get().explore
     if (explore === undefined) return
     const next: ExploreState = { ...explore }
@@ -138,12 +163,41 @@ export function createExploreActions(host: ExploreActionHost) {
     if ('q' in patch && patch.q !== undefined) next.q = patch.q.trim()
     if ('category' in patch) next.category = patch.category === '' ? undefined : patch.category
     if ('namespace' in patch) next.namespace = patch.namespace === '' ? undefined : patch.namespace
+    // 「只看可跑」也走同一入口：它和 q / 分类一样是过滤器，变化必须重取第一页；
+    // 但它住在视图记忆里（不是 config.rsshub），所以变化时顺手落一次盘。
+    const nextOnlyRunnable = 'onlyRunnable' in patch && patch.onlyRunnable !== undefined
+      ? patch.onlyRunnable
+      : get().onlyRunnable
+    const onlyRunnableChanged = nextOnlyRunnable !== get().onlyRunnable
     // 「再点同类 = 清除」在视图层把值翻译成 undefined；这里只判「有没有真的变」——
     // 同值重选不该白白发一次请求（分类按钮的音量）。
-    const changed = next.q !== explore.q || next.category !== explore.category || next.namespace !== explore.namespace
+    const changed = next.q !== explore.q
+      || next.category !== explore.category
+      || next.namespace !== explore.namespace
+      || onlyRunnableChanged
     if (!changed) return
+    if (onlyRunnableChanged) {
+      set({ onlyRunnable: nextOnlyRunnable })
+      persistView()
+    }
     set({ explore: { ...next, items: [], nextCursor: undefined, matched: undefined, loading: true, error: undefined } })
     void fetchFirstPage()
+  }
+
+  /**
+   * 「显示 NSFW」开关（R15 06）：先写 config.rsshub.hideNsfw，成功后才用新筛选重取第一页。
+   *
+   * 失败不重取：界面开关读的是同一份快照，写盘失败时它本来就不会翻面；提前重取只会让请求与
+   * 界面状态各说各话。过滤器变了游标必须重来（`fetchFirstPage` 会清空 items / nextCursor）。
+   */
+  const setExploreHideNsfw = async (hideNsfw: boolean): Promise<void> => {
+    if (get().explore === undefined) return
+    const result = await saveRsshubHideNsfw(hideNsfw)
+    if (!result.ok) {
+      set({ error: '保存 NSFW 偏好失败：' + result.message })
+      return
+    }
+    await fetchFirstPage()
   }
 
   /** 续页：游标原样回带，成功后追加；失败保留已加载行（不让一次续页失败清空整屏）。 */
@@ -154,7 +208,12 @@ export function createExploreActions(host: ExploreActionHost) {
     const cursor = explore.nextCursor
     set({ explore: { ...explore, loadingMore: true } })
     try {
-      const page = await rpc<ExploreCatalogPage>('exploreCatalog', catalogPayloadOf(explore, cursor))
+      const page = await rpc<ExploreCatalogPage>('exploreCatalog', catalogPayloadOf(
+        explore,
+        cursor,
+        get().rsshubSettings?.hideNsfw ?? true,
+        get().onlyRunnable,
+      ))
       if (version !== pageVersion) return
       const current = get().explore
       if (current === undefined) return
@@ -303,7 +362,7 @@ export function createExploreActions(host: ExploreActionHost) {
   }
 
   return {
-    openExplore, closeExplore, setExploreQuery, loadMoreExplore,
+    openExplore, closeExplore, setExploreQuery, setExploreHideNsfw, loadMoreExplore,
     selectExploreRoute, setExploreDraftValue, buildExploreAddress, addExploreSubscription,
   }
 }

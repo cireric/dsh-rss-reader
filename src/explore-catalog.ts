@@ -12,10 +12,12 @@ import { createHash } from 'node:crypto'
 import type { ExploreRouteView } from './shared.js'
 // 模板解析与预填的唯一实现在 explore-template.ts（客户端也要用，见那边的文件头）。
 import { parsePathTemplate } from './explore-template.js'
+// 「可跑」判据只有一份（票 05 导出）：排序与筛选必须引用它，不许各写一套。
+import { isRunnableRoute, weeklyTestGenerationOf, weeklyTestKey, type WeeklyTestMap } from './weekly-tests.js'
 export { parsePathTemplate, prefillValues } from './explore-template.js'
 export type { PathTemplate, PathTemplateSegment } from './explore-template.js'
 
-/** 检索条件：三个筛子 **AND** 叠加；空串 / 缺省 = 不生效（spec §4.3 / D9）。 */
+/** 检索条件：各筛子 **AND** 叠加；空串 / 缺省 = 不生效（spec §4.3 / D9）。 */
 export interface CatalogFilter {
   /** 子串、大小写不敏感；命中站点名 OR 路由名 OR 路径模板任一即可。 */
   q?: string
@@ -23,6 +25,16 @@ export interface CatalogFilter {
   category?: string
   /** 等值，即「站点钻取」。 */
   namespace?: string
+  /**
+   * 是否隐藏 NSFW 路由（R15 06 / spec §4.2.3）。**缺省 = true**：默认看不到 nsfw。
+   * 它不是「只在客户端隐藏」的展示开关 —— 计数与分页都按过滤后的行算（spec §4.2.4）。
+   */
+  hideNsfw?: boolean
+  /**
+   * 只看可跑（R15 06 / A12）。**缺省 = false**；true 时 = 周测通过 + 无反爬 +
+   * 无必填配置 + 非 nsfw 四项交集，判据直接复用 `isRunnableRoute`。
+   */
+  onlyRunnable?: boolean
 }
 
 /** 一次检索的结果：`matched` 与 `items` 同源，避免调用方另数一遍（两处迟早漂）。 */
@@ -48,6 +60,8 @@ interface NormalizedFilter {
   q: string
   category: string
   namespace: string
+  hideNsfw: boolean
+  onlyRunnable: boolean
 }
 
 function normalizeFilter(filter: CatalogFilter): NormalizedFilter {
@@ -55,6 +69,10 @@ function normalizeFilter(filter: CatalogFilter): NormalizedFilter {
     q: typeof filter.q === 'string' ? filter.q.trim().toLowerCase() : '',
     category: typeof filter.category === 'string' ? filter.category : '',
     namespace: typeof filter.namespace === 'string' ? filter.namespace : '',
+    // 只认显式 false 才关闭隐藏：缺省 / 认不出的值都回到「默认隐藏 nsfw」。
+    hideNsfw: filter.hideNsfw !== false,
+    // 只认显式 true：缺省 / 认不出的值都不启用硬过滤。
+    onlyRunnable: filter.onlyRunnable === true,
   }
 }
 
@@ -71,7 +89,11 @@ export interface CatalogIndex {
   /** 整张目录的路由级分类，去重升序（供筛选项）。 */
   readonly categories: readonly string[]
   readonly rows: readonly ExploreRouteView[]
-  query(filter: CatalogFilter): CatalogQueryResult
+  /**
+   * `weeklyTests` 是**内部参数**（不是用户 filter 的 wire 形状）：`onlyRunnable` 需要周测事实。
+   * 不传 = 本次没有周测标注 ⇒「只看可跑」结果为空（未知不许当通过）。
+   */
+  query(filter: CatalogFilter, weeklyTests?: WeeklyTestMap): CatalogQueryResult
 }
 
 /** 投影结果：顶层形状非法 ⇒ 失败原因（不抛）；坏条目逐条跳过并计入 `invalid`（B20）。 */
@@ -239,14 +261,15 @@ export function projectCatalog(raw: unknown): CatalogProjection {
     total: frozenRows.length,
     categories: Object.freeze([...categorySet].sort(compareText)),
     rows: frozenRows,
-    query: (filter) => queryCatalog(frozenRows, filter),
+    query: (filter, weeklyTests) => queryCatalog(frozenRows, filter, weeklyTests),
   }
   Object.freeze(catalog)
   return { ok: true, catalog, invalid }
 }
 
 /**
- * 三筛 AND 检索（spec §4.3 / D8 / D9）。
+ * 检索（spec §4.3 / D8 / D9）：q / category / namespace 三筛 AND，再叠加 R15 06 的
+ * hideNsfw（默认隐藏）与 onlyRunnable（硬过滤）。
  *
  * `q` 的匹配面是**站点名 OR 路由名 OR 路径模板**：站点名命中 ⇒ 该站全部路由命中，这是刻意的
  *（「搜站点 = 看该站能订什么」）；只看路由名 / 路径会把「搜 github 却只出来名字里带 github 的
@@ -255,8 +278,12 @@ export function projectCatalog(raw: unknown): CatalogProjection {
  * 分类只看**路由级** `categories`：站点级分类只覆盖 206 站，用它筛会让 2734 条有路由分类、
  * 站点没分类的路由整片消失（D7）。一项路由可属多个分类，任一个相等即命中。
  */
-function queryCatalog(rows: readonly ExploreRouteView[], filter: CatalogFilter): CatalogQueryResult {
-  const { q, category: rawCategory, namespace: rawNamespace } = normalizeFilter(filter)
+function queryCatalog(
+  rows: readonly ExploreRouteView[],
+  filter: CatalogFilter,
+  weeklyTests: WeeklyTestMap | undefined,
+): CatalogQueryResult {
+  const { q, category: rawCategory, namespace: rawNamespace, hideNsfw, onlyRunnable } = normalizeFilter(filter)
   const category = rawCategory !== '' ? rawCategory : undefined
   const namespace = rawNamespace !== '' ? rawNamespace : undefined
   const items = rows.filter((row) => {
@@ -268,6 +295,12 @@ function queryCatalog(rows: readonly ExploreRouteView[], filter: CatalogFilter):
         || row.path.toLowerCase().includes(q)
       if (!hit) return false
     }
+    // NSFW 默认隐藏（A8）：在宿主侧过滤，matched / 页大小 / nextCursor 才与过滤结果一致。
+    if (hideNsfw && row.features.nsfw) return false
+    // 只看可跑（A12）：判据只有 weekly-tests.ts 的 isRunnableRoute 一份，不许在这里重写四项条件。
+    if (onlyRunnable && !isRunnableRoute(row, weeklyTests?.get(weeklyTestKey(row.namespace, row.path)))) {
+      return false
+    }
     return true
   })
   return { matched: items.length, items }
@@ -276,13 +309,19 @@ function queryCatalog(rows: readonly ExploreRouteView[], filter: CatalogFilter):
 /**
  * 筛选条件 → 栅栏前缀（`<sha256 base64url>:`）。
  *
- * 为什么栅栏绑在**归一化后**的三元组上：栅栏回答的是「这页是不是同一个查询的下一页」，
+ * 为什么栅栏绑在**归一化后**的条件上：栅栏回答的是「这页是不是同一个查询的下一页」，
  * 而查询只看归一化后的值（`q` 大小写不敏感）。绑原始字符串会把语义相同的查询判成不同，
  * 制造一次假 400（spec §4.3 要拒的是**变了**的条件，不是**写法变了**的条件）。
+ * R15 06 的两个开关与周测代次也一起进哈希：它们同样改变列表内容与边界行。
  */
-function catalogFenceKey(filter: CatalogFilter): string {
-  const { q, category, namespace } = normalizeFilter(filter)
-  return createHash('sha256').update(JSON.stringify([q, category, namespace])).digest('base64url') + ':'
+function catalogFenceKey(filter: CatalogFilter, weeklyTests?: WeeklyTestMap): string {
+  const { q, category, namespace, hideNsfw, onlyRunnable } = normalizeFilter(filter)
+  // 周测代次也进栅栏（R15 06）：排序（可跑优先）与 onlyRunnable 都依赖这份外部事实，
+  // 翻页中途刷新会让边界行附近重复或漏行 —— 旧游标必须诚实地 400，而不是静默给一页错数据。
+  const weeklyGeneration = weeklyTestGenerationOf(weeklyTests)
+  return createHash('sha256')
+    .update(JSON.stringify([q, category, namespace, hideNsfw, onlyRunnable, weeklyGeneration]))
+    .digest('base64url') + ':'
 }
 
 /**
@@ -291,8 +330,12 @@ function catalogFenceKey(filter: CatalogFilter): string {
  * 与 `cursor.ts` 同一手感：分隔符取 `|`，**按第一个 `|` 切**（namespace 是站点 key，实测不含
  * `|` / `/`；path 是模板原文，万一含 `|` 也整段归 path）。
  */
-export function encodeCatalogCursor(filter: CatalogFilter, position: CatalogPosition): string {
-  return catalogFenceKey(filter) + position.namespace + '|' + position.path
+export function encodeCatalogCursor(
+  filter: CatalogFilter,
+  position: CatalogPosition,
+  weeklyTests?: WeeklyTestMap,
+): string {
+  return catalogFenceKey(filter, weeklyTests) + position.namespace + '|' + position.path
 }
 
 /**
@@ -305,8 +348,12 @@ export function encodeCatalogCursor(filter: CatalogFilter, position: CatalogPosi
  * 为什么不把「栅栏不符」退化成「没有游标 ⇒ 从第一页开始」：那样客户端会无限追加重复行，
  * 用户看到的是重复而不是报错（spec §4.3 / B7）。
  */
-export function decodeCatalogCursor(raw: string, filter: CatalogFilter): CatalogPosition | undefined {
-  const fence = catalogFenceKey(filter)
+export function decodeCatalogCursor(
+  raw: string,
+  filter: CatalogFilter,
+  weeklyTests?: WeeklyTestMap,
+): CatalogPosition | undefined {
+  const fence = catalogFenceKey(filter, weeklyTests)
   if (!raw.startsWith(fence)) return undefined
   const body = raw.slice(fence.length)
   const separator = body.indexOf('|')

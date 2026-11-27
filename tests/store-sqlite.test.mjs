@@ -757,7 +757,7 @@ test('viewPreferences 读侧一定给可信形状：坏值逐字段回落，已�
     })
     assert.deepEqual(
       store.viewPreferences(),
-      { navSelection: { kind: 'feed', feedId: 'https://a.example/feed.xml' }, filter: 'all', navVisible: true, showUnread: true, translateTarget: 'zh-CN', reading: DEFAULT_READING_PREFERENCES },
+      { navSelection: { kind: 'feed', feedId: 'https://a.example/feed.xml' }, filter: 'all', navVisible: true, showUnread: true, onlyRunnable: false, translateTarget: 'zh-CN', reading: DEFAULT_READING_PREFERENCES },
       '认不出的 filter / navVisible 必须**逐字段**回落（一项坏不该抹掉另两项的记忆），且不许把 junk 透出去',
     )
 
@@ -769,12 +769,12 @@ test('viewPreferences 读侧一定给可信形状：坏值逐字段回落，已�
     })
     assert.deepEqual(
       store.viewPreferences(),
-      { navSelection: { kind: 'virtual' }, filter: 'unread', navVisible: false, showUnread: true, translateTarget: 'zh-CN', reading: DEFAULT_READING_PREFERENCES },
+      { navSelection: { kind: 'virtual' }, filter: 'unread', navVisible: false, showUnread: true, onlyRunnable: false, translateTarget: 'zh-CN', reading: DEFAULT_READING_PREFERENCES },
       '退订的源必须回落虚拟视图，而不是让面板打不开（另两项记忆仍要保住）',
     )
 
     writeConfigFile(configPath, { version: 1, feeds: {}, viewPreferences: 'not-an-object' })
-    assert.deepEqual(store.viewPreferences(), { navSelection: { kind: 'virtual' }, filter: 'all', navVisible: true, showUnread: true, translateTarget: 'zh-CN', reading: DEFAULT_READING_PREFERENCES }, '垃圾一律给默认值，不抛错')
+    assert.deepEqual(store.viewPreferences(), { navSelection: { kind: 'virtual' }, filter: 'all', navVisible: true, showUnread: true, onlyRunnable: false, translateTarget: 'zh-CN', reading: DEFAULT_READING_PREFERENCES }, '垃圾一律给默认值，不抛错')
   } finally {
     db.close()
     rmSync(dir, { recursive: true, force: true })
@@ -845,7 +845,7 @@ test('saveViewPreferences 写前校验并落 config.json，且不碰订阅映射
     })
     assert.deepEqual(
       saved,
-      { navSelection: { kind: 'feed', feedId: 'https://a.example/feed.xml' }, filter: 'starred', navVisible: false, showUnread: true, translateTarget: 'zh-CN', reading: DEFAULT_READING_PREFERENCES },
+      { navSelection: { kind: 'feed', feedId: 'https://a.example/feed.xml' }, filter: 'starred', navVisible: false, showUnread: true, onlyRunnable: false, translateTarget: 'zh-CN', reading: DEFAULT_READING_PREFERENCES },
       '返回值必须是归一后的形状（调用方直接拿它进 state）',
     )
     const onDisk = JSON.parse(readFileSync(configPath, 'utf8'))

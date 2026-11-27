@@ -3511,4 +3511,23 @@ export const MUTATIONS = [
     ],
     from: "                tests.set(title, status);",
     to: "                tests.set(title, 'passed');" },
+
+  // ── R15 06：探索过滤（NSFW 默认隐藏 + 只看可跑）（2026-11-28）─────────────
+  // 默认隐藏被短路：nsfw 路由照常出现在列表与 matched 里（A8 的默认态直接失效）。
+  // 判据是端点用例里「默认 matched=4、且结果里没有 features.nsfw 的行」。
+  // from 照构建产物 lib/explore-catalog.js 的实际字节写（pitfalls 一、1.4），独立实测 OCCURRENCES=1。
+  { id: 'rsshub-nsfw 不隐藏', file: 'lib/explore-catalog.js',
+    judges: ['explore-endpoints.test.mjs'],
+    judgeTests: ['默认隐藏 NSFW：matched 不含它、列表不出现；开关打开后计数与行同步变化（A8）'],
+    from: 'if (hideNsfw && row.features.nsfw)',
+    to: 'if (false && row.features.nsfw)' },
+  // 两个用户筛选项不进游标栅栏：换「显示 NSFW / 只看可跑」后旧游标仍被当成同一次查询，
+  // 用户会在第 2 页看到与第一页不同的筛选口径（重复 / 漏行）。判据是栅栏用例里
+  // 「只改开关、游标不变 ⇒ 必须 bad-request」。
+  // from 照构建产物 lib/explore-catalog.js 的实际字节写（pitfalls 一、1.4），独立实测 OCCURRENCES=1。
+  { id: 'rsshub-过滤不进栅栏', file: 'lib/explore-catalog.js',
+    judges: ['explore-endpoints.test.mjs'],
+    judgeTests: ['栅栏：hideNsfw / onlyRunnable 变化、周测换代都回 bad-request；同条件翻页正常'],
+    from: '.update(JSON.stringify([q, category, namespace, hideNsfw, onlyRunnable, weeklyGeneration]))',
+    to: '.update(JSON.stringify([q, category, namespace, weeklyGeneration]))' },
 ]
