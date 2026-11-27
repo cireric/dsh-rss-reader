@@ -104,18 +104,34 @@ function parametersOf(raw: unknown): Record<string, string> {
 }
 
 /**
- * 事实标记：只保留四个会被展示的布尔（spec §4.4），非布尔一律 false。
+ * `requireConfig` 是三态，不是布尔（spec §4.2.1）。
  *
- * 不原样透传：实例的 `features` 有七个键，且未来可能改形状；把 `'yes'` / `1` 当成真值会让
- * 界面显示一个实例从未声明的能力（「不伪造事实」也适用于能力标记）。
+ * 实例回包里的真实类型是 `false | ConfigItem[]`（spec §1.3 实测 180 条非空）；旧代码按
+ * `=== true` 读，数组永远不等于 true ⇒「需配置」徽标从未显示过。数组里只要有一项的
+ * `optional !== true`（显式 `optional: false` 或整个键缺失）就是必填，全为可选项才是可选；
+ * `false` / 空数组 / 非数组都表示实例没有声明配置项 ⇒ `none`。历史布尔 `true` 也归 `none`：
+ * 它不是数组，认下来就是替实例编造一个配置事实。
+ */
+function requireConfigStateOf(raw: unknown): ExploreRouteView['features']['requireConfig'] {
+  if (!Array.isArray(raw) || raw.length === 0) return 'none'
+  return raw.some((item) => !(isRecord(item) && item['optional'] === true)) ? 'required' : 'optional'
+}
+
+/**
+ * 事实标记：`requireConfig` 压成三态，其余保留会被展示的布尔（spec §4.4），非布尔一律 false。
+ *
+ * 不原样透传：实例的 `features` 键数与形状都会漂（`nsfw` 还实测到一条拼成 `nfsw`）；把
+ * `'yes'` / `1` 当成真值会让界面显示一个实例从未声明的能力，「不伪造事实」也适用于能力标记。
  */
 function featuresOf(raw: unknown): ExploreRouteView['features'] {
   const record = isRecord(raw) ? raw : {}
   return {
-    requireConfig: record['requireConfig'] === true,
+    requireConfig: requireConfigStateOf(record['requireConfig']),
     requirePuppeteer: record['requirePuppeteer'] === true,
     antiCrawler: record['antiCrawler'] === true,
     supportPodcast: record['supportPodcast'] === true,
+    // 只认 `nsfw`：拼写漂移 `nfsw` 不猜、不映射 —— 认它就是在替实例改数据。
+    nsfw: record['nsfw'] === true,
   }
 }
 
