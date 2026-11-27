@@ -42,9 +42,9 @@
 | 2008-末 | 又一次大改版（负责人 Jenna Bilotta）：更干净的视觉、可折叠导航、"Friends" 导航、可隐藏未读计数、feed bundles | 【C】 |
 | 2010-03 | 发布 Google Reader Play（幻灯片式浏览，**无需 Google 账号**） | 【C】 |
 | 2010-06-01 | **下线 Gears 离线访问**；停止支持旧浏览器 | 【A】博客 *Spring Cleaning* / *Folder and tag renaming* |
-| 2010-09-22 | 关闭 "track changes"（无 feed 的网页变更跟踪）功能 | 【A】（博客标题级） |
+| 2010-09-30 | 关闭 "track changes"（无 feed 的网页变更跟踪）功能（博文 09-22 宣告，09-30 生效） | 【A】博客 *Turning off the track changes feature* |
 | 2010-12 | 发布 Android 版 Google Reader 应用 | 【C】 |
-| 2011-10-31 | 新版设计上线；**下线 friending / following / shared link blogs**，分享迁至 Google+ | 【A】博客 *New in Reader: a fresh design, and Google+ sharing* |
+| 2011-10-31 | 新版设计上线；**下线 friending / following / shared link blogs / shared items / 评论，Like、Share、Share with Note 被 +1 与 Google+ 分享替换** | 【A】博客 *New in Reader: a fresh design, and Google+ sharing* |
 | 2013-03-13 | 宣布关停（官方博客 *Powering Down Google Reader*） | 【A】 |
 | 2013-03 | 移除 +1 按钮与点赞计数 | 【C】 |
 | 2013-07-01 | 服务关停；建议用 Google Takeout 导出数据 | 【A】 |
@@ -97,12 +97,13 @@ ID 内部是 64 位数字，对外有两种表示：
 | 参数 | 语义 | 取值 / 上限 |
 |---|---|---|
 | `n` | 返回条数 | 取 ID 时上限 10000；取内容时上限 1000、默认 20 |
-| `r` | 排序方式 | `n`=最新优先（倒序）、`o`=最旧优先、`a`=**magic**（个性化排序）、`c`=评论最新优先 |
+| `r` | 排序方式 | `n`=最新优先（倒序）、`o`=最旧优先、`c`=评论最新优先；**`a`=magic（个性化排序）只在取 ID 接口有，取内容接口没有** |
 | `xt` | 排除标签 | 最常用于"隐藏已读" |
 | `nt` / `ot` | 时间窗（秒级时间戳） | — |
 | `c` | 分页续传令牌 | 响应里的 continuation 原样回填 |
-| `output` | 输出格式 | `json` / `xml`（内容接口另有 `atom`、`atom-hifi`） |
-| `likes` / `comments` / `sharers` | 是否附带社交数据 | 默认 true |
+| `output` | 输出格式 | `json` / `xml`（内容接口另有 `atom`、`atom-hifi`——**【D】，本次取到的 10 篇 wiki 未见此值**） |
+| `likes` / `comments` | 是否附带社交数据 | 默认 true |
+| `sharers` | 编码的 sharer 列表（用于取评论，来自 ApiFriendList） | 无默认，非布尔开关 |
 | `trans` | 是否把响应翻译成用户显示语言 | 默认 false |
 | `mediaRss` | 是否保留原 feed 的 MediaRSS 元素 | 默认 false |
 | `client` / `hl` | 调用方标识 / 语言 | — |
@@ -159,9 +160,9 @@ ID 内部是 64 位数字，对外有两种表示：
 | 动作 | 快捷键 | 说明 |
 |---|---|---|
 | Star（星标） | `s` | 切换星标状态 |
-| Like（喜欢） | `l` | 切换喜欢状态；用于个性化排序信号 |
-| Share（分享） | `shift-s` | 切换分享 |
-| Share with note | `shift-d` | 分享并附注 |
+| Like（喜欢） | `l` | 切换喜欢状态；用于个性化排序信号。**2011-10-31 被 +1 替换，不进验收（见 §3.10）** |
+| Share（分享） | `shift-s` | 切换分享。**2011-10-31 被 Google+ 分享替换，不进验收** |
+| Share with note | `shift-d` | 分享并附注。**2011-10-31 被替换，不进验收** |
 | Tag（打标签） | `t` | 打开标签输入框；也可点条目末尾的 "Add tags" / "Edit tags" 链接 |
 | Mark read/unread | `m` | 切换已读状态 |
 | Mark all as read | `shift-a` | 标记当前视图全部为已读 |
@@ -275,12 +276,12 @@ Trends 页（2007-01 上线，入口在 Home 页链接）包含：
 | 2009-08 | 分享条目支持 **PubSubHubbub**，加速分发 |
 | 2010-05 | 简化评论权限：**能看见就能评论**；公开分享者需在"继续公开并允许任何人评论"与"切换为受保护分享"间二选一 |
 | 2011-01 | 评论控制增强 |
-| 2011-10 | **下线 friending、following、Reader 内的分享链接博客**；分享迁往 Google+（+1 按钮） |
-| 2013-03 | 随关停公告移除 +1 按钮与点赞计数 |
+| 2011-10-31 | **下线 friending、following、Reader 内的分享链接博客、shared items 与评论**；Like / Share / Share with Note **被 +1 与 Google+ 分享替换**（博文原文："+1 …replacing 'Like'"、"replacing 'Share' and 'Share with Note'"） |
+| 2013-03 | 随关停公告移除 +1 按钮与点赞计数【C】 |
 
-**注（官方材料矛盾处）**：2012-10-16 版帮助页仍列出 `l`（like）、`shift-s`（share）、`g` `f`（好友分享）等社交快捷键，而官方博客 2011-10-20 已宣布下线相关社交功能。无法判定该帮助页是滞后未更新、还是快捷键在 2012 年仍在。
+**注（官方材料矛盾处）**：2012-10-16 版帮助页仍列出 `l`（like）、`shift-s`（share）、`shift-d`（share with note）、`g` `f`（好友分享）等社交快捷键，而官方博客 2011-10-31 已明确这些功能"starting today we'll be turning off"。**可判定为帮助页滞后未更新**——博文是"今日起关闭"的生效宣告（【A】正文），不是预告。
 
-**复刻取舍**：社交功能已在 §4 判定为「不做」，因此 §3.4 与 §3.8 中 like / share / 好友相关的快捷键条目**不应进入验收清单**——它们在 2013 年关停时刻是否仍然可用，史料无法确认。
+**复刻取舍**：社交功能已在 §4 判定为「不做」，因此 §3.4 与 §3.8 中 like / share / 好友相关的快捷键条目**不应进入验收清单**——官方已确认它们在 2011-10-31 被替换或关闭，2012-10 帮助页只是滞后。
 
 ### 3.11 邮件与外部出口
 
@@ -301,7 +302,7 @@ Trends 页（2007-01 上线，入口在 Home 页链接）包含：
   - 2009-07：移动端可定制；2009-05 起移动端可**发 notes**。
   - 2010-01：移动端再次更新。
   - 2010-12：Android 应用；2011-02 更新。
-  - 移动版启动页可选显示订阅列表（"Feeds" start page）。
+  - 移动版启动页可选显示订阅列表（"Feeds" start page，2009-08）。
 
 ### 3.13 平台集成
 
@@ -317,7 +318,7 @@ Trends 页（2007-01 上线，入口在 Home 页链接）包含：
 官方帮助中心为**内容发布方**单列一章，说明 Reader 不只是读者工具，还有 feed 供给侧契约：
 
 - *Feed 'best practices'*（69997）、*Technical Implementation of Feeds*（69998）、*Using feed 'auto-discovery'*（69999）、*Using 'Add to Google' buttons*（70000）、*Subscribers to my feed*（70001）、*Formatting for Google Reader*（78316）。【A-标题级】
-- **订阅者统计**：feed 的订阅人数会公开出现在搜索结果等处（官方 2007-10 专门澄清过这个数字的含义）。
+- **订阅者统计**：Google 订阅数（含 Reader、iGoogle、Orkut）出现在 Reader 的 **feed 搜索结果**与 Webmaster Tools，并由 crawler 上报给发布者（官方 2007-10 专门澄清过这个数字的含义）。
 
 ### 3.15 无障碍与多语言
 
@@ -349,8 +350,9 @@ Trends 页（2007-01 上线，入口在 Home 页链接）包含：
 |---|---|---|
 | Gears 离线访问 / 2000 条离线缓存 | 2010-06 移除 | 用得少、维护成本高、被 HTML5 取代 |
 | track changes（无 feed 网站的变更跟踪） | 2010-09 关闭 | 【A-标题级】 |
-| friending / following / 好友分享流 / 分享链接博客 | 2011-10 移除 | 迁往 Google+ |
-| Like（喜欢）与 +1 按钮、点赞计数 | 2013-03 移除 | 随关停 |
+| Like（喜欢）/ Share / Share with Note / 好友分享流 / 评论 | 2011-10-31 移除 | 被 +1 与 Google+ 分享**替换**（博文原文："+1 …replacing 'Like'"、"replacing 'Share' and 'Share with Note'"） |
+| friending / following / shared link blogs | 2011-10-31 移除 | 迁往 Google+ |
+| +1 按钮与点赞计数 | 2013-03 移除 | 随关停【C】 |
 | Google Buzz 集成 | 随 Buzz 死亡 | — |
 | Wii / iGoogle / Desktop gadget 等集成 | 随宿主平台死亡 | — |
 
@@ -365,7 +367,7 @@ Trends 页（2007-01 上线，入口在 Home 页链接）包含：
 | 3 | **"保持未读"是独立状态**，不是"未读"的同义词（`kept-unread` vs 无 `read`） | 【B】StreamId |
 | 4 | **文件夹 == 标签**（同一命名空间），且**一个订阅可属于多个文件夹** | 【B】StreamId / ApiSubscriptionEdit |
 | 5 | 标签名有**保留字符集合**，写入前必须校验或转义 | 【B】StreamId |
-| 6 | 排序至少有四种：最新 / 最旧 / **magic（个性化）** / 评论最新；magic 的信号是"历史阅读 + like + star + 全局信号" | 【A】164681 +【B】ApiStreamContents |
+| 6 | 排序至少有四种：最新 / 最旧 / **magic（个性化）** / 评论最新；magic 的信号是"历史阅读 + like + star + 全局信号"；**`r=a` 只在取 ID 接口有效，取内容接口不收** | 【A】164681 +【B】ApiStreamItemsIds / ApiStreamContents |
 | 7 | **Mark all as read 支持时间阈值**（"只标早于 X 的"），不是只有全量一种 | 【A】2009-08-12 |
 | 8 | **未读计数可隐藏**；计数刷新有独立快捷键 `r` | 【A】69973 +【C】 |
 | 9 | 改状态请求需要**限时的 ActionToken（30 分钟）**，失效表现为 401 + 专用响应头 | 【B】ActionToken |
@@ -433,8 +435,8 @@ Additional       Getting Started Guide / Google Reader Product Forum / Video tut
 
 官方博客共 **108 篇**（2005-10-21 ~ 2013-07-02）。下表列出本文引用的关键篇目，**并标出每篇的实际取证深度**：
 
-- **正文** = 已取到并逐段核对过博文正文（12 篇）
-- **标题级** = 仅从官方 feed 索引确认了标题/日期/摘要，**正文未取到**（9 篇，其论断不得超出标题所示范围）
+- **正文** = 已取到并逐段核对过博文正文（14 篇）
+- **标题级** = 仅从官方 feed 索引确认了标题/日期/摘要，**正文未取到**（8 篇，其论断不得超出标题所示范围）
 
 | 日期 | 标题 | 取证深度 | URL |
 |---|---|---|---|
@@ -455,8 +457,9 @@ Additional       Getting Started Guide / Google Reader Product Forum / Video tut
 | 2010-05-24 | Spring Cleaning（评论权限 / 停止 Gears） | …/2010/05/spring-cleaning-comments-offline-and.html | 正文 |
 | 2010-06-01 | Folder and tag renaming | …/2010/06/folder-and-tag-renaming.html | 正文 |
 | 2010-08-26 | Fullscreen and more!（全屏 / clicked trends / 终身计数） | …/2010/08/fullscreen-and-more.html | 正文 |
+| 2010-09-22 | Turning off the track changes feature（09-30 生效） | …/2010/09/turning-off-track-changes-feature.html | 正文 |
 | 2011-10-20 | Upcoming changes to Reader（社交下线预告） | …/2011/10/upcoming-changes-to-reader-new-look-new.html | 正文 |
-| 2011-10-31 | New in Reader: a fresh design, and Google+ sharing | …/2011/10/new-in-reader-fresh-design-and-google.html | 标题级 |
+| 2011-10-31 | New in Reader: a fresh design, and Google+ sharing（社交功能当日关闭；+1 替换 Like/Share） | …/2011/10/new-in-reader-fresh-design-and-google.html | 正文 |
 | 2013-03-13 | **Powering Down Google Reader**（关停公告） | …/2013/03/powering-down-google-reader.html | 正文 |
 | 2013-07-02 | A final farewell | …/2013/07/a-final-farewell.html | 标题级 |
 
