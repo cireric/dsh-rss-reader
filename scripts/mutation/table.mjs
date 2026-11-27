@@ -3481,4 +3481,19 @@ export const MUTATIONS = [
     judgeTests: ['projectCatalog：requireConfig 三态推导（false / 空数组 / 缺字段 ⇒ none，全可选 ⇒ optional，含必填 ⇒ required）'],
     from: "        requireConfig: requireConfigStateOf(record['requireConfig']),",
     to: "        requireConfig: record['requireConfig'] === true," },
+
+  // ── R15 05：周测数据与可跑判定（2026-11-27）─────────────────────────────
+  // 把周测的 failed 也写成 passed：1,271 条失败路由（实测）全部冒充「周测通过」，
+  // 「可跑优先」排序与票 06 的「只看可跑」会把明明跑不通的路由排到最前面 —— 用户按排序
+  // 订下去，失败要等订阅后才暴露。判据是解析用例里失败样本必须仍是 failed，以及
+  // 端点测试里失败样本不许前移。
+  // from 照构建产物 lib/weekly-tests.js 的实际字节写（pitfalls 一、1.4），独立实测 OCCURRENCES=1。
+  { id: 'rsshub-周测失败当通过', file: 'lib/weekly-tests.js',
+    judges: ['weekly-tests.test.mjs', 'explore-endpoints.test.mjs'],
+    judgeTests: [
+      '解析：只收 "/" 开头的路由标题，passed / failed 照实映射，非路由标题不进表',
+      '默认「可跑优先」：可跑路由整体前移、组内保序，三页累计不重不漏（A12 排序侧）',
+    ],
+    from: "                tests.set(title, status);",
+    to: "                tests.set(title, 'passed');" },
 ]
