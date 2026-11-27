@@ -231,6 +231,20 @@ export const discoverFeedsPayload = z.object({ url: z.string().trim().min(1) })
 export const testRsshubPayload = z.object({ base: z.string() })
 
 /**
+ * `saveRsshubSettings`（R15 01）：整份替换实例池。
+ *
+ * 上限**不在这里判**（zod 的 `.max(5)` 会把「最多 5 个」翻译成一句通用的 bad-request），
+ * 而由 handler / 控制器给出准确文案「最多 5 个实例」。逐条地址合法性也归 handler 的
+ * `parseRsshubBase`（与保存 / 读取同一份判据），坏项逐条丢弃并在回包里告警。
+ */
+export const saveRsshubSettingsPayload = z.object({
+  instances: z.array(z.string()),
+  // 06 / 07 票的形状一次定好：这两个字段现在可以存，行为留给后续票。
+  hiddenNamespaces: z.array(z.string()).optional(),
+  hideNsfw: z.boolean().optional(),
+})
+
+/**
  * `backfillHistory`（R9 02）：feedId + 归档页地址 + 可选篇数。
  *
  * 归档页地址只接受 http(s)：其它协议在抓取层只会得到「不支持的协议」，那属于**坏入参**而不是

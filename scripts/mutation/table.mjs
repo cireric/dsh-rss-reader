@@ -3103,6 +3103,21 @@ export const MUTATIONS = [
     from: '    if (url.pathname !== \'/\' || url.search !== \'\' || url.hash !== \'\')\n        return undefined;',
     to: '' },
 
+  // ── R15 01：实例池配置（2026-11-27）─────────────────────────────────────
+  // 空数组被当成「没配过」而回落旧 rsshubBase：用户点了「清空实例池」，重启后老地址复活，
+  // 「空池 = 零请求」的隐私边界失效。A5 的显式空数组用例会翻红。
+  { id: 'rsshub-空池回落旧值', file: 'lib/rsshub-settings.js',
+    judges: ['rsshub-settings.test.mjs'],
+    judgeTests: ['迁移：显式空数组 = 用户主动关闭，不回落旧 rsshubBase（A5）'],
+    from: '        if (file.rsshub !== undefined) {',
+    to: '        if (file.rsshub !== undefined && file.rsshub.instances.length > 0) {' },
+  // 上限放宽一条：第 6 条会被存进 config.json，spec §4.1.1 的 0–5 契约失效。A6 会翻红。
+  { id: 'rsshub-超 5 条照存', file: 'lib/rsshub-settings.js',
+    judges: ['rsshub-settings.test.mjs'],
+    judgeTests: ['保存边界：0 / 5 条成功，第 6 条拒绝并提示「最多 5 个」（A6）'],
+    from: '            if (patch.instances.length > RSSHUB_INSTANCE_MAX) {',
+    to: '            if (patch.instances.length > RSSHUB_INSTANCE_MAX + 1) {' },
+
   // ── R8a 03：Radar 接进发现流程（2026-11-23）──────────────────────────────
   // 合并顺序反过来：Radar 候选（未验证）排到页面声明前面。A1 的顺序断言会翻红；
   // 去重用例也会跟着红 —— 同一个地址变成 Radar 那条胜出（页面优先被逆转）。

@@ -54,7 +54,6 @@ import { ConfirmDialog } from './confirm-dialog.js'
 // 两处各造一个 `new Set()` 会得到值相等但引用不同的两份「空组覆盖」，而 React 的相等判断与
 // `foldOf` 的快照语义都靠**同一个引用**才不多跑一次渲染。理由见那边的常量注释。
 import { EMPTY_IMAGE_GROUPS } from '../image-fold.js'
-import { parseTunableValue } from '../settings-schema.js'
 import { hasBodyText, httpUrlOrEmpty, ROUTE_PATH, type ArticlePayload, type CleanupResult, type FeedView, type ItemView, type OpmlExportResult, type OpmlImportResult, type Overview, type RpcResult } from '../shared.js'
 import { recencyOf } from '../cursor.js'
 import { paragraphsOf } from '../html-text.js'
@@ -169,6 +168,17 @@ const STYLE = `
 /* R8a：实例地址是整条 URL，数值行的 6.5em 只够显示到 https://rsshub。
    仍允许在窄面板里收缩（max-width），否则整行会横向溢出。 */
 .dsh-rss-settings-input--url { width:20em; max-width:100%; }
+/* R15 01：实例池列表。每行 = 地址 + 位次 + 四个动作；窄面板照样换行，不横向溢出。 */
+.dsh-rss-rsshub-pool { list-style:none; margin:0; padding:0; flex-basis:100%;
+  display:flex; flex-direction:column; gap:2px; }
+.dsh-rss-rsshub-instance { display:flex; align-items:baseline; flex-wrap:wrap; gap:4px 8px;
+  padding:4px 0; border-top:1px dashed var(--rss-line); }
+.dsh-rss-rsshub-instance-url { font-size:13px; font-weight:600; overflow-wrap:anywhere; }
+.dsh-rss-rsshub-rank { flex-basis:auto; }
+/* 推荐卡片只在空池出现：它是起点建议，不是产品默认值。 */
+.dsh-rss-rsshub-recommend { flex-basis:100%; margin-top:8px; padding:8px 10px;
+  border:1px solid var(--rss-line); border-radius:6px; }
+.dsh-rss-rsshub-recommend-list { margin:4px 0; padding-left:18px; font-size:12px; }
 /* R7：模型下拉的选项是模型 id（最长见过 31 字符），数值行的 6.5em 只显示得出「deepsee」。
    用内容宽度而不是再写一个 em 常量：选项变长时不会又截断；窄面板仍靠 max-width 收缩。 */
 .dsh-rss-settings-input--select { width:auto; min-width:12em; max-width:100%; }
@@ -639,11 +649,13 @@ export function createReader(store: ReaderStore): () => ReactNode {
     }, [state.loading])
 
     // 打开面板即刷新（主进程侧有最小间隔节流），并把焦点收到列表上，键盘立即可用。
-    // R8b 04：设置快照原先只在打开设置页时才取；探索的两处入口要按 `effective.rsshubBase`
-    // 判可见性，所以面板挂载时补一次 —— 没进过设置页也必须能正确决定入口显不显示。
+    // R8b 04 / R15 01：设置快照与实例池原先只在打开设置页时才取；探索的两处入口要按
+    // 生效实例池判可见性，所以面板挂载时补一次 —— 没进过设置页也必须能正确决定入口显不显示。
     useEffect(() => {
       void store.load('refresh')
       void store.loadSettings()
+      // R15 01：探索入口的可见性看实例池（空池 = 功能关闭），面板挂载时一并取。
+      void store.loadRsshubSettings()
       // R7 02：翻译可用性在面板加载时探一次（宿主侧 30s 缓存；saveSettings 后失效）。
       void store.loadTranslateInfo()
     }, [])
@@ -885,16 +897,14 @@ export function createReader(store: ReaderStore): () => ReactNode {
       ? activeArticle
       : state.items.find((item) => item.id === state.selectedId)
     /**
-     * 探索入口的可见性（R8b 04 / D11）：两处入口共用这一份判据 —— 同一份 settings 快照、
-     * 同一个「解析得出且非空」检查。
+     * 探索入口的可见性（R8b 04 / D11 → R15 01 实例池）：两处入口共用这一份判据 ——
+     * 宿主下发的生效实例池是否非空。
      *
-     * `parseTunableValue('rsshubBase', …)` 就是宿主 `exploreBaseOf` 调的那份地址判据
-     *（`parseRsshubBase`），**不是**客户端第二套「实例可用」规则；这里只是把同一份解析结果
-     * 拿来判空。坏地址（如 `ftp://x`）与未配置在宿主同归 `not-configured`，入口也必须同样
-     * 不渲染 —— 否则点进去必然拿到一句「地址不合法」，把人送进死胡同。
+     * 地址合法性已经在宿主侧由 `parseRsshubBase` 判过（坏项在 `config.json` 读取时就被丢弃）；
+     * 客户端不再解析第二遍，也不看遗留的 `settings.rsshubBase` —— 空池就是功能关闭，
+     * 即使旧键还留着也不能让入口诈尸。
      */
-    const exploreBase = parseTunableValue('rsshubBase', state.settings?.effective.rsshubBase)
-    const exploreAvailable = exploreBase !== undefined && exploreBase !== ''
+    const exploreAvailable = (state.rsshubSettings?.instances.length ?? 0) > 0
 
     return (
       <div ref={setRoot} tabIndex={0} {...{ [ROOT_ATTR]: '' }}
@@ -1191,6 +1201,8 @@ export function createReader(store: ReaderStore): () => ReactNode {
           <SettingsView
             settings={state.settings}
             error={state.settingsError}
+            rsshub={state.rsshubSettings}
+            rsshubError={state.rsshubSettingsError}
             warningDismissed={state.settingsWarningDismissed}
             reading={state.reading}
             onReading={(patch) => store.setReading(patch)}
@@ -1203,6 +1215,7 @@ export function createReader(store: ReaderStore): () => ReactNode {
             onSave={(key, value) => store.saveSetting(key, value)}
             onReset={() => store.resetSettings()}
             onTestRsshub={(base) => store.testRsshub(base)}
+            onSaveRsshub={(instances) => store.saveRsshubInstances(instances)}
             onCleanupPreview={() => store.cleanupPreview()}
             onCleanup={() => store.cleanup()}
             onManageFeeds={() => store.toggleFeeds()}

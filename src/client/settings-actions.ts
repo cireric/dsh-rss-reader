@@ -5,7 +5,7 @@
  * 设置页的 state（快照、取数错误、告警是否已关）不属于列表 / 搜索 / 订阅 / 标签任何一块。
  * 放进任一既有域都会让那块同时管两种数据来源（端点的 settings 与条目数据）。
  */
-import type { RsshubTestResult, SettingsSnapshot } from '../shared.js'
+import type { RsshubSettingsSnapshot, RsshubTestResult, SettingsSnapshot } from '../shared.js'
 import { changedNumberTunableKeys, type TunableKey } from '../settings-schema.js'
 import type { ReaderState, ReaderStoreDeps } from './store.js'
 
@@ -18,6 +18,14 @@ import type { ReaderState, ReaderStoreDeps } from './store.js'
 export type SaveSettingResult =
   | { readonly ok: true; readonly settings: SettingsSnapshot }
   | { readonly ok: false; readonly message: string; readonly current: string | number | boolean | undefined }
+
+/**
+ * 实例池保存的结果（R15 01）。失败只带可展示原因：池子没有「当前生效值仍是多少」的单值可回，
+ * 界面保留用户刚编的列表、红字说清楚为什么没存下即可。
+ */
+export type SaveRsshubSettingsResult =
+  | { readonly ok: true; readonly rsshub: RsshubSettingsSnapshot }
+  | { readonly ok: false; readonly message: string }
 
 /**
  * 翻译路由的一次性 patch（R7 02）：provider / model / effort 必须**一起**提交。
@@ -115,6 +123,63 @@ export function createSettingsActions(host: SettingsActionHost) {
     return run
   }
 
+  /**
+   * RSSHub 实例池的取数（R15 01）：与 settings 分开取 —— 它住在 config.json，不是 settings.json
+   * 的标量覆盖层。失败只写分区级错误（`rsshubSettingsError`），不把整页设置打成错误。
+   */
+  let rsshubInFlight: Promise<void> | undefined
+
+  const loadRsshubSettings = async (): Promise<void> => {
+    if (rsshubInFlight !== undefined) return rsshubInFlight
+    rsshubInFlight = (async () => {
+      try {
+        const result = await rpc<{ rsshub?: RsshubSettingsSnapshot }>('rsshubSettings')
+        const snapshot = result?.rsshub
+        // 回包缺字段是宿主契约被破坏，不能当成「池子为空」画到页面上（那会静默关闭 RSSHub）。
+        if (snapshot === undefined) throw new Error('rsshubSettings 回包缺少 rsshub 字段')
+        set({ rsshubSettings: snapshot, rsshubSettingsError: undefined })
+      } catch (failure) {
+        const message = failure instanceof Error ? failure.message : String(failure)
+        set({ rsshubSettingsError: message })
+        log('warn', '[rss-reader] 读取 RSSHub 实例池失败', failure)
+      } finally {
+        rsshubInFlight = undefined
+      }
+    })()
+    return rsshubInFlight
+  }
+
+  /**
+   * 实例池保存（R15 01）：与设置保存同一条纪律 —— **串行**且只认最新一次回包。
+   * 增 / 删 / 上下移各自提交整份数组；连点时晚提交的顺序才是权威顺序。
+   */
+  let rsshubChain: Promise<unknown> = Promise.resolve()
+  let latestRsshubSave = 0
+
+  const saveRsshubInstances = (instances: readonly string[]): Promise<SaveRsshubSettingsResult> => {
+    const ticket = ++latestRsshubSave
+    const run = rsshubChain.then(async (): Promise<SaveRsshubSettingsResult> => {
+      try {
+        const result = await rpc<{ rsshub?: RsshubSettingsSnapshot }>('saveRsshubSettings', {
+          instances: [...instances],
+        })
+        const snapshot = result?.rsshub
+        if (snapshot === undefined) throw new Error('saveRsshubSettings 回包缺少 rsshub 字段')
+        if (ticket === latestRsshubSave) set({ rsshubSettings: snapshot, rsshubSettingsError: undefined })
+        return { ok: true, rsshub: snapshot }
+      } catch (failure) {
+        const message = failure instanceof Error ? failure.message : String(failure)
+        // 保存失败由分区组件就地红字展示（它知道是哪次动作失败）；`rsshubSettingsError`
+        // 只表示「读不出池子」，不能把保存失败写成「读取失败」。
+        log('warn', '[rss-reader] 保存 RSSHub 实例池失败', failure)
+        return { ok: false, message }
+      }
+    })
+    // 链本身永不 reject：一次失败不该让后续保存永远排在一条断掉的 Promise 后面。
+    rsshubChain = run.then(() => undefined, () => undefined)
+    return run
+  }
+
   const saveSetting = (key: TunableKey, value: string | number | boolean): Promise<SaveSettingResult> =>
     // 计算键的类型在运行时就是该键本身；宿主端点会用同一份 parseTunableValue 再验一次。
     runSave({ patch: { [key]: value } }, () => get().settings?.effective[key])
@@ -187,6 +252,8 @@ export function createSettingsActions(host: SettingsActionHost) {
   const openSettings = (): void => {
     set({ view: 'settings' })
     void loadSettings()
+    // 池子与 settings 是两处数据：进设置页时一并取，别让 RSSHub 分区先闪一屏空值。
+    void loadRsshubSettings()
   }
 
   const closeSettings = (): void => { set({ view: 'list' }) }
@@ -201,7 +268,7 @@ export function createSettingsActions(host: SettingsActionHost) {
   const dismissSettingsWarning = (): void => { set({ settingsWarningDismissed: true }) }
 
   return {
-    loadSettings, openSettings, closeSettings, toggleSettings, dismissSettingsWarning,
-    saveSetting, saveTranslateRoute, resetSettings, testRsshub,
+    loadSettings, loadRsshubSettings, openSettings, closeSettings, toggleSettings, dismissSettingsWarning,
+    saveSetting, saveRsshubInstances, saveTranslateRoute, resetSettings, testRsshub,
   }
 }

@@ -18,6 +18,28 @@ import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { feedRecordSchema, type FeedRecord } from '../domain.js'
 import { mergeFolderDirectory } from '../folders.js'
+import { parseRsshubBase } from '../settings-schema.js'
+
+/** 实例池上限（spec §4.1.1）：>5 条拒绝保存。读取侧只告警、不替用户删数据。 */
+export const RSSHUB_INSTANCE_MAX = 5
+
+/**
+ * RSSHub 的持久化策略（R15 01，spec §4.1.1 / §5.1）。
+ *
+ * 三个字段一次定好形状：`instances` 是实例池（顺序即优先级），`hiddenNamespaces` / `hideNsfw`
+ * 是 06 / 07 票的筛选偏好 —— 它们现在只是被读回、被保存，行为留给后续票，避免再改一次配置形状。
+ *
+ * 为什么放在 `config.json` 而不是 `settings.json`：设置层只支持标量键（`src/settings-schema.ts`），
+ * 数组会迫使新增整套 array tunable；`config.json` 本来就是用户列表（`folders` / `feedOrder`）的家。
+ */
+export interface ReaderRsshubConfig {
+  /** 0–5 条实例源站（已归一成 `URL.origin`）。0 条 = 用户主动关闭 RSSHub。 */
+  instances: string[]
+  /** 探索视图里被用户隐藏的 namespace（06 / 07 票）。 */
+  hiddenNamespaces: string[]
+  /** 是否默认隐藏 NSFW 路由（06 票）。 */
+  hideNsfw: boolean
+}
 
 /** config.json 的完整形状。版本是**硬相等**的契约（见 readConfigFile 的拒绝逻辑）。 */
 export interface ReaderConfigFile {
@@ -39,6 +61,12 @@ export interface ReaderConfigFile {
    * 空数组则是用户/写入者明确给出的合法值。未列出的源由 src/feed-order.ts 按 `feeds` 键序追加。
    */
   feedOrder?: string[]
+  /**
+   * RSSHub 实例池与筛选偏好（R15 01）。**缺省 ≠ 空池**：
+   * 缺省 = 从没配过，运行时回落旧的 `settings.json` `rsshubBase`（单元素池）；
+   * `instances: []` = 用户主动清空，功能关闭，**绝不回落**旧值。
+   */
+  rsshub?: ReaderRsshubConfig
   /** 视图偏好（两列布局的单例槽）。形状归一化在 src/preferences.ts 的 sanitizeViewPreferences 做。 */
   viewPreferences?: unknown
   /** 文件格式版本。只认 1。 */
@@ -80,9 +108,11 @@ export function configFileMissing(path: string): boolean {
  * - 文件**存在但读不进来**（截断的 JSON / 形状不对 / 版本不认 / 记录不合 `FeedRecord`）⇒
  *   **抛错**，消息带路径。绝不返回空订阅：那是「静默清空用户面板」的同义词。
  *
+ * @param warn 可选的告警出口（RSSHub 坏实例逐条丢弃时用）。设置页把它接到插件日志；
+ *             其它调用方不传 = 静默丢弃，但**绝不**因此让整份配置失败。
  * @throws 解析或校验失败时。
  */
-export function readConfigFile(path: string): ReaderConfigFile {
+export function readConfigFile(path: string, warn?: (line: string) => void): ReaderConfigFile {
   let text: string
   try {
     text = readFileSync(path, 'utf8')
@@ -103,11 +133,11 @@ export function readConfigFile(path: string): ReaderConfigFile {
       { cause: error },
     )
   }
-  return validateConfig(parsed, path)
+  return validateConfig(parsed, path, warn)
 }
 
 /** 校验读进来的值；不合法一律抛错并带路径。读写共用同一套判据，所以「读得进必写得回」。 */
-function validateConfig(parsed: unknown, path: string): ReaderConfigFile {
+function validateConfig(parsed: unknown, path: string, warn?: (line: string) => void): ReaderConfigFile {
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new Error(`订阅文件 ${path} 的顶层不是对象（读到 ${describe(parsed)}）`)
   }
@@ -181,6 +211,9 @@ function validateConfig(parsed: unknown, path: string): ReaderConfigFile {
     }
     feedOrder = [...feedOrderRaw]
   }
+  // RSSHub 实例池：坏项逐条丢弃 + 告警，**不抛错**。它和 folders / feedOrder 的语义刻意不同 ——
+  // 一个手滑的实例地址不该让整份订阅配置打不开；那些是结构（目录 / 顺序），坏掉就无从解释。
+  const rsshub = validateRsshub(record.rsshub, path, warn)
   return {
     version: CURRENT_CONFIG_VERSION,
     feeds: valid,
@@ -189,7 +222,77 @@ function validateConfig(parsed: unknown, path: string): ReaderConfigFile {
     // 缺省时**不写这个键**（值是 undefined 会让 JSON.stringify 抹掉，但对象形状里仍多一个键；
     // 用条件展开把「没排过」保持成真正的不存在）。
     ...(feedOrder === undefined ? {} : { feedOrder }),
+    ...(rsshub === undefined ? {} : { rsshub }),
   }
+}
+
+/**
+ * 校验 `rsshub` 字段（§4.1.1）。
+ *
+ * 三条与别处不同的约定：
+ *  1. **坏实例逐条丢**，不抛错 —— 地址是外部可变输入，一条坏的不该让整份 config.json 失效；
+ *  2. **空串算坏项**：`parseRsshubBase('')` 在设置层表示「未配置」，但在池子里它没有意义，
+ *     留下只会让运行时多一次空地址请求；
+ *  3. 池子超过 5 条**读侧保留并告警**，保存侧才拒绝 —— 读侧替用户删数据是不可逆的，
+ *     让他在设置页看到「有 6 条、保存前需删减」比静默丢一条诚实。
+ *
+ * 告警里**不回显原始地址**：URL 可能带 userinfo（凭据），日志不该成为第二份泄漏面。
+ */
+function validateRsshub(
+  raw: unknown,
+  path: string,
+  warn?: (line: string) => void,
+): ReaderRsshubConfig | undefined {
+  if (raw === undefined) return undefined
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    warn?.(`订阅文件 ${path} 的 rsshub 不是对象（读到 ${describe(raw)}），已忽略这个字段；旧的 rsshubBase 仍按遗留键读取`)
+    return undefined
+  }
+  const record = raw as Record<string, unknown>
+  const rawInstances = record.instances
+  if (!Array.isArray(rawInstances)) {
+    // `instances` 缺席 = 这个 rsshub 字段没写完整：整份忽略，让迁移逻辑回落旧 rsshubBase。
+    warn?.(`订阅文件 ${path} 的 rsshub.instances 不是数组（读到 ${describe(rawInstances)}），已忽略整个 rsshub 字段`)
+    return undefined
+  }
+  const instances: string[] = []
+  for (const [index, entry] of rawInstances.entries()) {
+    const parsed = parseRsshubBase(entry)
+    if (parsed === undefined || parsed === '') {
+      warn?.(`订阅文件 ${path} 的 rsshub.instances 第 ${index + 1} 项不是合法的实例源站`
+        + '（只支持 http(s)，不能带路径 / 查询 / 参数），已丢弃')
+      continue
+    }
+    instances.push(parsed)
+  }
+  if (instances.length > RSSHUB_INSTANCE_MAX) {
+    warn?.(`订阅文件 ${path} 的 rsshub.instances 有 ${instances.length} 个（上限 ${RSSHUB_INSTANCE_MAX} 个），`
+      + '设置页保存前需要删减到上限以内')
+  }
+
+  const rawHidden = record.hiddenNamespaces
+  const hiddenNamespaces: string[] = []
+  if (rawHidden !== undefined) {
+    if (!Array.isArray(rawHidden)) {
+      warn?.(`订阅文件 ${path} 的 rsshub.hiddenNamespaces 不是字符串数组（读到 ${describe(rawHidden)}），已按空列表处理`)
+    } else {
+      for (const [index, entry] of rawHidden.entries()) {
+        if (typeof entry !== 'string' || entry.trim() === '') {
+          warn?.(`订阅文件 ${path} 的 rsshub.hiddenNamespaces 第 ${index + 1} 项不是非空字符串，已丢弃`)
+          continue
+        }
+        hiddenNamespaces.push(entry.trim())
+      }
+    }
+  }
+
+  let hideNsfw = true
+  if (record.hideNsfw !== undefined) {
+    if (typeof record.hideNsfw === 'boolean') hideNsfw = record.hideNsfw
+    else warn?.(`订阅文件 ${path} 的 rsshub.hideNsfw 不是布尔值（读到 ${describe(record.hideNsfw)}），已按默认 true 处理`)
+  }
+
+  return { instances, hiddenNamespaces, hideNsfw }
 }
 
 /**
