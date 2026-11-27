@@ -427,7 +427,7 @@ const browserDeps: ReaderStoreDeps = {
  * | 标签 | `tags` / 条目的 `tagIds` | createTag / renameTag / deleteTag / toggleItemTag | 乐观改 tagIds，失败回取当前页拉回真相（tagWrite 串行化 + tagEpoch 身份） |
 | 设置 | `settings` / `settingsError` / `settingsWarningDismissed` / `rsshubSettings` / `rsshubSettingsError` | loadSettings / loadRsshubSettings / openSettings / closeSettings / toggleSettings / dismissSettingsWarning | 只调 `settings` / `rsshubSettings` 两个端点取快照；`view: 'settings'` 是跨域呈现状态，与列表 / 订阅域同一条规则（左栏导航 / 切过滤 / 切档经列表域入口退出） |
 | 探索 | `explore`（目录页累计行 / q + category + namespace / loading / error / 表单草稿 / 回执 / 拼好的地址） | openExplore / closeExplore / setExploreQuery / loadMoreExplore / selectExploreRoute / setExploreDraftValue / buildExploreAddress / addExploreSubscription | 订阅只经 `addFeed`（订阅域入口），自己只写 `explore`；`view: 'explore'` 与设置页同一条跨域规则（左栏导航 / 切过滤 / 切档经列表域入口退出）；拼地址只调宿主端点，模板判据读 `explore-template.ts` |
-| 精选源 | `sourcePack`（清单 / 搜索词 / 分类 / 加源表单与校验结果 / saving / 告警） | openSourcePack / closeSourcePack / loadSourcePack / setSourcePackQuery / setSourcePackCategory / openSourcePackForm / closeSourcePackForm / setSourcePackDraft / probeSourcePackUrl / saveSourcePackDraft / removeSourcePackEntry / restoreSourcePackSeed | 只调 `sourcePack` / `saveSourcePack` 两个端点；加源解析借 `discoverFeeds`（不新造校验引擎）。删条目**不**调 removeFeed —— 清单不是订阅是这张票的核心不变量。`view: 'sourcePack'` 与设置页同一条跨域规则 |
+| 精选源 | `sourcePack`（清单 / 搜索词 / 分类 / 加源表单与校验结果 / 勾选 / 导入结果 / saving / importing / 告警） | openSourcePack / closeSourcePack / loadSourcePack / setSourcePackQuery / setSourcePackCategory / toggleSourcePackSelection / importSelectedSourcePack / openSourcePackForm / closeSourcePackForm / setSourcePackDraft / probeSourcePackUrl / saveSourcePackDraft / removeSourcePackEntry / restoreSourcePackSeed | 只调 `sourcePack` / `saveSourcePack` / `opmlImport` 三个端点；加源解析借 `discoverFeeds`（不新造校验引擎）；导入所选走现有 `opmlImport`（不新增导入端点、不跳过校验，30 条上限只在客户端拦）。删条目 / 导入**都不**写源包清单 —— 清单不是订阅是这一域的核心不变量。`view: 'sourcePack'` 与设置页同一条跨域规则 |
  *
  * `view` / `article` 是跨域呈现状态：列表的 openArticle / retryArticle / closeArticle 与 setFilter、
  * 搜索的 submitSearch、导航的 selectNav（经列表域入口）、toggleFeeds 与设置域的 open/closeSettings
@@ -866,6 +866,8 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
   // 探索域（R8b 04）：订阅只经 feedActions.addFeed（唯一入口），探索自己不碰 feeds 真相。
   const sourcePackActions = createSourcePackActions({
     get, set, rpc: deps.rpc, now: deps.now,
+    // 导入所选走宿主 opmlImport 写完订阅后，订阅列表必须重取（与 opml-actions.importOpml 一致）。
+    reload: () => listActions.load('overview'),
   })
 
   const exploreActions = createExploreActions({
