@@ -6,7 +6,7 @@
  */
 import { mapConcurrent } from './concurrency.js'
 import { blockedReason, fetchFeed, type FetchLimits } from './feed/fetch.js'
-import { parseFeed } from './feed/parse.js'
+import { NOT_A_FEED_REASON, parseFeed } from './feed/parse.js'
 import { normalizeFeedUrl } from './refresh.js'
 import { discoverFeedUrls, isSameOrigin, MAX_CANDIDATES } from './feed/discover.js'
 import { candidatesFromRules } from './rsshub.js'
@@ -157,7 +157,7 @@ async function checkCandidate(
   if (attempt.kind === 'failed') return { ok: false, reason: attempt.reason }
   if (attempt.kind === 'not-modified') return { ok: false, reason: '校验请求收到了 304（不应发生）' }
   const parsed = parseFeed(attempt.body, candidate)
-  if (parsed.format === 'unknown') return { ok: false, reason: '不是可识别的 feed（RSS 2.0 / RSS 1.0 / Atom 皆不匹配）' }
+  if (parsed.format === 'unknown') return { ok: false, reason: NOT_A_FEED_REASON }
   return { ok: true, title: parsed.title, format: parsed.format, itemCount: parsed.items.length }
 }
 

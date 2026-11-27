@@ -30,6 +30,12 @@ export interface ParsedFeed {
   items: ParsedItem[]
 }
 
+/**
+ * 「200 但不是 feed」的统一措辞：订阅校验（subscribe.ts）与刷新切换（refresh.ts）共用。
+ * 两处各写一份字符串，用户迟早会看到两种说法；判据（`format === 'unknown'`）也只能有一份口径。
+ */
+export const NOT_A_FEED_REASON = '不是可识别的 feed（RSS 2.0 / RSS 1.0 / Atom 皆不匹配）'
+
 const parser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: '@_',

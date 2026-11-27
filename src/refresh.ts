@@ -7,14 +7,25 @@
  *   ③ 去重窗口（maxSeenPerFeed）与条目保留量（maxItemsPerFeed）是两件事，
  *      前者必须远大于后者，否则老条目会借「滚出去重窗口」重新变成未读。
  */
+import { performance } from 'node:perf_hooks'
 import { normalizeAuthor } from './author.js'
 import { mapConcurrent } from './concurrency.js'
 import { recencyOf } from './cursor.js'
 import { rebuildItem, type FeedRecord } from './domain.js'
 import { resolveItemIds, type KnownIdentities } from './feed/item-id.js'
-import { fetchFeed, type FetchLimits } from './feed/fetch.js'
+import { fetchFeed, type FetchLimits, type FetchResult, type FeedValidators } from './feed/fetch.js'
 import { selectPrunable, selectArticleEvictions, type RetentionRow } from './retention.js'
-import { parseFeed } from './feed/parse.js'
+import { NOT_A_FEED_REASON, parseFeed, type ParsedFeed } from './feed/parse.js'
+import {
+  RSSHUB_ATTEMPT_TIMEOUT_MS,
+  RSSHUB_MAX_ATTEMPTS,
+  RSSHUB_REFRESH_BUDGET_MS,
+  rsshubCooldown,
+  rsshubFailureSummary,
+  rsshubInstanceOrder,
+  rsshubInstanceUrl,
+  type RsshubAttemptFailure,
+} from './rsshub-failover.js'
 import { rsshubSourceOf } from './rsshub-source.js'
 import { effectiveLimitOf } from './shared.js'
 import type { ReaderStore } from './store.js'
@@ -59,6 +70,14 @@ export interface RefreshOptions {
    */
   instances?: readonly string[]
   now?: () => Date
+  /**
+   * 单调时钟（毫秒），只给 RSSHub 切换的 20 s 总预算计时。
+   *
+   * 不用 `now`（墙钟）：系统校时或夏令时跳变能让「已用时间」凭空多出/少掉几分钟，预算就不是
+   * 预算了。默认 `performance.now()`；测试注入假时钟即可验证「第一个用满 12 s ⇒ 第二个只剩 8 s」，
+   * 不必真等 12 秒。
+   */
+  clock?: () => number
   fetchFeedImpl?: typeof fetchFeed
 }
 
@@ -81,6 +100,13 @@ export interface FeedOutcome {
    */
   reclaimed?: number
   reason?: string
+  /**
+   * 本轮为这个源**实际请求过**的实例（按尝试顺序，`URL.origin`）。
+   *
+   * 只有 RSSHub 源会带：非 RSSHub 源保持键缺席，「零切换」在回包上就是可判的（A4），
+   * A1–A3 的请求数判据也靠它与 fetchFeedImpl 的调用记录互证。没轮到的实例不许出现在这里。
+   */
+  instancesAttempted?: string[]
 }
 
 /** 源标识即归一化后的 URL：稳定、可读、便于在存储里直接排查。 */
@@ -248,6 +274,7 @@ export async function refreshFeeds(
   signal?: AbortSignal,
 ): Promise<FeedOutcome[]> {
   const now = options.now ?? (() => new Date())
+  const clock = options.clock ?? (() => performance.now())
   const doFetch = options.fetchFeedImpl ?? fetchFeed
   /**
    * 有界并发 + 保序（见 concurrency.ts；与 subscribe.ts 共用同一个实现）。
@@ -257,7 +284,7 @@ export async function refreshFeeds(
    * feedId 都不同（调用方传的是 listFeeds() 的键，天然唯一），所以写之间没有共享状态。
    */
   const outcomes = await mapConcurrent(urls, options.refreshConcurrency, (rawUrl) =>
-    refreshOne(rawUrl, store, options, now, doFetch, signal))
+    refreshOne(rawUrl, store, options, now, clock, doFetch, signal))
   // 正文缓存闸门在这一轮**全部落库之后**才清算，且只清算一次（2026-10-11 任务 9）：
   //   · 放循环里逐源清算 = 每源一份上限，200 源即 200 份（病象，见 capArticleCache 的注释）；
   //   · 放循环里逐源清算即便改成全局也错：每个源只看得见自己那一份，合计仍是上限的「源数倍」。
@@ -268,12 +295,38 @@ export async function refreshFeeds(
   return outcomes
 }
 
-/** 抓取并落库单个源；结果由调用方按输入下标放回数组。 */
+/** `settleFetch` 的入参：两条抓取路径（非 RSSHub 单请求 / RSSHub 切换）最后都汇到这一段入库逻辑。 */
+interface SettleInput {
+  readonly feedId: string
+  readonly store: ReaderStore
+  readonly options: RefreshOptions
+  readonly previous: FeedRecord | undefined
+  readonly now: () => Date
+  /** 写回来源（RSSHub 切换成功时 instance 是实际成功的那台；非 RSSHub 源为 undefined）。 */
+  readonly rsshub: FeedRecord['rsshub']
+  readonly result: FetchResult
+  /** RSSHub 切换路径已经解析过一次，直接复用；非 RSSHub 路径为 undefined（保持原路径的解析位置）。 */
+  readonly parsed: ParsedFeed | undefined
+  /** 只有 RSSHub 源带；非 RSSHub 源保持 undefined，回包上就没有这个键。 */
+  readonly instancesAttempted: string[] | undefined
+}
+
+/**
+ * 抓取并落库单个源；结果由调用方按输入下标放回数组。
+ *
+ * 只有两条抓取路径：
+ *  - **非 RSSHub 源**（以及池子为空的 RSSHub 源）：原路径，一个请求，超时 / 错误文案逐字不变（A4）。
+ *    池子为空时也不切换：没有候选实例，但已有订阅仍按原地址刷新 —— 「空池 = RSSHub 功能关闭」
+ *    关闭的是 Radar / 探索 / 新订阅这些能力，不替用户静默停掉已经订好的源。
+ *  - **RSSHub 源**：按候选顺序逐实例尝试，最多 2 个、总额 ≤ 20 s（spec §4.1.4）。
+ *    任何「这次没拿到内容」（超时 / 网络 / 4xx / 5xx / 429 / 200 但不是 feed）都切下一个。
+ */
 async function refreshOne(
   rawUrl: string,
   store: ReaderStore,
   options: RefreshOptions,
   now: () => Date,
+  clock: () => number,
   doFetch: typeof fetchFeed,
   signal: AbortSignal | undefined,
 ): Promise<FeedOutcome> {
@@ -290,13 +343,98 @@ async function refreshOne(
   const rsshub = rsshubSourceOf({ url: feedId, rsshub: previous?.rsshub }, options.instances ?? [])
   // 内容版本落后 ⇒ 这一轮不带条件请求，强制拿 200 以便回填正文
   const needsContentUpgrade = (previous?.contentRevision ?? 1) < CONTENT_REVISION
-  const result = await doFetch(
-    feedId,
-    needsContentUpgrade ? {} : { etag: previous?.etag, lastModified: previous?.lastModified },
-    options.limits,
-    signal,
+  const validators: FeedValidators = needsContentUpgrade
+    ? {}
+    : { etag: previous?.etag, lastModified: previous?.lastModified }
+  const instances = options.instances ?? []
+  // 这一条是 A4 的承重判定：非 RSSHub 源**一个字节都不许**走下面的实例逻辑。
+  const failover = rsshub !== undefined && instances.length > 0
+
+  if (!failover) {
+    const result = await doFetch(feedId, validators, options.limits, signal)
+    // 池子为空时没有候选实例，也就没有「实际切换到的实例」可记：来源字段是历史事实（R15 02 的
+    // 契约），这里原样保留，不因为用户关掉池子就把它改写成别的值。
+    return settleFetch({
+      feedId, store, options, previous, now, rsshub, result, parsed: undefined, instancesAttempted: undefined,
+    })
+  }
+
+  const coolingNow = now().getTime()
+  const order = rsshubInstanceOrder(
+    rsshub?.instance,
+    instances,
+    (instance) => rsshubCooldown.isCooling(feedId, instance, coolingNow),
   )
+  const startedAt = clock()
+  const instancesAttempted: string[] = []
+  const failures: RsshubAttemptFailure[] = []
+  let success: { readonly instance: string; readonly result: FetchResult; readonly parsed: ParsedFeed | undefined } | undefined
+
+  for (const instance of order) {
+    if (instancesAttempted.length >= RSSHUB_MAX_ATTEMPTS) break
+    const remaining = RSSHUB_REFRESH_BUDGET_MS - (clock() - startedAt)
+    // 第一个实例最多吃 12 s；它用满之后第二个只剩 8 s，两次合计不超过 20 s。
+    if (remaining <= 0) break
+    instancesAttempted.push(instance)
+    const result = await doFetch(
+      rsshubInstanceUrl(feedId, instance),
+      // 条件请求只对「上次成功的那台」有意义，而候选顺序的第一个就是它；换到别的实例必须全量拿。
+      // 老记录没记过实例时首个候选只是池子首选，带错的 ETag 最多多一次 200，不会丢内容。
+      instancesAttempted.length === 1 ? validators : {},
+      { ...options.limits, timeoutMs: Math.min(RSSHUB_ATTEMPT_TIMEOUT_MS, remaining) },
+      signal,
+    )
+    if (result.kind === 'failed') {
+      failures.push({ instance, reason: result.reason })
+      continue
+    }
+    if (result.kind === 'not-modified') {
+      success = { instance, result, parsed: undefined }
+      break
+    }
+    // 「200 但不是 feed」也算这次没拿到内容：有些实例/网关会用 200 回一张 HTML 错误页。
+    const parsed = parseFeed(result.body, feedId)
+    if (parsed.format === 'unknown') {
+      failures.push({ instance, reason: NOT_A_FEED_REASON })
+      continue
+    }
+    success = { instance, result, parsed }
+    break
+  }
+
+  const recordedAt = now().getTime()
+  for (const failure of failures) rsshubCooldown.recordFailure(feedId, failure.instance, recordedAt)
+  if (success === undefined) {
+    return settleFetch({
+      feedId, store, options, previous, now, rsshub,
+      result: {
+        kind: 'failed',
+        reason: failures.length === 0 ? '没有可用的 RSSHub 实例' : rsshubFailureSummary(failures),
+      },
+      parsed: undefined,
+      instancesAttempted,
+    })
+  }
+  rsshubCooldown.recordSuccess(feedId, success.instance)
+  return settleFetch({
+    feedId, store, options, previous, now,
+    rsshub: rsshub === undefined ? undefined : { ...rsshub, instance: success.instance },
+    result: success.result,
+    parsed: success.parsed,
+    instancesAttempted,
+  })
+}
+
+/**
+ * 把一次抓取结果落库：200 解析入库 / 304 记成功 / failed 记失败。
+ *
+ * 抽出来是为了让两条抓取路径共用**同一段**入库逻辑（去重、身份、游标、来源字段、裁剪）。
+ * 抄一份「RSSHub 版入库」是最容易让来源字段或失败计数在某一支上漂掉的做法。
+ */
+async function settleFetch(input: SettleInput): Promise<FeedOutcome> {
+  const { feedId, store, options, previous, now, rsshub, result, instancesAttempted } = input
   const stamp = now().toISOString()
+  const attempts = instancesAttempted === undefined ? {} : { instancesAttempted }
 
   // 抓取窗口内用户可能已经退订了这个源（removeFeed → store.deleteSubscription，一次变更）。
   // 判据必须带 previous !== undefined：**本轮开始时它得还在**。只判「现在不在」会把
@@ -305,7 +443,7 @@ async function refreshOne(
   // 退订恰好落进这段窗口仍会写出孤儿条目 —— 那部分由装载时的孤儿报告兜底（ADR-0002）。
   // 一个源的这种失败也不该掀翻整轮（模块头的不变式①）。
   if (previous !== undefined && store.feed(feedId) === undefined) {
-    return { feedId, url: feedId, status: 'failed', added: 0, reason: '订阅已在抓取期间移除，本轮结果丢弃' }
+    return { feedId, url: feedId, status: 'failed', added: 0, reason: '订阅已在抓取期间移除，本轮结果丢弃', ...attempts }
   }
 
   let added = 0
@@ -314,23 +452,23 @@ async function refreshOne(
       // 字段合并规则在 src/feed-intent.ts（H4 收拢）；「失败的尝试也是一次尝试」的防饿死判据
       // 随意图走（refresh-failure），判据在 tests/refresh.test.mjs。
       await store.updateFeed(feedId, { kind: 'refresh-failure', url: feedId, stamp, reason: result.reason })
-      return { feedId, url: feedId, status: 'failed', added: 0, reason: result.reason }
+      return { feedId, url: feedId, status: 'failed', added: 0, reason: result.reason, ...attempts }
     }
 
     if (result.kind === 'not-modified') {
       // 升级轮里还被判 304（源忽略了无条件请求）：写回版本号避免每轮都重试，并留下痕迹
-      const upgradeSkipped = needsContentUpgrade
+      const upgradeSkipped = (previous?.contentRevision ?? 1) < CONTENT_REVISION
       // 304 也是**成功**（源说「内容没变」）：lastFailure 必须清 —— 横幅只能反映最近一次真实结果
       //（用户实测：月光博客连续十几次 not-modified，横幅仍写 HTTP 502）。合并语义在 feed-intent.ts。
       await store.updateFeed(feedId, {
         kind: 'refresh-not-modified', url: feedId, stamp, contentRevision: CONTENT_REVISION, rsshub,
       })
       return upgradeSkipped
-        ? { feedId, url: feedId, status: 'not-modified', added: 0, reason: '源未响应无条件请求，正文升级跳过' }
-        : { feedId, url: feedId, status: 'not-modified', added: 0 }
+        ? { feedId, url: feedId, status: 'not-modified', added: 0, reason: '源未响应无条件请求，正文升级跳过', ...attempts }
+        : { feedId, url: feedId, status: 'not-modified', added: 0, ...attempts }
     }
 
-    const parsed = parseFeed(result.body, feedId)
+    const parsed = input.parsed ?? parseFeed(result.body, feedId)
     const cursor = store.cursor(feedId)
     const seen = cursor?.seen ?? []
 
@@ -442,6 +580,7 @@ async function refreshOne(
       untrusted: resolved.untrusted > 0 ? resolved.untrusted : undefined,
       // 「认回了老条目」也留痕：它是「源的身份依据变过」这唯一一个可观测信号
       reclaimed: resolved.reclaimed > 0 ? resolved.reclaimed : undefined,
+      ...attempts,
     }
   } catch (error) {
     // 单源持久化失败必须**就地降级**（模块头的不变式①）：磁盘满、config.json 被外部改坏、
@@ -453,6 +592,7 @@ async function refreshOne(
       status: 'failed',
       added,
       reason: '存储写入失败：' + (error instanceof Error ? error.message : String(error)),
+      ...attempts,
     }
   }
 }
