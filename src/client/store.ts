@@ -892,7 +892,11 @@ export function createReaderStore(overrides: Partial<ReaderStoreDeps> = {}) {
     get, set, rpc: deps.rpc, addFeed: feedActions.addFeed,
     persistView,
     saveRsshubHideNsfw: settingsActions.saveRsshubHideNsfw,
-    hideNamespace: settingsActions.hideRsshubNamespace,
+    // 探索行也必须走**根上的组合动作**：只有它把写盘失败画成 `state.error`（`settingsActions.
+    // hideRsshubNamespace` 自己只记一行日志）。这里曾经传的是裸动作，于是探索页隐藏站点失败时
+    // 界面一片安静 —— 用户以为「点了没反应」，与「失败必须可见」相反（2026-11-28 评审 F2）。
+    // 组合动作顺带剪候选清单，对探索入口无害：隐藏了就该从候选里消失，语义一致。
+    hideNamespace,
   })
 
   return {

@@ -3646,4 +3646,52 @@ export const MUTATIONS = [
     ],
     from: '.update(JSON.stringify([q, category, namespace, hiddenNamespaces, hideNsfw, onlyRunnable, weeklyGeneration]))',
     to: '.update(JSON.stringify([q, category, namespace, hideNsfw, onlyRunnable, weeklyGeneration]))' },
+
+  // ── 评审修复（2026-11-28 F1 / F2 / F3）──────────────────────────────────
+  // F1：相对链接按 `feedId`（订阅 URL）绝对化，而不是按**实际取到内容**的实例（`finalUrl`）。
+  // 病象：内容来自 hub-b、条目 link 却指向 hub-a；落库的 rsshub.instance 与 link 互相矛盾，
+  // 缺 guid 的源还会把 link 当身份依据（feed/item-id.ts），下一轮切回来可能记成新条目。
+  // 判据是两条用例：切到次选后的 link、以及重定向落点目录下的相对 link。
+  // from 照构建产物 lib/refresh.js 的实际字节写（pitfalls 一、1.4），独立实测 OCCURRENCES=1。
+  { id: 'rsshub-相对链接按旧实例', file: 'lib/refresh.js',
+    judges: ['rsshub-failover.test.mjs'],
+    judgeTests: [
+      'F1：切到次选实例后，条目里的相对 link 按次选实例绝对化（不是订阅 URL 的实例）',
+      'F1：重定向后的相对 link 按**落点**绝对化（finalUrl 而不是订阅 URL）',
+    ],
+    from: 'const parsed = parseFeed(result.body, result.finalUrl);',
+    to: 'const parsed = parseFeed(result.body, feedId);' },
+
+  // F2：探索域拿到的是**裸的** settingsActions.hideRsshubNamespace（只记一行日志），而不是根上的
+  // 组合动作 hideNamespace（把写盘失败画成 state.error）。病象：探索页隐藏站点失败时界面一片安静，
+  // 用户以为「点了没反应」，而隐藏其实没生效 —— 与「失败必须可见」相反。
+  // 判据是 explore-hide-failure 的失败用例（它断言 state.error 含「隐藏站点失败」）。
+  // from 照 lib/client.js 的产物字节写；`hideNamespace` 在这个对象字面量里是简写属性。
+  { id: 'client-探索隐藏失败静默', file: 'lib/client.js',
+    judges: ['explore-hide-failure.test.mjs'],
+    judgeTests: ['F2：探索页隐藏站点写盘失败 ⇒ 全局 error 必须给出「隐藏站点失败」'],
+    from: '\t\t\t\tsaveRsshubHideNsfw: settingsActions.saveRsshubHideNsfw,\n\t\t\t\thideNamespace\n\t\t\t});',
+    to: '\t\t\t\tsaveRsshubHideNsfw: settingsActions.saveRsshubHideNsfw,\n\t\t\t\thideNamespace: settingsActions.hideRsshubNamespace\n\t\t\t});' },
+
+  // F3：保存时不比对「校验的是哪个地址」，只要 probe.ok 就写「已验证」。
+  // 病象：粘站点首页时验的是页面声明的 feed、存的是首页；试读成功后改地址也会拿旧结论担保新地址。
+  // 判据是 source-pack-client 的两条 F3 用例（粘首页 / 改地址）。
+  // 产物里 sameTarget 被内联成 `!(probe.url === url)`，照实际字节写。
+  { id: 'client-源包校验结论错位', file: 'lib/client.js',
+    judges: ['source-pack-client.test.mjs'],
+    judgeTests: [
+      'F3：粘站点首页时，保存的条目不许被标成「已验证」（验的是页面声明的 feed）',
+      'F3：试读成功后改地址 ⇒ 旧结论作废，新地址不会被标成「已验证」',
+    ],
+    from: 'const marker = !(probe.url === url) ?',
+    to: 'const marker = !(probe.url === url || true) ?' },
+
+  // F3 的另一半：改地址时不清掉旧结论。probe.ok 说的是「刚才那个地址能解析」，换了地址后
+  // 它不再描述任何东西；留着它，保存路径的第二道防线就成了唯一防线（而它本该是冗余的）。
+  // 判据是「试读成功后改地址 ⇒ 旧结论作废」。
+  { id: 'client-源包改地址不清结论', file: 'lib/client.js',
+    judges: ['source-pack-client.test.mjs'],
+    judgeTests: ['F3：试读成功后改地址 ⇒ 旧结论作废，新地址不会被标成「已验证」'],
+    from: 'const urlChanged = patch.url !== void 0 && patch.url !== state.draft.url;',
+    to: 'const urlChanged = false;' },
 ]

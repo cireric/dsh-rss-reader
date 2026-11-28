@@ -152,3 +152,123 @@ test('编辑：改分类与备注走 saveSourcePack 整份替换，只动被编�
   assert.equal('category' in cleared, false, '清空分类 ⇒ 键不出现')
   assert.equal('note' in cleared, false, '清空备注 ⇒ 键不出现')
 })
+
+// ── 评审 F3（2026-11-28）：校验结论必须绑定到**它验证过的那个地址** ───────────────
+
+test('F3：粘站点首页时，保存的条目不许被标成「已验证」（验的是页面声明的 feed）', async () => {
+  const calls = []
+  const snapshot = { entries: [], seed: { collectedAt: '2026-10-10', count: 79 } }
+  const { exports } = loadClientModule({ AbortController, setTimeout, clearTimeout, URL })
+  const store = exports.createReaderStore({
+    rpc: async (endpoint, payload) => {
+      calls.push([endpoint, payload])
+      if (endpoint === 'sourcePack') return { sourcePack: snapshot }
+      if (endpoint === 'saveSourcePack') {
+        return { sourcePack: { entries: payload.entries, seed: snapshot.seed }, dropped: 0, restored: 0 }
+      }
+      if (endpoint === 'discoverFeeds') {
+        // 用户粘的是站点首页；页面里声明了真正的 feed —— 两者不是同一个地址。
+        return {
+          url: payload.url,
+          candidates: [{
+            url: 'https://blog.example/feed.xml', title: '博客', format: 'rss2', itemCount: 20, source: 'page',
+          }],
+          warnings: [],
+        }
+      }
+      return { changed: 0, unread: 0 }
+    },
+  })
+  store.openSourcePack()
+  await waitFor(() => store.get().sourcePack?.loading === false, 'sourcePack 回包')
+  store.openSourcePackForm()
+  store.setSourcePackDraft({ url: 'https://blog.example/' })
+  await store.probeSourcePackUrl()
+
+  const probe = store.get().sourcePack.probe
+  assert.equal(probe.ok, true)
+  assert.equal(probe.url, 'https://blog.example/feed.xml', '结论记在候选自己的地址上')
+
+  await store.saveSourcePackDraft()
+  const entry = calls.findLast(([endpoint]) => endpoint === 'saveSourcePack')[1].entries.at(-1)
+  assert.equal(entry.url, 'https://blog.example/', '保存的仍是用户粘贴的地址（不替用户改写）')
+  assert.match(entry.note ?? '', /未验证/, '没验证过的地址不许标「已验证」')
+  assert.match(entry.note ?? '', /https:\/\/blog\.example\/feed\.xml/, '未验证原因要说清验的是哪一条')
+})
+
+test('F3：试读成功后改地址 ⇒ 旧结论作废，新地址不会被标成「已验证」', async () => {
+  const calls = []
+  const snapshot = { entries: [], seed: { collectedAt: '2026-10-10', count: 79 } }
+  const { exports } = loadClientModule({ AbortController, setTimeout, clearTimeout, URL })
+  const store = exports.createReaderStore({
+    rpc: async (endpoint, payload) => {
+      calls.push([endpoint, payload])
+      if (endpoint === 'sourcePack') return { sourcePack: snapshot }
+      if (endpoint === 'saveSourcePack') {
+        return { sourcePack: { entries: payload.entries, seed: snapshot.seed }, dropped: 0, restored: 0 }
+      }
+      if (endpoint === 'discoverFeeds') {
+        if (payload.url === 'https://good.example/feed') {
+          return {
+            url: payload.url,
+            candidates: [{ url: payload.url, title: '好源', format: 'rss2', itemCount: 3, source: 'page' }],
+            warnings: [],
+          }
+        }
+        return { url: payload.url, candidates: [], warnings: [{ reason: 'HTTP 404' }] }
+      }
+      return { changed: 0, unread: 0 }
+    },
+  })
+  store.openSourcePack()
+  await waitFor(() => store.get().sourcePack?.loading === false, 'sourcePack 回包')
+  store.openSourcePackForm()
+  store.setSourcePackDraft({ url: 'https://good.example/feed' })
+  await store.probeSourcePackUrl()
+  assert.equal(store.get().sourcePack.probe.ok, true, '前置：验证通过')
+
+  // 改主意换一个从未验证过的地址
+  store.setSourcePackDraft({ url: 'https://other.example/feed' })
+  assert.equal(store.get().sourcePack.probe, undefined, '改地址必须丢掉旧结论')
+
+  // 再点保存：没有 probe 就什么都不该发生（不写盘、不落条目）
+  const before = calls.filter(([endpoint]) => endpoint === 'saveSourcePack').length
+  await store.saveSourcePackDraft()
+  assert.equal(calls.filter(([endpoint]) => endpoint === 'saveSourcePack').length, before,
+    '没有有效结论时不许静默写一条「已验证」的条目')
+})
+
+test('F3：只改标题 / 分类 / 备注不清掉校验结论（那几项不影响地址能不能当 feed）', async () => {
+  const snapshot = { entries: [], seed: { collectedAt: '2026-10-10', count: 79 } }
+  const { exports } = loadClientModule({ AbortController, setTimeout, clearTimeout, URL })
+  const store = exports.createReaderStore({
+    rpc: async (endpoint, payload) => {
+      if (endpoint === 'sourcePack') return { sourcePack: snapshot }
+      if (endpoint === 'saveSourcePack') {
+        return { sourcePack: { entries: payload.entries, seed: snapshot.seed }, dropped: 0, restored: 0 }
+      }
+      if (endpoint === 'discoverFeeds') {
+        return {
+          url: payload.url,
+          candidates: [{ url: payload.url, title: '好源', format: 'rss2', itemCount: 3, source: 'page' }],
+          warnings: [],
+        }
+      }
+      return { changed: 0, unread: 0 }
+    },
+  })
+  store.openSourcePack()
+  await waitFor(() => store.get().sourcePack?.loading === false, 'sourcePack 回包')
+  store.openSourcePackForm()
+  store.setSourcePackDraft({ url: 'https://good.example/feed' })
+  await store.probeSourcePackUrl()
+
+  store.setSourcePackDraft({ title: '我起的名字' })
+  store.setSourcePackDraft({ category: '科技' })
+  store.setSourcePackDraft({ note: '备注' })
+
+  const probe = store.get().sourcePack.probe
+  assert.notEqual(probe, undefined, '只改元数据不该丢掉地址的校验结论')
+  assert.equal(probe.ok, true)
+  assert.equal(probe.url, 'https://good.example/feed')
+})

@@ -212,7 +212,8 @@ export function createExploreActions(host: ExploreActionHost) {
    */
   const hideExploreNamespace = async (namespace: string): Promise<void> => {
     if (get().explore === undefined) return
-    // 失败时宿主动作已写进全局 error（两个入口共用一条通道），这里不重取、不改列表。
+    // 失败时**根上的组合动作**（store.ts 的 hideNamespace）已经把「隐藏站点失败：…」写进全局
+    // error，这里不重取、不改列表。判据只认它的返回值：将来若换回裸动作，这条注释就不再成立。
     if (!(await hideNamespace(namespace)).ok) return
     await fetchFirstPage()
   }

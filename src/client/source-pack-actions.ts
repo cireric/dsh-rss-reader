@@ -31,12 +31,18 @@ export interface SourcePackDraft {
 }
 
 /**
- * 一次「抓取校验」的结果。`format` / `itemCount` 只用于界面即时显示（wire 形状里没有这两个
- * 字段，不落盘）；失败时 `reason` 会写进 `note`（`未验证：…`）保留下来。
+ * 一次「抓取校验」的结果。
+ *
+ * `url` 是**被验证的那个地址**，不是用户此刻输入框里的地址：粘的是站点首页时，`discoverFeeds`
+ * 返回的是页面声明的 feed，两者不同。`保存` 只在 `probe.url === 待保存地址` 时才敢写「已验证」——
+ * 否则就是拿 A 的结论担保 B（2026-11-28 评审 F3）。
+ *
+ * `format` / `itemCount` 只用于界面即时显示（wire 形状里没有这两个字段，不落盘）；失败时
+ * `reason` 会写进 `note`（`未验证：…`）保留下来。
  */
 export type SourcePackProbe =
-  | { readonly ok: true; readonly title?: string; readonly format?: string; readonly itemCount?: number }
-  | { readonly ok: false; readonly reason: string }
+  | { readonly ok: true; readonly url: string; readonly title?: string; readonly format?: string; readonly itemCount?: number }
+  | { readonly ok: false; readonly url: string; readonly reason: string }
 
 /** 源包域整份状态：`view: 'sourcePack'` 时存在；离开视图后保留（再打开先用旧值，不闪空屏）。 */
 export interface SourcePackState {
@@ -199,7 +205,17 @@ export function createSourcePackActions(host: SourcePackActionHost) {
   const setSourcePackDraft = (patch: Partial<SourcePackDraft>): void => {
     const state = get().sourcePack
     if (state === undefined) return
-    set({ sourcePack: { ...state, draft: { ...state.draft, ...patch } } })
+    // 改了**地址**就必须丢掉旧的校验结论：`probe.ok` 说的是「刚才那个地址能解析」，换成新地址后
+    // 它不再描述任何东西。留着它，保存时会把一个从未验证过的地址标成「已验证」（评审 F3）。
+    // 只改标题 / 分类 / 备注不动 probe —— 那几项不影响「这个地址能不能当 feed」。
+    const urlChanged = patch.url !== undefined && patch.url !== state.draft.url
+    set({
+      sourcePack: {
+        ...state,
+        draft: { ...state.draft, ...patch },
+        ...(urlChanged ? { probe: undefined } : {}),
+      },
+    })
   }
 
   /** 粘贴 URL → 宿主抓一次并解析（复用 discoverFeeds，不新造校验引擎）。 */
@@ -208,11 +224,11 @@ export function createSourcePackActions(host: SourcePackActionHost) {
     if (state === undefined || state.probing) return
     const url = state.draft.url.trim()
     if (url === '') {
-      set({ sourcePack: { ...state, probe: { ok: false, reason: '请先粘贴一个地址' } } })
+      set({ sourcePack: { ...state, probe: { ok: false, url, reason: '请先粘贴一个地址' } } })
       return
     }
     if (!isHttpUrl(url)) {
-      set({ sourcePack: { ...state, probe: { ok: false, reason: '地址必须是绝对 http(s) 链接' } } })
+      set({ sourcePack: { ...state, probe: { ok: false, url, reason: '地址必须是绝对 http(s) 链接' } } })
       return
     }
     set({ sourcePack: { ...state, probing: true, probe: undefined, error: undefined } })
@@ -225,14 +241,22 @@ export function createSourcePackActions(host: SourcePackActionHost) {
         ?? result.candidates[0]
       if (candidate === undefined) {
         const reason = result.warnings[0]?.reason ?? '没有找到可解析的 feed'
-        set({ sourcePack: { ...current, probing: false, probe: { ok: false, reason } } })
+        set({ sourcePack: { ...current, probing: false, probe: { ok: false, url, reason } } })
         return
       }
+      // 结论记在**候选自己的地址**上：用户粘首页时它是页面声明的 feed 地址，与输入框不同。
+      // 界面据此提示「你输入的是首页，实际验证的是 X」，保存时也据此决定能不能写「已验证」。
       set({
         sourcePack: {
           ...current,
           probing: false,
-          probe: { ok: true, title: candidate.title, format: candidate.format, itemCount: candidate.itemCount },
+          probe: {
+            ok: true,
+            url: candidate.url,
+            title: candidate.title,
+            format: candidate.format,
+            itemCount: candidate.itemCount,
+          },
           // 标题只在用户没自己填时预填：用户输入优先。
           draft: {
             ...current.draft,
@@ -246,7 +270,7 @@ export function createSourcePackActions(host: SourcePackActionHost) {
       set({
         sourcePack: {
           ...current, probing: false,
-          probe: { ok: false, reason: failure instanceof Error ? failure.message : String(failure) },
+          probe: { ok: false, url, reason: failure instanceof Error ? failure.message : String(failure) },
         },
       })
     }
@@ -255,6 +279,11 @@ export function createSourcePackActions(host: SourcePackActionHost) {
   /**
    * 保存当前草稿。`force = true` 是「仍然保存」：没验证通过也允许入库，
    * 但把原因写进 note（`未验证：…`）—— 字段形状没有 verified 位，这是唯一不丢信息的合法位置。
+   *
+   * **只有 `probe.url` 等于待保存地址时才算「已验证」**。两条路径会不相等：
+   *  ① 用户粘的是站点首页，`discoverFeeds` 验的是页面声明的 feed —— 验的是 A、存的是 B；
+   *  ② 试读成功后改了地址（`setSourcePackDraft` 已清 probe，这里是第二道防线）。
+   * 这两种情况一律落 `未验证：…`，绝不拿另一条地址的结论给自己担保（评审 F3）。
    */
   const saveSourcePackDraft = async (force = false): Promise<void> => {
     const state = get().sourcePack
@@ -267,9 +296,13 @@ export function createSourcePackActions(host: SourcePackActionHost) {
     const note = state.draft.note.trim()
     // 校验结论（含格式 / 失败原因）写进 note：wire 形状（spec §5.1）没有 verified / format 字段，
     // 这是唯一能「重启后仍然看得见」的合法位置。用户自己的备注在前，机器结论放括号里。
-    const marker = probe.ok
-      ? `已验证：${probe.format === undefined ? '格式未识别' : probe.format}`
-      : `未验证：${probe.reason}`
+    // 结论归属于 probe.url；地址不一致时它描述的不是这条条目，只能降级成一句可读的未验证原因。
+    const sameTarget = probe.url === url
+    const marker = !sameTarget
+      ? `未验证：校验的是 ${probe.url}，与保存的地址不同`
+      : probe.ok
+        ? `已验证：${probe.format === undefined ? '格式未识别' : probe.format}`
+        : `未验证：${probe.reason}`
     const entry: CuratedSourceEntry = {
       url,
       addedAt: new Date(now()).toISOString(),

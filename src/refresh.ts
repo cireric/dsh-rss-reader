@@ -362,7 +362,8 @@ async function refreshOne(
     // 池子为空时没有候选实例，也就没有「实际切换到的实例」可记：来源字段是历史事实（R15 02 的
     // 契约），这里原样保留，不因为用户关掉池子就把它改写成别的值。
     return settleFetch({
-      feedId, store, options, previous, now, rsshub, result, parsed: undefined, instancesAttempted: undefined,
+      feedId, store, options, previous, now, rsshub, result,
+      parsed: undefined, instancesAttempted: undefined,
       contentUpgrade: needsContentUpgrade,
     })
   }
@@ -405,7 +406,8 @@ async function refreshOne(
       break
     }
     // 「200 但不是 feed」也算这次没拿到内容：有些实例/网关会用 200 回一张 HTML 错误页。
-    const parsed = parseFeed(result.body, feedId)
+    // base 用 finalUrl：相对链接必须按**实际提供内容的那个地址**绝对化（评审 F1）。
+    const parsed = parseFeed(result.body, result.finalUrl)
     if (parsed.format === 'unknown') {
       failures.push({ instance, reason: NOT_A_FEED_REASON })
       continue
@@ -482,7 +484,10 @@ async function settleFetch(input: SettleInput): Promise<FeedOutcome> {
         : { feedId, url: feedId, status: 'not-modified', added: 0, ...attempts }
     }
 
-    const parsed = input.parsed ?? parseFeed(result.body, feedId)
+    // 解析基准 = 本轮**真正取到内容**的地址（`finalUrl`），不是订阅 URL：实例切换后内容可能来自
+    // 池里的另一台，用 `feedId` 会把 `/post/1` 拼到没提供过这份内容的实例上（评审 F1）。
+    // 走到这里 `result.kind` 必是 `'ok'`（failed / not-modified 上面已各自返回），不必兜底。
+    const parsed = input.parsed ?? parseFeed(result.body, result.finalUrl)
     const cursor = store.cursor(feedId)
     const seen = cursor?.seen ?? []
 

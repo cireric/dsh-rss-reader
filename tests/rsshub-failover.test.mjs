@@ -558,3 +558,98 @@ test('条件请求：老记录没有 rsshub.instance ⇒ 任何候选都不带�
 
   assert.deepEqual(calls[0].validators, {}, '没有 instance 事实就没有「上次成功的那台」，条件头一律不带')
 })
+
+// ── F1（2026-11-28 评审）：相对链接必须按**实际提供内容的实例**绝对化 ─────────────
+
+test('F1：切到次选实例后，条目里的相对 link 按次选实例绝对化（不是订阅 URL 的实例）', async () => {
+  // 病象：内容来自 hub-b，而条目 link 被拼到 hub-a 上 —— 落库的 rsshub.instance 与 link 互相矛盾，
+  // 且缺 guid 的源会把 link 当身份依据（feed/item-id.ts），下一轮再切回来可能记成新条目。
+  const store = strictMemoryStore()
+  const feedUrl = 'https://hub-a.test/rel/baoyu'
+  const pool = ['https://hub-a.test', 'https://hub-b.test']
+  await store.saveFeed(feedUrl, {
+    url: feedUrl,
+    title: '博客',
+    rsshub: { namespace: 'rel', path: '/rel/baoyu', instance: 'https://hub-a.test' },
+  })
+  // 相对链接（RSS 规范允许）：/post/1 必须相对**取到它的那台实例**解析。
+  const relative = '<?xml version="1.0"?><rss version="2.0"><channel><title>相对</title>'
+    + '<item><title>a</title><link>/post/1</link><guid>g1</guid></item></channel></rss>'
+  const { impl, calls } = fetchStub({
+    [feedUrl]: { kind: 'failed', reason: 'HTTP 503' },
+    ['https://hub-b.test/rel/baoyu']: { kind: 'ok', body: relative, finalUrl: 'https://hub-b.test/rel/baoyu' },
+  })
+
+  const outcomes = await refreshFeeds([feedUrl], store, { ...BASE_OPTIONS, instances: pool, fetchFeedImpl: impl })
+
+  assert.equal(calls.length, 2, '前置：首选 503 后切到次选')
+  assert.equal(store.feed(feedUrl).rsshub.instance, 'https://hub-b.test', '来源记的是实际成功的实例')
+  assert.equal(store.items.size, 1)
+  const [itemId] = [...store.items.keys()]
+  assert.equal(store.item(itemId).link, 'https://hub-b.test/post/1',
+    '相对 link 必须按实际提供内容的实例绝对化（F1）')
+  assert.equal(outcomes[0].status, 'added')
+})
+
+test('F1：同一实例（首选就成功）时相对 link 仍按该实例绝对化，与改动前逐字一致', async () => {
+  const store = strictMemoryStore()
+  const feedUrl = 'https://hub-a.test/rel-same/baoyu'
+  const pool = ['https://hub-a.test', 'https://hub-b.test']
+  await store.saveFeed(feedUrl, {
+    url: feedUrl,
+    title: '博客',
+    rsshub: { namespace: 'rel-same', path: '/rel-same/baoyu', instance: 'https://hub-a.test' },
+  })
+  const relative = '<?xml version="1.0"?><rss version="2.0"><channel><title>相对</title>'
+    + '<item><title>a</title><link>/post/1</link><guid>g1</guid></item></channel></rss>'
+  const { impl, calls } = fetchStub({
+    [feedUrl]: { kind: 'ok', body: relative, finalUrl: feedUrl },
+  })
+
+  await refreshFeeds([feedUrl], store, { ...BASE_OPTIONS, instances: pool, fetchFeedImpl: impl })
+
+  assert.equal(calls.length, 1, '首选成功 ⇒ 只请求一次')
+  const [itemId] = [...store.items.keys()]
+  assert.equal(store.item(itemId).link, 'https://hub-a.test/post/1', '首选路径的行为不许漂')
+})
+
+test('F1：非 RSSHub 源（单请求路径）的相对 link 同样按 finalUrl 绝对化', async () => {
+  // 这一支不走切换，但 baseUrl 现在统一来自 FetchResult.finalUrl —— 顺手钉住它没被改坏。
+  const store = strictMemoryStore()
+  const feedUrl = 'https://site.test/feed.xml'
+  await store.saveFeed(feedUrl, { url: feedUrl, title: '原生源' })
+  const relative = '<?xml version="1.0"?><rss version="2.0"><channel><title>原生</title>'
+    + '<item><title>a</title><link>/post/2</link><guid>g1</guid></item></channel></rss>'
+  const { impl } = fetchStub({
+    [feedUrl]: { kind: 'ok', body: relative, finalUrl: feedUrl },
+  })
+
+  await refreshFeeds([feedUrl], store, { ...BASE_OPTIONS, fetchFeedImpl: impl })
+
+  const [itemId] = [...store.items.keys()]
+  assert.equal(store.item(itemId).link, 'https://site.test/post/2')
+  assert.equal(store.feed(feedUrl).rsshub, undefined, '非 RSSHub 源不许被标成 RSSHub')
+})
+
+test('F1：重定向后的相对 link 按**落点**绝对化（finalUrl 而不是订阅 URL）', async () => {
+  const store = strictMemoryStore()
+  const feedUrl = 'https://hub-a.test/rel-redirect/baoyu'
+  const pool = ['https://hub-a.test']
+  await store.saveFeed(feedUrl, {
+    url: feedUrl,
+    title: '博客',
+    rsshub: { namespace: 'rel-redirect', path: '/rel-redirect/baoyu', instance: 'https://hub-a.test' },
+  })
+  const relative = '<?xml version="1.0"?><rss version="2.0"><channel><title>相对</title>'
+    + '<item><title>a</title><link>post/1</link><guid>g1</guid></item></channel></rss>'
+  const { impl } = fetchStub({
+    // 实例把这条路由 301 到带尾斜杠的规范地址：相对链接必须相对**落点**解析。
+    [feedUrl]: { kind: 'ok', body: relative, finalUrl: 'https://hub-a.test/rel-redirect/baoyu/' },
+  })
+
+  await refreshFeeds([feedUrl], store, { ...BASE_OPTIONS, instances: pool, fetchFeedImpl: impl })
+
+  const [itemId] = [...store.items.keys()]
+  assert.equal(store.item(itemId).link, 'https://hub-a.test/rel-redirect/baoyu/post/1',
+    '相对链接按落点目录解析，不是按订阅 URL 的目录')
+})

@@ -303,3 +303,34 @@ test('行内编辑：点「编辑」上报 URL；编辑态回填并可改分类 
     editing.cleanup()
   }
 })
+
+// ── 评审 F3（2026-11-28）：校验结论的归属必须画在界面上 ────────────────────────
+
+test('F3：校验的是另一个地址时，界面说清是哪一个，且只给「仍然保存（未验证）」', skip, async () => {
+  const h = await mountView(packState({
+    formOpen: true,
+    // 用户粘的是站点首页，实际验证的是页面声明的 feed。
+    draft: { url: 'https://blog.example/', title: '博客', category: '', note: '' },
+    probe: { ok: true, url: 'https://blog.example/feed.xml', format: 'rss2', itemCount: 20, title: '博客' },
+  }))
+  const text = h.$('[data-rss-pack-probe-result]')?.textContent ?? ''
+  assert.match(text, /blog\.example\/feed\.xml/, '必须点名真正验证过的地址')
+  assert.match(text, /不是上面这个地址/, '必须说清「验的不是你要存的那条」')
+  assert.equal(h.$('[data-rss-pack-save]'), null,
+    '地址不同 ⇒ 不许给「保存」（那会把未验证的地址标成已验证）')
+  assert.notEqual(h.$('[data-rss-pack-save-unverified]'), null,
+    '只能走「仍然保存（未验证）」')
+})
+
+test('F3：同一个地址且验证通过 ⇒ 正常给「保存」，文案不提另一条地址', skip, async () => {
+  const h = await mountView(packState({
+    formOpen: true,
+    draft: { url: 'https://good.example/feed', title: '好源', category: '', note: '' },
+    probe: { ok: true, url: 'https://good.example/feed', format: 'rss2', itemCount: 3, title: '好源' },
+  }))
+  const text = h.$('[data-rss-pack-probe-result]')?.textContent ?? ''
+  assert.match(text, /已验证/)
+  assert.equal(text.includes('不是上面这个地址'), false, '同一地址不该出现错位提示')
+  assert.notEqual(h.$('[data-rss-pack-save]'), null, '验证通过 ⇒ 给「保存」')
+  assert.equal(h.$('[data-rss-pack-save-unverified]'), null, '不需要「仍然保存」')
+})

@@ -53,13 +53,22 @@ function visibleEntriesOf(state: SourcePackState): CuratedSourceEntry[] {
   })
 }
 
-function probeTextOf(probe: SourcePackProbe): string {
+/**
+ * 校验结论的一行文案。
+ *
+ * `targetUrl` 是**此刻要保存的地址**：粘站点首页时 `probe.url` 是页面声明的 feed 地址，
+ * 两者不同就必须当场说清「验的不是你要存的那条」，否则用户会在保存后才发现备注写着「未验证」。
+ */
+function probeTextOf(probe: SourcePackProbe, targetUrl: string): string {
   if (!probe.ok) return '校验失败：' + probe.reason
   const parts = ['已验证']
   if (probe.format !== undefined) parts.push('格式 ' + probe.format)
   if (probe.itemCount !== undefined) parts.push(probe.itemCount + ' 条')
   if (probe.title !== undefined) parts.push('标题「' + probe.title + '」')
-  return parts.join(' · ')
+  const text = parts.join(' · ')
+  if (probe.url === targetUrl) return text
+  // 结论属于另一个地址：说清是哪一个，并把后果讲明（保存后会标成未验证）。
+  return text + '（校验的是 ' + probe.url + '，不是上面这个地址；直接保存会标为未验证）'
 }
 
 function AddForm(props: {
@@ -72,8 +81,11 @@ function AddForm(props: {
   const { state, onDraft, onProbe, onSave, onClose } = props
   const probe = state.probe
   // 先抓一次再保存：没校验过就不给「保存」，只给「抓取校验」——避免用户以为已经验证过。
-  const canSave = probe !== undefined && probe.ok
-  const canForce = probe !== undefined && !probe.ok
+  // 校验结论只对**它验证过的那个地址**有效：地址不同 ⇒ 只能走「仍然保存（未验证）」。
+  const targetUrl = state.draft.url.trim()
+  const sameTarget = probe !== undefined && probe.url === targetUrl
+  const canSave = sameTarget && probe.ok
+  const canForce = probe !== undefined && (sameTarget ? !probe.ok : true)
   return (
     <form className="dsh-rss-pack-form" data-rss-pack-form=""
       onSubmit={(event) => { event.preventDefault(); if (canSave) onSave() }}>
@@ -105,8 +117,10 @@ function AddForm(props: {
       {probe !== undefined && (
         <div className={probe.ok ? 'dsh-rss-pack-probe' : 'dsh-rss-settings-error'}
           role={probe.ok ? 'status' : 'alert'} data-rss-pack-probe-result={probe.ok ? 'ok' : 'failed'}>
-          {probeTextOf(probe)}
-          {!probe.ok && '（仍可「仍然保存」，会标为未验证并保留原因）'}
+          {probeTextOf(probe, targetUrl)}
+          {/* 只要不是「同一个地址且验证通过」，都只能走「仍然保存（未验证）」——
+              两个原因（验的另一条 / 验失败）对用户是同一件事，不必分两句说。 */}
+          {(probe.ok ? !sameTarget : true) && '（仍可「仍然保存」，会标为未验证并保留原因）'}
         </div>
       )}
       {probe !== undefined && (
