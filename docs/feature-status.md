@@ -70,6 +70,16 @@
       副本演练通过后才 reload（库 v4→v5、行数与已读/星标计数不变、`integrity_check=ok`）；
       演练记录 `.scratch/r12-author/migration-rehearsal.md`。**快照保留作回滚点，别删**；
 - [x] 5. 版本号与 `CHANGELOG.md` 一致 —— `package.json` **0.3.0**，`CHANGELOG.md` 已建立 **0.3.0 — 2026-11-27** 小节，R1–R7 等未发布条目归入该版本；
-- [ ] 6. **发布动作（push / npm publish）另行授权** —— 本地 `main` 领先 `origin/main`（origin 在 `516a79b` / v0.2.0 tag）；本地 `v0.3.0` tag 已创建，未 push、无 npm publish。
+- [ ] 6. **发布动作另行授权** —— `main` 与 `v0.3.0` tag 均已 push；R15 已合入 main 但未发版（见下方「版本账目」）；npm publish 未做（本插件 `private: true`）。
 - [x] 7. R7 终检（2026-11-27）：`bash scripts/gate.sh` L1 全过（build / build:client / typecheck / test **1380/1380**）；全量变异 `407/407 · 0 幸存 · 恢复后基线绿`；`dev_reload_package` 前后 `[active]`、当日日志「装载失败」0 条、路由 401。
 
+
+## 版本账目与已知不一致
+
+> 只记「发到哪一步」与「哪里的数字对不上」。已拍板的**决定**看 `docs/adr/`（有独立论证的）与各 `.scratch/<slug>/spec.md` 的 D 系列；不要在这里再列一遍决策清单。
+
+- **v0.1.0 / v0.2.0**：`v0.2.0` tag 在 `516a79b`（2026-11-22），该 tag 的 `package.json` 仍是 `0.1.0`。历史 tag 内容不可改写，仅记录。
+- **v0.3.0**：`package.json` 已抬到 `0.3.0`，`CHANGELOG.md` 有 `0.3.0 — 2026-11-27` 小节；tag 已创建并 push。含 R1–R7、R8a/R8b、R9、R11、R12、R14。
+- **R9 / R14**：评审修复 `e317e73` 与 `6153927` 已合入 `main` `a59baf4`，随 `0.3.0` 发布。真机与真实站点证据在 `.scratch/r9-archive/issues/04-real-device.md` 与 `.scratch/r14-feed-scope/issues/01-feed-scope.md`。
+- **R15**：已合入 `main`（`d945430`，2026-11-28），`CHANGELOG.md` 记在「未发布」段；`package.json` 仍是 `0.3.0`，**未打 tag**。
+- **已知不一致**：只有 v0.2.0 tag 与版本号不符这一条（见上）。其余文档面（`CHANGELOG.md` / 本文件 / 各 spec 头部状态）已逐轮校正，无已知漂移。

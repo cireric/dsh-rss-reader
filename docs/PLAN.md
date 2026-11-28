@@ -1,7 +1,7 @@
 # PLAN —— 接下来的工作
 
 > **只放未来**：这里只记「接下来要做什么」，按动作排，不记已完成的历史。
-> 已完成阶段的验收与遗留 → [feature-status.md](feature-status.md)；已拍板的决定与版本账目 → [DECISIONS.md](DECISIONS.md)。
+> 已完成阶段的验收、遗留与版本账目 → [feature-status.md](feature-status.md)；有独立论证的决定 → [docs/adr/](adr/)。
 > **状态词**：`待拍板` / `待开工` / `进行中` / `已排期` / `暂缓`。
 > **完成定义**：按 [AGENTS.md](../AGENTS.md) 的四道门槛 + 真机三步。本文件不抄门槛。
 
@@ -32,6 +32,6 @@
 ## 怎么用这份文件
 
 1. **选定一项** → 状态改 `进行中`，并建 / 扩展 `.scratch/<slug>/spec.md` 与 `issues/`。
-2. **做完一项** → 从本文件删掉该行（历史在 `feature-status.md` 与 spec 里），需要记录的决策追加到 `DECISIONS.md`。
+2. **做完一项** → 从本文件删掉该行（历史在 `feature-status.md` 与 spec 里）；决定若值得独立论证就写 ADR，否则留在 spec 的 D 系列。
 3. **新想法** → 先进 `.scratch/optimization-backlog/draft.md` 当候选，不直接写进本文件；拍板后再列到这里。
 4. 本文件保持在**一屏可读**；超了就说明该把某项开成 spec 了。
