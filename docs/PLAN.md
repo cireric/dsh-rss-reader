@@ -14,10 +14,12 @@
 | # | 动作 | 规模 | 状态 | 入口 |
 |---|---|---|---|---|
 | 1 | 修 R15 遗留的两个小缺陷：试读失败不该进 10 分钟缓存；探活按钮 `title` 里是字面量 `{实例}` | 约 6 行 + 2 条用例 + 1 条变异 | 待开工（建议先做） | [draft.md §4b](../.scratch/optimization-backlog/draft.md) 的 R15-04 / R15-05 |
-| 2 | 决策：把优化候选池 14 项逐项裁定（做 / 不做 / 等触发） | 一次会话 | 待拍板 | [draft.md](../.scratch/optimization-backlog/draft.md) |
+| 2 | 决策：把优化候选池 16 项逐项裁定（做 / 不做 / 等触发） | 一次会话 | 待拍板 | [draft.md](../.scratch/optimization-backlog/draft.md) |
 | 3 | 按裁定开做：为裁定为「做」的项各开 spec + 票 | 视裁定 | 待拍板 | 同上 |
 | 4 | 重构：拆 `src/endpoints.ts`（1859 行 → ≤900），三张票 | 3 次提交，各跑一遍完成定义 | 待开工（无阻塞，可随时插） | [endpoints-split/spec.md](../.scratch/endpoints-split/spec.md) |
-| 5 | 发版：定版本号 → CHANGELOG「未发布」段转正 → tag → 发布前真机三步 | 一轮 | 待拍板 | `CHANGELOG.md` 的「未发布」段 |
+| 5 | 列表加「今天到此为止」分界线（全部视图，纯客户端） | 约 20 行 + 1 条 DOM 用例 | 待拍板 | [draft.md §4d](../.scratch/optimization-backlog/draft.md) 的 FR-01 |
+| 6 | 单源刷新：失败源行内「立刻重试」（改刷新链路，需独立评审） | 中（端点 + lifecycle + 客户端） | 待拍板 | [draft.md §4d](../.scratch/optimization-backlog/draft.md) 的 FR-02 |
+| 7 | 发版：定版本号 → CHANGELOG「未发布」段转正 → tag → 发布前真机三步 | 一轮 | 待拍板 | `CHANGELOG.md` 的「未发布」段 |
 
 ## 暂缓 / 不做
 
