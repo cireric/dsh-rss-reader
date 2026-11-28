@@ -3358,7 +3358,9 @@ export const MUTATIONS = [
   { id: 'explore-未配置也请求', file: 'lib/endpoints.js',
     judges: ['explore-endpoints.test.mjs'],
     judgeTests: ['未配置实例：两个端点都回可读错误，且一个网络请求都不发（B9）'],
-    from: "        return { ok: false, result: fail('not-configured', '未配置 RSSHub 实例地址，无法浏览路由表') };",
+    // 2026-11-28 重锚：入口文案改叫「RSSHub源」后，报错里那句「无法浏览路由表」跟着改了；
+    // 判据不变 —— 未配置实例时这两个端点必须一个请求都不发。
+    from: "        return { ok: false, result: fail('not-configured', '未配置 RSSHub 实例地址，无法打开「RSSHub源」') };",
     to: "        return { ok: true, base: 'https://rsshub.app' };" },
 
   // ── R8b 04：客户端探索视图（2026-11-24）────────────────────────────────────

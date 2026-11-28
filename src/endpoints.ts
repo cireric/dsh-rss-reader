@@ -574,19 +574,19 @@ function exploreBaseOf(ctx: EndpointCtx): { ok: true; base: string } | { ok: fal
   if (ctx.rsshubSettings !== undefined) {
     const poolBase = ctx.rsshubSettings.instances()[0]
     if (poolBase === undefined) {
-      return { ok: false, result: fail('not-configured', '实例池为空（未配置 RSSHub 实例），无法浏览路由表') }
+      return { ok: false, result: fail('not-configured', '实例池为空（未配置 RSSHub 实例），无法打开「RSSHub源」') }
     }
     return { ok: true, base: poolBase }
   }
   // 缺省分支只服务测试桩（历史用例只给 config.rsshubBase）：判据仍是同一个 parseRsshubBase。
   const base = parseRsshubBase(ctx.config.rsshubBase)
   if (base === '') {
-    return { ok: false, result: fail('not-configured', '未配置 RSSHub 实例地址，无法浏览路由表') }
+    return { ok: false, result: fail('not-configured', '未配置 RSSHub 实例地址，无法打开「RSSHub源」') }
   }
   if (base === undefined) {
     return {
       ok: false,
-      result: fail('not-configured', 'RSSHub 实例地址不合法（只支持 http(s) 源站，不能带路径 / 查询 / 参数），无法浏览路由表'),
+      result: fail('not-configured', 'RSSHub 实例地址不合法（只支持 http(s) 源站，不能带路径 / 查询 / 参数），无法打开「RSSHub源」'),
     }
   }
   return { ok: true, base }

@@ -297,14 +297,15 @@ test('R8b 04 入口可见性：rsshubBase 已配置时设置页与订阅管理�
   try {
     await openSettings(h)
     const settingsEntry = h.$('[data-rss-settings-section="rsshub"] [data-rss-explore-open]')
-    assert.ok(settingsEntry !== null, '设置页「RSSHub」分区必须有「浏览该实例的路由表」')
-    assert.match(settingsEntry.textContent ?? '', /浏览该实例的路由表/, '入口文案是验收项')
+    assert.ok(settingsEntry !== null, '设置页「RSSHub」分区必须有「RSSHub源」入口')
+    assert.match(settingsEntry.textContent ?? '', /RSSHub源/, '入口文案是验收项')
 
     h.press('Escape')
     await h.waitFor(() => h.store.get().view === 'list', { label: 'Esc 回列表' })
     await openFeeds(h)
     const feedsEntry = h.$('[data-rss-explore-open]')
     assert.ok(feedsEntry !== null, '订阅管理页「添加订阅」区域必须有探索入口')
+    assert.match(feedsEntry.textContent ?? '', /RSSHub源/, '入口文案是验收项（2026-11-28 起叫「RSSHub源」）')
   } finally {
     h.cleanup()
   }

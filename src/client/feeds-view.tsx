@@ -344,14 +344,14 @@ export function FeedsView({
           disabled={busy || draft.trim() === ''}
           onClick={() => { onDiscover(draft.trim()) }}>发现候选</button>
         {/* R8b 04 / D11：未配置实例时入口整个不渲染（与设置页那条同一判据）。 */}
-        {/* R15 08 修正：精选源是**面板**（换主栏内容），与「浏览路由表」同族，入口放这里而不是左栏。
+        {/* R15 08 修正：精选源是**面板**（换主栏内容），与「RSSHub源」同族，入口放这里而不是左栏。
             原先它占了左栏一行，同类面板两种入口，用户第一反应就是「这不该在订阅里吗」。 */}
         <button type="button" className="dsh-rss-btn" data-rss-source-pack-open="" onClick={onOpenSourcePack}>
           精选源
         </button>
         {exploreAvailable && (
           <button type="button" className="dsh-rss-btn" data-rss-explore-open="" onClick={onExplore}>
-            浏览路由表
+            RSSHub源
           </button>
         )}
       </div>

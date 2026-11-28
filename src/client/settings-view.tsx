@@ -706,7 +706,7 @@ export function SettingsView(props: SettingsViewProps): ReactNode {
               {exploreAvailable && (
                 <div className="dsh-rss-settings-row" data-rss-explore-entry="">
                   <button type="button" className="dsh-rss-btn" data-rss-explore-open="" onClick={onExplore}>
-                    浏览该实例的路由表
+                    RSSHub源
                   </button>
                   <p className="dsh-rss-settings-help">
                     按站点 / 分类浏览 RSSHub 的路由，填参数可拼出订阅地址；拼出的地址仍需点「添加」才落库。

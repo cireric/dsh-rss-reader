@@ -180,7 +180,7 @@ export function ExploreView(props: ExploreViewProps): ReactNode {
         <button type="button" className="dsh-rss-btn" data-rss-explore-back="" onClick={onBack}>
           ← 返回列表（Esc）
         </button>
-        <strong className="dsh-rss-explore-title">路由探索</strong>
+        <strong className="dsh-rss-explore-title">RSSHub源</strong>
         {state.siteTotal !== undefined && state.routeTotal !== undefined && (
           <span className="dsh-rss-meta" data-rss-explore-counts="">
             共 {state.siteTotal} 个站点 · {state.routeTotal} 条路由
