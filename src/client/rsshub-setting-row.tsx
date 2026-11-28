@@ -169,7 +169,7 @@ export function RsshubSettingRow(props: RsshubSettingRowProps): ReactNode {
                     {index === 0 ? '首选' : '第 ' + (index + 1) + ' 位'}
                   </span>
                   <button type="button" className="dsh-rss-btn dsh-rss-btn--ghost" data-rss-rsshub-test={index}
-                    title="向 {实例}/api/radar/rules/zhihu.com 探一次；这是启发式，不保证每个站点都有规则"
+                    title={'向 ' + instance + '/api/radar/rules/zhihu.com 探一次；这是启发式，不保证每个站点都有规则'}
                     disabled={disabled || testingIndex !== undefined}
                     onClick={() => { void runTest(index) }}>
                     {testingIndex === index ? '测试中…' : '测试连接'}

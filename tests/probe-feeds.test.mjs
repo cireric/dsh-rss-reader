@@ -5,7 +5,7 @@
  *  · `ok` 只看解析结果（HTML 200 也算失败；空 feed 0 条仍算可用）；
  *  · 单条固定 15 s（不吃全局 timeoutMs：实测有成功路由要 17.5–20 s）；
  *  · 私网 / 回环 / 非法协议统一「目标被安全策略拒绝」，且一个字都不回显；
- *  · 批量保序、缓存命中不出网、在飞复用、10 分钟过期、50 条上限。
+ *  · 批量保序、缓存命中不出网、在飞复用、10 分钟过期、50 条上限、**失败不进缓存**。
  *
  * fetchImpl 是唯一被替换的出网层 —— 与 subscribe / testRsshub 同一手法。
  */
@@ -232,4 +232,32 @@ test('试读缓存：10 分钟过期重抓；上限 50 条按插入序淘汰', a
   assert.equal(counts.get(urls[1]), 1, '只淘汰最旧的一条，其余仍在缓存里')
   await probe2([urls[0]], deps)
   assert.equal(counts.get(urls[0]), 2, '第 51 条插入后，最早那条被淘汰，再试必须重新出网')
+})
+
+test('试读缓存：失败不进缓存 —— 再点一次必须真的再出网（且拿到新结论）', async () => {
+  let clock = 1_000_000
+  let calls = 0
+  // 第一次超时、第二次可用：如果失败被缓存，第二次仍会回那句旧的「超时」。
+  const impl = async (url) => {
+    calls += 1
+    return calls === 1 ? { kind: 'failed', reason: '超时（15000ms）' } : okRss(url)
+  }
+  const probe = createProbeFeeds({ now: () => clock })
+  const deps = { fetchImpl: impl, maxBytes: 1024 }
+  const url = 'https://retry.test/feed'
+
+  const first = await probe([url], deps)
+  assert.equal(first[0].ok, false)
+  assert.match(first[0].reason, /超时/)
+
+  // 60 秒后再点：远在 10 分钟 TTL 内，但失败不该被记住 —— 用户的「再点一次」就是重试。
+  clock += 60 * 1000
+  const second = await probe([url], deps)
+  assert.equal(calls, 2, '失败不许进缓存：再点一次必须重新出网')
+  assert.equal(second[0].ok, true, '重试拿到的是这次的结论，不是上次那句旧话')
+  assert.equal(second[0].itemCount, 2)
+
+  // 成功才进缓存：成功后 TTL 内的第三次不再出网。
+  await probe([url], deps)
+  assert.equal(calls, 2, '成功后 10 分钟内命中缓存')
 })

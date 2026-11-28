@@ -6,7 +6,8 @@
  *  · 单条超时固定 15 s —— 实测有成功路由耗时 17.5–20 s，跟着全局 timeoutMs（默认 15 s 但可配小）
  *    走会误杀；
  *  · 私网 / 回环 / 非法协议在出网前就拒，原因统一换成「目标被安全策略拒绝」：fetch 层的原始文案
- *    带 hostname，原样透出等于把内网地址回显到浏览器。
+ *    带 hostname，原样透出等于把内网地址回显到浏览器；
+ *  · **只有成功进缓存**（10 分钟）：失败缓存会把用户「再点一次」这个唯一的重试表达静默吞掉。
  *
  * 这里**不写库、不碰订阅状态**：试读是只读观测，候选行的「添加」仍走 addFeed 做最终校验。
  */
@@ -113,7 +114,12 @@ export function createProbeFeeds(options: ProbeFeedsOptions = {}): ProbeFeeds {
       const oldest = cache.keys().next().value
       if (oldest !== undefined) cache.delete(oldest)
     }
-    return { url: raw, ...(await promise) }
+    const outcome = await promise
+    // 失败不进缓存（spec §4.3.3 只写了「10 分钟」，没区分成败）：失败被缓存 10 分钟时，
+    // 用户看到「超时」再点一次会立刻回同一句旧结论、`elapsedMs` 也是上次那次的 —— 而「再点一次」
+    // 是用户表达重试的唯一方式。与 explore-catalog-fetch 的「失败不缓存」同一条取向。
+    if (!outcome.ok) cache.delete(key)
+    return { url: raw, ...outcome }
   }
 
   return async (urls, deps) => Promise.all(urls.map((url) => probeOne(url, deps)))

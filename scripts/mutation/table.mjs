@@ -3137,6 +3137,14 @@ export const MUTATIONS = [
     judgeTests: ['试读端点：HTML 页 / 304 / 超时都按失败处理并给出可读原因'],
     from: "if (parsed.format === 'unknown')",
     to: 'if (false)' },
+  // 失败也留在缓存里（R15-04 修掉的病象）：用户看到「超时」再点一次，10 分钟内回同一句旧结论，
+  // 「再点一次」这个唯一的重试表达被静默吞掉。新增用例会翻红。
+  // from 照构建产物 lib/probe.js 的实际字节写（pitfalls 一、1.4），独立实测 OCCURRENCES=1。
+  { id: 'rsshub-试读失败也缓存', file: 'lib/probe.js',
+    judges: ['probe-feeds.test.mjs'],
+    judgeTests: ['试读缓存：失败不进缓存 —— 再点一次必须真的再出网（且拿到新结论）'],
+    from: 'if (!outcome.ok)',
+    to: 'if (false)' },
 
   // ── R8a 03：Radar 接进发现流程（2026-11-23）──────────────────────────────
   // 合并顺序反过来：Radar 候选（未验证）排到页面声明前面。A1 的顺序断言会翻红；
@@ -3694,4 +3702,12 @@ export const MUTATIONS = [
     judgeTests: ['F3：试读成功后改地址 ⇒ 旧结论作废，新地址不会被标成「已验证」'],
     from: 'const urlChanged = patch.url !== void 0 && patch.url !== state.draft.url;',
     to: 'const urlChanged = false;' },
+
+  // R15-05：探活按钮的 title 写成普通字符串，`{实例}` 原样出现在悬停提示里（不是模板字面量）。
+  // 判据是设置页 DOM 用例对 title 的两条断言：不含花括号 + 带上这一行的实例地址。
+  { id: 'client-探活title字面量花括号', file: 'lib/client.js',
+    judges: ['settings-page-dom.test.mjs'],
+    judgeTests: ['R15 01 测试连接：探的是该行实例，结果原地展示且不改保存值'],
+    from: 'title: "向 " + instance + "/api/radar/rules/zhihu.com 探一次；这是启发式，不保证每个站点都有规则",',
+    to: 'title: "向 {实例}/api/radar/rules/zhihu.com 探一次；这是启发式，不保证每个站点都有规则",' },
 ]

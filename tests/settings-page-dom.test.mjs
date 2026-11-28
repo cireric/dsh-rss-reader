@@ -1105,6 +1105,11 @@ test('R15 01 测试连接：探的是该行实例，结果原地展示且不改�
     assert.deepEqual(calls.map((entry) => entry.payload), [{ base: 'https://b.example' }],
       '探活只把这一行的地址交给宿主，浏览器不直连实例')
     assert.match(h.$('[data-rss-rsshub-result]').textContent, /测试通过/)
+    // 悬停文案里的地址必须是真的这一行实例：`title="…{实例}…"` 是普通字符串属性，
+    // 花括号会原样出现在提示里（不是模板字面量）。
+    const title = h.$('[data-rss-rsshub-test="1"]').getAttribute('title')
+    assert.equal(title.includes('{'), false, 'title 里不许留字面量花括号：' + title)
+    assert.match(title, /^向 https:\/\/b\.example\/api\/radar\/rules\//, 'title 必须带上这一行的实例地址')
     assert.equal(h.requests.filter((entry) => entry.endpoint === 'saveRsshubSettings').length, 0,
       '探活不是保存：不许写盘')
   } finally {
